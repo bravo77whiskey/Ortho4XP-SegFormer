@@ -33,6 +33,8 @@ added_datas = [
     (os.path.join(SPEC_DIR, "Providers"), "Ortho4XP_Data/Providers"),
     (os.path.join(SPEC_DIR, "Extents"),   "Ortho4XP_Data/Extents"),
     (os.path.join(SPEC_DIR, "Filters"),   "Ortho4XP_Data/Filters"),
+    (os.path.join(SPEC_DIR, "Licence"),   "Ortho4XP_Data/Licence"),
+    (os.path.join(SPEC_DIR, "community_server.txt"), "Ortho4XP_Data"),
     (os.path.join(SPEC_DIR, "Previews"),  "Ortho4XP_Data/Previews"),
     (os.path.join(SPEC_DIR, "Patches"),   "Ortho4XP_Data/Patches"),
     # SFR overlay scripts + AI inference module — run as venv subprocesses.

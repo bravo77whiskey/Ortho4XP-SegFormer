@@ -299,8 +299,11 @@ def _for_entry(veg_cls, frac, shape, region, rng, density_override=None):
               else _density_level(frac)
 
     if veg_cls == SEGFORMER.CLASS_TREE:
-        ftype    = 'mixed'    if dlevel >= 50 else 'woodland'
-        base_key = 'tree'     if dlevel >= 50 else 'woodland'
+        # Reserve the taller mixed-forest assets for clearly dense forest only.
+        # Sparser areas and treelines read better with the shorter woodland assets.
+        use_tall_forest = shape == 'area' and dlevel >= 75
+        ftype    = 'mixed' if use_tall_forest else 'woodland'
+        base_key = 'tree' if use_tall_forest else 'woodland'
         base     = _BASE_DENSITY[base_key][dlevel]
     elif veg_cls == SEGFORMER.CLASS_RANGELAND:
         ftype    = 'woodland'

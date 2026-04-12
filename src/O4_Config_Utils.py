@@ -30,16 +30,18 @@ from O4_Cfg_Vars import (
     list_cfg_vars,
     list_dsf_vars,
     list_global_dsf_vars,
+    list_global_sfr_bld_vars,
+    list_global_sfr_veg_vars,
     list_global_mask_vars,
     list_global_mesh_vars,
     list_global_tile_vars,
     list_global_vector_vars,
     list_mask_vars,
     list_mesh_vars,
+    list_sfr_bld_vars,
+    list_sfr_veg_vars,
     list_tile_vars,
     list_vector_vars,
-    list_sfr_overlay_vars,
-    list_global_sfr_overlay_vars,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -461,7 +463,8 @@ class Ortho4XP_Config(tk.Toplevel):
             ("Mesh", list_mesh_vars),
             ("Masks", list_mask_vars),
             ("DSF/Imagery", list_dsf_vars),
-            ("SegFormer Overlays", list_sfr_overlay_vars),
+            ("SegFormer Bld", list_sfr_bld_vars),
+            ("SegFormer Veg", list_sfr_veg_vars),
         ):
             tk.Label(
                 frame_cfg,
@@ -662,7 +665,8 @@ class Ortho4XP_Config(tk.Toplevel):
             ("Mesh", list_global_mesh_vars),
             ("Masks", list_global_mask_vars),
             ("DSF/Imagery", list_global_dsf_vars),
-            ("SegFormer Overlays", list_global_sfr_overlay_vars),
+            ("SegFormer Bld", list_global_sfr_bld_vars),
+            ("SegFormer Veg", list_global_sfr_veg_vars),
         ):
             tk.Label(
                 frame_cfg,

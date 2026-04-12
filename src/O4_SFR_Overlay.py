@@ -3,7 +3,7 @@ O4_SFR_Overlay.py — Pipeline bridge for SegFormer-based vegetation and buildin
 
 Exposes process_veg_tile() / process_bld_tile() entry points that the Ortho4XP
 pipeline calls after Build Imagery/DSF, using module-level config vars synced from
-the per-tile Tile object (same pattern as O4_AI_Overlay).
+the per-tile Tile object.
 
 scripts.generate_veg_overlay and scripts.generate_bld_overlay are imported lazily inside each
 process function (after _activate_venv()) because they import torch at the top
@@ -37,9 +37,11 @@ if getattr(sys, 'frozen', False):
     # source-mode imports.
     _root_dir = os.path.join(sys._MEIPASS, 'sfr_scripts')
     _exe_dir  = os.path.dirname(sys.executable)   # .venv lives here
+    _data_dir = os.path.join(sys._MEIPASS, 'Ortho4XP_Data')
 else:
     _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _exe_dir  = _root_dir
+    _data_dir = _root_dir
 
 _src_dir = os.path.join(_root_dir, 'src')
 for _path in (_root_dir, _src_dir):
@@ -98,10 +100,10 @@ sfr_batch_size        = 0
 
 
 def _dsf_output_path(lat, lon, folder):
-    """Compute X-Plane DSF output path rooted at _exe_dir.
+    """Compute X-Plane DSF output path rooted at the runtime data directory.
 
     e.g. folder='yOrtho4XP_Veg_Overlays' →
-         <exe_dir>/yOrtho4XP_Veg_Overlays/Earth nav data/+30+100/+36+102.dsf
+         <data_dir>/yOrtho4XP_Veg_Overlays/Earth nav data/+30+100/+36+102.dsf
     """
     lat_i = int(lat); lon_i = int(lon)
     lat_g = int(math.floor(lat / 10)) * 10
@@ -110,7 +112,7 @@ def _dsf_output_path(lat, lon, folder):
     lon_s  = f"{'+' if lon_i >= 0 else '-'}{abs(lon_i):03d}"
     lat_gs = f"{'+' if lat_g >= 0 else '-'}{abs(lat_g):02d}"
     lon_gs = f"{'+' if lon_g >= 0 else '-'}{abs(lon_g):03d}"
-    return os.path.join(_exe_dir, folder, 'Earth nav data',
+    return os.path.join(_data_dir, folder, 'Earth nav data',
                         f'{lat_gs}{lon_gs}', f'{lat_s}{lon_s}.dsf')
 
 
@@ -120,8 +122,8 @@ def _dsftool_path():
         utils_dir = os.path.join(sys._MEIPASS, 'Ortho4XP_Data', 'Utils')
     else:
         try:
-            import O4_AI_Overlay as _AI
-            return _AI._dsftool
+            import O4_SegFormer_Overlay as _SEG
+            return _SEG._dsftool
         except Exception:
             return None
     if sys.platform.startswith('win'):
@@ -135,9 +137,7 @@ def _run_venv(code):
     """Run Python code in .venv, streaming stdout line by line to this process.
 
     The subprocess receives PYTHONPATH pointing to _root_dir so it can import
-    scripts.generate_veg_overlay, scripts.generate_bld_overlay, and
-    O4_AI_Overlay as loose .py files (bundled as data in _internal/ for the
-    frozen exe).
+    the bundled SFR/SegFormer modules as loose .py files from sfr_scripts/src.
 
     Returns the process exit code.
     """
@@ -258,13 +258,13 @@ def process_veg_tile(lat, lon, build_dir):
     out_dsf          = _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
 
     code = (
-        f"import O4_AI_Overlay as AI\n"
-        f"AI.ai_patch_size = {sfr_patch_size!r}\n"
-        f"AI.ai_overlap    = {sfr_overlap!r}\n"
-        f"AI.ai_batch_size = {sfr_batch_size!r}\n"
-        f"AI._dsftool      = {dsftool!r}\n"
-        f"from scripts import generate_veg_overlay\n"
-        f"generate_veg_overlay.run(\n"
+        f"import O4_SegFormer_Overlay as SEG\n"
+        f"SEG.segformer_patch_size = {sfr_patch_size!r}\n"
+        f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
+        f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"
+        f"SEG._dsftool     = {dsftool!r}\n"
+        f"import O4_SFR_Vegetation_Overlay as veg_overlay\n"
+        f"veg_overlay.run(\n"
         f"    tex_dir          = {tex_dir!r},\n"
         f"    lat              = {lat!r},\n"
         f"    lon              = {lon!r},\n"
@@ -309,13 +309,13 @@ def process_bld_tile(lat, lon, build_dir):
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Overlays')
 
     code = (
-        f"import O4_AI_Overlay as AI\n"
-        f"AI.ai_patch_size = {sfr_patch_size!r}\n"
-        f"AI.ai_overlap    = {sfr_overlap!r}\n"
-        f"AI.ai_batch_size = {sfr_batch_size!r}\n"
-        f"AI._dsftool      = {dsftool!r}\n"
-        f"from scripts import generate_bld_overlay\n"
-        f"generate_bld_overlay.run(\n"
+        f"import O4_SegFormer_Overlay as SEG\n"
+        f"SEG.segformer_patch_size = {sfr_patch_size!r}\n"
+        f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
+        f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"
+        f"SEG._dsftool     = {dsftool!r}\n"
+        f"import O4_SFR_Building_Overlay as bld_overlay\n"
+        f"bld_overlay.run(\n"
         f"    tex_dir                  = {tex_dir!r},\n"
         f"    lat                      = {lat!r},\n"
         f"    lon                      = {lon!r},\n"

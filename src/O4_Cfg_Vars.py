@@ -578,6 +578,7 @@ list_global_tile_vars = [
         + list_mesh_vars
         + list_mask_vars
         + list_dsf_vars
+        + list_sfr_overlay_vars
         + list_other_vars
     )
 ]
@@ -589,6 +590,10 @@ list_global_mesh_vars = [global_prefix + item for item in list_mesh_vars]
 list_global_dsf_vars = [global_prefix + item for item in list_dsf_vars]
 
 list_global_mask_vars = [global_prefix + item for item in list_mask_vars]
+
+list_global_sfr_veg_vars = [global_prefix + item for item in list_sfr_veg_vars]
+
+list_global_sfr_bld_vars = [global_prefix + item for item in list_sfr_bld_vars]
 
 list_global_sfr_overlay_vars = [global_prefix + item for item in list_sfr_overlay_vars]
 

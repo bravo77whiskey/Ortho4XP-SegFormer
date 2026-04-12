@@ -20,13 +20,12 @@ def resource_path(relative_path):
 
 
 def user_path(relative_path):
-    """Absolute path to a user-writable data directory.
-    When frozen: next to the exe (dist/Ortho4XP/Tiles etc.).
-      Use build.py (not pyinstaller -y directly) so rebuilds never wipe this data.
-    When from source: relative to cwd.
+    """Absolute path to a runtime data directory.
+    Match master branch behavior when frozen by keeping runtime-created folders
+    under the bundled Ortho4XP_Data root.
     """
-    if getattr(sys, 'frozen', False):
-        base_path = os.path.dirname(sys.executable)
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_path = os.path.join(sys._MEIPASS, 'Ortho4XP_Data')
     else:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)

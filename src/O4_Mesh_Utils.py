@@ -729,7 +729,8 @@ def build_mesh(tile):
             )
             mesh_cmd[1] = Tri_option
             fingers_crossed = subprocess.Popen(
-                mesh_cmd, stdout=subprocess.PIPE, bufsize=0
+                mesh_cmd, stdout=subprocess.PIPE, bufsize=0,
+                creationflags=_CREATE_NO_WINDOW,
             )
             while True:
                 line = fingers_crossed.stdout.readline()

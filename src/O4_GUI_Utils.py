@@ -295,7 +295,7 @@ class Ortho4XP_GUI(tk.Tk):
         ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
 
         # Third row (Steps)
-        for i in range(8):
+        for i in range(7):
             self.frame_steps.columnconfigure(i, weight=1)
         ttk.Button(
             self.frame_steps,
@@ -335,13 +335,8 @@ class Ortho4XP_GUI(tk.Tk):
             command=self.build_sfr_veg,
         ).grid(row=0, column=5, padx=5, pady=0, sticky=N + S + E + W)
         ttk.Button(
-            self.frame_steps,
-            text=" Setup SegFormer ",
-            command=self.setup_sfr_models,
-        ).grid(row=0, column=6, padx=5, pady=0, sticky=N + S + E + W)
-        ttk.Button(
             self.frame_steps, text="    All in one     ", command=self.build_all
-        ).grid(row=0, column=7, padx=5, pady=0, sticky=N + S + E + W)
+        ).grid(row=0, column=6, padx=5, pady=0, sticky=N + S + E + W)
 
         # Fourth row (Progress bars and controls)
         # Label(self.frame_left,anchor=W,text="DSF/Masks progress",
@@ -1454,8 +1449,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "OSM data",
         "Mask data",
         "Jpeg imagery",
-        "SFR veg cache",
         "SFR bld cache",
+        "SFR veg cache",
         "Tile (whole)",
         "Tile (textures)",
     ]
@@ -2045,10 +2040,10 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 data_deleted = self.delete_mask_data(lat, lon)
             if self.v_["Jpeg imagery"].get():
                 data_deleted = self.delete_jpeg_imagery(lat, lon)
-            if self.v_["SFR veg cache"].get():
-                data_deleted = self.delete_sfr_veg_cache(lat, lon)
             if self.v_["SFR bld cache"].get():
                 data_deleted = self.delete_sfr_bld_cache(lat, lon)
+            if self.v_["SFR veg cache"].get():
+                data_deleted = self.delete_sfr_veg_cache(lat, lon)
             if self.v_["Tile (whole)"].get() and not self.grouped:
                 data_deleted = self.delete_tile_whole(lat, lon)
             if self.v_["Tile (textures)"].get() and not self.grouped:
