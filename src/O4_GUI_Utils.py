@@ -703,6 +703,12 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_veg_simplify_m    = tile.sfr_veg_simplify_m
         SFR.sfr_veg_excl_buffer_m = tile.sfr_veg_excl_buffer_m
         SFR.sfr_veg_use_simheaven = tile.sfr_veg_use_simheaven
+        SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
+        SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
+        SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
+        SFR.sfr_veg_simheaven_buffer_m = tile.sfr_veg_simheaven_buffer_m
+        SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
+        SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
         SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
         SFR.sfr_patch_size        = tile.sfr_patch_size
         SFR.sfr_overlap           = tile.sfr_overlap

@@ -62,6 +62,45 @@ def find_simheaven_building_dsfs(custom_scenery_dir, lat, lon):
     )
 
 
+def find_global_forests_dsfs(custom_scenery_dir, lat, lon):
+    """Return Global Forests v2 DSFs for a tile from Custom Scenery."""
+    tile_dsf_relpath = _tile_dsf_relpath(lat, lon)
+    return _scan_custom_scenery(
+        custom_scenery_dir,
+        tile_dsf_relpath,
+        lambda folder_name: "global" in folder_name and "forest" in folder_name,
+    )
+
+
+def find_simheaven_vegetation_dsfs(custom_scenery_dir, lat, lon):
+    """Return simHeaven DSFs that may contain vegetation overlays for a tile."""
+    tile_dsf_relpath = _tile_dsf_relpath(lat, lon)
+    return _scan_custom_scenery(
+        custom_scenery_dir,
+        tile_dsf_relpath,
+        lambda folder_name: "simheaven" in folder_name and "network" not in folder_name,
+    )
+
+
+def find_default_overlay_dsfs(custom_overlay_src, lat, lon, alternate_dir=None):
+    """Return the configured default overlay-source DSF(s) for a tile."""
+    tile_dsf_relpath = _tile_dsf_relpath(lat, lon)
+    matches = []
+    seen_paths = set()
+    for source_dir in (custom_overlay_src, alternate_dir):
+        if not source_dir or not os.path.isdir(source_dir):
+            continue
+        dsf_path = os.path.join(source_dir, tile_dsf_relpath)
+        if not os.path.isfile(dsf_path):
+            continue
+        resolved_path = os.path.realpath(dsf_path)
+        if resolved_path in seen_paths:
+            continue
+        seen_paths.add(resolved_path)
+        matches.append((os.path.basename(source_dir.rstrip("\\/")) or source_dir, dsf_path))
+    return matches
+
+
 def cached_dsf_text_path(dsf_path, cache_dir):
     """Return the cache path for the disassembled text version of a DSF file."""
     stat = os.stat(dsf_path)

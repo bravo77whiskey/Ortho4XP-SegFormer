@@ -85,6 +85,12 @@ sfr_veg_min_area_m2   = 50.0
 sfr_veg_simplify_m    = 3.0
 sfr_veg_excl_buffer_m = 5.0
 sfr_veg_use_simheaven = True
+sfr_veg_avoid_gfv2    = True
+sfr_veg_gfv2_buffer_m = 0.0
+sfr_veg_avoid_simheaven_forests = True
+sfr_veg_simheaven_buffer_m = 0.0
+sfr_veg_avoid_default_forests = True
+sfr_veg_default_buffer_m = 0.0
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
 
 sfr_bld_enabled       = False
@@ -203,6 +209,25 @@ def _check_tile_imagery(tex_dir, lat, lon, step_name):
     return False
 
 
+def _scenery_paths():
+    """Return configured scenery roots needed by the SFR overlay subprocesses."""
+    custom_scenery_dir = ""
+    custom_overlay_src = ""
+    custom_overlay_src_alternate = ""
+    try:
+        import O4_Config_Utils as CFG
+        custom_scenery_dir = getattr(CFG, "custom_scenery_dir", "") or ""
+    except Exception:
+        pass
+    try:
+        import O4_Overlay_Utils as OVL
+        custom_overlay_src = getattr(OVL, "custom_overlay_src", "") or ""
+        custom_overlay_src_alternate = getattr(OVL, "custom_overlay_src_alternate", "") or ""
+    except Exception:
+        pass
+    return custom_scenery_dir, custom_overlay_src, custom_overlay_src_alternate
+
+
 def _deps_ready():
     """Return True if all required packages are importable from the .venv Python."""
     if not _venv_exists():
@@ -256,6 +281,7 @@ def process_veg_tile(lat, lon, build_dir):
     res_m            = None if sfr_veg_res_m <= 0 else sfr_veg_res_m
     dsftool          = _dsftool_path()
     out_dsf          = _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
+    custom_scenery_dir, custom_overlay_src, custom_overlay_src_alternate = _scenery_paths()
 
     code = (
         f"import O4_SegFormer_Overlay as SEG\n"
@@ -279,8 +305,17 @@ def process_veg_tile(lat, lon, build_dir):
         f"    res_m            = {res_m!r},\n"
         f"    excl_buffer_m    = {sfr_veg_excl_buffer_m!r},\n"
         f"    use_simheaven    = {sfr_veg_use_simheaven!r},\n"
+        f"    avoid_gfv2       = {sfr_veg_avoid_gfv2!r},\n"
+        f"    gfv2_buffer_m    = {sfr_veg_gfv2_buffer_m!r},\n"
+        f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"
+        f"    simheaven_buffer_m = {sfr_veg_simheaven_buffer_m!r},\n"
+        f"    avoid_default_forests = {sfr_veg_avoid_default_forests!r},\n"
+        f"    default_buffer_m = {sfr_veg_default_buffer_m!r},\n"
         f"    bld_excl_m       = 10.0,\n"
         f"    dsftool_path     = {dsftool!r},\n"
+        f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
+        f"    custom_overlay_src = {custom_overlay_src!r},\n"
+        f"    custom_overlay_src_alternate = {custom_overlay_src_alternate!r},\n"
         f")\n"
     )
     ret = _run_venv(code)
@@ -307,6 +342,7 @@ def process_bld_tile(lat, lon, build_dir):
     min_zone_px = max(1, int(sfr_bld_min_zone_m2 / (2.0 ** 2)))
     dsftool     = _dsftool_path()
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Overlays')
+    custom_scenery_dir, _, _ = _scenery_paths()
 
     code = (
         f"import O4_SegFormer_Overlay as SEG\n"
@@ -326,6 +362,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    min_zone_px  = {min_zone_px!r},\n"
         f"    make_viz                 = False,\n"
         f"    cache_dir                = {cache_dir!r},\n"
+        f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
         f"    dsftool_path             = {dsftool!r},\n"
         f"    skip_osm_excl_download   = False,\n"
         f")\n"

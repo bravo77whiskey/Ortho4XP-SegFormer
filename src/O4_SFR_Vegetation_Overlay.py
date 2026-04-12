@@ -41,7 +41,13 @@ from math import pi, atan, exp
 from PIL import Image
 
 import O4_SegFormer_Overlay as SEGFORMER
-from O4_SFR_DSF_Utils import ensure_cached_dsf_text, find_simheaven_network_dsfs
+from O4_SFR_DSF_Utils import (
+    ensure_cached_dsf_text,
+    find_default_overlay_dsfs,
+    find_global_forests_dsfs,
+    find_simheaven_network_dsfs,
+    find_simheaven_vegetation_dsfs,
+)
 
 # ── Defaults (all spatial params in metres) ───────────────────────────────────
 CLOSE_M       = 10.0   # close kernel radius — fill gaps within a patch
@@ -261,6 +267,124 @@ def _roads_for_bounds(roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     return result
 
 
+def _poly_bounds(poly):
+    if not poly:
+        return (0.0, 0.0, 0.0, 0.0)
+    lons = [pt[0] for pt in poly]
+    lats = [pt[1] for pt in poly]
+    return min(lats), max(lats), min(lons), max(lons)
+
+
+def _prepare_polygons(polys):
+    prepared = []
+    for poly in polys or []:
+        if len(poly) < 3:
+            continue
+        prepared.append({'pts': poly, '_bounds': _poly_bounds(poly)})
+    return prepared
+
+
+def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
+    if not polys:
+        return []
+    s = lat_s - pad_deg
+    n = lat_n + pad_deg
+    w = lon_w - pad_deg
+    e = lon_e + pad_deg
+    result = []
+    for poly in polys:
+        p_s, p_n, p_w, p_e = poly.get('_bounds') or _poly_bounds(poly.get('pts', ()))
+        if p_n >= s and p_s <= n and p_e >= w and p_w <= e:
+            result.append(poly.get('pts', poly))
+    return result
+
+
+def _rasterize_polygons(polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w):
+    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    if not polys:
+        return mask
+
+    def ll_to_px(lat, lon):
+        x = int((lon - lon_w) / (lon_e - lon_w) * img_w)
+        y = int((lat_n - lat) / (lat_n - lat_s) * img_h)
+        return x, y
+
+    for poly in polys:
+        pts_px = np.array([ll_to_px(lat, lon) for lon, lat in poly], dtype=np.int32)
+        if len(pts_px) >= 3:
+            cv2.fillPoly(mask, [pts_px], 1)
+    return mask
+
+
+def _is_forest_polygon_path(path):
+    p = (path or '').replace('\\', '/').lower()
+    return p.endswith('.for') or '/forest' in p or 'forest/' in p
+
+
+def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
+    """Parse forest polygons from a list of DSFs."""
+    polys = []
+    seen_layers = set()
+
+    for folder_name, dsf_path in dsf_matches:
+        layer_key = folder_name.lower()
+        if layer_key in seen_layers:
+            continue
+        seen_layers.add(layer_key)
+
+        n_poly0 = len(polys)
+        try:
+            cached_text_path = ensure_cached_dsf_text(
+                dsf_path,
+                dsftool_path,
+                cache_dir,
+                create_no_window=SEGFORMER._CREATE_NO_WINDOW,
+            )
+            polygon_defs = []
+            current_polygon_is_forest = False
+            current_winding = None
+
+            with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+                for raw_line in text_file:
+                    line = raw_line.strip()
+                    if line.startswith("POLYGON_DEF "):
+                        polygon_defs.append(line.split(" ", 1)[1])
+                    elif line.startswith("BEGIN_POLYGON "):
+                        parts = line.split()
+                        current_polygon_is_forest = False
+                        current_winding = None
+                        try:
+                            polygon_index = int(parts[1])
+                            current_polygon_is_forest = _is_forest_polygon_path(
+                                polygon_defs[polygon_index]
+                            )
+                        except (IndexError, ValueError):
+                            current_polygon_is_forest = False
+                    elif line == "BEGIN_WINDING" and current_polygon_is_forest:
+                        current_winding = []
+                    elif line.startswith("POLYGON_POINT ") and current_winding is not None:
+                        parts = line.split()
+                        try:
+                            current_winding.append((float(parts[1]), float(parts[2])))
+                        except (IndexError, ValueError):
+                            pass
+                    elif line == "END_WINDING" and current_winding is not None:
+                        if len(current_winding) >= 3:
+                            polys.append(current_winding)
+                        current_winding = None
+                    elif line == "END_POLYGON":
+                        current_polygon_is_forest = False
+                        current_winding = None
+
+            print(
+                f"  [{layer_name}] {folder_name}: +{len(polys) - n_poly0} forest polys"
+            )
+        except Exception as exc:
+            print(f"  [{layer_name}] failed {dsf_path}: {exc}")
+
+    return polys
+
+
 # ── Climate region ────────────────────────────────────────────────────────────
 def _climate_region(lat):
     a = abs(lat + 0.5)
@@ -415,7 +539,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         make_viz, density_override=None, res_m=None, excl_buffer_m=EXCL_BUFFER_M,
         bld_excl_m=10.0,
         osm_roads_path=None, use_simheaven=True, dsftool_path=None,
-        custom_scenery_dir=None):
+        custom_scenery_dir=None, custom_overlay_src=None,
+        custom_overlay_src_alternate=None,
+        avoid_gfv2=True, gfv2_buffer_m=0.0,
+        avoid_simheaven_forests=True, simheaven_buffer_m=0.0,
+        avoid_default_forests=True, default_buffer_m=0.0):
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
@@ -527,6 +655,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     print(f"Tile: lat={lat} lon={lon}  DDS: {len(files)} ({_zl_str})")
     print(f"close={close_m}m  open={open_m}m  min_area={min_area_m2}m²  "
           f"simplify={simplify_m}m  density={dens_str}  excl_buffer={excl_buffer_m}m")
+    print(
+        "forest overlap avoid:"
+        f" GFv2={'on' if avoid_gfv2 else 'off'} ({gfv2_buffer_m}m),"
+        f" simHeaven={'on' if avoid_simheaven_forests else 'off'} ({simheaven_buffer_m}m),"
+        f" default={'on' if avoid_default_forests else 'off'} ({default_buffer_m}m)"
+    )
 
     device = __import__('torch').device('cuda' if __import__('torch').cuda.is_available() else 'cpu')
     model = proc = None
@@ -535,12 +669,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     rng     = np.random.default_rng(7)
     polygons = []   # (for_path, dsf_density, ring)
     timings = {
-        'simheaven_parse': 0.0,
+        'scenery_parse': 0.0,
         'cache_load': 0.0,
         'dds_load': 0.0,
         'inference': 0.0,
         'road_excl': 0.0,
         'bld_excl': 0.0,
+        'forest_layer_excl': 0.0,
         'contours': 0.0,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
@@ -578,12 +713,56 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     if use_simheaven and dsftool_path and os.path.exists(dsftool_path):
         _t = time.perf_counter()
         sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, cache_dir)
-        timings['simheaven_parse'] += time.perf_counter() - _t
+        timings['scenery_parse'] += time.perf_counter() - _t
         print(f"simHeaven network: {len(sh_network)} road segments")
     elif use_simheaven:
         print(f"  [simHeaven] DSFTool not found at {dsftool_path} — skipping")
 
     all_road_ways = _prepare_roads(osm_roads + excl_rails + sh_network)
+
+    forest_layers = []
+    if dsftool_path and os.path.exists(dsftool_path):
+        layer_specs = [
+            (
+                "Global Forests v2",
+                avoid_gfv2,
+                find_global_forests_dsfs(custom_scenery_dir, lat, lon),
+                gfv2_buffer_m,
+            ),
+            (
+                "simHeaven",
+                avoid_simheaven_forests,
+                find_simheaven_vegetation_dsfs(custom_scenery_dir, lat, lon),
+                simheaven_buffer_m,
+            ),
+            (
+                "default",
+                avoid_default_forests,
+                find_default_overlay_dsfs(
+                    custom_overlay_src, lat, lon, custom_overlay_src_alternate
+                ),
+                default_buffer_m,
+            ),
+        ]
+        for layer_name, enabled, dsf_matches, buffer_m in layer_specs:
+            if not enabled:
+                print(f"{layer_name} forests: disabled")
+                continue
+            _t = time.perf_counter()
+            polys = _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir)
+            timings['scenery_parse'] += time.perf_counter() - _t
+            prepared = _prepare_polygons(polys)
+            forest_layers.append(
+                {
+                    'name': layer_name,
+                    'buffer_m': max(0.0, float(buffer_m)),
+                    'polys': prepared,
+                }
+            )
+            print(f"{layer_name} forests: {len(prepared)} polygons")
+    else:
+        if any((avoid_gfv2, avoid_simheaven_forests, avoid_default_forests)):
+            print(f"Forest overlap layers: skipped (DSFTool unavailable at {dsftool_path})")
 
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
@@ -698,6 +877,28 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 n_bld_excl_missing += 1
             timings['bld_excl'] += time.perf_counter() - _t
 
+        # ── Exclusion layer 4: existing forest overlays in scenery packages ──
+        if forest_layers:
+            _t = time.perf_counter()
+            for layer in forest_layers:
+                local_polys = _polys_for_bounds(
+                    layer['polys'], lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+                )
+                if not local_polys:
+                    continue
+                layer_mask = _rasterize_polygons(
+                    local_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+                buffer_m = layer['buffer_m']
+                if buffer_m > 0 and layer_mask.any():
+                    buffer_px = max(1, int(buffer_m / mpp))
+                    k_layer = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (buffer_px * 2 + 1, buffer_px * 2 + 1)
+                    )
+                    layer_mask = cv2.dilate(layer_mask, k_layer)
+                excl_mask = cv2.bitwise_or(excl_mask, layer_mask)
+            timings['forest_layer_excl'] += time.perf_counter() - _t
+
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
 
         kwargs = dict(img_w=img_w, img_h=img_h,
@@ -760,12 +961,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     print(
         "[Veg timing] "
-        f"simHeaven={timings['simheaven_parse']:.1f}s  "
+        f"scenery_parse={timings['scenery_parse']:.1f}s  "
         f"cache_load={timings['cache_load']:.1f}s  "
         f"dds_load={timings['dds_load']:.1f}s  "
         f"inference={timings['inference']:.1f}s  "
         f"road_excl={timings['road_excl']:.1f}s  "
         f"bld_excl={timings['bld_excl']:.1f}s  "
+        f"forest_excl={timings['forest_layer_excl']:.1f}s  "
         f"contours={timings['contours']:.1f}s  "
         f"dsf_text={timings['dsf_text']:.1f}s  "
         f"dsf_compile={timings['dsf_compile']:.1f}s"
@@ -799,8 +1001,26 @@ def parse_args():
                     help='Path to *_big_roads.osm.bz2 (auto-discovered from tex_dir if omitted)')
     ap.add_argument('--custom-scenery-dir', default=None,
                     help='Configured X-Plane Custom Scenery directory used to locate simHeaven.')
+    ap.add_argument('--custom-overlay-src', default=None,
+                    help='Configured overlay source root used to locate default forest DSFs.')
+    ap.add_argument('--custom-overlay-src-alternate', default=None,
+                    help='Alternate overlay source root used if the main default overlay source is missing.')
     ap.add_argument('--no-simheaven', action='store_true', dest='no_simheaven',
                     help='Skip simHeaven X-World network road exclusion')
+    ap.add_argument('--no-avoid-gfv2', action='store_true', dest='no_avoid_gfv2',
+                    help='Do not exclude Global Forests v2 polygons from generated vegetation.')
+    ap.add_argument('--gfv2-buffer-m', type=float, default=0.0, dest='gfv2_buffer_m',
+                    help='Extra exclusion buffer in metres around Global Forests v2 polygons.')
+    ap.add_argument('--no-avoid-simheaven-forests', action='store_true',
+                    dest='no_avoid_simheaven_forests',
+                    help='Do not exclude simHeaven forest polygons from generated vegetation.')
+    ap.add_argument('--simheaven-buffer-m', type=float, default=0.0, dest='simheaven_buffer_m',
+                    help='Extra exclusion buffer in metres around simHeaven forest polygons.')
+    ap.add_argument('--no-avoid-default-forests', action='store_true',
+                    dest='no_avoid_default_forests',
+                    help='Do not exclude default-overlay forest polygons from generated vegetation.')
+    ap.add_argument('--default-buffer-m', type=float, default=0.0, dest='default_buffer_m',
+                    help='Extra exclusion buffer in metres around default-overlay forest polygons.')
     ap.add_argument('--no-viz',     action='store_true')
     return ap.parse_args()
 
@@ -850,6 +1070,14 @@ def main():
         osm_roads_path   = args.osm_roads,
         use_simheaven    = not args.no_simheaven,
         custom_scenery_dir = args.custom_scenery_dir,
+        custom_overlay_src = args.custom_overlay_src,
+        custom_overlay_src_alternate = args.custom_overlay_src_alternate,
+        avoid_gfv2       = not args.no_avoid_gfv2,
+        gfv2_buffer_m    = args.gfv2_buffer_m,
+        avoid_simheaven_forests = not args.no_avoid_simheaven_forests,
+        simheaven_buffer_m = args.simheaven_buffer_m,
+        avoid_default_forests = not args.no_avoid_default_forests,
+        default_buffer_m = args.default_buffer_m,
     )
 
 
