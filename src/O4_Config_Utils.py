@@ -1584,10 +1584,14 @@ class Ortho4XP_Config(tk.Toplevel):
         if cfg_vars[var]["type"] == int or cfg_vars[var]["type"] == float:
             return float(value)
         if cfg_vars[var]["type"] == bool:
+            if isinstance(value, bool):
+                return value
             return ast.literal_eval(value)
         if cfg_vars[var]["type"] == str:
             return str(value)
         if cfg_vars[var]["type"] == list:
+            if isinstance(value, list):
+                return value
             return ast.literal_eval(value)
 
     def dict_to_cfg(self, file:str, cfg_dict: dict) -> None:

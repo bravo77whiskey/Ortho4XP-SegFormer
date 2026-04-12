@@ -427,6 +427,12 @@ cfg_tile_vars = {
         "short_name": "sfr_veg_res",
         "hint": "Downsample inference maps to this resolution (m/px) before polygon extraction. 0 = native DDS resolution (~1.9 m/px at ZL16, maximum detail). Use 5–10 to reduce polygon count on performance-critical tiles.",
     },
+    "sfr_veg_del": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_veg_del",
+        "hint": "Automatically delete the SFR vegetation cache (*_veg.npy) for this tile after a successful vegetation overlay build.",
+    },
     "sfr_patch_size": {
         "type": int,
         "default": 512,
@@ -469,6 +475,12 @@ cfg_tile_vars = {
         "default": 200.0,
         "short_name": "sfr_bld_min_z",
         "hint": "Minimum building zone area in m² to be filled with objects. Smaller zones are skipped entirely. Converted to pixels at ~2 m/px (200 m² ≈ 50 px²).",
+    },
+    "sfr_bld_del": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_bld_del",
+        "hint": "Automatically delete the SFR building cache (*_bld.pkl) for this tile after a successful building overlay build.",
     },
     # Other
     "custom_dem": {
@@ -587,6 +599,7 @@ list_sfr_veg_vars = [
     "sfr_veg_avoid_default_forests",
     "sfr_veg_default_buffer_m",
     "sfr_veg_res_m",
+    "sfr_veg_del",
     "sfr_patch_size",
     "sfr_overlap",
     "sfr_batch_size",
@@ -597,6 +610,7 @@ list_sfr_bld_vars = [
     "sfr_bld_close_k",
     "sfr_bld_open_k",
     "sfr_bld_min_zone_m2",
+    "sfr_bld_del",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars

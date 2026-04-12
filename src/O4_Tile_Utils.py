@@ -399,6 +399,7 @@ def build_tile_list(
             SFR.sfr_bld_close_k     = tile.sfr_bld_close_k
             SFR.sfr_bld_open_k      = tile.sfr_bld_open_k
             SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
+            SFR.sfr_bld_del         = tile.sfr_bld_del
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap
             SFR.sfr_batch_size      = tile.sfr_batch_size
@@ -429,6 +430,7 @@ def build_tile_list(
             SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
             SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
             SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
+            SFR.sfr_veg_del           = tile.sfr_veg_del
             SFR.sfr_patch_size        = tile.sfr_patch_size
             SFR.sfr_overlap           = tile.sfr_overlap
             SFR.sfr_batch_size        = tile.sfr_batch_size

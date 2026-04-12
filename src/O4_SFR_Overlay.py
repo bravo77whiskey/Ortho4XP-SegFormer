@@ -27,6 +27,21 @@ def _sfr_cache_dir(lat, lon):
         return os.path.join(_exe_dir, 'SFR_cache',
                             f'{int(lat):+03d}{int(lon):+04d}')
 
+
+def _delete_cache_files(cache_dir, patterns, label):
+    import glob
+
+    removed = 0
+    for pattern in patterns:
+        for path in glob.glob(os.path.join(cache_dir, pattern)):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        print(f"[SFR] Removed {removed} {label} cache file(s).", flush=True)
+
 # ── Locate root dir and make overlay scripts importable ───────────────────────
 # In a frozen PyInstaller bundle sys.executable is Ortho4XP.exe and the
 # bundled scripts land in sfr_scripts/scripts/ and helper modules land in
@@ -93,11 +108,13 @@ sfr_veg_simheaven_buffer_m = 0.0
 sfr_veg_avoid_default_forests = True
 sfr_veg_default_buffer_m = 0.0
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
+sfr_veg_del           = False
 
 sfr_bld_spacing_m     = 20.0
 sfr_bld_close_k       = 15
 sfr_bld_open_k        = 5
 sfr_bld_min_zone_m2   = 200.0
+sfr_bld_del           = False
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -323,6 +340,8 @@ def process_veg_tile(lat, lon, build_dir):
     ret = _run_venv(code)
     if ret != 0:
         raise RuntimeError(f"SegFormer veg overlay subprocess failed (exit {ret})")
+    if sfr_veg_del:
+        _delete_cache_files(cache_dir, ['*_veg.npy'], 'veg')
     print(f"[SFR Veg] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
@@ -372,6 +391,8 @@ def process_bld_tile(lat, lon, build_dir):
     ret = _run_venv(code)
     if ret != 0:
         raise RuntimeError(f"SegFormer bld overlay subprocess failed (exit {ret})")
+    if sfr_bld_del:
+        _delete_cache_files(cache_dir, ['*_bld.pkl'], 'bld')
     print(f"[SFR Bld] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
