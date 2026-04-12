@@ -37,12 +37,14 @@ added_datas = [
     (os.path.join(SPEC_DIR, "Patches"),   "Ortho4XP_Data/Patches"),
     # SFR overlay scripts + AI inference module — run as venv subprocesses.
     # Bundled as loose .py files so the .venv Python can import them directly.
-    # Placed in sfr_scripts/ (not ".") so PYTHONPATH points only here, avoiding
-    # conflicts with frozen shapely/rtree stubs in _internal/.
-    (os.path.join(SPEC_DIR, "generate_veg_overlay.py"),  "sfr_scripts"),
-    (os.path.join(SPEC_DIR, "generate_bld_overlay.py"),  "sfr_scripts"),
-    (os.path.join(SPEC_DIR, "generate_sfr_overlay.py"),  "sfr_scripts"),
-    (os.path.join(SPEC_DIR, "src", "O4_AI_Overlay.py"),  "sfr_scripts"),
+    # Keep a repo-like layout inside sfr_scripts/src so imports work the same
+    # in source and packaged runs.
+    (os.path.join(SPEC_DIR, "src", "scripts", "__init__.py"),            "sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "scripts", "generate_overlay.py"),    "sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "scripts", "generate_veg_overlay.py"),"sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "scripts", "generate_bld_overlay.py"),"sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "scripts", "generate_sfr_overlay.py"),"sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "O4_AI_Overlay.py"),                  "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SegFormer_Overlay.py"),      "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Building_Overlay.py"),   "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Utils.py"),          "sfr_scripts/src"),

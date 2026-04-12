@@ -15,7 +15,7 @@ Pipeline
 8. Write DSF text, compile with DSFTool
 
 Usage:
-    python generate_veg_overlay.py <tex_dir> <lat> <lon> [options]
+    python src/scripts/generate_veg_overlay.py <tex_dir> <lat> <lon> [options]
 
 Options:
     --cache-dir DIR   Inference cache (default: <o4xp_root>/SFR_cache/<tile>)
@@ -27,7 +27,7 @@ Options:
     --no-viz          Skip overview image
 
 Example:
-    python generate_veg_overlay.py \\
+    python src/scripts/generate_veg_overlay.py \\
         "dist/Ortho4XP/Tiles/zOrtho4XP_+36+101/textures" 36 101 \\
         --cache-dir "cache_zl16_36_101"
 """
@@ -667,7 +667,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             timings['road_excl'] += time.perf_counter() - _t
 
         # ── Exclusion layer 3: placed building objects from bld overlay ──────
-        # Read the per-DDS placement cache written by generate_bld_overlay.
+        # Read the per-DDS placement cache written by src/scripts/generate_bld_overlay.
         # Use a loose circular buffer (bld_excl_m) — much larger than the
         # building-to-building 3 m margin — so trees stay clear of structures
         # without being pushed too far back from the building edge.

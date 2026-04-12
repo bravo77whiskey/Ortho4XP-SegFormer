@@ -330,7 +330,7 @@ cfg_tile_vars = {
         "default": False,
         "hint": "Terrain files for all but water triangles will contain the maquify_1_green_key.dcl decal directive. The effect is noticeable at very low altitude and helps to overcome the orthophoto blur at such levels. Can be slightly distracting at higher altitude.",
     },
-    # SegFormer vegetation overlay (generate_veg_overlay.py)
+    # SegFormer vegetation overlay (src/scripts/generate_veg_overlay.py)
     "sfr_veg_enabled": {
         "type": bool,
         "default": False,
@@ -403,7 +403,7 @@ cfg_tile_vars = {
         "short_name": "sfr_batch",
         "hint": "SegFormer inference batch size. 0 = auto-size from available GPU VRAM; raise only if your GPU has enough memory.",
     },
-    # SegFormer building overlay (generate_bld_overlay.py)
+    # SegFormer building overlay (src/scripts/generate_bld_overlay.py)
     "sfr_bld_enabled": {
         "type": bool,
         "default": False,

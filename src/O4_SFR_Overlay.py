@@ -5,7 +5,7 @@ Exposes process_veg_tile() / process_bld_tile() entry points that the Ortho4XP
 pipeline calls after Build Imagery/DSF, using module-level config vars synced from
 the per-tile Tile object (same pattern as O4_AI_Overlay).
 
-generate_veg_overlay and generate_bld_overlay are imported lazily inside each
+scripts.generate_veg_overlay and scripts.generate_bld_overlay are imported lazily inside each
 process function (after _activate_venv()) because they import torch at the top
 level — importing them at module load time would fail in the frozen exe before
 .venv has been set up.
@@ -29,20 +29,22 @@ def _sfr_cache_dir(lat, lon):
 
 # ── Locate root dir and make overlay scripts importable ───────────────────────
 # In a frozen PyInstaller bundle sys.executable is Ortho4XP.exe and the
-# bundled scripts (generate_veg_overlay.py etc.) land in _MEIPASS (the
-# _internal/ folder next to the exe).  In source mode _root_dir is one
-# level above src/.
+# bundled scripts land in sfr_scripts/scripts/ and helper modules land in
+# sfr_scripts/src/ inside _MEIPASS (the _internal/ folder next to the exe).
+# In source mode _root_dir is one level above src/.
 if getattr(sys, 'frozen', False):
-    # Overlay scripts are in sfr_scripts/ (not _MEIPASS root) so PYTHONPATH
-    # doesn't conflict with frozen shapely/rtree stubs in _internal/.
+    # Keep repo-like structure inside sfr_scripts so subprocess imports match
+    # source-mode imports.
     _root_dir = os.path.join(sys._MEIPASS, 'sfr_scripts')
     _exe_dir  = os.path.dirname(sys.executable)   # .venv lives here
 else:
     _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _exe_dir  = _root_dir
 
-if _root_dir not in sys.path:
-    sys.path.insert(0, _root_dir)
+_src_dir = os.path.join(_root_dir, 'src')
+for _path in (_root_dir, _src_dir):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 # ── Single shared virtual environment ────────────────────────────────────────
 # We use ONE venv for everything — the same .venv that build.py creates to run
@@ -69,7 +71,7 @@ def _no_window():
     return {}
 
 
-# generate_veg_overlay / generate_bld_overlay are run as .venv subprocesses,
+# scripts.generate_veg_overlay / scripts.generate_bld_overlay are run as .venv subprocesses,
 # never imported into the frozen exe process.
 
 # ── Module-level config vars — synced from Tile before each call ──────────────
@@ -133,14 +135,16 @@ def _run_venv(code):
     """Run Python code in .venv, streaming stdout line by line to this process.
 
     The subprocess receives PYTHONPATH pointing to _root_dir so it can import
-    generate_veg_overlay, generate_bld_overlay, and O4_AI_Overlay as loose
-    .py files (bundled as data in _internal/ for the frozen exe).
+    scripts.generate_veg_overlay, scripts.generate_bld_overlay, and
+    O4_AI_Overlay as loose .py files (bundled as data in _internal/ for the
+    frozen exe).
 
     Returns the process exit code.
     """
     env = os.environ.copy()
     prev = env.get('PYTHONPATH', '')
-    env['PYTHONPATH'] = f"{_root_dir}{os.pathsep}{prev}" if prev else _root_dir
+    py_paths = os.pathsep.join((_root_dir, _src_dir))
+    env['PYTHONPATH'] = f"{py_paths}{os.pathsep}{prev}" if prev else py_paths
 
     proc = subprocess.Popen(
         [_venv_python(), '-u', '-c', code],
@@ -259,7 +263,7 @@ def process_veg_tile(lat, lon, build_dir):
         f"AI.ai_overlap    = {sfr_overlap!r}\n"
         f"AI.ai_batch_size = {sfr_batch_size!r}\n"
         f"AI._dsftool      = {dsftool!r}\n"
-        f"import generate_veg_overlay\n"
+        f"from scripts import generate_veg_overlay\n"
         f"generate_veg_overlay.run(\n"
         f"    tex_dir          = {tex_dir!r},\n"
         f"    lat              = {lat!r},\n"
@@ -310,7 +314,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"AI.ai_overlap    = {sfr_overlap!r}\n"
         f"AI.ai_batch_size = {sfr_batch_size!r}\n"
         f"AI._dsftool      = {dsftool!r}\n"
-        f"import generate_bld_overlay\n"
+        f"from scripts import generate_bld_overlay\n"
         f"generate_bld_overlay.run(\n"
         f"    tex_dir                  = {tex_dir!r},\n"
         f"    lat                      = {lat!r},\n"

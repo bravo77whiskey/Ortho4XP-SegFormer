@@ -8,8 +8,8 @@ Uses the nave1616/SegFormer-landcover-FT model to segment orthophoto DDS texture
 Output is a compiled binary DSF overlay placed in yOrtho4XP_SFR_Overlays/.
 
 Usage (standalone):
-    python generate_sfr_overlay.py --lat 45 --lon 7
-    python generate_sfr_overlay.py --lat 45 --lon 7 --build-dir /path/to/tile
+    python src/scripts/generate_sfr_overlay.py --lat 45 --lon 7
+    python src/scripts/generate_sfr_overlay.py --lat 45 --lon 7 --build-dir /path/to/tile
 """
 
 import os

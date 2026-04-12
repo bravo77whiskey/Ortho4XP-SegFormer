@@ -12,7 +12,7 @@ scikit-fmm==2025.6.23
 # directly — source builds will fail on Windows without the GDAL C headers.
 # gdal  ← installed by build.py / manually with --only-binary :all:
 
-# AI overlay dependencies (O4_AI_Overlay.py / generate_overlay.py / generate_veg_overlay.py)
+# AI overlay dependencies (src/O4_AI_Overlay.py / src/scripts/generate_overlay.py / src/scripts/generate_veg_overlay.py)
 # Install PyTorch separately with the appropriate CUDA version:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 torch>=2.0.0

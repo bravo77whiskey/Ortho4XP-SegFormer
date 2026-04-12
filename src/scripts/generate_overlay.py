@@ -5,28 +5,29 @@ generate_overlay.py — standalone CLI for AI-based Ortho4XP overlay generation.
 Examples
 --------
 # Tile at lat=45, lon=7 using the default Tiles/ directory
-    python generate_overlay.py --lat 45 --lon 7
+    python src/scripts/generate_overlay.py --lat 45 --lon 7
 
 # Multiple tiles
-    python generate_overlay.py --lat 45 --lon 7 --lat 46 --lon 8
+    python src/scripts/generate_overlay.py --lat 45 --lon 7 --lat 46 --lon 8
 
 # Specify a custom build directory for the tile
-    python generate_overlay.py --lat 45 --lon 7 --build-dir D:/Scenery/zOrtho4XP_+45+007
+    python src/scripts/generate_overlay.py --lat 45 --lon 7 --build-dir D:/Scenery/zOrtho4XP_+45+007
 
 # Vegetation only (skip building detection)
-    python generate_overlay.py --lat 45 --lon 7 --no-buildings
+    python src/scripts/generate_overlay.py --lat 45 --lon 7 --no-buildings
 
 # Force CPU (useful for debugging)
-    python generate_overlay.py --lat 45 --lon 7 --cpu
+    python src/scripts/generate_overlay.py --lat 45 --lon 7 --cpu
 """
 
 import argparse
 import sys
 import os
 
-# Ensure src/ is on the path whether we run from repo root or elsewhere
-_here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_here, "src"))
+# Ensure src/ is on the path when run directly from src/scripts/
+_src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _src not in sys.path:
+    sys.path.insert(0, _src)
 
 
 def parse_args():

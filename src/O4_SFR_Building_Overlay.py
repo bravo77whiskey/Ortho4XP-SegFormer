@@ -2,7 +2,7 @@
 O4_SFR_Building_Overlay.py — SegFormer-assisted building overlay generation.
 
 Usage:
-    python generate_bld_overlay.py <tex_dir> <lat> <lon> <out_dsf> [options]
+    python src/scripts/generate_bld_overlay.py <tex_dir> <lat> <lon> <out_dsf> [options]
 
 Options:
     --spacing   METRES   Object spacing in metres (default 15)
@@ -20,7 +20,7 @@ Inference is cached per-DDS under cache-dir — changing spacing/kernel params
 does NOT re-run inference, only the fast fill + write steps.
 
 Example:
-    python generate_bld_overlay.py ^
+    python src/scripts/generate_bld_overlay.py ^
         "H:/XP12/Tiles/zOrtho4XP_-02+037/textures" -2 37 ^
         "H:/XP12/Custom Scenery/yOrtho4XP_SFR_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
