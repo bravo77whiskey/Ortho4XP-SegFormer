@@ -311,50 +311,6 @@ def build_all(tile):
     if UI.red_flag:
         UI.exit_message_and_bottom_line("")
         return 0
-    if tile.sfr_bld_enabled:
-        UI.lvprint(0, f"\nSegFormer Bld overlay for "
-                   f"{FNAMES.short_latlon(tile.lat, tile.lon)} :\n--------\n")
-        SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
-        SFR.sfr_bld_close_k     = tile.sfr_bld_close_k
-        SFR.sfr_bld_open_k      = tile.sfr_bld_open_k
-        SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
-        SFR.sfr_patch_size      = tile.sfr_patch_size
-        SFR.sfr_overlap         = tile.sfr_overlap
-        SFR.sfr_batch_size      = tile.sfr_batch_size
-        try:
-            SFR.process_bld_tile(tile.lat, tile.lon, tile.build_dir)
-        except Exception as exc:
-            UI.lvprint(0, f"[SFR] SegFormer bld overlay failed: {exc}")
-        if UI.red_flag:
-            UI.exit_message_and_bottom_line("")
-            return 0
-    if tile.sfr_veg_enabled:
-        UI.lvprint(0, f"\nSegFormer Veg overlay for "
-                   f"{FNAMES.short_latlon(tile.lat, tile.lon)} :\n--------\n")
-        SFR.sfr_veg_density       = tile.sfr_veg_density
-        SFR.sfr_veg_close_m       = tile.sfr_veg_close_m
-        SFR.sfr_veg_open_m        = tile.sfr_veg_open_m
-        SFR.sfr_veg_min_area_m2   = tile.sfr_veg_min_area_m2
-        SFR.sfr_veg_simplify_m    = tile.sfr_veg_simplify_m
-        SFR.sfr_veg_excl_buffer_m = tile.sfr_veg_excl_buffer_m
-        SFR.sfr_veg_use_simheaven = tile.sfr_veg_use_simheaven
-        SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
-        SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
-        SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
-        SFR.sfr_veg_simheaven_buffer_m = tile.sfr_veg_simheaven_buffer_m
-        SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
-        SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
-        SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
-        SFR.sfr_patch_size        = tile.sfr_patch_size
-        SFR.sfr_overlap           = tile.sfr_overlap
-        SFR.sfr_batch_size        = tile.sfr_batch_size
-        try:
-            SFR.process_veg_tile(tile.lat, tile.lon, tile.build_dir)
-        except Exception as exc:
-            UI.lvprint(0, f"[SFR] SegFormer veg overlay failed: {exc}")
-        if UI.red_flag:
-            UI.exit_message_and_bottom_line("")
-            return 0
     UI.is_working = 0
     if IMG.incomplete_imgs:
         UI.lvprint(
@@ -464,6 +420,8 @@ def build_tile_list(
             SFR.sfr_veg_simplify_m    = tile.sfr_veg_simplify_m
             SFR.sfr_veg_excl_buffer_m = tile.sfr_veg_excl_buffer_m
             SFR.sfr_veg_use_simheaven = tile.sfr_veg_use_simheaven
+            SFR.sfr_veg_avoid_simheaven_buildings = tile.sfr_veg_avoid_simheaven_buildings
+            SFR.sfr_veg_simheaven_building_buffer_m = tile.sfr_veg_simheaven_building_buffer_m
             SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
             SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
             SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests

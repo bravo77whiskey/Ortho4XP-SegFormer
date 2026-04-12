@@ -77,7 +77,6 @@ def _no_window():
 # never imported into the frozen exe process.
 
 # ── Module-level config vars — synced from Tile before each call ──────────────
-sfr_veg_enabled       = False
 sfr_veg_density       = -1.0    # -1 = auto; 0.0–1.0 = override
 sfr_veg_close_m       = 10.0
 sfr_veg_open_m        = 3.0
@@ -85,6 +84,8 @@ sfr_veg_min_area_m2   = 50.0
 sfr_veg_simplify_m    = 3.0
 sfr_veg_excl_buffer_m = 5.0
 sfr_veg_use_simheaven = True
+sfr_veg_avoid_simheaven_buildings = True
+sfr_veg_simheaven_building_buffer_m = 10.0
 sfr_veg_avoid_gfv2    = True
 sfr_veg_gfv2_buffer_m = 0.0
 sfr_veg_avoid_simheaven_forests = True
@@ -93,7 +94,6 @@ sfr_veg_avoid_default_forests = True
 sfr_veg_default_buffer_m = 0.0
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
 
-sfr_bld_enabled       = False
 sfr_bld_spacing_m     = 20.0
 sfr_bld_close_k       = 15
 sfr_bld_open_k        = 5
@@ -305,6 +305,8 @@ def process_veg_tile(lat, lon, build_dir):
         f"    res_m            = {res_m!r},\n"
         f"    excl_buffer_m    = {sfr_veg_excl_buffer_m!r},\n"
         f"    use_simheaven    = {sfr_veg_use_simheaven!r},\n"
+        f"    avoid_simheaven_buildings = {sfr_veg_avoid_simheaven_buildings!r},\n"
+        f"    simheaven_building_buffer_m = {sfr_veg_simheaven_building_buffer_m!r},\n"
         f"    avoid_gfv2       = {sfr_veg_avoid_gfv2!r},\n"
         f"    gfv2_buffer_m    = {sfr_veg_gfv2_buffer_m!r},\n"
         f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"

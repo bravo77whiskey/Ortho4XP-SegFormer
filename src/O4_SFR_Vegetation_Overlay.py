@@ -41,6 +41,12 @@ from math import pi, atan, exp
 from PIL import Image
 
 import O4_SegFormer_Overlay as SEGFORMER
+from O4_SFR_Building_Overlay import (
+    _load_simheaven_building_exclusions,
+    _prepare_simheaven_objects,
+    _rasterize_simheaven_objects,
+    _simheaven_objects_for_bounds,
+)
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
     find_default_overlay_dsfs,
@@ -541,6 +547,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         osm_roads_path=None, use_simheaven=True, dsftool_path=None,
         custom_scenery_dir=None, custom_overlay_src=None,
         custom_overlay_src_alternate=None,
+        avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
         avoid_gfv2=True, gfv2_buffer_m=0.0,
         avoid_simheaven_forests=True, simheaven_buffer_m=0.0,
         avoid_default_forests=True, default_buffer_m=0.0):
@@ -661,6 +668,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f" simHeaven={'on' if avoid_simheaven_forests else 'off'} ({simheaven_buffer_m}m),"
         f" default={'on' if avoid_default_forests else 'off'} ({default_buffer_m}m)"
     )
+    print(
+        f"building overlap avoid: SFR cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
+        f" simHeaven={'on' if avoid_simheaven_buildings else 'off'} ({simheaven_building_buffer_m}m)"
+    )
 
     device = __import__('torch').device('cuda' if __import__('torch').cuda.is_available() else 'cpu')
     model = proc = None
@@ -769,6 +780,28 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     n_files = len(files)
     n_bld_excl_used = 0
     n_bld_excl_missing = 0
+    n_sh_bld_polys = 0
+    n_sh_bld_objs = 0
+
+    sh_bld_polys = []
+    sh_bld_index = None
+    if avoid_simheaven_buildings and dsftool_path and os.path.exists(dsftool_path):
+        _t = time.perf_counter()
+        sh_bld_polys, sh_bld_objects = _load_simheaven_building_exclusions(
+            custom_scenery_dir,
+            lat,
+            lon,
+            dsftool_path,
+            cache_dir,
+        )
+        timings['scenery_parse'] += time.perf_counter() - _t
+        n_sh_bld_polys = len(sh_bld_polys)
+        n_sh_bld_objs = len(sh_bld_objects)
+        sh_bld_polys = _prepare_polygons(sh_bld_polys)
+        sh_bld_index = _prepare_simheaven_objects(sh_bld_objects)
+        print(f"simHeaven buildings: {n_sh_bld_objs} objects  {n_sh_bld_polys} facade polys")
+    elif avoid_simheaven_buildings:
+        print(f"simHeaven buildings: skipped (DSFTool unavailable at {dsftool_path})")
 
     for idx, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
@@ -877,6 +910,35 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 n_bld_excl_missing += 1
             timings['bld_excl'] += time.perf_counter() - _t
 
+        # ── Exclusion layer 3b: existing simHeaven buildings ─────────────────
+        if avoid_simheaven_buildings and (sh_bld_polys or sh_bld_index):
+            _t = time.perf_counter()
+            local_sh_bld_polys = _polys_for_bounds(
+                sh_bld_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
+            )
+            if local_sh_bld_polys:
+                sh_bld_poly_mask = _rasterize_polygons(
+                    local_sh_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+                if simheaven_building_buffer_m > 0 and sh_bld_poly_mask.any():
+                    sh_bld_poly_px = max(1, int(simheaven_building_buffer_m / mpp))
+                    k_sh_poly = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (sh_bld_poly_px * 2 + 1, sh_bld_poly_px * 2 + 1)
+                    )
+                    sh_bld_poly_mask = cv2.dilate(sh_bld_poly_mask, k_sh_poly)
+                excl_mask = cv2.bitwise_or(excl_mask, sh_bld_poly_mask)
+
+            local_sh_bld_objects = _simheaven_objects_for_bounds(
+                sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
+            )
+            if local_sh_bld_objects:
+                sh_bld_obj_mask = _rasterize_simheaven_objects(
+                    local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
+                    img_h, img_w, mpp, margin_m=max(0.0, float(simheaven_building_buffer_m))
+                )
+                excl_mask = cv2.bitwise_or(excl_mask, sh_bld_obj_mask)
+            timings['bld_excl'] += time.perf_counter() - _t
+
         # ── Exclusion layer 4: existing forest overlays in scenery packages ──
         if forest_layers:
             _t = time.perf_counter()
@@ -916,7 +978,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     print(f"Loaded {len(files)} DDS  ({time.time()-t_inf:.1f}s)  "
           f"climate={region}  "
-          f"bld_excl: {n_bld_excl_used} used / {n_bld_excl_missing} missing")
+          f"bld_excl: {n_bld_excl_used} used / {n_bld_excl_missing} missing  "
+          f"simh_bld: {n_sh_bld_objs} obj / {n_sh_bld_polys} poly")
     print(f"Polygons: tree={n_tree}  total={len(polygons)}")
 
     if not polygons:
@@ -1007,6 +1070,12 @@ def parse_args():
                     help='Alternate overlay source root used if the main default overlay source is missing.')
     ap.add_argument('--no-simheaven', action='store_true', dest='no_simheaven',
                     help='Skip simHeaven X-World network road exclusion')
+    ap.add_argument('--no-avoid-simheaven-buildings', action='store_true',
+                    dest='no_avoid_simheaven_buildings',
+                    help='Do not exclude simHeaven building footprints/objects from generated vegetation.')
+    ap.add_argument('--simheaven-building-buffer-m', type=float, default=10.0,
+                    dest='simheaven_building_buffer_m',
+                    help='Extra exclusion buffer in metres around simHeaven building footprints/objects.')
     ap.add_argument('--no-avoid-gfv2', action='store_true', dest='no_avoid_gfv2',
                     help='Do not exclude Global Forests v2 polygons from generated vegetation.')
     ap.add_argument('--gfv2-buffer-m', type=float, default=0.0, dest='gfv2_buffer_m',
@@ -1072,6 +1141,8 @@ def main():
         custom_scenery_dir = args.custom_scenery_dir,
         custom_overlay_src = args.custom_overlay_src,
         custom_overlay_src_alternate = args.custom_overlay_src_alternate,
+        avoid_simheaven_buildings = not args.no_avoid_simheaven_buildings,
+        simheaven_building_buffer_m = args.simheaven_building_buffer_m,
         avoid_gfv2       = not args.no_avoid_gfv2,
         gfv2_buffer_m    = args.gfv2_buffer_m,
         avoid_simheaven_forests = not args.no_avoid_simheaven_forests,

@@ -331,12 +331,6 @@ cfg_tile_vars = {
         "hint": "Terrain files for all but water triangles will contain the maquify_1_green_key.dcl decal directive. The effect is noticeable at very low altitude and helps to overcome the orthophoto blur at such levels. Can be slightly distracting at higher altitude.",
     },
     # SegFormer vegetation overlay (src/scripts/generate_veg_overlay.py)
-    "sfr_veg_enabled": {
-        "type": bool,
-        "default": False,
-        "short_name": "sfr_veg",
-        "hint": "Enable SegFormer+GFv2 per-DDS vegetation overlay generation after the DSF/Imagery step. Outputs to yOrtho4XP_Veg_Overlays. Requires PyTorch and the nave1616/SegFormer-landcover-FT model.",
-    },
     "sfr_veg_density": {
         "type": float,
         "default": -1.0,
@@ -377,7 +371,19 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "sfr_veg_simh",
-        "hint": "Use simHeaven X-World network roads for road-width tree exclusion. This setting is only for road masks; simHeaven forest overlap is controlled separately by the simh_f / simh_b settings.",
+        "hint": "Use simHeaven X-World network roads for road-width tree exclusion. This setting is only for road masks; simHeaven forest/building overlap is controlled separately by the simh_f / simh_b and simh_bd / simh_bd_b settings.",
+    },
+    "sfr_veg_avoid_simheaven_buildings": {
+        "type": bool,
+        "default": True,
+        "short_name": "sfr_veg_simh_bd",
+        "hint": "Avoid overlapping simHeaven building footprints and objects when generating vegetation. This is separate from the SFR building-placement cache exclusion.",
+    },
+    "sfr_veg_simheaven_building_buffer_m": {
+        "type": float,
+        "default": 10.0,
+        "short_name": "sfr_veg_simh_bd_b",
+        "hint": "Extra exclusion buffer in metres around simHeaven building footprints and objects.",
     },
     "sfr_veg_avoid_gfv2": {
         "type": bool,
@@ -440,12 +446,6 @@ cfg_tile_vars = {
         "hint": "SegFormer inference batch size. 0 = auto-size from available GPU VRAM; raise only if your GPU has enough memory.",
     },
     # SegFormer building overlay (src/scripts/generate_bld_overlay.py)
-    "sfr_bld_enabled": {
-        "type": bool,
-        "default": False,
-        "short_name": "sfr_bld",
-        "hint": "Enable SegFormer+SFD Global per-DDS building object overlay generation after the DSF/Imagery step. Outputs to yOrtho4XP_Overlays. Requires PyTorch and the nave1616/SegFormer-landcover-FT model.",
-    },
     "sfr_bld_spacing_m": {
         "type": float,
         "default": 20.0,
@@ -571,7 +571,6 @@ list_dsf_vars = [
 list_other_vars = ["custom_dem", "fill_nodata"]
 
 list_sfr_veg_vars = [
-    "sfr_veg_enabled",
     "sfr_veg_density",
     "sfr_veg_close_m",
     "sfr_veg_open_m",
@@ -579,6 +578,8 @@ list_sfr_veg_vars = [
     "sfr_veg_simplify_m",
     "sfr_veg_excl_buffer_m",
     "sfr_veg_use_simheaven",
+    "sfr_veg_avoid_simheaven_buildings",
+    "sfr_veg_simheaven_building_buffer_m",
     "sfr_veg_avoid_gfv2",
     "sfr_veg_gfv2_buffer_m",
     "sfr_veg_avoid_simheaven_forests",
@@ -592,7 +593,6 @@ list_sfr_veg_vars = [
 ]
 
 list_sfr_bld_vars = [
-    "sfr_bld_enabled",
     "sfr_bld_spacing_m",
     "sfr_bld_close_k",
     "sfr_bld_open_k",
