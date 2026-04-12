@@ -330,6 +330,110 @@ cfg_tile_vars = {
         "default": False,
         "hint": "Terrain files for all but water triangles will contain the maquify_1_green_key.dcl decal directive. The effect is noticeable at very low altitude and helps to overcome the orthophoto blur at such levels. Can be slightly distracting at higher altitude.",
     },
+    # SegFormer vegetation overlay (generate_veg_overlay.py)
+    "sfr_veg_enabled": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_veg",
+        "hint": "Enable SegFormer+GFv2 per-DDS vegetation overlay generation after the DSF/Imagery step. Outputs to yOrtho4XP_Veg_Overlays. Requires PyTorch and the nave1616/SegFormer-landcover-FT model.",
+    },
+    "sfr_veg_density": {
+        "type": float,
+        "default": -1.0,
+        "short_name": "sfr_veg_den",
+        "hint": "DSF density override 0.0–1.0 (scaled to 0–255). -1 = auto-select based on pixel fill fraction within each polygon.",
+    },
+    "sfr_veg_close_m": {
+        "type": float,
+        "default": 10.0,
+        "short_name": "sfr_veg_close",
+        "hint": "Morphological close radius in metres. Fills canopy gaps within a tree patch. Larger values merge nearby trees into one polygon; smaller values preserve fine detail.",
+    },
+    "sfr_veg_open_m": {
+        "type": float,
+        "default": 3.0,
+        "short_name": "sfr_veg_open",
+        "hint": "Morphological open radius in metres. Removes isolated noise pixels before contouring. Raise to suppress small spurious tree detections.",
+    },
+    "sfr_veg_min_area_m2": {
+        "type": float,
+        "default": 50.0,
+        "short_name": "sfr_veg_min_a",
+        "hint": "Minimum vegetation polygon area in m² to include in the DSF. Raise to reduce polygon count; lower to capture small isolated trees.",
+    },
+    "sfr_veg_simplify_m": {
+        "type": float,
+        "default": 3.0,
+        "short_name": "sfr_veg_simp",
+        "hint": "Douglas-Peucker polygon simplification tolerance in metres. Higher values produce fewer, coarser vertices; lower values preserve exact canopy outlines.",
+    },
+    "sfr_veg_excl_buffer_m": {
+        "type": float,
+        "default": 5.0,
+        "short_name": "sfr_veg_excl",
+        "hint": "Dilation buffer in metres applied around SegFormer road/building pixels before subtracting from the tree mask. Prevents trees bleeding onto building edges or road surfaces.",
+    },
+    "sfr_veg_use_simheaven": {
+        "type": bool,
+        "default": True,
+        "short_name": "sfr_veg_simh",
+        "hint": "Use simHeaven X-World network roads for per-type road-width tree exclusion (e.g. motorway 36 m, residential 10 m). Silently skipped if simHeaven is not installed.",
+    },
+    "sfr_veg_res_m": {
+        "type": float,
+        "default": 0.0,
+        "short_name": "sfr_veg_res",
+        "hint": "Downsample inference maps to this resolution (m/px) before polygon extraction. 0 = native DDS resolution (~1.9 m/px at ZL16, maximum detail). Use 5–10 to reduce polygon count on performance-critical tiles.",
+    },
+    "sfr_patch_size": {
+        "type": int,
+        "default": 512,
+        "short_name": "sfr_patch",
+        "hint": "SegFormer inference patch size in pixels. Must match the model's training resolution (512 for nave1616/SegFormer-landcover-FT). Larger values require more VRAM; smaller may reduce accuracy at patch boundaries.",
+    },
+    "sfr_overlap": {
+        "type": int,
+        "default": 64,
+        "short_name": "sfr_overlap",
+        "hint": "Overlap in pixels between adjacent inference patches. Higher values reduce seam artifacts at patch boundaries at the cost of more inference passes. 64 is a good balance for 512-px patches.",
+    },
+    "sfr_batch_size": {
+        "type": int,
+        "default": 0,
+        "short_name": "sfr_batch",
+        "hint": "SegFormer inference batch size. 0 = auto-size from available GPU VRAM; raise only if your GPU has enough memory.",
+    },
+    # SegFormer building overlay (generate_bld_overlay.py)
+    "sfr_bld_enabled": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_bld",
+        "hint": "Enable SegFormer+SFD Global per-DDS building object overlay generation after the DSF/Imagery step. Outputs to yOrtho4XP_Overlays. Requires PyTorch and the nave1616/SegFormer-landcover-FT model.",
+    },
+    "sfr_bld_spacing_m": {
+        "type": float,
+        "default": 20.0,
+        "short_name": "sfr_bld_sp",
+        "hint": "Minimum placement spacing between SFD Global building objects in metres. Lower values produce denser fills; raise to reduce object count in performance-critical areas.",
+    },
+    "sfr_bld_close_k": {
+        "type": int,
+        "default": 15,
+        "short_name": "sfr_bld_close",
+        "hint": "Morphological close kernel radius in pixels at native ZL16 resolution (~2 m/px). Fills gaps between building detections to form coherent building zones (15 px ≈ 30 m radius).",
+    },
+    "sfr_bld_open_k": {
+        "type": int,
+        "default": 5,
+        "short_name": "sfr_bld_open",
+        "hint": "Morphological open kernel radius in pixels at native ZL16 resolution (~2 m/px). Removes small isolated building detections (5 px ≈ 10 m diameter).",
+    },
+    "sfr_bld_min_zone_m2": {
+        "type": float,
+        "default": 200.0,
+        "short_name": "sfr_bld_min_z",
+        "hint": "Minimum building zone area in m² to be filled with objects. Smaller zones are skipped entirely. Converted to pixels at ~2 m/px (200 m² ≈ 50 px²).",
+    },
     # Other
     "custom_dem": {
         "type": str,
@@ -430,11 +534,39 @@ list_dsf_vars = [
 
 list_other_vars = ["custom_dem", "fill_nodata"]
 
+list_sfr_veg_vars = [
+    "sfr_veg_enabled",
+    "sfr_veg_density",
+    "sfr_veg_close_m",
+    "sfr_veg_open_m",
+    "sfr_veg_min_area_m2",
+    "sfr_veg_simplify_m",
+    "sfr_veg_excl_buffer_m",
+    "sfr_veg_use_simheaven",
+    "sfr_veg_res_m",
+    "sfr_patch_size",
+    "sfr_overlap",
+    "sfr_batch_size",
+]
+
+list_sfr_bld_vars = [
+    "sfr_bld_enabled",
+    "sfr_bld_spacing_m",
+    "sfr_bld_close_k",
+    "sfr_bld_open_k",
+    "sfr_bld_min_zone_m2",
+]
+
+list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars
+
+list_overlay_vars = list_sfr_overlay_vars
+
 list_tile_vars = (
     list_vector_vars
     + list_mesh_vars
     + list_mask_vars
     + list_dsf_vars
+    + list_overlay_vars
     + list_other_vars
     + ["default_website", "default_zl", "zone_list"]
 )
@@ -457,5 +589,7 @@ list_global_mesh_vars = [global_prefix + item for item in list_mesh_vars]
 list_global_dsf_vars = [global_prefix + item for item in list_dsf_vars]
 
 list_global_mask_vars = [global_prefix + item for item in list_mask_vars]
+
+list_global_sfr_overlay_vars = [global_prefix + item for item in list_sfr_overlay_vars]
 
 list_cfg_vars = list_tile_vars + list_global_tile_vars + list_app_vars

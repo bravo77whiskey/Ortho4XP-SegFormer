@@ -41,6 +41,7 @@ import O4_Mask_Utils as MASK
 import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_Config_Utils as CFG
+import O4_SFR_Overlay as SFR
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
@@ -294,7 +295,7 @@ class Ortho4XP_GUI(tk.Tk):
         ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
 
         # Third row (Steps)
-        for i in range(5):
+        for i in range(8):
             self.frame_steps.columnconfigure(i, weight=1)
         ttk.Button(
             self.frame_steps,
@@ -324,8 +325,23 @@ class Ortho4XP_GUI(tk.Tk):
             command=self.build_tile,
         ).grid(row=0, column=3, padx=5, pady=0, sticky=N + S + E + W)
         ttk.Button(
-            self.frame_steps, text="    All in one     ", command=self.build_all
+            self.frame_steps,
+            text=" SegFormer Bld ",
+            command=self.build_sfr_bld,
         ).grid(row=0, column=4, padx=5, pady=0, sticky=N + S + E + W)
+        ttk.Button(
+            self.frame_steps,
+            text=" SegFormer Veg ",
+            command=self.build_sfr_veg,
+        ).grid(row=0, column=5, padx=5, pady=0, sticky=N + S + E + W)
+        ttk.Button(
+            self.frame_steps,
+            text=" Setup SegFormer ",
+            command=self.setup_sfr_models,
+        ).grid(row=0, column=6, padx=5, pady=0, sticky=N + S + E + W)
+        ttk.Button(
+            self.frame_steps, text="    All in one     ", command=self.build_all
+        ).grid(row=0, column=7, padx=5, pady=0, sticky=N + S + E + W)
 
         # Fourth row (Progress bars and controls)
         # Label(self.frame_left,anchor=W,text="DSF/Masks progress",
@@ -374,7 +390,7 @@ class Ortho4XP_GUI(tk.Tk):
 
         # reinitialization from last visit
         try:
-            f = open(FNAMES.resource_path(".last_gui_params.txt"), "r")
+            f = open(FNAMES.user_path(".last_gui_params.txt"), "r")
             (lat, lon, default_website, default_zl) = f.readline().split()
             custom_build_dir = f.readline().strip()
             self.lat.set(lat)
@@ -676,6 +692,59 @@ class Ortho4XP_GUI(tk.Tk):
         )
         self.working_thread.start()
 
+    def build_sfr_veg(self):
+        try:
+            tile = self.tile_from_interface()
+            if not tile:
+                return
+        except Exception as e:
+            UI.vprint(1, "Process aborted.\n")
+            _LOGGER.exception(e)
+            return 0
+        SFR.sfr_veg_density       = tile.sfr_veg_density
+        SFR.sfr_veg_close_m       = tile.sfr_veg_close_m
+        SFR.sfr_veg_open_m        = tile.sfr_veg_open_m
+        SFR.sfr_veg_min_area_m2   = tile.sfr_veg_min_area_m2
+        SFR.sfr_veg_simplify_m    = tile.sfr_veg_simplify_m
+        SFR.sfr_veg_excl_buffer_m = tile.sfr_veg_excl_buffer_m
+        SFR.sfr_veg_use_simheaven = tile.sfr_veg_use_simheaven
+        SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
+        SFR.sfr_patch_size        = tile.sfr_patch_size
+        SFR.sfr_overlap           = tile.sfr_overlap
+        SFR.sfr_batch_size        = tile.sfr_batch_size
+        self.working_thread = threading.Thread(
+            target=SFR.process_veg_tile,
+            args=[tile.lat, tile.lon, tile.build_dir],
+        )
+        self.working_thread.start()
+
+    def build_sfr_bld(self):
+        try:
+            tile = self.tile_from_interface()
+            if not tile:
+                return
+        except Exception as e:
+            UI.vprint(1, "Process aborted.\n")
+            _LOGGER.exception(e)
+            return 0
+        SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
+        SFR.sfr_bld_close_k     = tile.sfr_bld_close_k
+        SFR.sfr_bld_open_k      = tile.sfr_bld_open_k
+        SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
+        SFR.sfr_patch_size      = tile.sfr_patch_size
+        SFR.sfr_overlap         = tile.sfr_overlap
+        SFR.sfr_batch_size      = tile.sfr_batch_size
+        self.working_thread = threading.Thread(
+            target=SFR.process_bld_tile,
+            args=[tile.lat, tile.lon, tile.build_dir],
+        )
+        self.working_thread.start()
+
+    def setup_sfr_models(self):
+        """Download SegFormer model weights and check/install dependencies."""
+        self.working_thread = threading.Thread(target=SFR.setup_sfr_models)
+        self.working_thread.start()
+
     def build_all(self):
         # Check for unsaved changes
         if (
@@ -757,7 +826,7 @@ class Ortho4XP_GUI(tk.Tk):
             if result == "cancel":
                 return        
         try:
-            f = open(FNAMES.resource_path(".last_gui_params.txt"), "w")
+            f = open(FNAMES.user_path(".last_gui_params.txt"), "w")
             f.write(
                 self.lat.get()
                 + " "
@@ -1385,6 +1454,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "OSM data",
         "Mask data",
         "Jpeg imagery",
+        "SFR veg cache",
+        "SFR bld cache",
         "Tile (whole)",
         "Tile (textures)",
     ]
@@ -1394,6 +1465,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "Draw water masks",
         "Build imagery/DSF",
         "Extract overlays",
+        "SegFormer Bld",
+        "SegFormer Veg",
         "Override tile configs",
     ]
 
@@ -1719,6 +1792,12 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         threading.Thread(target=self.preview_existing_tiles).start()
 
     def preview_existing_tiles(self):
+        try:
+            self._preview_existing_tiles_impl()
+        except tk.TclError:
+            pass  # Canvas destroyed while thread was running — normal on close
+
+    def _preview_existing_tiles_impl(self):
         dico_color = {
             11: "blue",
             12: "blue",
@@ -1966,6 +2045,10 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 data_deleted = self.delete_mask_data(lat, lon)
             if self.v_["Jpeg imagery"].get():
                 data_deleted = self.delete_jpeg_imagery(lat, lon)
+            if self.v_["SFR veg cache"].get():
+                data_deleted = self.delete_sfr_veg_cache(lat, lon)
+            if self.v_["SFR bld cache"].get():
+                data_deleted = self.delete_sfr_bld_cache(lat, lon)
             if self.v_["Tile (whole)"].get() and not self.grouped:
                 data_deleted = self.delete_tile_whole(lat, lon)
             if self.v_["Tile (textures)"].get() and not self.grouped:
@@ -2034,6 +2117,38 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         except Exception as e:
             UI.vprint(3, e)
             _LOGGER.exception(e)
+
+    def delete_sfr_veg_cache(self, lat: int, lon: int) -> bool:
+        """Delete SegFormer vegetation inference maps (*_veg.npy) for this tile."""
+        import glob as _glob
+        cache_dir = FNAMES.sfr_cache_dir(lat, lon)
+        files = _glob.glob(os.path.join(cache_dir, '*_veg.npy'))
+        if not files:
+            UI.vprint(3, "No SFR veg cache exists for tile at " + str(lat) + str(lon))
+            return False
+        for f in files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                UI.vprint(3, e)
+        UI.vprint(3, f"SFR veg cache removed for tile at {lat}{lon} ({len(files)} files)")
+        return True
+
+    def delete_sfr_bld_cache(self, lat: int, lon: int) -> bool:
+        """Delete SegFormer building placement caches (*_bld.pkl) for this tile."""
+        import glob as _glob
+        cache_dir = FNAMES.sfr_cache_dir(lat, lon)
+        files = _glob.glob(os.path.join(cache_dir, '*_bld.pkl'))
+        if not files:
+            UI.vprint(3, "No SFR bld cache exists for tile at " + str(lat) + str(lon))
+            return False
+        for f in files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                UI.vprint(3, e)
+        UI.vprint(3, f"SFR bld cache removed for tile at {lat}{lon} ({len(files)} files)")
+        return True
 
     def delete_tile_whole(self, lat: int, lon: int) -> None:
         """Delete all tile data."""
@@ -2175,6 +2290,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.v_["Draw water masks"].get(),
             self.v_["Build imagery/DSF"].get(),
             self.v_["Extract overlays"].get(),
+            self.v_["SegFormer Bld"].get(),
+            self.v_["SegFormer Veg"].get(),
             self.v_["Override tile configs"].get(),
         ]
         threading.Thread(target=TILE.build_tile_list, args=args).start()

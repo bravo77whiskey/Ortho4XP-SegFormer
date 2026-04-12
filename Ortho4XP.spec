@@ -1,103 +1,166 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""
+PyInstaller spec for Ortho4XP (with veg/building/AI overlay extensions).
+
+Build command (run from repo root with the project venv active):
+    python build.py          ← preferred (safe smart-merge into dist/)
+    pyinstaller Ortho4XP.spec -y   ← raw PyInstaller (output in dist_build/)
+
+Output:  dist/Ortho4XP/Ortho4XP.exe  (one-dir bundle)
+
+NOTE: AI packages (torch, transformers, huggingface_hub) are NOT bundled into
+the exe.  They live in sfr_venv/ next to the exe and are added to sys.path at
+runtime by O4_SFR_Overlay._activate_venv().  This keeps the bundle small
+(<500 MB) and lets users upgrade to a CUDA torch wheel independently.
+
+User data preserved on rebuild (never overwritten by build.py):
+    Tiles, OSM_data, Orthophotos, Masks, yOrtho4XP_Overlays,
+    yOrtho4XP_Veg_Overlays, Elevation_data, Geotiffs, tmp,
+    Ortho4XP.cfg, .last_gui_params.txt, sfr_venv/
+"""
+
 import os
-import subprocess
-import pyproj
-from PyInstaller.utils.hooks import collect_submodules
+import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-# ---------------------------------------------------------------------------
-# Resolve the correct proj.db from the system PROJ installation (version 5+)
-# rather than letting PyInstaller pick up the outdated one bundled with pyproj.
-# Supports macOS, Linux, and Windows.
-# ---------------------------------------------------------------------------
-def get_system_proj_db():
-    # First, try asking the 'projinfo' CLI for its search paths (one per line).
-    try:
-        result = subprocess.check_output(["projinfo", "--searchpaths"], stderr=subprocess.DEVNULL).decode().strip()
-        for path in result.splitlines():
-            db = os.path.join(path.strip(), "proj.db")
-            if os.path.isfile(db):
-                return os.path.dirname(db)
-    except Exception:
-        pass
+# ── Paths ──────────────────────────────────────────────────────────────────────
+SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 
-    # Fallback: common install locations per platform
-    if os.name == "nt":
-        # Windows: OSGeo4W and conda are the most common PROJ providers
-        osgeo = os.environ.get("OSGEO4W_ROOT", r"C:\OSGeo4W")
-        if not os.path.exists(osgeo):
-            osgeo = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Programs", "OSGeo4W")
-        conda = os.environ.get("CONDA_PREFIX", "")
-        candidates = [
-            os.path.join(osgeo, "share", "proj"),                    # OSGeo4W
-            os.path.join(conda, "Library", "share", "proj"),         # conda on Windows
-            r"C:\Program Files\PROJ\share\proj",                     # standalone PROJ installer
-        ]
-    else:
-        candidates = [
-            "/opt/homebrew/share/proj",    # macOS Apple Silicon (Homebrew)
-            "/usr/local/share/proj",       # macOS Intel (Homebrew) / Linux manual install
-            "/usr/share/proj",             # Linux system package (apt/dnf)
-        ]
+# ── Data files to bundle ───────────────────────────────────────────────────────
+added_datas = [
+    # Application resource directories (read-only; bundled inside _MEIPASS)
+    (os.path.join(SPEC_DIR, "Utils"),     "Ortho4XP_Data/Utils"),
+    (os.path.join(SPEC_DIR, "Providers"), "Ortho4XP_Data/Providers"),
+    (os.path.join(SPEC_DIR, "Extents"),   "Ortho4XP_Data/Extents"),
+    (os.path.join(SPEC_DIR, "Filters"),   "Ortho4XP_Data/Filters"),
+    (os.path.join(SPEC_DIR, "Previews"),  "Ortho4XP_Data/Previews"),
+    (os.path.join(SPEC_DIR, "Patches"),   "Ortho4XP_Data/Patches"),
+    # SFR overlay scripts + AI inference module — run as venv subprocesses.
+    # Bundled as loose .py files so the .venv Python can import them directly.
+    # Placed in sfr_scripts/ (not ".") so PYTHONPATH points only here, avoiding
+    # conflicts with frozen shapely/rtree stubs in _internal/.
+    (os.path.join(SPEC_DIR, "generate_veg_overlay.py"),  "sfr_scripts"),
+    (os.path.join(SPEC_DIR, "generate_bld_overlay.py"),  "sfr_scripts"),
+    (os.path.join(SPEC_DIR, "generate_sfr_overlay.py"),  "sfr_scripts"),
+    (os.path.join(SPEC_DIR, "src", "O4_AI_Overlay.py"),  "sfr_scripts"),
+    (os.path.join(SPEC_DIR, "src", "O4_SegFormer_Overlay.py"),      "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_Building_Overlay.py"),   "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Utils.py"),          "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_Vegetation_Overlay.py"), "sfr_scripts/src"),
+]
+# pyproj CRS data is collected automatically by the pyinstaller pyproj hook
 
-    for candidate in candidates:
-        if candidate and os.path.isfile(os.path.join(candidate, "proj.db")):
-            return candidate
+# shapely and rtree ship their own DLLs; collect them as data so PyInstaller
+# picks them up even if it misses them during the automatic analysis pass.
+added_datas += collect_data_files("shapely")
+added_datas += collect_data_files("rtree")
 
-    # Last resort: use pyproj's own data dir (may be version 4)
-    print("WARNING: Could not find system proj.db — falling back to pyproj's bundled version.")
-    return pyproj.datadir.get_data_dir()
+# ── Binaries (native DLLs needed at runtime) ──────────────────────────────────
+# AI packages (torch, transformers, etc.) are NOT bundled — they live in
+# sfr_venv/ and are loaded at runtime via _activate_venv().
+added_binaries = []
+added_binaries += collect_dynamic_libs("shapely")
+added_binaries += collect_dynamic_libs("rtree")
 
-system_proj_dir = get_system_proj_db()
-print(f"Using proj.db from: {system_proj_dir}")
+# ── Hidden imports PyInstaller may miss ───────────────────────────────────────
+hidden = [
+    # tkinter (sometimes missed on Windows)
+    "tkinter",
+    "tkinter.ttk",
+    "tkinter.filedialog",
+    "tkinter.messagebox",
+    # PIL / Pillow
+    "PIL._tkinter_finder",
+    # pyproj internals (hook handles CRS data automatically)
+    "pyproj.datadir",
+    # Shapely geometry types
+    "shapely.geometry",
+    "shapely.ops",
+    "shapely.validation",
+    # Our source modules
+    "O4_UI_Utils",
+    "O4_File_Names",
+    "O4_Imagery_Utils",
+    "O4_Vector_Map",
+    "O4_Mesh_Utils",
+    "O4_Mask_Utils",
+    "O4_Tile_Utils",
+    "O4_GUI_Utils",
+    "O4_Config_Utils",
+    "O4_Cfg_Vars",
+    "O4_DSF_Utils",
+    "O4_Overlay_Utils",
+    "O4_Veg_Overlay",
+    "O4_Building_Overlay",
+    "O4_AI_Overlay",
+    "O4_SFR_Overlay",
+    "O4_SegFormer_Overlay",
+    "O4_SFR_Building_Overlay",
+    "O4_SFR_DSF_Utils",
+    "O4_SFR_Vegetation_Overlay",
+    "O4_Parallel_Utils",
+    "O4_OSM_Utils",
+    "O4_Geo_Utils",
+    "O4_DEM_Utils",
+    "O4_Vector_Utils",
+    "O4_Version",
+    # SFR scripts are bundled as .py data files (see added_datas) and imported
+    # lazily at runtime after _activate_venv() — not via the import graph.
+]
 
-# Destination inside the bundle mirrors the path Ortho4XP.py expects:
-#   sys._MEIPASS / pyproj / proj_dir / share / proj
-proj_dest = os.path.join("pyproj", "proj_dir", "share", "proj")
+# ── Modules to exclude ────────────────────────────────────────────────────────
+# Explicitly exclude AI packages — they live in sfr_venv, not the bundle.
+# NOTE: do NOT exclude setuptools/distutils — PyInstaller hooks them internally.
+excludes = [
+    "torch",
+    "torchvision",
+    "transformers",
+    "huggingface_hub",
+    "timm",
+    "safetensors",
+    "wand",
+    "matplotlib",
+    "IPython",
+    "notebook",
+    "pytest",
+]
 
+# ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
-    ['Ortho4XP.py'],
-    pathex=['src'],
-    binaries=[],
-    datas=[
-        ('./Utils',               './Ortho4XP_Data/Utils'),
-        ('./Extents',             './Ortho4XP_Data/Extents'),
-        ('./Filters',             './Ortho4XP_Data/Filters'),
-        ('./Licence',             './Ortho4XP_Data/Licence'),
-        ('./Patches',             './Ortho4XP_Data/Patches'),
-        ('./Previews',            './Ortho4XP_Data/Previews'),
-        ('./Providers',           './Ortho4XP_Data/Providers'),
-        ('community_server.txt',  './Ortho4XP_Data/'),
-        # Explicitly bundle the system proj.db (version 5+) so the bundled
-        # app doesn't fall back to pyproj's outdated version 4 copy.
-        (os.path.join(system_proj_dir, "proj.db"), proj_dest),
-    ],
-    hiddenimports=collect_submodules('PIL'),
+    ["Ortho4XP.py"],
+    pathex=[SPEC_DIR, os.path.join(SPEC_DIR, "src")],
+    binaries=added_binaries,
+    datas=added_datas,
+    hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excludes,
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     [],
-    exclude_binaries=True,
-    name='Ortho4XP',
+    exclude_binaries=True,       # onedir: binaries go in the bundle folder
+    name="Ortho4XP",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,               # no console window (GUI app)
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=None,
 )
+
 coll = COLLECT(
     exe,
     a.binaries,
@@ -105,5 +168,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Ortho4XP',
+    name="Ortho4XP",
 )

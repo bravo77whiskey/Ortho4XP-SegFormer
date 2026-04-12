@@ -1,10 +1,23 @@
-numpy==2.4.4
-pillow==12.2.0
+numpy==1.26.4
+pillow==12.0.0
+opencv-python==4.10.0.84
 pyproj==3.7.2
-requests==2.33.1
+requests==2.32.5
 Rtree==1.4.1
 shapely==2.1.2
 scikit-fmm==2025.6.23
-gdal==3.12.3; platform_system == 'Darwin'
-gdal==3.12.2; platform_system == 'Windows'
-gdal==3.9.0; platform_system == 'Linux'
+# GDAL must be installed as a pre-built binary wheel (no source compile):
+#   pip install gdal --only-binary :all:
+# The build.py script handles this automatically.  Do not install via this file
+# directly — source builds will fail on Windows without the GDAL C headers.
+# gdal  ← installed by build.py / manually with --only-binary :all:
+
+# AI overlay dependencies (O4_AI_Overlay.py / generate_overlay.py / generate_veg_overlay.py)
+# Install PyTorch separately with the appropriate CUDA version:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+segmentation-models-pytorch>=0.3.0
+huggingface-hub>=1.0.0
+Wand>=0.6.0

@@ -38,6 +38,8 @@ from O4_Cfg_Vars import (
     list_mesh_vars,
     list_tile_vars,
     list_vector_vars,
+    list_sfr_overlay_vars,
+    list_global_sfr_overlay_vars,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,8 +47,8 @@ _LOGGER.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 _LOGGER.addHandler(handler)
 
-global_cfg_file = FNAMES.resource_path("Ortho4XP.cfg")
-global_cfg_bak_file = FNAMES.resource_path("Ortho4XP.cfg.bak")
+global_cfg_file = FNAMES.user_path("Ortho4XP.cfg")
+global_cfg_bak_file = FNAMES.user_path("Ortho4XP.cfg.bak")
 
 
 def set_global_variables(var: str, value: str) -> None:
@@ -112,7 +114,7 @@ try:
         if line[0] == "#":
             continue
         try:
-            (var, value) = line.split("=", 1)
+            (var, value) = line.split("=")
             value = config_compatibility(value)
             # Set all tile and app config variables
             set_global_variables(var, value)
@@ -178,43 +180,15 @@ class Tile:
                 )
                 raise Exception
 
-    def read_from_config(self, config_file=None, use_global=False):
-        """
-        Read tile config from config file and update class variables.
-
-        :params str config_file: path to config file; unknown use case
-        :params bool use_global: force use of global config file
-        
-        :returns: 1 if successful, 0 if not
-        :return type: int
-        """
-        if not config_file:
-            config_file = os.path.join(
-                self.build_dir,
-                "Ortho4XP_" + FNAMES.short_latlon(self.lat, self.lon) + ".cfg",
-            )
-            if not os.path.isfile(config_file) or use_global:
-                config_file = global_cfg_file
-
-                if not os.path.isfile(config_file):
-                    
-                    UI.lvprint(
-                        0,
-                        "CFG error: No tile or global config file found.",
-                        FNAMES.short_latlon(self.lat, self.lon),
-                    )
-                    return 0
-        try:
-            f = open(config_file, "r")
+    def _apply_config_file(self, config_file):
+        """Parse a single config file and apply values to self. Silently skips unknown vars."""
+        with open(config_file, "r") as f:
             for line in f.readlines():
                 line = line.strip()
-                if not line:
-                    continue
-                if line[0] == "#":
+                if not line or line[0] == "#":
                     continue
                 try:
-                    (var, value) = line.split("=", 1)
-                    # compatibility with config files from version <= 1.20
+                    (var, value) = line.split("=")
                     value = config_compatibility(value)
                     if cfg_vars[var]["type"] in (bool, list):
                         cmd = "self." + var + "=" + value
@@ -228,8 +202,6 @@ class Tile:
                         )
                     exec(cmd)
                 except Exception as e:
-                    # compatibility with zone_list config files from
-                    # version <= 1.20
                     if "zone_list.append" in line:
                         try:
                             exec("self." + line)
@@ -237,10 +209,57 @@ class Tile:
                             pass
                     else:
                         UI.vprint(2, e)
-                        pass
-            f.close()
+
+    def read_from_config(self, config_file=None, use_global=False):
+        """
+        Read tile config from config file and update class variables.
+
+        Global config is always applied first as a baseline; a tile-specific
+        config file (if present) is then applied on top so that tile values
+        override global defaults while unset tile vars inherit from global.
+
+        :params str config_file: path to config file; unknown use case
+        :params bool use_global: force use of global config file
+
+        :returns: 1 if successful, 0 if not
+        :return type: int
+        """
+        if not config_file:
+            tile_config = os.path.join(
+                self.build_dir,
+                "Ortho4XP_" + FNAMES.short_latlon(self.lat, self.lon) + ".cfg",
+            )
+            tile_exists = os.path.isfile(tile_config)
+
+            if not os.path.isfile(global_cfg_file):
+                if not tile_exists:
+                    UI.lvprint(
+                        0,
+                        "CFG error: No tile or global config file found.",
+                        FNAMES.short_latlon(self.lat, self.lon),
+                    )
+                    return 0
+            else:
+                # Always load global first so tile vars inherit global defaults
+                try:
+                    self._apply_config_file(global_cfg_file)
+                except Exception:
+                    UI.lvprint(
+                        0,
+                        "CFG error: Could not read global config file.",
+                    )
+                    return 0
+
+            if tile_exists and not use_global:
+                config_file = tile_config
+            elif tile_exists and use_global:
+                return 1   # global already applied; tile intentionally ignored
+            elif not tile_exists:
+                return 1   # global was the only source; already applied
+        try:
+            self._apply_config_file(config_file)
             return 1
-        except:
+        except Exception:
             UI.lvprint(
                 0,
                 "CFG error: Could not read config file for tile",
@@ -405,7 +424,7 @@ class Ortho4XP_Config(tk.Toplevel):
         # Allow widgets to shrink and expand with window resize
         frame_status.columnconfigure(0, weight=0)
         frame_status.rowconfigure(0, weight=0)
-        for j in range(8):
+        for j in range(12):
             frame_cfg.columnconfigure(j, weight=1)
 
         frame_cfg.rowconfigure(0, weight=1)
@@ -431,7 +450,7 @@ class Ortho4XP_Config(tk.Toplevel):
 
         tk.Label(
             frame_status,
-            textvariable=self.tile_cfg_msg,   
+            textvariable=self.tile_cfg_msg,
             bg="light green",
             fg="black",
             font="TKFixedFont 15",
@@ -442,6 +461,7 @@ class Ortho4XP_Config(tk.Toplevel):
             ("Mesh", list_mesh_vars),
             ("Masks", list_mask_vars),
             ("DSF/Imagery", list_dsf_vars),
+            ("SegFormer Overlays", list_sfr_overlay_vars),
         ):
             tk.Label(
                 frame_cfg,
@@ -504,7 +524,7 @@ class Ortho4XP_Config(tk.Toplevel):
         row = next_row
 
         frame_dem.grid(
-            row=row, column=0, columnspan=6, sticky=N + S + W + E
+            row=row, column=0, columnspan=12, sticky=N + S + W + E
         )
 
         item = "custom_dem"
@@ -614,7 +634,7 @@ class Ortho4XP_Config(tk.Toplevel):
         frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, bg="light green")
         frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, bg="light green")
 
-        for j in range(8):
+        for j in range(12):
             frame_cfg.columnconfigure(j, weight=1)
 
         frame_cfg.rowconfigure(0, weight=1)
@@ -642,6 +662,7 @@ class Ortho4XP_Config(tk.Toplevel):
             ("Mesh", list_global_mesh_vars),
             ("Masks", list_global_mask_vars),
             ("DSF/Imagery", list_global_dsf_vars),
+            ("SegFormer Overlays", list_global_sfr_overlay_vars),
         ):
             tk.Label(
                 frame_cfg,
@@ -706,7 +727,7 @@ class Ortho4XP_Config(tk.Toplevel):
         row = next_row
 
         frame_dem.grid(
-            row=row, column=0, columnspan=6, sticky=N + S + W + E
+            row=row, column=0, columnspan=12, sticky=N + S + W + E
         )
 
         text = "custom_dem"
@@ -1027,7 +1048,7 @@ class Ortho4XP_Config(tk.Toplevel):
             if not line or line[0] == "#":
                 continue
             try:
-                (var, value) = line.split("=", 1)
+                (var, value) = line.split("=")
                 value = config_compatibility(value)
                 self.v_[var].set(value)
             except Exception as e:
@@ -1076,7 +1097,7 @@ class Ortho4XP_Config(tk.Toplevel):
             if line[0] == "#":
                 continue
             try:
-                (var, value) = line.split("=", 1)
+                (var, value) = line.split("=")
                 value = config_compatibility(value)
                 self.v_[var].set(value)
             except Exception as e:

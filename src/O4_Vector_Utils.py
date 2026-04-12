@@ -800,9 +800,13 @@ def ensure_MultiLineString(input_geometry):
     elif input_geometry.geom_type in ["LineString", "LinearRing"]:
         return geometry.MultiLineString([input_geometry])
     elif "Collection" in input_geometry.geom_type:
-        valid_lines = [line for line in input_geometry.geoms
-                        if line.geom_type in ["LineString", "LinearRing"]]
-        return geometry.MultiLineString(valid_lines or [])
+        return geometry.MultiLineString(
+            (
+                line
+                for line in input_geometry.geoms
+                if line.geom_type in ["LineString", "LinearRing"]
+            )
+        )
     else:
         return geometry.MultiLineString()
 

@@ -8,28 +8,48 @@ g2xpl_16_prefix = ""
 g2xpl_16_suffix = ""
 
 def resource_path(relative_path):
-    """Get absolute path to resource."""
-    # Required for using pyinstaller
+    """Absolute path to a READ-ONLY bundled resource (Providers, Utils, etc.).
+    When frozen: inside _internal/Ortho4XP_Data/.
+    When from source: relative to cwd.
+    """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         base_path = os.path.join(sys._MEIPASS, 'Ortho4XP_Data')
     else:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-Preview_dir = resource_path("Previews")
-Provider_dir = resource_path("Providers")
-Extent_dir = resource_path("Extents")
-Filter_dir = resource_path("Filters")
-OSM_dir = resource_path("OSM_data")
-Mask_dir = resource_path("Masks")
-Imagery_dir = resource_path("Orthophotos")
-Elevation_dir = resource_path("Elevation_data")
-Geotiff_dir = resource_path("Geotiffs")
-Patch_dir = resource_path("Patches")
-Utils_dir = resource_path("Utils")
-Tile_dir = resource_path("Tiles")
-Tmp_dir = resource_path("tmp")
-Overlay_dir = resource_path("yOrtho4XP_Overlays")
+
+def user_path(relative_path):
+    """Absolute path to a user-writable data directory.
+    When frozen: next to the exe (dist/Ortho4XP/Tiles etc.).
+      Use build.py (not pyinstaller -y directly) so rebuilds never wipe this data.
+    When from source: relative to cwd.
+    """
+    if getattr(sys, 'frozen', False):
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
+# Read-only bundled assets
+Preview_dir   = resource_path("Previews")
+Provider_dir  = resource_path("Providers")
+Extent_dir    = resource_path("Extents")
+Filter_dir    = resource_path("Filters")
+Patch_dir     = resource_path("Patches")
+Utils_dir     = resource_path("Utils")
+
+# User-writable data (stored outside the bundle so rebuilds don't delete them)
+OSM_dir       = user_path("OSM_data")
+Mask_dir      = user_path("Masks")
+Imagery_dir   = user_path("Orthophotos")
+Elevation_dir = user_path("Elevation_data")
+Geotiff_dir   = user_path("Geotiffs")
+Tile_dir      = user_path("Tiles")
+Tmp_dir       = user_path("tmp")
+Overlay_dir   = user_path("yOrtho4XP_Overlays")
+SFR_cache_dir = user_path("SFR_cache")
 
 ##############################################################################
 def short_latlon(lat, lon):
@@ -79,6 +99,10 @@ def build_dir(lat, lon, custom_build_dir):
 
 def osm_dir(lat, lon):
     return os.path.join(OSM_dir, long_latlon(lat, lon))
+
+
+def sfr_cache_dir(lat, lon):
+    return os.path.join(SFR_cache_dir, long_latlon(lat, lon))
 
 
 def mask_dir(lat, lon):

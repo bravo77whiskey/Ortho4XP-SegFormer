@@ -4,6 +4,8 @@ import shutil
 import sys
 import subprocess
 import O4_File_Names as FNAMES
+
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 import O4_UI_Utils as UI
 
 # the following is meant to be modified directly by users who need it (in the 
@@ -80,7 +82,9 @@ def build_overlay(lat, lon):
     if dsfid == "7z":
         UI.vprint(1, "-> The original DSF is a 7z archive, uncompressing...")
         os.replace(file_to_sniff_loc, file_to_sniff_loc + ".7z")
-        subprocess.run([unzip_cmd, "e", f"-o{FNAMES.Tmp_dir}", f"{file_to_sniff_loc}.7z"], env=UI.subprocess_env())
+        subprocess.run([unzip_cmd, "e", f"-o{FNAMES.Tmp_dir}", f"{file_to_sniff_loc}.7z"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                       creationflags=_CREATE_NO_WINDOW)
         os.remove(file_to_sniff_loc + ".7z")
     UI.vprint(1, "-> Converting the copy to text format")
     dsfconvertcmd = [
@@ -92,7 +96,8 @@ def build_overlay(lat, lon):
         ),
     ]
     fingers_crossed = subprocess.Popen(
-        dsfconvertcmd, stdout=subprocess.PIPE, bufsize=0, env=UI.subprocess_env()
+        dsfconvertcmd, stdout=subprocess.PIPE, bufsize=0,
+        creationflags=_CREATE_NO_WINDOW,
     )
     while True:
         line = fingers_crossed.stdout.readline()
@@ -192,7 +197,8 @@ def build_overlay(lat, lon):
         ),
     ]
     fingers_crossed = subprocess.Popen(
-        dsfconvertcmd, stdout=subprocess.PIPE, bufsize=0, env=UI.subprocess_env()
+        dsfconvertcmd, stdout=subprocess.PIPE, bufsize=0,
+        creationflags=_CREATE_NO_WINDOW,
     )
     while True:
         line = fingers_crossed.stdout.readline()

@@ -1,6 +1,7 @@
 Binary/
 build/
 dist/
+dist_build/
 Elevation_data/
 Geotiffs/
 Masks/
@@ -12,6 +13,7 @@ Extents/Auto
 tmp/
 Tiles/
 venv*/
+.venv/
 **/Ortho4XP.log
 **/__pycache__
 **/Thumbs.db
@@ -19,3 +21,18 @@ venv*/
 **/*.swp
 .last_gui_params.txt
 .DS_Store
+# Development artefacts
+cache_zl16*/
+bld_cache/
+SFR_cache/
+test_output/
+test_*.py
+full_tile_*.npy
+full_tile_*.png
+multimodel_result*
+native_zl1*.png
+perdds_*.png
+perdds_*.txt
+zl16_*.npy
+zl16_*.png
+*.npy
