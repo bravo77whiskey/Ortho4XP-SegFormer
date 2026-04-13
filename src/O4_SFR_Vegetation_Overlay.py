@@ -60,7 +60,8 @@ CLOSE_M       = 10.0   # close kernel radius — fill gaps within a patch
 OPEN_M        = 3.0    # open  kernel radius — remove sub-pixel noise
 MIN_AREA_M2   = 50.0   # minimum polygon area (~7×7 m)
 SIMPLIFY_M    = 3.0    # Douglas-Peucker tolerance
-TREELINE_RATIO= 5.0    # perimeter² / (4π × area) ≥ this → treeline mode
+TREELINE_RATIO= 5.0    # perimeter² / (4π × area) ≥ this → candidate treeline
+TREELINE_MAX_WIDTH_M = 30.0  # broad irregular blobs should stay filled forest
 MAX_RING_PTS  = 8000   # hard vertex cap per DSF winding
 EXCL_BUFFER_M = 5.0    # dilation buffer around SegFormer buildings/roads before exclusion
 
@@ -466,7 +467,7 @@ def _polygon_fill_frac(mask, cnt):
     return float((roi * fill).sum()) / float(total)
 
 
-def _contour_shape(cnt, min_area_px):
+def _contour_shape(cnt, min_area_px, m_per_px):
     area = cv2.contourArea(cnt)
     if area < min_area_px:
         return 'tiny', area
@@ -474,7 +475,9 @@ def _contour_shape(cnt, min_area_px):
     if perim == 0:
         return 'tiny', area
     ratio = (perim ** 2) / (4 * pi * area)
-    return ('treeline' if ratio >= TREELINE_RATIO else 'area'), area
+    width_m = (2.0 * area / perim) * m_per_px
+    is_treeline = ratio >= TREELINE_RATIO and width_m <= TREELINE_MAX_WIDTH_M
+    return ('treeline' if is_treeline else 'area'), area
 
 
 
@@ -512,7 +515,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
     for cnt in cnts:
-        shape, _ = _contour_shape(cnt, min_area_px)
+        shape, _ = _contour_shape(cnt, min_area_px, m_per_px)
         if shape == 'tiny':
             continue
         if veg_cls == SEGFORMER.CLASS_AGRICULTURE and shape != 'treeline':

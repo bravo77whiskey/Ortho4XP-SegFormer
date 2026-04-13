@@ -72,7 +72,8 @@ _DEFAULT_DENSITY = 200   # 0-255; 255 = maximum density
 # Shape thresholds
 _MIN_AREA_PX  = 400     # ignore patches smaller than this (pixels²)
 _MAX_AREA_PX  = None    # None = no upper limit
-_TREELINE_RATIO = 6.0   # perimeter² / area > ratio → treat as treeline
+_TREELINE_RATIO = 6.0   # perimeter² / area > ratio → candidate treeline
+_TREELINE_MAX_WIDTH_M = 30.0  # broad rough-edged blobs should remain area forest
 _LARGE_BLOB_AREA_DEG2 = 0.003   # blobs > this (in degree²) with very low
                                   # internal variance are likely fields – drop
 
@@ -494,7 +495,8 @@ def _vectorise_mask(veg_mask: np.ndarray, img_w: int, img_h: int,
         else:
             iso = 1.0
 
-        if iso < (1.0 / _TREELINE_RATIO):
+        width_m = (2.0 * area_m2 / perim_m) if perim_m > 0 else float("inf")
+        if iso < (1.0 / _TREELINE_RATIO) and width_m <= _TREELINE_MAX_WIDTH_M:
             line_polygons.append(pts)
         else:
             area_polygons.append(pts)
@@ -536,11 +538,10 @@ def _write_text_dsf(
 
         def_idx = 0
 
-        def write_polys(polygons, density, fill_mode):
+        def write_polys(polygons, dsf_param):
             nonlocal def_idx
-            params = f"{density} {fill_mode}"
             for ring in polygons:
-                f.write(f"BEGIN_POLYGON {def_idx} {params}\n")
+                f.write(f"BEGIN_POLYGON {def_idx} {dsf_param} 2\n")
                 f.write("BEGIN_WINDING\n")
                 for lon_pt, lat_pt in ring:
                     f.write(f"POLYGON_POINT {lon_pt:.7f} {lat_pt:.7f}\n")
@@ -549,9 +550,9 @@ def _write_text_dsf(
             def_idx += 1
 
         if area_polygons:
-            write_polys(area_polygons, _DEFAULT_DENSITY, 2)
+            write_polys(area_polygons, _DEFAULT_DENSITY)
         if line_polygons:
-            write_polys(line_polygons, _DEFAULT_DENSITY, 2)
+            write_polys(line_polygons, _DEFAULT_DENSITY + 256)
 
 
 def _compile_dsf(txt_path: str, dsf_path: str) -> bool:
@@ -612,11 +613,10 @@ def _write_combined_dsf(
         def_idx = 0
 
         # Forest polygons
-        def write_forest(polygons, density, fill_mode):
+        def write_forest(polygons, dsf_param):
             nonlocal def_idx
-            params = f"{density} {fill_mode}"
             for ring in polygons:
-                f.write(f"BEGIN_POLYGON {def_idx} {params}\n")
+                f.write(f"BEGIN_POLYGON {def_idx} {dsf_param} 2\n")
                 f.write("BEGIN_WINDING\n")
                 for lon_pt, lat_pt in ring:
                     f.write(f"POLYGON_POINT {lon_pt:.7f} {lat_pt:.7f}\n")
@@ -625,9 +625,9 @@ def _write_combined_dsf(
             def_idx += 1
 
         if area_polygons:
-            write_forest(area_polygons, _DEFAULT_DENSITY, 2)
+            write_forest(area_polygons, _DEFAULT_DENSITY)
         if line_polygons:
-            write_forest(line_polygons, _DEFAULT_DENSITY, 2)
+            write_forest(line_polygons, _DEFAULT_DENSITY + 256)
 
         # Building facade polygons
         for ring, fac_path, height in bld_polygons:
