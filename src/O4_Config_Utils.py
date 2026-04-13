@@ -91,6 +91,25 @@ def config_compatibility(value) -> str:
         value = value[:-1]
     return value
 
+
+def normalize_config_entry(var: str, value: str) -> tuple[str, str]:
+    """Map legacy config keys/values to the current user-facing schema."""
+    aliases = {
+        "sfr_bld_close_k": "sfr_bld_close_m",
+        "sfr_bld_open_k": "sfr_bld_open_m",
+        f"{global_prefix}sfr_bld_close_k": f"{global_prefix}sfr_bld_close_m",
+        f"{global_prefix}sfr_bld_open_k": f"{global_prefix}sfr_bld_open_m",
+    }
+    if var not in aliases:
+        return var, value
+
+    try:
+        # Older configs stored ZL16 kernel radii in pixels (~2 m/px).
+        value = str(float(value) * 2.0)
+    except Exception:
+        pass
+    return aliases[var], value
+
 ################################################################################
 # Initialization to default values
 # Some variables are set using simply their name
@@ -118,6 +137,7 @@ try:
         try:
             (var, value) = line.split("=")
             value = config_compatibility(value)
+            var, value = normalize_config_entry(var, value)
             # Set all tile and app config variables
             set_global_variables(var, value)
             # Set all global tile config variables
@@ -192,6 +212,7 @@ class Tile:
                 try:
                     (var, value) = line.split("=")
                     value = config_compatibility(value)
+                    var, value = normalize_config_entry(var, value)
                     if cfg_vars[var]["type"] in (bool, list):
                         cmd = "self." + var + "=" + value
                     else:
@@ -1054,6 +1075,7 @@ class Ortho4XP_Config(tk.Toplevel):
             try:
                 (var, value) = line.split("=")
                 value = config_compatibility(value)
+                var, value = normalize_config_entry(var, value)
                 self.v_[var].set(value)
             except Exception as e:
                 # compatibility with zone_list config files from version <= 1.20
@@ -1103,6 +1125,7 @@ class Ortho4XP_Config(tk.Toplevel):
             try:
                 (var, value) = line.split("=")
                 value = config_compatibility(value)
+                var, value = normalize_config_entry(var, value)
                 self.v_[var].set(value)
             except Exception as e:
                 # compatibility with zone_list config files from version <= 1.20
@@ -1198,8 +1221,10 @@ class Ortho4XP_Config(tk.Toplevel):
                     # Ignore list_app_vars
                     if var in list_app_vars:
                         continue
-                    var = global_prefix + var
                     value = config_compatibility(value)
+                    var, value = normalize_config_entry(var, value)
+                    if not var.startswith(global_prefix):
+                        var = global_prefix + var
                     self.v_[var].set(value)
                 # Apply changes to update global variables
                 self.apply_changes("tile")
@@ -1262,6 +1287,7 @@ class Ortho4XP_Config(tk.Toplevel):
                     if var in list_global_tile_vars:
                         continue
                     value = config_compatibility(value)
+                    var, value = normalize_config_entry(var, value)
                     self.v_[var].set(value)
                 # Apply changes to update global variables
                 self.apply_changes("tile")
@@ -1619,7 +1645,10 @@ class Ortho4XP_Config(tk.Toplevel):
                 line = line.strip()
                 if line and '=' in line:
                     key, value = line.split('=', 1)
-                    config_dict[key.strip()] = value.strip()
+                    key = key.strip()
+                    value = config_compatibility(value.strip())
+                    key, value = normalize_config_entry(key, value)
+                    config_dict[key] = value
         return config_dict
 
     def choose_dem(self, global_config=False):

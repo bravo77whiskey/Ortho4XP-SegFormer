@@ -396,9 +396,13 @@ def build_tile_list(
             UI.lvprint(0, f"\nSegFormer Bld overlay for "
                        f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
             SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
-            SFR.sfr_bld_close_k     = tile.sfr_bld_close_k
-            SFR.sfr_bld_open_k      = tile.sfr_bld_open_k
+            SFR.sfr_bld_close_m     = tile.sfr_bld_close_m
+            SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
             SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
+            SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
+            SFR.sfr_bld_use_default_assets = tile.sfr_bld_use_default_assets
+            SFR.sfr_bld_use_sfd_assets = tile.sfr_bld_use_sfd_assets
+            SFR.sfr_bld_use_simheaven_assets = tile.sfr_bld_use_simheaven_assets
             SFR.sfr_bld_del         = tile.sfr_bld_del
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap

@@ -111,9 +111,13 @@ sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
 sfr_veg_del           = False
 
 sfr_bld_spacing_m     = 20.0
-sfr_bld_close_k       = 15
-sfr_bld_open_k        = 5
+sfr_bld_close_m       = 30.0
+sfr_bld_open_m        = 10.0
 sfr_bld_min_zone_m2   = 200.0
+sfr_bld_grid_n        = 16
+sfr_bld_use_default_assets = False
+sfr_bld_use_sfd_assets = True
+sfr_bld_use_simheaven_assets = False
 sfr_bld_del           = False
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
@@ -360,7 +364,9 @@ def process_bld_tile(lat, lon, build_dir):
         )
 
     os.makedirs(cache_dir, exist_ok=True)
-    min_zone_px = max(1, int(sfr_bld_min_zone_m2 / (2.0 ** 2)))
+    native_zl16_m_per_px = 2.0
+    close_k = max(1, int(round(sfr_bld_close_m / native_zl16_m_per_px)))
+    open_k = max(1, int(round(sfr_bld_open_m / native_zl16_m_per_px)))
     dsftool     = _dsftool_path()
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Overlays')
     custom_scenery_dir, _, _ = _scenery_paths()
@@ -378,14 +384,18 @@ def process_bld_tile(lat, lon, build_dir):
         f"    lon                      = {lon!r},\n"
         f"    out_dsf                  = {out_dsf!r},\n"
         f"    spacing_m    = {sfr_bld_spacing_m!r},\n"
-        f"    close_k      = {sfr_bld_close_k!r},\n"
-        f"    open_k       = {sfr_bld_open_k!r},\n"
-        f"    min_zone_px  = {min_zone_px!r},\n"
+        f"    close_k      = {close_k!r},\n"
+        f"    open_k       = {open_k!r},\n"
+        f"    min_zone_m2  = {sfr_bld_min_zone_m2!r},\n"
         f"    make_viz                 = False,\n"
         f"    cache_dir                = {cache_dir!r},\n"
+        f"    grid_n                   = {sfr_bld_grid_n!r},\n"
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
         f"    dsftool_path             = {dsftool!r},\n"
         f"    skip_osm_excl_download   = False,\n"
+        f"    include_default_assets   = {sfr_bld_use_default_assets!r},\n"
+        f"    include_sfd_assets       = {sfr_bld_use_sfd_assets!r},\n"
+        f"    include_simheaven_assets = {sfr_bld_use_simheaven_assets!r},\n"
         f")\n"
     )
     ret = _run_venv(code)

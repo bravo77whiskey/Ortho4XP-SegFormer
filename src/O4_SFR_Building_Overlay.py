@@ -5,10 +5,10 @@ Usage:
     python src/scripts/generate_bld_overlay.py <tex_dir> <lat> <lon> <out_dsf> [options]
 
 Options:
-    --spacing   METRES   Object spacing in metres (default 15)
+    --spacing   METRES   Object spacing in metres (default 20)
     --close     PIXELS   Morphological close kernel radius (default 15)
     --open      PIXELS   Morphological open  kernel radius (default 5)
-    --min-zone-m2 M2     Min zone area to bother filling   (default 50)
+    --min-zone-m2 M2     Min zone area to bother filling   (default 200)
     --no-viz             Skip overview image generation
     --cache-dir DIR      Where to store per-DDS inference caches
                           (default: <o4xp_root>/SFR_cache/<tile>)
@@ -55,7 +55,7 @@ def parse_args():
     ap.add_argument('--spacing',   type=float, default=20.0)
     ap.add_argument('--close',     type=int,   default=15)
     ap.add_argument('--open-k',    type=int,   default=5,  dest='open_k')
-    ap.add_argument('--min-zone', '--min-zone-m2', type=float, default=50.0, dest='min_zone_m2')
+    ap.add_argument('--min-zone', '--min-zone-m2', type=float, default=200.0, dest='min_zone_m2')
     ap.add_argument('--no-viz',    action='store_true')
     ap.add_argument('--cache-dir', default=None)
     ap.add_argument('--grid-n',    type=int,   default=HEADING_GRID_N, dest='grid_n')
@@ -1478,9 +1478,9 @@ def run(
     spacing_m,
     close_k,
     open_k,
-    min_zone_m2,
-    make_viz,
-    cache_dir,
+    min_zone_m2=None,
+    make_viz=False,
+    cache_dir=None,
     grid_n=HEADING_GRID_N,
     osm_roads_path=None,
     dsftool_path=None,
@@ -1489,7 +1489,19 @@ def run(
     include_default_assets=False,
     include_sfd_assets=True,
     include_simheaven_assets=False,
+    **legacy_kwargs,
 ):
+    legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
+    if legacy_kwargs:
+        bad_keys = ", ".join(sorted(legacy_kwargs))
+        raise TypeError(f"run() got unexpected keyword argument(s): {bad_keys}")
+
+    if min_zone_m2 is None:
+        if legacy_min_zone_px is None:
+            raise TypeError("run() missing required argument: 'min_zone_m2'")
+        # Older callers passed native-ZL16 pixel area; convert back to the
+        # canonical square-metre config value used by the UI.
+        min_zone_m2 = float(legacy_min_zone_px) * (2.0 ** 2)
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", _re.IGNORECASE)

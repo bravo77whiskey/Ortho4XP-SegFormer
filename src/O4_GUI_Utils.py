@@ -469,6 +469,7 @@ class Ortho4XP_GUI(tk.Tk):
                 try:
                     (var, value) = line.split("=")
                     value = CFG.config_compatibility(value)
+                    var, value = CFG.normalize_config_entry(var, value)
                     target = (
                         cfg_vars[var]["module"] + "." + var
                         if "module" in cfg_vars[var]
@@ -732,9 +733,13 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception(e)
             return 0
         SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
-        SFR.sfr_bld_close_k     = tile.sfr_bld_close_k
-        SFR.sfr_bld_open_k      = tile.sfr_bld_open_k
+        SFR.sfr_bld_close_m     = tile.sfr_bld_close_m
+        SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
         SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
+        SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
+        SFR.sfr_bld_use_default_assets = tile.sfr_bld_use_default_assets
+        SFR.sfr_bld_use_sfd_assets = tile.sfr_bld_use_sfd_assets
+        SFR.sfr_bld_use_simheaven_assets = tile.sfr_bld_use_simheaven_assets
         SFR.sfr_bld_del         = tile.sfr_bld_del
         SFR.sfr_patch_size      = tile.sfr_patch_size
         SFR.sfr_overlap         = tile.sfr_overlap

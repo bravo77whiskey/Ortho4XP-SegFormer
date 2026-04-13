@@ -335,7 +335,7 @@ cfg_tile_vars = {
         "type": float,
         "default": -1.0,
         "short_name": "sfr_veg_den",
-        "hint": "DSF density override 0.0–1.0 (scaled to 0–255). -1 = auto-select based on pixel fill fraction within each polygon.",
+        "hint": "DSF density override 0.0–1.0 (scaled to 0–255). -1 = auto-select based on how much of each polygon is covered by vegetation.",
     },
     "sfr_veg_close_m": {
         "type": float,
@@ -347,7 +347,7 @@ cfg_tile_vars = {
         "type": float,
         "default": 3.0,
         "short_name": "sfr_veg_open",
-        "hint": "Morphological open radius in metres. Removes isolated noise pixels before contouring. Raise to suppress small spurious tree detections.",
+        "hint": "Morphological open radius in metres. Removes tiny isolated detections before contouring. Raise to suppress small spurious tree patches.",
     },
     "sfr_veg_min_area_m2": {
         "type": float,
@@ -365,7 +365,7 @@ cfg_tile_vars = {
         "type": float,
         "default": 5.0,
         "short_name": "sfr_veg_excl",
-        "hint": "Dilation buffer in metres applied around SegFormer road/building pixels before subtracting from the tree mask. Prevents trees bleeding onto building edges or road surfaces.",
+        "hint": "Dilation buffer in metres applied around detected roads and buildings before subtracting them from the tree mask. Prevents trees bleeding onto building edges or road surfaces.",
     },
     "sfr_veg_use_simheaven": {
         "type": bool,
@@ -425,7 +425,7 @@ cfg_tile_vars = {
         "type": float,
         "default": 0.0,
         "short_name": "sfr_veg_res",
-        "hint": "Downsample inference maps to this resolution (m/px) before polygon extraction. 0 = native DDS resolution (~1.9 m/px at ZL16, maximum detail). Use 5–10 to reduce polygon count on performance-critical tiles.",
+        "hint": "Downsample inference maps to this ground resolution in metres before polygon extraction. 0 = native DDS detail (about 2 m at ZL16). Use 5–10 m to reduce polygon count on performance-critical tiles.",
     },
     "sfr_veg_del": {
         "type": bool,
@@ -437,13 +437,13 @@ cfg_tile_vars = {
         "type": int,
         "default": 512,
         "short_name": "sfr_patch",
-        "hint": "SegFormer inference patch size in pixels. Must match the model's training resolution (512 for nave1616/SegFormer-landcover-FT). Larger values require more VRAM; smaller may reduce accuracy at patch boundaries.",
+        "hint": "SegFormer inference patch size. 512 matches the model's training resolution and covers roughly 1 km of ZL16 imagery edge to edge. Larger values need more VRAM; smaller may reduce accuracy at patch boundaries.",
     },
     "sfr_overlap": {
         "type": int,
         "default": 64,
         "short_name": "sfr_overlap",
-        "hint": "Overlap in pixels between adjacent inference patches. Higher values reduce seam artifacts at patch boundaries at the cost of more inference passes. 64 is a good balance for 512-px patches.",
+        "hint": "Overlap between adjacent inference patches. Higher values reduce seam artifacts at patch boundaries at the cost of more inference passes. 64 is a good balance for 512-size patches and is roughly 120 m on ZL16 imagery.",
     },
     "sfr_batch_size": {
         "type": int,
@@ -455,26 +455,62 @@ cfg_tile_vars = {
     "sfr_bld_spacing_m": {
         "type": float,
         "default": 20.0,
-        "short_name": "sfr_bld_sp",
+        "short_name": "bld_spacing_m",
         "hint": "Minimum placement spacing between SFD Global building objects in metres. Lower values produce denser fills; raise to reduce object count in performance-critical areas.",
+    },
+    "sfr_bld_close_m": {
+        "type": float,
+        "default": 30.0,
+        "short_name": "bld_gap_m",
+        "hint": "Gap-closing radius in metres for building zones. Larger values bridge wider gaps between nearby building detections.",
+    },
+    "sfr_bld_open_m": {
+        "type": float,
+        "default": 10.0,
+        "short_name": "bld_cleanup_m",
+        "hint": "Cleanup radius in metres for building zones. Larger values remove more tiny isolated detections.",
     },
     "sfr_bld_close_k": {
         "type": int,
         "default": 15,
         "short_name": "sfr_bld_close",
-        "hint": "Morphological close kernel radius in pixels at native ZL16 resolution (~2 m/px). Fills gaps between building detections to form coherent building zones (15 px ≈ 30 m radius).",
+        "hint": "Gap-closing radius for building zones. On typical ZL16 imagery, 15 is roughly a 30 m radius. Raise it to bridge wider gaps between nearby building detections.",
     },
     "sfr_bld_open_k": {
         "type": int,
         "default": 5,
         "short_name": "sfr_bld_open",
-        "hint": "Morphological open kernel radius in pixels at native ZL16 resolution (~2 m/px). Removes small isolated building detections (5 px ≈ 10 m diameter).",
+        "hint": "Small-feature cleanup size for building zones. On typical ZL16 imagery, 5 removes features around 10 m across. Raise it to suppress more tiny isolated detections.",
     },
     "sfr_bld_min_zone_m2": {
         "type": float,
         "default": 200.0,
-        "short_name": "sfr_bld_min_z",
-        "hint": "Minimum building zone area in m² to be filled with objects. Smaller zones are skipped entirely. Converted to pixels at ~2 m/px (200 m² ≈ 50 px²).",
+        "short_name": "bld_min_area_m2",
+        "hint": "Minimum building zone area in square metres to be filled with objects. Smaller zones are skipped entirely.",
+    },
+    "sfr_bld_grid_n": {
+        "type": int,
+        "default": 16,
+        "short_name": "sfr_bld_grid",
+        "hint": "Heading-grid resolution per texture tile. Higher values follow street direction changes more closely but can make orientation noisier.",
+    },
+    "sfr_bld_use_default_assets": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_bld_def",
+        "hint": "Allow default X-Plane facade assets in the SegFormer building overlay output.",
+    },
+    "sfr_bld_use_sfd_assets": {
+        "type": bool,
+        "default": True,
+        "short_name": "sfr_bld_sfd",
+        "hint": "Allow SFD Global building assets in the SegFormer building overlay output.",
+    },
+    "sfr_bld_use_simheaven_assets": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_bld_simh",
+        "hint": "Allow simHeaven building assets when matching simHeaven scenery is available.",
     },
     "sfr_bld_del": {
         "type": bool,
@@ -607,9 +643,13 @@ list_sfr_veg_vars = [
 
 list_sfr_bld_vars = [
     "sfr_bld_spacing_m",
-    "sfr_bld_close_k",
-    "sfr_bld_open_k",
+    "sfr_bld_close_m",
+    "sfr_bld_open_m",
     "sfr_bld_min_zone_m2",
+    "sfr_bld_grid_n",
+    "sfr_bld_use_default_assets",
+    "sfr_bld_use_sfd_assets",
+    "sfr_bld_use_simheaven_assets",
     "sfr_bld_del",
 ]
 
