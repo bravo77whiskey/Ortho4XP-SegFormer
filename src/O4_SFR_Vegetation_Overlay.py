@@ -40,6 +40,7 @@ import cv2
 from math import pi, atan, exp
 from PIL import Image
 
+import O4_Forest_Assets as FOREST_ASSETS
 import O4_SegFormer_Overlay as SEGFORMER
 from O4_SFR_Building_Overlay import (
     _load_simheaven_building_exclusions,
@@ -553,16 +554,6 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
     return polys
 
 
-# ── Climate region ────────────────────────────────────────────────────────────
-def _climate_region(lat):
-    a = abs(lat + 0.5)
-    if a < 15:  return 'tropical'
-    if a < 25:  return 'subtropical'
-    if a < 35:  return 'northsouth'
-    if a < 55:  return 'northmiddle'
-    return 'northnorth'
-
-
 # ── .for file selection ───────────────────────────────────────────────────────
 def _density_level(frac):
     if frac >= 0.72: return 100
@@ -579,25 +570,9 @@ def _for_density_level(override):
     return 100
 
 
-def _gfv2_path(region, ftype, dlevel, variant):
-    fname = f"{region}_{ftype}_{dlevel}_y{variant}.for"
-    return f"forests/{region}/{ftype}/{fname}"
-
-
-_GFV2_VARIANT_POOLS = {
-    # Keep the vegetation overlay on natural-looking forest assets.
-    # Some GFv2 y3 variants read more like ornamental/compound trees than
-    # wild forest or scrub, so exclude them from generated vegetation globally
-    # rather than only in one climate bucket.
-    'mixed':    (1, 2),
-    'woodland': (1, 2),
-    'cropland': (1, 2),
-}
-
-
-def _pick_gfv2_variant(ftype, rng):
-    variants = _GFV2_VARIANT_POOLS.get(ftype, (1, 2, 3))
-    return int(rng.choice(np.asarray(variants, dtype=np.int16)))
+def _short_tree_candidates(region, dlevel):
+    """Combine the measured short-tree GFv2 and default asset pools."""
+    return FOREST_ASSETS.short_tree_candidates(region, dlevel)
 
 
 def _for_entry(veg_cls, frac, shape, region, rng,
@@ -625,11 +600,10 @@ def _for_entry(veg_cls, frac, shape, region, rng,
             base_key = 'woodland'
             dlevel = 25 if shape == 'treeline' else min(dlevel, 50)
         else:
-            # Reserve the taller mixed-forest assets for clearly dense forest only.
-            # Sparser areas and treelines read better with the shorter woodland assets.
-            use_tall_forest = shape == 'area' and dlevel >= 75
-            ftype    = 'mixed' if use_tall_forest else 'woodland'
-            base_key = 'tree' if use_tall_forest else 'woodland'
+            # Future generated overlays stay under the Brazilian-nut height cap.
+            # Dense forest gets denser placement, not taller asset families.
+            ftype = 'woodland'
+            base_key = 'tree' if shape == 'area' and dlevel >= 75 else 'woodland'
         base     = _BASE_DENSITY[base_key][dlevel]
     elif veg_cls == SEGFORMER.CLASS_RANGELAND:
         ftype    = 'woodland'
@@ -643,8 +617,21 @@ def _for_entry(veg_cls, frac, shape, region, rng,
     if density_override is not None:
         base = int(round(density_override * 255))
 
-    variant = _pick_gfv2_variant(ftype, rng)
-    path = _gfv2_path(region, ftype, dlevel, variant)
+    if veg_cls == SEGFORMER.CLASS_TREE:
+        tree_context = 'bulk'
+        if shape == 'treeline':
+            tree_context = 'treeline'
+        elif veg_type in {'settlement_trees', 'park_or_managed_green'}:
+            tree_context = 'managed'
+        path = FOREST_ASSETS.choose_tree_path(
+            region,
+            dlevel,
+            rng,
+            context=tree_context,
+        )
+    else:
+        candidates = FOREST_ASSETS.short_gfv2_candidates(region, ftype, dlevel)
+        path = FOREST_ASSETS.choose_path(candidates, rng)
     dsf_density = base + 256 if shape == 'treeline' else base
     return path, dsf_density
 
@@ -973,7 +960,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     device = __import__('torch').device('cuda' if __import__('torch').cuda.is_available() else 'cpu')
     model = proc = None
 
-    region  = _climate_region(lat)
+    region  = FOREST_ASSETS.climate_region(lat)
     rng     = np.random.default_rng(7)
     polygons = []   # (for_path, dsf_density, ring)
     timings = {

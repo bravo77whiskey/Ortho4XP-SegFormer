@@ -26,6 +26,8 @@ from shapely import geometry
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
+import O4_Forest_Assets as FOREST_ASSETS
+
 # ── Ortho4XP imports ─────────────────────────────────────────────────────────
 # Allow running from repo root or from src/
 _src = os.path.dirname(__file__)
@@ -77,28 +79,7 @@ VEG_CLASSES = (CLASS_TREE, CLASS_RANGELAND, CLASS_AGRICULTURE)
 
 def _for_path(class_idx, lat):
     """Return the XP12 lib .for path for a vegetation class at the given latitude."""
-    if class_idx == CLASS_TREE:
-        # Tree canopy → broadleaf/conifer selection by latitude
-        if abs(lat) < 15:
-            return "lib/vegetation/forests/broadleaves/hot.for"
-        if abs(lat) < 40:
-            return "lib/vegetation/forests/broadleaves/warm.for"
-        if abs(lat) < 60:
-            return "lib/vegetation/forests/broadleaves/temperate.for"
-        return "lib/vegetation/forests/conifers/cold.for"
-    if class_idx == CLASS_AGRICULTURE:
-        # Farmland / crop fields → very sparse ground cover (grass .for)
-        if abs(lat) < 40:
-            return "lib/vegetation/forests/mixed/warm.for"
-        return "lib/vegetation/forests/mixed/temperate.for"
-    # CLASS_RANGELAND → mixed/brushwood scrub
-    if abs(lat) < 15:
-        return "lib/vegetation/forests/mixed/hot.for"
-    if abs(lat) < 40:
-        return "lib/vegetation/forests/mixed/warm.for"
-    if abs(lat) < 60:
-        return "lib/vegetation/forests/mixed/temperate.for"
-    return "lib/vegetation/forests/mixed/cold.for"
+    return FOREST_ASSETS.default_short_tree_for_lat(lat)
 
 
 # Per-class DSF density (0–255).  Lower = sparser placement within the .for area.

@@ -30,6 +30,7 @@ from math import cos, pi, sqrt
 import numpy as np
 from PIL import Image
 
+import O4_Forest_Assets as FOREST_ASSETS
 import O4_File_Names as FNAMES
 import O4_UI_Utils as UI
 
@@ -51,21 +52,7 @@ elif "win" in sys.platform:
 else:
     _dsftool = os.path.join(FNAMES.Utils_dir, "lin", "DSFTool")
 
-# ---------------------------------------------------------------------------
-# Forest type lookup by latitude  (simple climate proxy)
-# ---------------------------------------------------------------------------
-# XP12 lib/ paths for forest overlays (confirmed from 1200 forests/library.txt).
-# DSFTool BEGIN_POLYGON format: idx  param  coord_depth
-#   coord_depth = 2 means 2D (lon + lat) — required for all ground polygons.
-_FOREST_TYPES = [
-    # (max_abs_lat, for_file)
-    (23,  "lib/vegetation/forests/broadleaves/hot.for"),         # tropical
-    (40,  "lib/vegetation/forests/broadleaves/warm.for"),        # temperate broadleaf
-    (55,  "lib/vegetation/forests/mixed/temperate.for"),         # mixed temperate
-    (75,  "lib/vegetation/forests/conifers/temperate.for"),      # boreal / taiga
-    (90,  "lib/vegetation/forests/conifers/cold.for"),           # arctic / tundra
-]
-_HEDGE_FOR = "lib/vegetation/forests/mixed/temperate.for"
+_HEDGE_FOR = FOREST_ASSETS.default_short_tree_for_lat(45.0)
 
 _DEFAULT_DENSITY = 200   # 0-255; 255 = maximum density
 
@@ -82,11 +69,7 @@ _LARGE_BLOB_AREA_DEG2 = 0.003   # blobs > this (in degree²) with very low
 # ---------------------------------------------------------------------------
 
 def _for_file_for_lat(lat: float) -> str:
-    abs_lat = abs(lat + 0.5)   # centre of the tile
-    for max_lat, for_file in _FOREST_TYPES:
-        if abs_lat <= max_lat:
-            return for_file
-    return "vegetation/mixed.for"
+    return FOREST_ASSETS.default_short_tree_for_lat(lat)
 
 
 def _px_to_latlon(px_col, px_row, img_w, img_h, tile_lat, tile_lon):
