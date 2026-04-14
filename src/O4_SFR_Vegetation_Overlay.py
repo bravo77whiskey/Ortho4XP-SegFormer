@@ -32,7 +32,7 @@ Example:
         --cache-dir "cache_zl16_36_101"
 """
 
-import sys, os, argparse, warnings, time, math
+import sys, os, argparse, warnings, time, math, urllib.request, urllib.parse
 warnings.filterwarnings('ignore')
 
 import numpy as np
@@ -81,6 +81,17 @@ ROAD_EXCL_HALF_WIDTH_M = {
     'narrow_gauge':    4, 'monorail':         4,
 }
 _ROAD_DEFAULT_HALF_M = 5   # fallback for unrecognised highway types
+
+RESIDENTIAL_HIGHWAY_TYPES = {
+    'living_street',
+    'residential',
+    'service',
+    'unclassified',
+}
+RESIDENTIAL_FALLBACK_BUFFER_M = 45.0
+RESIDENTIAL_FALLBACK_BUFFER_PX_MIN = 16
+TREE_ROW_WIDTH_M = 8.0
+CONTEXT_RING_M = 18.0
 
 # DSF density (0–255 integer) + fill-mode bits (treeline +256, point +512)
 _BASE_DENSITY = {
@@ -144,31 +155,131 @@ def _load_osm_roads(osm_bz2_path):
     return roads
 
 
-def _load_excl_railways(cache_path):
-    """Extract railway open-way records from an Overpass exclusion .osm.bz2.
-    Returns list of {'pts': [(lat,lon),...], 'type': railway_value}.
-    """
+def _parse_excl_context_cache(cache_path):
+    """Parse exclusion cache into railway ways and residential polygons."""
     import bz2, xml.etree.ElementTree as ET
     if not os.path.exists(cache_path):
-        return []
+        return [], []
     with bz2.open(cache_path, 'rb') as f:
         root = ET.parse(f).getroot()
     nodes = {}
     for node in root.iter('node'):
         nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
     rails = []
+    residential_polys = []
     for way in root.iter('way'):
-        rw = None
-        for tag in way.iter('tag'):
-            if tag.get('k') == 'railway':
-                rw = tag.get('v'); break
-        if rw is None:
-            continue
         pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+        if len(pts) < 2:
+            continue
         is_closed = len(pts) >= 4 and pts[0] == pts[-1]
-        if len(pts) >= 2 and not is_closed:
+        tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
+        rw = tags.get('railway')
+        if rw and not is_closed:
             rails.append({'pts': pts, 'type': rw})
-    return rails
+        elif is_closed and tags.get('landuse') == 'residential':
+            residential_polys.append([(lon, lat) for lat, lon in pts])
+    return rails, residential_polys
+
+
+def _download_and_cache_veg_context_osm(lat, lon, cache_path, timeout=45):
+    """Download OSM semantics used to classify tree cover into real-world types."""
+    if os.path.exists(cache_path):
+        return True
+
+    bbox = f"{int(lat)},{int(lon)},{int(lat)+1},{int(lon)+1}"
+    query = (
+        f'[out:xml][timeout:{timeout}];'
+        f'('
+        f'  way["natural"~"^(wood|tree_row|water|wetland|scrub)$"]({bbox});'
+        f'  way["waterway"="riverbank"]({bbox});'
+        f'  way["landuse"~"^(forest|orchard|farmland|farmyard|residential|allotments|village_green|recreation_ground)$"]({bbox});'
+        f'  way["leisure"~"^(park|garden|golf_course|pitch)$"]({bbox});'
+        f');'
+        f'(._;>;);out body;'
+    )
+    servers = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass.osm.jp/api/interpreter",
+    ]
+    for server in servers:
+        try:
+            url = server + '?data=' + urllib.parse.quote(query)
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                data = resp.read()
+            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+            import bz2 as _bz2
+            with _bz2.open(cache_path, 'wb') as f:
+                f.write(data)
+            print(f"  [OSM veg] Downloaded {len(data)//1024} KB → {os.path.basename(cache_path)}")
+            return True
+        except Exception as exc:
+            print(f"  [OSM veg] {server} failed: {exc}")
+    return False
+
+
+def _parse_veg_context_osm(cache_path):
+    """Parse vegetation semantic polygons and tree-row hints from OSM XML cache."""
+    import bz2, xml.etree.ElementTree as ET
+
+    context = {
+        'forest_polys': [],
+        'woodland_hint_polys': [],
+        'orchard_polys': [],
+        'managed_polys': [],
+        'residential_polys': [],
+        'farmland_polys': [],
+        'water_polys': [],
+        'tree_rows': [],
+    }
+    if not os.path.exists(cache_path):
+        return context
+
+    with bz2.open(cache_path, 'rb') as f:
+        root = ET.parse(f).getroot()
+
+    nodes = {}
+    for node in root.iter('node'):
+        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+
+    for way in root.iter('way'):
+        pts_latlon = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+        if len(pts_latlon) < 2:
+            continue
+
+        is_closed = len(pts_latlon) >= 4 and pts_latlon[0] == pts_latlon[-1]
+        tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
+        landuse = tags.get('landuse')
+        natural = tags.get('natural')
+        leisure = tags.get('leisure')
+        waterway = tags.get('waterway')
+
+        if natural == 'tree_row' and len(pts_latlon) >= 2:
+            context['tree_rows'].append({'pts': pts_latlon, 'type': 'tree_row'})
+            continue
+
+        if not is_closed:
+            continue
+
+        pts_lonlat = [(lon, lat) for lat, lon in pts_latlon]
+        if natural == 'wood' or landuse == 'forest':
+            context['forest_polys'].append(pts_lonlat)
+        elif natural == 'scrub':
+            context['woodland_hint_polys'].append(pts_lonlat)
+        elif landuse == 'orchard':
+            context['orchard_polys'].append(pts_lonlat)
+        elif landuse in {'residential'}:
+            context['residential_polys'].append(pts_lonlat)
+        elif landuse in {'farmland', 'farmyard', 'allotments'}:
+            context['farmland_polys'].append(pts_lonlat)
+        elif leisure in {'park', 'garden', 'golf_course', 'pitch'} or landuse in {
+            'village_green', 'recreation_ground'
+        }:
+            context['managed_polys'].append(pts_lonlat)
+        elif natural in {'water', 'wetland'} or waterway == 'riverbank':
+            context['water_polys'].append(pts_lonlat)
+
+    return context
 
 
 def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
@@ -323,6 +434,56 @@ def _rasterize_polygons(polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w):
     return mask
 
 
+def _rasterize_ways_constant_width(ways, lat_n, lat_s, lon_w, lon_e,
+                                   img_h, img_w, width_px):
+    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    if not ways:
+        return mask
+
+    def ll_to_px(lat, lon):
+        x = int((lon - lon_w) / (lon_e - lon_w) * img_w)
+        y = int((lat_n - lat) / (lat_n - lat_s) * img_h)
+        return (max(0, min(img_w - 1, x)),
+                max(0, min(img_h - 1, y)))
+
+    for way in ways:
+        pts = way.get('pts', ())
+        if len(pts) < 2:
+            continue
+        pts_px = [ll_to_px(lat, lon) for lat, lon in pts]
+        for i in range(len(pts_px) - 1):
+            cv2.line(mask, pts_px[i], pts_px[i + 1], 1, thickness=width_px)
+    return mask
+
+
+def _residential_roads(roads):
+    return [road for road in (roads or []) if road.get('type') in RESIDENTIAL_HIGHWAY_TYPES]
+
+
+def _build_residential_context_mask(residential_polys, residential_roads,
+                                    lat_n, lat_s, lon_w, lon_e,
+                                    img_h, img_w, mpp):
+    if residential_polys:
+        return _rasterize_polygons(
+            residential_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+        ), 'OSM residential landuse'
+
+    if residential_roads:
+        road_mask = _rasterize_ways_constant_width(
+            residential_roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w, width_px=1
+        )
+        road_buffer_px = max(
+            RESIDENTIAL_FALLBACK_BUFFER_PX_MIN,
+            int(round(RESIDENTIAL_FALLBACK_BUFFER_M / max(mpp, 1e-6))),
+        )
+        road_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (road_buffer_px * 2 + 1, road_buffer_px * 2 + 1)
+        )
+        return cv2.dilate(road_mask, road_kernel), 'OSM neighborhood roads'
+
+    return None, 'unavailable'
+
+
 def _is_forest_polygon_path(path):
     p = (path or '').replace('\\', '/').lower()
     return p.endswith('.for') or '/forest' in p or 'forest/' in p
@@ -423,18 +584,52 @@ def _gfv2_path(region, ftype, dlevel, variant):
     return f"forests/{region}/{ftype}/{fname}"
 
 
-def _for_entry(veg_cls, frac, shape, region, rng, density_override=None):
+_GFV2_VARIANT_POOLS = {
+    # Keep the vegetation overlay on natural-looking forest assets.
+    # Some GFv2 y3 variants read more like ornamental/compound trees than
+    # wild forest or scrub, so exclude them from generated vegetation globally
+    # rather than only in one climate bucket.
+    'mixed':    (1, 2),
+    'woodland': (1, 2),
+    'cropland': (1, 2),
+}
+
+
+def _pick_gfv2_variant(ftype, rng):
+    variants = _GFV2_VARIANT_POOLS.get(ftype, (1, 2, 3))
+    return int(rng.choice(np.asarray(variants, dtype=np.int16)))
+
+
+def _for_entry(veg_cls, frac, shape, region, rng,
+               density_override=None, veg_type=None):
     """Return (for_path, dsf_density) for a polygon."""
-    variant = int(rng.integers(1, 4))
     dlevel  = _for_density_level(density_override) if density_override is not None \
               else _density_level(frac)
 
     if veg_cls == SEGFORMER.CLASS_TREE:
-        # Reserve the taller mixed-forest assets for clearly dense forest only.
-        # Sparser areas and treelines read better with the shorter woodland assets.
-        use_tall_forest = shape == 'area' and dlevel >= 75
-        ftype    = 'mixed' if use_tall_forest else 'woodland'
-        base_key = 'tree' if use_tall_forest else 'woodland'
+        if veg_type in {'natural_woodland_open', 'uncertain_tree_cover'}:
+            ftype = 'woodland'
+            base_key = 'woodland'
+        elif veg_type == 'riparian_trees':
+            ftype = 'woodland'
+            base_key = 'woodland'
+            dlevel = min(dlevel, 50 if shape == 'treeline' else 75)
+        elif veg_type in {'settlement_trees', 'park_or_managed_green'}:
+            # Keep coverage, but bias managed/settlement canopy toward the safer
+            # woodland assets instead of full mixed-forest sets.
+            ftype = 'woodland'
+            base_key = 'woodland'
+            dlevel = min(dlevel, 50)
+        elif veg_type in {'orchard_or_plantation', 'tree_row_linear'}:
+            ftype = 'woodland'
+            base_key = 'woodland'
+            dlevel = 25 if shape == 'treeline' else min(dlevel, 50)
+        else:
+            # Reserve the taller mixed-forest assets for clearly dense forest only.
+            # Sparser areas and treelines read better with the shorter woodland assets.
+            use_tall_forest = shape == 'area' and dlevel >= 75
+            ftype    = 'mixed' if use_tall_forest else 'woodland'
+            base_key = 'tree' if use_tall_forest else 'woodland'
         base     = _BASE_DENSITY[base_key][dlevel]
     elif veg_cls == SEGFORMER.CLASS_RANGELAND:
         ftype    = 'woodland'
@@ -448,6 +643,7 @@ def _for_entry(veg_cls, frac, shape, region, rng, density_override=None):
     if density_override is not None:
         base = int(round(density_override * 255))
 
+    variant = _pick_gfv2_variant(ftype, rng)
     path = _gfv2_path(region, ftype, dlevel, variant)
     dsf_density = base + 256 if shape == 'treeline' else base
     return path, dsf_density
@@ -467,6 +663,44 @@ def _polygon_fill_frac(mask, cnt):
     return float((roi * fill).sum()) / float(total)
 
 
+def _contour_context_stats(cnt, masks, m_per_px):
+    x, y, w, h = cv2.boundingRect(cnt)
+    if w == 0 or h == 0:
+        return {}
+
+    fill = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(fill, [cnt - np.array([[x, y]])], 0, 1, cv2.FILLED)
+    area_px = int(fill.sum())
+    if area_px <= 0:
+        return {}
+
+    ring_px = max(2, int(round(CONTEXT_RING_M / max(m_per_px, 1e-6))))
+    ring_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (ring_px * 2 + 1, ring_px * 2 + 1)
+    )
+    outer = cv2.dilate(fill, ring_kernel)
+    ring = cv2.subtract(outer, fill)
+    ring_area_px = int(ring.sum())
+
+    stats = {'area_px': float(area_px), 'ring_area_px': float(ring_area_px)}
+    for name, mask in (masks or {}).items():
+        if mask is None:
+            stats[name] = 0.0
+            stats[f'{name}_ring'] = 0.0
+            continue
+        roi = mask[y:y+h, x:x+w]
+        if roi.shape != fill.shape:
+            stats[name] = 0.0
+            stats[f'{name}_ring'] = 0.0
+            continue
+        stats[name] = float((roi * fill).sum()) / float(area_px)
+        stats[f'{name}_ring'] = (
+            float((roi * ring).sum()) / float(ring_area_px)
+            if ring_area_px > 0 else 0.0
+        )
+    return stats
+
+
 def _contour_shape(cnt, min_area_px, m_per_px):
     area = cv2.contourArea(cnt)
     if area < min_area_px:
@@ -478,6 +712,54 @@ def _contour_shape(cnt, min_area_px, m_per_px):
     width_m = (2.0 * area / perim) * m_per_px
     is_treeline = ratio >= TREELINE_RATIO and width_m <= TREELINE_MAX_WIDTH_M
     return ('treeline' if is_treeline else 'area'), area
+
+
+def _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks):
+    stats = _contour_context_stats(cnt, context_masks, m_per_px)
+    if not stats:
+        return 'natural_woodland_open'
+
+    area_m2 = stats['area_px'] * m_per_px * m_per_px
+    forest_in = stats.get('forest', 0.0)
+    forest = max(forest_in, 0.7 * stats.get('forest_ring', 0.0))
+    woodland_hint = max(
+        stats.get('woodland_hint', 0.0),
+        0.7 * stats.get('woodland_hint_ring', 0.0),
+    )
+    orchard_in = stats.get('orchard', 0.0)
+    managed_in = stats.get('managed', 0.0)
+    residential_in = stats.get('residential', 0.0)
+    developed = max(stats.get('developed', 0.0), stats.get('developed_ring', 0.0))
+    water = max(stats.get('water', 0.0), stats.get('water_ring', 0.0))
+    tree_row = max(stats.get('tree_row', 0.0), stats.get('tree_row_ring', 0.0))
+
+    # Only explicit semantic evidence should suppress canopy from forest output.
+    if orchard_in >= 0.30:
+        return 'orchard_or_plantation'
+    if managed_in >= 0.30 and forest < 0.12:
+        return 'park_or_managed_green'
+    if shape == 'treeline' and tree_row >= 0.20 and forest < 0.10:
+        return 'tree_row_linear'
+    if residential_in >= 0.42:
+        return 'settlement_trees'
+    if (
+        shape == 'treeline' and area_m2 <= 1600.0 and
+        residential_in >= 0.20 and forest < 0.10
+    ):
+        return 'settlement_trees'
+    if water >= 0.12 and developed < 0.12 and residential_in < 0.15 and managed_in < 0.15:
+        return 'riparian_trees'
+    if forest >= 0.12 or woodland_hint >= 0.20:
+        if shape == 'area' and frac >= 0.58 and area_m2 >= 600.0:
+            return 'natural_forest_closed'
+        return 'natural_woodland_open'
+    # Preserve broad coverage: when semantics are inconclusive, prefer a natural
+    # fallback rather than dropping vegetation entirely.
+    if shape == 'area' and frac >= 0.66 and area_m2 >= 900.0 and residential_in < 0.20:
+        return 'natural_forest_closed'
+    if area_m2 >= 200.0:
+        return 'natural_woodland_open'
+    return 'uncertain_tree_cover'
 
 
 
@@ -510,7 +792,8 @@ def _write_winding(f, ring_pts):
 def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       lat_n, lat_s, lon_w, lon_e, tile_lat, tile_lon,
                       m_per_px, min_area_px, simplify_px,
-                      region, rng, density_override):
+                      region, rng, density_override,
+                      context_masks=None, type_counts=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring)."""
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
@@ -537,7 +820,17 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         if min(lats) >= tile_lat + 1 or max(lats) <= tile_lat: continue
 
         frac = _polygon_fill_frac(mask, cnt)
-        fpath, dsf_den = _for_entry(veg_cls, frac, shape, region, rng, density_override)
+        veg_type = None
+        if veg_cls == SEGFORMER.CLASS_TREE:
+            veg_type = _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks)
+            if type_counts is not None:
+                type_counts[veg_type] = type_counts.get(veg_type, 0) + 1
+
+        fpath, dsf_den = _for_entry(
+            veg_cls, frac, shape, region, rng, density_override, veg_type=veg_type
+        )
+        if not fpath:
+            continue
         polys.append((fpath, dsf_den, ring))
     return polys
 
@@ -548,6 +841,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         make_viz, density_override=None, res_m=None, excl_buffer_m=EXCL_BUFFER_M,
         bld_excl_m=10.0,
         osm_roads_path=None, use_simheaven=True, dsftool_path=None,
+        download_veg_context=True,
         custom_scenery_dir=None, custom_overlay_src=None,
         custom_overlay_src_alternate=None,
         avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
@@ -715,10 +1009,37 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     osm_roads = _load_osm_roads(osm_roads_path)
     print(f"OSM roads: {len(osm_roads)} ways  ({osm_roads_path})")
 
-    # Railways from the exclusion cache written by building overlay (if present)
-    excl_cache = osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail.osm.bz2')
-    excl_rails = _load_excl_railways(excl_cache)
+    # Railways + residential hints from the exclusion cache written by building overlay.
+    excl_cache_candidates = [
+        osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2'),
+        osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail.osm.bz2'),
+    ]
+    excl_cache = next((p for p in excl_cache_candidates if os.path.exists(p)), excl_cache_candidates[0])
+    excl_rails, excl_residential = _parse_excl_context_cache(excl_cache)
     print(f"OSM railways: {len(excl_rails)} ways")
+
+    veg_context_osm_path = osm_roads_path.replace('_big_roads.osm.bz2', '_veg_context.osm.bz2')
+    if download_veg_context and not os.path.exists(veg_context_osm_path):
+        _download_and_cache_veg_context_osm(lat, lon, veg_context_osm_path)
+    veg_context = _parse_veg_context_osm(veg_context_osm_path)
+    if excl_residential and not veg_context['residential_polys']:
+        veg_context['residential_polys'] = excl_residential
+    print(
+        "OSM veg context: "
+        f"forest={len(veg_context['forest_polys'])} "
+        f"woodland={len(veg_context['woodland_hint_polys'])} "
+        f"orchard={len(veg_context['orchard_polys'])} "
+        f"managed={len(veg_context['managed_polys'])} "
+        f"residential={len(veg_context['residential_polys'])} "
+        f"tree_rows={len(veg_context['tree_rows'])}"
+    )
+    veg_context_prepared = {
+        key: _prepare_polygons(value)
+        for key, value in veg_context.items()
+        if key.endswith('_polys')
+    }
+    osm_residential_roads = _prepare_roads(_residential_roads(osm_roads))
+    veg_context_tree_rows = _prepare_roads(veg_context.get('tree_rows', []))
 
     # simHeaven full street network
     if dsftool_path is None:
@@ -781,6 +1102,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
     n_files = len(files)
+    tree_type_counts = {}
     n_bld_excl_used = 0
     n_bld_excl_missing = 0
     n_sh_bld_polys = 0
@@ -964,6 +1286,60 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 excl_mask = cv2.bitwise_or(excl_mask, layer_mask)
             timings['forest_layer_excl'] += time.perf_counter() - _t
 
+        local_context_masks = {
+            'developed': cv2.dilate(excl_raw, ke),
+            'agriculture': (veg_map == SEGFORMER.CLASS_AGRICULTURE).astype(np.uint8),
+        }
+
+        for key in (
+            'forest_polys',
+            'woodland_hint_polys',
+            'orchard_polys',
+            'managed_polys',
+            'farmland_polys',
+            'water_polys',
+            'residential_polys',
+        ):
+            local_polys = _polys_for_bounds(
+                veg_context_prepared.get(key, []), lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+            )
+            mask_name = key.replace('_polys', '')
+            if local_polys:
+                local_context_masks[mask_name] = _rasterize_polygons(
+                    local_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+            else:
+                local_context_masks[mask_name] = None
+
+        if local_context_masks['residential'] is None:
+            local_residential_roads = _roads_for_bounds(
+                osm_residential_roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+            )
+            residential_mask, _res_source = _build_residential_context_mask(
+                None, local_residential_roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp
+            )
+            local_context_masks['residential'] = residential_mask
+
+        local_tree_rows = _roads_for_bounds(
+            veg_context_tree_rows,
+            lat_n, lat_s, lon_w, lon_e, pad_deg=0.001,
+        )
+        if local_tree_rows:
+            tree_row_px = max(1, int(round(TREE_ROW_WIDTH_M / max(mpp, 1e-6))))
+            local_context_masks['tree_row'] = _rasterize_ways_constant_width(
+                local_tree_rows, lat_n, lat_s, lon_w, lon_e, img_h, img_w, tree_row_px
+            )
+        else:
+            local_context_masks['tree_row'] = None
+
+        if local_context_masks.get('farmland') is not None:
+            if local_context_masks['agriculture'] is None:
+                local_context_masks['agriculture'] = local_context_masks['farmland']
+            else:
+                local_context_masks['agriculture'] = cv2.bitwise_or(
+                    local_context_masks['agriculture'], local_context_masks['farmland']
+                )
+
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
 
         kwargs = dict(img_w=img_w, img_h=img_h,
@@ -972,7 +1348,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       m_per_px=mpp, min_area_px=min_area_px,
                       simplify_px=simplify_px,
                       region=region, rng=rng,
-                      density_override=density_override)
+                      density_override=density_override,
+                      context_masks=local_context_masks,
+                      type_counts=tree_type_counts)
 
         _t = time.perf_counter()
         p = _process_dds_mask(tree_mask, SEGFORMER.CLASS_TREE, **kwargs)
@@ -984,6 +1362,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
           f"bld_excl: {n_bld_excl_used} used / {n_bld_excl_missing} missing  "
           f"simh_bld: {n_sh_bld_objs} obj / {n_sh_bld_polys} poly")
     print(f"Polygons: tree={n_tree}  total={len(polygons)}")
+    if tree_type_counts:
+        ordered = sorted(tree_type_counts.items(), key=lambda item: (-item[1], item[0]))
+        summary = ", ".join(f"{name}={count}" for name, count in ordered)
+        print(f"Tree types: {summary}")
 
     if not polygons:
         print("No vegetation polygons — skipping DSF write."); return 0
@@ -1065,6 +1447,9 @@ def parse_args():
                          'excluding from tree mask (default: %(default)sm)')
     ap.add_argument('--osm-roads', default=None, dest='osm_roads',
                     help='Path to *_big_roads.osm.bz2 (auto-discovered from tex_dir if omitted)')
+    ap.add_argument('--no-download-veg-context', action='store_true',
+                    dest='no_download_veg_context',
+                    help='Do not download OSM vegetation context when the cache is missing.')
     ap.add_argument('--custom-scenery-dir', default=None,
                     help='Configured X-Plane Custom Scenery directory used to locate simHeaven.')
     ap.add_argument('--custom-overlay-src', default=None,
@@ -1141,6 +1526,7 @@ def main():
         excl_buffer_m    = args.excl_buffer_m,
         osm_roads_path   = args.osm_roads,
         use_simheaven    = not args.no_simheaven,
+        download_veg_context = not args.no_download_veg_context,
         custom_scenery_dir = args.custom_scenery_dir,
         custom_overlay_src = args.custom_overlay_src,
         custom_overlay_src_alternate = args.custom_overlay_src_alternate,
@@ -1153,9 +1539,10 @@ def main():
         avoid_default_forests = not args.no_avoid_default_forests,
         default_buffer_m = args.default_buffer_m,
     )
+    print(f"\nDone: {n} vegetation polygons in {(time.time()-t0)/60:.1f}min")
+    return n
 
 
 if __name__ == '__main__':
     main()
-    print(f"\nDone: {n} vegetation polygons in {(time.time()-t0)/60:.1f}min")
 
