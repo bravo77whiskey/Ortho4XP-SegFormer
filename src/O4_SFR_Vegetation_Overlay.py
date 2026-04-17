@@ -35,12 +35,15 @@ Example:
 import sys, os, argparse, warnings, time, math, urllib.request, urllib.parse
 warnings.filterwarnings('ignore')
 
+import hashlib
 import numpy as np
 import cv2
 from math import pi, atan, exp
 from PIL import Image
 
 import O4_Forest_Assets as FOREST_ASSETS
+import O4_SFR_Bounds_Index as BBOX
+import O4_SFR_Persistent_Cache as PCACHE
 import O4_SegFormer_Overlay as SEGFORMER
 from O4_SFR_Building_Overlay import (
     _load_simheaven_building_exclusions,
@@ -130,56 +133,75 @@ def px_to_latlon(px, py, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
 
 
 # ── Road / network data loading ──────────────────────────────────────────────
-def _load_osm_roads(osm_bz2_path):
+def _load_osm_roads(osm_bz2_path, cache_dir=None):
     """Parse an Ortho4XP *_big_roads.osm.bz2 file.
     Returns list of {'pts': [(lat,lon),...], 'type': highway_value}.
     """
     import bz2, xml.etree.ElementTree as ET
     if not os.path.exists(osm_bz2_path):
         return []
-    with bz2.open(osm_bz2_path, 'rb') as f:
-        root = ET.parse(f).getroot()
-    nodes = {}
-    for node in root.iter('node'):
-        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-    roads = []
-    for way in root.iter('way'):
-        hw = None
-        for tag in way.iter('tag'):
-            if tag.get('k') == 'highway':
-                hw = tag.get('v'); break
-        if hw is None:
-            continue
-        pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-        if len(pts) >= 2:
-            roads.append({'pts': pts, 'type': hw})
-    return roads
+    def _parse():
+        with bz2.open(osm_bz2_path, 'rb') as f:
+            root = ET.parse(f).getroot()
+        nodes = {}
+        for node in root.iter('node'):
+            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+        roads = []
+        for way in root.iter('way'):
+            hw = None
+            for tag in way.iter('tag'):
+                if tag.get('k') == 'highway':
+                    hw = tag.get('v')
+                    break
+            if hw is None:
+                continue
+            pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+            if len(pts) >= 2:
+                roads.append({'pts': pts, 'type': hw})
+        return roads
+
+    return PCACHE.load_or_build(
+        osm_bz2_path,
+        cache_dir,
+        "osm_parse",
+        _parse,
+        version="roads-v1",
+    )
 
 
-def _parse_excl_context_cache(cache_path):
+def _parse_excl_context_cache(cache_path, cache_dir=None):
     """Parse exclusion cache into railway ways and residential polygons."""
     import bz2, xml.etree.ElementTree as ET
     if not os.path.exists(cache_path):
         return [], []
-    with bz2.open(cache_path, 'rb') as f:
-        root = ET.parse(f).getroot()
-    nodes = {}
-    for node in root.iter('node'):
-        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-    rails = []
-    residential_polys = []
-    for way in root.iter('way'):
-        pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-        if len(pts) < 2:
-            continue
-        is_closed = len(pts) >= 4 and pts[0] == pts[-1]
-        tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
-        rw = tags.get('railway')
-        if rw and not is_closed:
-            rails.append({'pts': pts, 'type': rw})
-        elif is_closed and tags.get('landuse') == 'residential':
-            residential_polys.append([(lon, lat) for lat, lon in pts])
-    return rails, residential_polys
+    def _parse():
+        with bz2.open(cache_path, 'rb') as f:
+            root = ET.parse(f).getroot()
+        nodes = {}
+        for node in root.iter('node'):
+            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+        rails = []
+        residential_polys = []
+        for way in root.iter('way'):
+            pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+            if len(pts) < 2:
+                continue
+            is_closed = len(pts) >= 4 and pts[0] == pts[-1]
+            tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
+            rw = tags.get('railway')
+            if rw and not is_closed:
+                rails.append({'pts': pts, 'type': rw})
+            elif is_closed and tags.get('landuse') == 'residential':
+                residential_polys.append([(lon, lat) for lat, lon in pts])
+        return rails, residential_polys
+
+    return PCACHE.load_or_build(
+        cache_path,
+        cache_dir,
+        "osm_parse",
+        _parse,
+        version="veg-excl-context-v1",
+    )
 
 
 def _download_and_cache_veg_context_osm(lat, lon, cache_path, timeout=45):
@@ -219,7 +241,7 @@ def _download_and_cache_veg_context_osm(lat, lon, cache_path, timeout=45):
     return False
 
 
-def _parse_veg_context_osm(cache_path):
+def _parse_veg_context_osm(cache_path, cache_dir=None):
     """Parse vegetation semantic polygons and tree-row hints from OSM XML cache."""
     import bz2, xml.etree.ElementTree as ET
 
@@ -236,51 +258,71 @@ def _parse_veg_context_osm(cache_path):
     if not os.path.exists(cache_path):
         return context
 
-    with bz2.open(cache_path, 'rb') as f:
-        root = ET.parse(f).getroot()
+    def _parse():
+        parsed_context = {
+            'forest_polys': [],
+            'woodland_hint_polys': [],
+            'orchard_polys': [],
+            'managed_polys': [],
+            'residential_polys': [],
+            'farmland_polys': [],
+            'water_polys': [],
+            'tree_rows': [],
+        }
 
-    nodes = {}
-    for node in root.iter('node'):
-        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+        with bz2.open(cache_path, 'rb') as f:
+            root = ET.parse(f).getroot()
 
-    for way in root.iter('way'):
-        pts_latlon = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-        if len(pts_latlon) < 2:
-            continue
+        nodes = {}
+        for node in root.iter('node'):
+            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
 
-        is_closed = len(pts_latlon) >= 4 and pts_latlon[0] == pts_latlon[-1]
-        tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
-        landuse = tags.get('landuse')
-        natural = tags.get('natural')
-        leisure = tags.get('leisure')
-        waterway = tags.get('waterway')
+        for way in root.iter('way'):
+            pts_latlon = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+            if len(pts_latlon) < 2:
+                continue
 
-        if natural == 'tree_row' and len(pts_latlon) >= 2:
-            context['tree_rows'].append({'pts': pts_latlon, 'type': 'tree_row'})
-            continue
+            is_closed = len(pts_latlon) >= 4 and pts_latlon[0] == pts_latlon[-1]
+            tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
+            landuse = tags.get('landuse')
+            natural = tags.get('natural')
+            leisure = tags.get('leisure')
+            waterway = tags.get('waterway')
 
-        if not is_closed:
-            continue
+            if natural == 'tree_row' and len(pts_latlon) >= 2:
+                parsed_context['tree_rows'].append({'pts': pts_latlon, 'type': 'tree_row'})
+                continue
 
-        pts_lonlat = [(lon, lat) for lat, lon in pts_latlon]
-        if natural == 'wood' or landuse == 'forest':
-            context['forest_polys'].append(pts_lonlat)
-        elif natural == 'scrub':
-            context['woodland_hint_polys'].append(pts_lonlat)
-        elif landuse == 'orchard':
-            context['orchard_polys'].append(pts_lonlat)
-        elif landuse in {'residential'}:
-            context['residential_polys'].append(pts_lonlat)
-        elif landuse in {'farmland', 'farmyard', 'allotments'}:
-            context['farmland_polys'].append(pts_lonlat)
-        elif leisure in {'park', 'garden', 'golf_course', 'pitch'} or landuse in {
-            'village_green', 'recreation_ground'
-        }:
-            context['managed_polys'].append(pts_lonlat)
-        elif natural in {'water', 'wetland'} or waterway == 'riverbank':
-            context['water_polys'].append(pts_lonlat)
+            if not is_closed:
+                continue
 
-    return context
+            pts_lonlat = [(lon, lat) for lat, lon in pts_latlon]
+            if natural == 'wood' or landuse == 'forest':
+                parsed_context['forest_polys'].append(pts_lonlat)
+            elif natural == 'scrub':
+                parsed_context['woodland_hint_polys'].append(pts_lonlat)
+            elif landuse == 'orchard':
+                parsed_context['orchard_polys'].append(pts_lonlat)
+            elif landuse in {'residential'}:
+                parsed_context['residential_polys'].append(pts_lonlat)
+            elif landuse in {'farmland', 'farmyard', 'allotments'}:
+                parsed_context['farmland_polys'].append(pts_lonlat)
+            elif leisure in {'park', 'garden', 'golf_course', 'pitch'} or landuse in {
+                'village_green', 'recreation_ground'
+            }:
+                parsed_context['managed_polys'].append(pts_lonlat)
+            elif natural in {'water', 'wetland'} or waterway == 'riverbank':
+                parsed_context['water_polys'].append(pts_lonlat)
+
+        return parsed_context
+
+    return PCACHE.load_or_build(
+        cache_path,
+        cache_dir,
+        "osm_parse",
+        _parse,
+        version="veg-context-v1",
+    )
 
 
 def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
@@ -295,31 +337,44 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
                 cache_dir,
                 create_no_window=SEGFORMER._CREATE_NO_WINDOW,
             )
-            current_points = None
-            with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
-                for raw_line in text_file:
-                    line = raw_line.strip()
-                    if line.startswith("BEGIN_SEGMENT "):
-                        parts = line.split()
-                        try:
-                            current_points = [(float(parts[5]), float(parts[4]))]
-                        except (IndexError, ValueError):
+            def _parse():
+                parsed_ways = []
+                current_points = None
+                with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+                    for raw_line in text_file:
+                        line = raw_line.strip()
+                        if line.startswith("BEGIN_SEGMENT "):
+                            parts = line.split()
+                            try:
+                                current_points = [(float(parts[5]), float(parts[4]))]
+                            except (IndexError, ValueError):
+                                current_points = None
+                        elif line.startswith("SHAPE_POINT ") and current_points is not None:
+                            parts = line.split()
+                            try:
+                                current_points.append((float(parts[2]), float(parts[1])))
+                            except (IndexError, ValueError):
+                                pass
+                        elif line.startswith("END_SEGMENT ") and current_points is not None:
+                            parts = line.split()
+                            try:
+                                current_points.append((float(parts[3]), float(parts[2])))
+                            except (IndexError, ValueError):
+                                pass
+                            if len(current_points) >= 2:
+                                parsed_ways.append({"pts": current_points, "type": "network"})
                             current_points = None
-                    elif line.startswith("SHAPE_POINT ") and current_points is not None:
-                        parts = line.split()
-                        try:
-                            current_points.append((float(parts[2]), float(parts[1])))
-                        except (IndexError, ValueError):
-                            pass
-                    elif line.startswith("END_SEGMENT ") and current_points is not None:
-                        parts = line.split()
-                        try:
-                            current_points.append((float(parts[3]), float(parts[2])))
-                        except (IndexError, ValueError):
-                            pass
-                        if len(current_points) >= 2:
-                            road_ways.append({"pts": current_points, "type": "network"})
-                        current_points = None
+                return parsed_ways
+
+            road_ways.extend(
+                PCACHE.load_or_build(
+                    cached_text_path,
+                    cache_dir,
+                    "dsf_parse",
+                    _parse,
+                    version="simheaven-network-v1",
+                )
+            )
             print(f"  [simHeaven] {folder_name}: +{len(road_ways) - segment_count_before} segments")
         except Exception as exc:
             print(f"  [simHeaven] failed {dsf_path}: {exc}")
@@ -392,6 +447,8 @@ def _roads_for_bounds(roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     n = lat_n + pad_deg
     w = lon_w - pad_deg
     e = lon_e + pad_deg
+    if isinstance(roads, dict) and {'items', 'south', 'north', 'west', 'east'} <= set(roads):
+        return BBOX.query_bounds(roads, s, n, w, e)
     result = []
     for road in roads:
         r_s, r_n, r_w, r_e = road.get('_bounds') or _road_bounds(road)
@@ -451,6 +508,8 @@ def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     n = lat_n + pad_deg
     w = lon_w - pad_deg
     e = lon_e + pad_deg
+    if isinstance(polys, dict) and {'items', 'south', 'north', 'west', 'east'} <= set(polys):
+        return [poly.get('pts', poly) for poly in BBOX.query_bounds(polys, s, n, w, e)]
     result = []
     for poly in polys:
         p_s, p_n, p_w, p_e = poly.get('_bounds') or _poly_bounds(poly.get('pts', ()))
@@ -576,6 +635,72 @@ def _save_dds_mask_cache(cache_path, key, payload):
         pass
 
 
+def _dds_polygon_cache_key(
+    fname,
+    lat_n,
+    lat_s,
+    lon_w,
+    lon_e,
+    img_h,
+    img_w,
+    veg_cache_stat,
+    mask_cache_key,
+    close_px,
+    open_px,
+    min_area_px,
+    simplify_px,
+    density_override,
+    excl_buffer_m,
+    region,
+):
+    return {
+        'version': 1,
+        'fname': fname,
+        'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
+        'shape': (int(img_h), int(img_w)),
+        'veg_cache_stat': veg_cache_stat,
+        'mask_cache_key': mask_cache_key,
+        'close_px': int(close_px),
+        'open_px': int(open_px),
+        'min_area_px': round(float(min_area_px), 4),
+        'simplify_px': round(float(simplify_px), 4),
+        'density_override': None if density_override is None else round(float(density_override), 6),
+        'excl_buffer_m': round(float(excl_buffer_m), 4),
+        'region': region,
+    }
+
+
+def _load_dds_polygon_cache(cache_path, key):
+    import pickle as _pickle
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, 'rb') as f:
+            data = _pickle.load(f)
+        if data.get('key') == key:
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _save_dds_polygon_cache(cache_path, key, polygons, type_counts):
+    import pickle as _pickle
+    try:
+        with open(cache_path, 'wb') as f:
+            _pickle.dump(
+                {
+                    'key': key,
+                    'polygons': polygons,
+                    'type_counts': dict(type_counts or {}),
+                },
+                f,
+                protocol=_pickle.HIGHEST_PROTOCOL,
+            )
+    except Exception:
+        pass
+
+
 def _is_forest_polygon_path(path):
     p = (path or '').replace('\\', '/').lower()
     return p.endswith('.for') or '/forest' in p or 'forest/' in p
@@ -600,41 +725,54 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
                 cache_dir,
                 create_no_window=SEGFORMER._CREATE_NO_WINDOW,
             )
-            polygon_defs = []
-            current_polygon_is_forest = False
-            current_winding = None
+            def _parse():
+                parsed_polys = []
+                polygon_defs = []
+                current_polygon_is_forest = False
+                current_winding = None
 
-            with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
-                for raw_line in text_file:
-                    line = raw_line.strip()
-                    if line.startswith("POLYGON_DEF "):
-                        polygon_defs.append(line.split(" ", 1)[1])
-                    elif line.startswith("BEGIN_POLYGON "):
-                        parts = line.split()
-                        current_polygon_is_forest = False
-                        current_winding = None
-                        try:
-                            polygon_index = int(parts[1])
-                            current_polygon_is_forest = _is_forest_polygon_path(
-                                polygon_defs[polygon_index]
-                            )
-                        except (IndexError, ValueError):
+                with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+                    for raw_line in text_file:
+                        line = raw_line.strip()
+                        if line.startswith("POLYGON_DEF "):
+                            polygon_defs.append(line.split(" ", 1)[1])
+                        elif line.startswith("BEGIN_POLYGON "):
+                            parts = line.split()
                             current_polygon_is_forest = False
-                    elif line == "BEGIN_WINDING" and current_polygon_is_forest:
-                        current_winding = []
-                    elif line.startswith("POLYGON_POINT ") and current_winding is not None:
-                        parts = line.split()
-                        try:
-                            current_winding.append((float(parts[1]), float(parts[2])))
-                        except (IndexError, ValueError):
-                            pass
-                    elif line == "END_WINDING" and current_winding is not None:
-                        if len(current_winding) >= 3:
-                            polys.append(current_winding)
-                        current_winding = None
-                    elif line == "END_POLYGON":
-                        current_polygon_is_forest = False
-                        current_winding = None
+                            current_winding = None
+                            try:
+                                polygon_index = int(parts[1])
+                                current_polygon_is_forest = _is_forest_polygon_path(
+                                    polygon_defs[polygon_index]
+                                )
+                            except (IndexError, ValueError):
+                                current_polygon_is_forest = False
+                        elif line == "BEGIN_WINDING" and current_polygon_is_forest:
+                            current_winding = []
+                        elif line.startswith("POLYGON_POINT ") and current_winding is not None:
+                            parts = line.split()
+                            try:
+                                current_winding.append((float(parts[1]), float(parts[2])))
+                            except (IndexError, ValueError):
+                                pass
+                        elif line == "END_WINDING" and current_winding is not None:
+                            if len(current_winding) >= 3:
+                                parsed_polys.append(current_winding)
+                            current_winding = None
+                        elif line == "END_POLYGON":
+                            current_polygon_is_forest = False
+                            current_winding = None
+                return parsed_polys
+
+            polys.extend(
+                PCACHE.load_or_build(
+                    cached_text_path,
+                    cache_dir,
+                    "dsf_parse",
+                    _parse,
+                    version="forest-polygons-v1",
+                )
+            )
 
             print(
                 f"  [{layer_name}] {folder_name}: +{len(polys) - n_poly0} forest polys"
@@ -1098,12 +1236,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     model = proc = None
 
     region  = FOREST_ASSETS.climate_region(lat)
-    rng     = np.random.default_rng(7)
     polygons = []   # (for_path, dsf_density, ring)
     timings = {
         'scenery_parse': 0.0,
         'cache_load': 0.0,
         'mask_cache': 0.0,
+        'poly_cache': 0.0,
         'dds_load': 0.0,
         'inference': 0.0,
         'road_excl': 0.0,
@@ -1131,8 +1269,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
 
-    osm_roads = _load_osm_roads(osm_roads_path)
+    osm_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
     print(f"OSM roads: {len(osm_roads)} ways  ({osm_roads_path})")
+    osm_roads = _prepare_roads(osm_roads)
 
     # Railways + residential hints from the exclusion cache written by building overlay.
     excl_cache_candidates = [
@@ -1140,13 +1279,16 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail.osm.bz2'),
     ]
     excl_cache = next((p for p in excl_cache_candidates if os.path.exists(p)), excl_cache_candidates[0])
-    excl_rails, excl_residential = _parse_excl_context_cache(excl_cache)
+    excl_rails, excl_residential = _parse_excl_context_cache(
+        excl_cache, cache_dir=cache_dir
+    )
     print(f"OSM railways: {len(excl_rails)} ways")
+    excl_rails = _prepare_roads(excl_rails)
 
     veg_context_osm_path = osm_roads_path.replace('_big_roads.osm.bz2', '_veg_context.osm.bz2')
     if download_veg_context and not os.path.exists(veg_context_osm_path):
         _download_and_cache_veg_context_osm(lat, lon, veg_context_osm_path)
-    veg_context = _parse_veg_context_osm(veg_context_osm_path)
+    veg_context = _parse_veg_context_osm(veg_context_osm_path, cache_dir=cache_dir)
     if excl_residential and not veg_context['residential_polys']:
         veg_context['residential_polys'] = excl_residential
     print(
@@ -1167,8 +1309,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         key: _polys_signature(value)
         for key, value in veg_context_prepared.items()
     }
+    veg_context_indexes = {
+        key: BBOX.build_bounds_index(value)
+        for key, value in veg_context_prepared.items()
+    }
     osm_residential_roads = _prepare_roads(_residential_roads(osm_roads))
+    osm_residential_index = BBOX.build_bounds_index(osm_residential_roads)
     veg_context_tree_rows = _prepare_roads(veg_context.get('tree_rows', []))
+    tree_row_index = BBOX.build_bounds_index(veg_context_tree_rows)
 
     # simHeaven full street network
     if dsftool_path is None:
@@ -1182,7 +1330,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     elif use_simheaven:
         print(f"  [simHeaven] DSFTool not found at {dsftool_path} — skipping")
 
-    all_road_ways = _prepare_roads(osm_roads + excl_rails + sh_network)
+    sh_network = _prepare_roads(sh_network)
+    all_road_ways = osm_roads + excl_rails + sh_network
+    all_road_index = BBOX.build_bounds_index(all_road_ways)
     all_road_sig = _roads_signature(all_road_ways)
     osm_residential_sig = _roads_signature(osm_residential_roads)
     tree_row_sig = _roads_signature(veg_context_tree_rows)
@@ -1224,6 +1374,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     'name': layer_name,
                     'buffer_m': max(0.0, float(buffer_m)),
                     'polys': prepared,
+                    'index': BBOX.build_bounds_index(prepared),
                 }
             )
             print(f"{layer_name} forests: {len(prepared)} polygons")
@@ -1245,6 +1396,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     n_sh_bld_objs = 0
 
     sh_bld_polys = []
+    sh_bld_poly_index = None
     sh_bld_index = None
     sh_bld_poly_sig = (0, 0, 0.0)
     sh_bld_obj_sig = (0, 0.0)
@@ -1261,6 +1413,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         n_sh_bld_polys = len(sh_bld_polys)
         n_sh_bld_objs = len(sh_bld_objects)
         sh_bld_polys = _prepare_polygons(sh_bld_polys)
+        sh_bld_poly_index = BBOX.build_bounds_index(sh_bld_polys)
         sh_bld_index = _prepare_simheaven_objects(sh_bld_objects)
         sh_bld_poly_sig = _polys_signature(sh_bld_polys)
         if sh_bld_objects:
@@ -1305,6 +1458,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             veg_map = SEGFORMER.run_inference(model, device, img, proc)
             timings['inference'] += time.perf_counter() - _t
             np.save(cache_path, veg_map)
+
+        try:
+            _veg_st = os.stat(cache_path)
+            veg_cache_stat = (_veg_st.st_mtime_ns, _veg_st.st_size)
+        except OSError:
+            veg_cache_stat = None
 
         img_h, img_w = veg_map.shape
         mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
@@ -1388,7 +1547,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if road_excl is None and all_road_ways:
             _t = time.perf_counter()
             local_road_ways = _roads_for_bounds(
-                all_road_ways, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+                all_road_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
             road_excl = _rasterize_roads_typed(
                 local_road_ways, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp)
             timings['road_excl'] += time.perf_counter() - _t
@@ -1431,7 +1590,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             _t = time.perf_counter()
             if sh_bld_poly_mask is None:
                 local_sh_bld_polys = _polys_for_bounds(
-                    sh_bld_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
+                    sh_bld_poly_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
                 )
                 if local_sh_bld_polys:
                     sh_bld_poly_mask = _rasterize_polygons(
@@ -1464,7 +1623,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             forest_excl_mask = np.zeros((img_h, img_w), dtype=np.uint8)
             for layer in forest_layers:
                 local_polys = _polys_for_bounds(
-                    layer['polys'], lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+                    layer['index'], lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
                 )
                 if not local_polys:
                     continue
@@ -1501,7 +1660,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 'residential_polys',
             ):
                 local_polys = _polys_for_bounds(
-                    veg_context_prepared.get(key, []), lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+                    veg_context_indexes.get(key), lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
                 )
                 mask_name = key.replace('_polys', '')
                 if local_polys:
@@ -1513,7 +1672,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
             if local_context_masks['residential'] is None:
                 local_residential_roads = _roads_for_bounds(
-                    osm_residential_roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+                    osm_residential_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
                 )
                 residential_mask, _res_source = _build_residential_context_mask(
                     None, local_residential_roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp
@@ -1521,7 +1680,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 local_context_masks['residential'] = residential_mask
 
             local_tree_rows = _roads_for_bounds(
-                veg_context_tree_rows,
+                tree_row_index,
                 lat_n, lat_s, lon_w, lon_e, pad_deg=0.001,
             )
             if local_tree_rows:
@@ -1567,20 +1726,62 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
 
+        _poly_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_vegpoly.pkl'))
+        _poly_cache_key = _dds_polygon_cache_key(
+            fname,
+            lat_n,
+            lat_s,
+            lon_w,
+            lon_e,
+            img_h,
+            img_w,
+            veg_cache_stat,
+            _mask_cache_key,
+            close_px,
+            open_px,
+            min_area_px,
+            simplify_px,
+            density_override,
+            excl_buffer_m,
+            region,
+        )
+        _t = time.perf_counter()
+        _poly_cached = _load_dds_polygon_cache(_poly_cache_file, _poly_cache_key)
+        timings['poly_cache'] += time.perf_counter() - _t
+        if _poly_cached is not None:
+            p = list(_poly_cached.get('polygons', ()))
+            for veg_type, count in (_poly_cached.get('type_counts', {}) or {}).items():
+                tree_type_counts[veg_type] = tree_type_counts.get(veg_type, 0) + int(count)
+            n_tree += len(p)
+            polygons.extend(p)
+            continue
+
         kwargs = dict(img_w=img_w, img_h=img_h,
                       lat_n=lat_n, lat_s=lat_s, lon_w=lon_w, lon_e=lon_e,
                       tile_lat=lat, tile_lon=lon,
                       m_per_px=mpp, min_area_px=min_area_px,
                       simplify_px=simplify_px,
-                      region=region, rng=rng,
+                      region=region,
                       density_override=density_override,
                       context_masks=local_context_masks,
-                      type_counts=tree_type_counts)
+                      type_counts=None)
+
+        dds_seed = int.from_bytes(
+            hashlib.sha1(f"veg-poly:{fname}".encode("utf-8")).digest()[:8],
+            "big",
+        )
+        dds_rng = np.random.default_rng(dds_seed)
+        kwargs['rng'] = dds_rng
+        dds_type_counts = {}
+        kwargs['type_counts'] = dds_type_counts
 
         _t = time.perf_counter()
         p = _process_dds_mask(tree_mask, SEGFORMER.CLASS_TREE, **kwargs)
         timings['contours'] += time.perf_counter() - _t
         n_tree += len(p); polygons.extend(p)
+        for veg_type, count in dds_type_counts.items():
+            tree_type_counts[veg_type] = tree_type_counts.get(veg_type, 0) + int(count)
+        _save_dds_polygon_cache(_poly_cache_file, _poly_cache_key, p, dds_type_counts)
 
     print(f"Loaded {len(files)} DDS  ({time.time()-t_inf:.1f}s)  "
           f"climate={region}  "
@@ -1637,6 +1838,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"scenery_parse={timings['scenery_parse']:.1f}s  "
         f"cache_load={timings['cache_load']:.1f}s  "
         f"mask_cache={timings['mask_cache']:.1f}s  "
+        f"poly_cache={timings['poly_cache']:.1f}s  "
         f"dds_load={timings['dds_load']:.1f}s  "
         f"inference={timings['inference']:.1f}s  "
         f"road_excl={timings['road_excl']:.1f}s  "

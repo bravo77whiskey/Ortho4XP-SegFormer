@@ -25,7 +25,7 @@ Example:
         "H:/XP12/Custom Scenery/yOrtho4XP_SFR_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
-import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse
+import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib
 warnings.filterwarnings('ignore')
 
 import numpy as np
@@ -35,6 +35,8 @@ from math import pi, atan, exp, log, tan
 from PIL import Image, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
+import O4_SFR_Bounds_Index as BBOX
+import O4_SFR_Persistent_Cache as PCACHE
 import O4_SegFormer_Overlay as SEGFORMER
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
@@ -104,7 +106,7 @@ def px_to_latlon(px, py, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
 
 
 # ── OSM road helpers ─────────────────────────────────────────────────────────
-def _load_osm_roads(osm_bz2_path):
+def _load_osm_roads(osm_bz2_path, cache_dir=None):
     """Parse an Ortho4XP *_big_roads.osm.bz2 file.
 
     Returns a list of road records, each a dict with:
@@ -117,29 +119,37 @@ def _load_osm_roads(osm_bz2_path):
     if not os.path.exists(osm_bz2_path):
         return []
 
-    with bz2.open(osm_bz2_path, 'rb') as f:
-        tree = ET.parse(f)
-    root = tree.getroot()
+    def _parse():
+        with bz2.open(osm_bz2_path, 'rb') as f:
+            tree = ET.parse(f)
+        root = tree.getroot()
 
-    # Index nodes
-    nodes = {}
-    for node in root.iter('node'):
-        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+        nodes = {}
+        for node in root.iter('node'):
+            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
 
-    roads = []
-    for way in root.iter('way'):
-        hw = None
-        for tag in way.iter('tag'):
-            if tag.get('k') == 'highway':
-                hw = tag.get('v'); break
-        if hw is None:
-            continue
-        pts = [nodes[nd.get('ref')] for nd in way.iter('nd')
-               if nd.get('ref') in nodes]
-        if len(pts) >= 2:
-            roads.append({'pts': pts, 'type': hw})
+        roads = []
+        for way in root.iter('way'):
+            hw = None
+            for tag in way.iter('tag'):
+                if tag.get('k') == 'highway':
+                    hw = tag.get('v')
+                    break
+            if hw is None:
+                continue
+            pts = [nodes[nd.get('ref')] for nd in way.iter('nd')
+                   if nd.get('ref') in nodes]
+            if len(pts) >= 2:
+                roads.append({'pts': pts, 'type': hw})
+        return roads
 
-    return roads
+    return PCACHE.load_or_build(
+        osm_bz2_path,
+        cache_dir,
+        "osm_parse",
+        _parse,
+        version="roads-v1",
+    )
 
 
 def _rasterize_roads(roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
@@ -176,6 +186,8 @@ def _roads_for_bounds(roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     n = lat_n + pad_deg
     w = lon_w - pad_deg
     e = lon_e + pad_deg
+    if isinstance(roads, dict) and {'items', 'south', 'north', 'west', 'east'} <= set(roads):
+        return BBOX.query_bounds(roads, s, n, w, e)
     result = []
     for road in roads:
         r_s, r_n, r_w, r_e = road.get('_bounds') or _road_bounds(road)
@@ -478,22 +490,31 @@ def _fill_heading_grid_nearest(hgrid, segments, lat_n, lat_s, lon_w, lon_e,
 
 
 # ── OSM polygon / exclusion helpers ──────────────────────────────────────────
-def _load_osm_closed_ways(osm_bz2_path):
+def _load_osm_closed_ways(osm_bz2_path, cache_dir=None):
     """Return list of closed-way polygons as [(lat,lon),...] from an .osm.bz2 file."""
     import bz2, xml.etree.ElementTree as ET
     if not os.path.exists(osm_bz2_path):
         return []
-    with bz2.open(osm_bz2_path, 'rb') as f:
-        root = ET.parse(f).getroot()
-    nodes = {}
-    for node in root.iter('node'):
-        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-    polys = []
-    for way in root.iter('way'):
-        pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-        if len(pts) >= 4 and pts[0] == pts[-1]:  # closed way
-            polys.append(pts)
-    return polys
+    def _parse():
+        with bz2.open(osm_bz2_path, 'rb') as f:
+            root = ET.parse(f).getroot()
+        nodes = {}
+        for node in root.iter('node'):
+            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+        polys = []
+        for way in root.iter('way'):
+            pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+            if len(pts) >= 4 and pts[0] == pts[-1]:
+                polys.append(pts)
+        return polys
+
+    return PCACHE.load_or_build(
+        osm_bz2_path,
+        cache_dir,
+        "osm_parse",
+        _parse,
+        version="closed-ways-v1",
+    )
 
 
 def _rasterize_polygons(polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w):
@@ -541,6 +562,8 @@ def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     north = lat_n + pad_deg
     west = lon_w - pad_deg
     east = lon_e + pad_deg
+    if isinstance(polys, dict) and {'items', 'south', 'north', 'west', 'east'} <= set(polys):
+        return [poly.get('pts', poly) for poly in BBOX.query_bounds(polys, south, north, west, east)]
     filtered = []
     for poly in polys:
         if isinstance(poly, dict):
@@ -620,31 +643,44 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
                 cache_dir,
                 create_no_window=SEGFORMER._CREATE_NO_WINDOW,
             )
-            current_points = None
-            with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
-                for raw_line in text_file:
-                    line = raw_line.strip()
-                    if line.startswith("BEGIN_SEGMENT "):
-                        parts = line.split()
-                        try:
-                            current_points = [(float(parts[5]), float(parts[4]))]
-                        except (IndexError, ValueError):
+            def _parse():
+                parsed_ways = []
+                current_points = None
+                with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+                    for raw_line in text_file:
+                        line = raw_line.strip()
+                        if line.startswith("BEGIN_SEGMENT "):
+                            parts = line.split()
+                            try:
+                                current_points = [(float(parts[5]), float(parts[4]))]
+                            except (IndexError, ValueError):
+                                current_points = None
+                        elif line.startswith("SHAPE_POINT ") and current_points is not None:
+                            parts = line.split()
+                            try:
+                                current_points.append((float(parts[2]), float(parts[1])))
+                            except (IndexError, ValueError):
+                                pass
+                        elif line.startswith("END_SEGMENT ") and current_points is not None:
+                            parts = line.split()
+                            try:
+                                current_points.append((float(parts[3]), float(parts[2])))
+                            except (IndexError, ValueError):
+                                pass
+                            if len(current_points) >= 2:
+                                parsed_ways.append({"pts": current_points, "type": "network"})
                             current_points = None
-                    elif line.startswith("SHAPE_POINT ") and current_points is not None:
-                        parts = line.split()
-                        try:
-                            current_points.append((float(parts[2]), float(parts[1])))
-                        except (IndexError, ValueError):
-                            pass
-                    elif line.startswith("END_SEGMENT ") and current_points is not None:
-                        parts = line.split()
-                        try:
-                            current_points.append((float(parts[3]), float(parts[2])))
-                        except (IndexError, ValueError):
-                            pass
-                        if len(current_points) >= 2:
-                            road_ways.append({"pts": current_points, "type": "network"})
-                        current_points = None
+                return parsed_ways
+
+            road_ways.extend(
+                PCACHE.load_or_build(
+                    cached_text_path,
+                    cache_dir,
+                    "dsf_parse",
+                    _parse,
+                    version="simheaven-network-v1",
+                )
+            )
             print(f"  [simHeaven net] {folder_name}: +{len(road_ways) - segment_count_before} segments")
         except Exception as exc:
             print(f"  [simHeaven net] failed {dsf_path}: {exc}")
@@ -711,67 +747,81 @@ def _load_simheaven_building_exclusions(custom_scenery_dir, tile_lat, tile_lon, 
                 cache_dir,
                 create_no_window=SEGFORMER._CREATE_NO_WINDOW,
             )
-            object_defs = []
-            polygon_defs = []
-            current_polygon_is_building = False
-            current_winding = None
+            def _parse():
+                parsed_objects = []
+                parsed_polys = []
+                object_defs = []
+                polygon_defs = []
+                current_polygon_is_building = False
+                current_winding = None
 
-            with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
-                for raw_line in text_file:
-                    line = raw_line.strip()
-                    if line.startswith("OBJECT_DEF "):
-                        object_defs.append(line.split(" ", 1)[1])
-                    elif line.startswith("POLYGON_DEF "):
-                        polygon_defs.append(line.split(" ", 1)[1])
-                    elif line.startswith("OBJECT "):
-                        parts = line.split()
-                        try:
-                            object_index = int(parts[1])
-                            object_path = object_defs[object_index]
-                            if not _is_simheaven_building_object(object_path):
+                with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+                    for raw_line in text_file:
+                        line = raw_line.strip()
+                        if line.startswith("OBJECT_DEF "):
+                            object_defs.append(line.split(" ", 1)[1])
+                        elif line.startswith("POLYGON_DEF "):
+                            polygon_defs.append(line.split(" ", 1)[1])
+                        elif line.startswith("OBJECT "):
+                            parts = line.split()
+                            try:
+                                object_index = int(parts[1])
+                                object_path = object_defs[object_index]
+                                if not _is_simheaven_building_object(object_path):
+                                    continue
+                                object_lon = float(parts[2])
+                                object_lat = float(parts[3])
+                                object_heading = float(parts[4]) if len(parts) > 4 else 0.0
+                                object_width_m, object_height_m = _simheaven_object_dims(object_path)
+                            except (IndexError, ValueError):
                                 continue
-                            object_lon = float(parts[2])
-                            object_lat = float(parts[3])
-                            object_heading = float(parts[4]) if len(parts) > 4 else 0.0
-                            object_width_m, object_height_m = _simheaven_object_dims(object_path)
-                        except (IndexError, ValueError):
-                            continue
-                        objects.append(
-                            {
-                                'lat': object_lat,
-                                'lon': object_lon,
-                                'heading': object_heading,
-                                'w_m': object_width_m,
-                                'h_m': object_height_m,
-                                'path': object_path,
-                            }
-                        )
-                    elif line.startswith("BEGIN_POLYGON "):
-                        parts = line.split()
-                        current_polygon_is_building = False
-                        current_winding = None
-                        try:
-                            polygon_index = int(parts[1])
-                            current_polygon_is_building = _is_simheaven_building_polygon(
-                                polygon_defs[polygon_index]
+                            parsed_objects.append(
+                                {
+                                    'lat': object_lat,
+                                    'lon': object_lon,
+                                    'heading': object_heading,
+                                    'w_m': object_width_m,
+                                    'h_m': object_height_m,
+                                    'path': object_path,
+                                }
                             )
-                        except (IndexError, ValueError):
+                        elif line.startswith("BEGIN_POLYGON "):
+                            parts = line.split()
                             current_polygon_is_building = False
-                    elif line == "BEGIN_WINDING" and current_polygon_is_building:
-                        current_winding = []
-                    elif line.startswith("POLYGON_POINT ") and current_winding is not None:
-                        parts = line.split()
-                        try:
-                            current_winding.append((float(parts[2]), float(parts[1])))
-                        except (IndexError, ValueError):
-                            pass
-                    elif line == "END_WINDING" and current_winding is not None:
-                        if len(current_winding) >= 3:
-                            polys.append(current_winding)
-                        current_winding = None
-                    elif line == "END_POLYGON":
-                        current_polygon_is_building = False
-                        current_winding = None
+                            current_winding = None
+                            try:
+                                polygon_index = int(parts[1])
+                                current_polygon_is_building = _is_simheaven_building_polygon(
+                                    polygon_defs[polygon_index]
+                                )
+                            except (IndexError, ValueError):
+                                current_polygon_is_building = False
+                        elif line == "BEGIN_WINDING" and current_polygon_is_building:
+                            current_winding = []
+                        elif line.startswith("POLYGON_POINT ") and current_winding is not None:
+                            parts = line.split()
+                            try:
+                                current_winding.append((float(parts[2]), float(parts[1])))
+                            except (IndexError, ValueError):
+                                pass
+                        elif line == "END_WINDING" and current_winding is not None:
+                            if len(current_winding) >= 3:
+                                parsed_polys.append(current_winding)
+                            current_winding = None
+                        elif line == "END_POLYGON":
+                            current_polygon_is_building = False
+                            current_winding = None
+                return {"objects": parsed_objects, "polys": parsed_polys}
+
+            parsed = PCACHE.load_or_build(
+                cached_text_path,
+                cache_dir,
+                "dsf_parse",
+                _parse,
+                version="simheaven-buildings-v1",
+            )
+            objects.extend(parsed.get("objects", ()))
+            polys.extend(parsed.get("polys", ()))
 
             print(
                 f"  [simHeaven bld] {folder_name}: "
@@ -866,7 +916,7 @@ def _rasterize_simheaven_objects(objects, lat_n, lat_s, lon_w, lon_e,
     return mask
 
 
-def _parse_excl_osm(cache_path):
+def _parse_excl_osm(cache_path, cache_dir=None):
     """Parse downloaded OSM into exclusions and residential guidance.
 
     Returns:
@@ -882,31 +932,43 @@ def _parse_excl_osm(cache_path):
     residential_polys = []
     if not os.path.exists(cache_path):
         return exclusion_polys, rail_ways, residential_polys
-    with bz2.open(cache_path, 'rb') as f:
-        root = ET.parse(f).getroot()
-    nodes = {}
-    for node in root.iter('node'):
-        nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-    for way in root.iter('way'):
-        pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-        if len(pts) < 2:
-            continue
-        is_closed = len(pts) >= 4 and pts[0] == pts[-1]
-        tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
-        railway_type = tags.get('railway')
-        landuse_type = tags.get('landuse')
+    def _parse():
+        parsed_exclusion_polys = []
+        parsed_rail_ways = []
+        parsed_residential_polys = []
+        with bz2.open(cache_path, 'rb') as f:
+            root = ET.parse(f).getroot()
+        nodes = {}
+        for node in root.iter('node'):
+            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
+        for way in root.iter('way'):
+            pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
+            if len(pts) < 2:
+                continue
+            is_closed = len(pts) >= 4 and pts[0] == pts[-1]
+            tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
+            railway_type = tags.get('railway')
+            landuse_type = tags.get('landuse')
 
-        if railway_type and not is_closed:
-            rail_ways.append({'pts': pts, 'type': railway_type})
-        elif is_closed and landuse_type == 'residential':
-            residential_polys.append(pts)
-        elif is_closed and (
-            'building' in tags or
-            'aeroway' in tags or
-            landuse_type in {'railway', 'aeroway'}
-        ):
-            exclusion_polys.append(pts)
-    return exclusion_polys, rail_ways, residential_polys
+            if railway_type and not is_closed:
+                parsed_rail_ways.append({'pts': pts, 'type': railway_type})
+            elif is_closed and landuse_type == 'residential':
+                parsed_residential_polys.append(pts)
+            elif is_closed and (
+                'building' in tags or
+                'aeroway' in tags or
+                landuse_type in {'railway', 'aeroway'}
+            ):
+                parsed_exclusion_polys.append(pts)
+        return parsed_exclusion_polys, parsed_rail_ways, parsed_residential_polys
+
+    return PCACHE.load_or_build(
+        cache_path,
+        cache_dir,
+        "osm_parse",
+        _parse,
+        version="building-exclusions-v1",
+    )
 
 
 # ── Per-zone heading detection (Hough fallback) ────────────────────────────
@@ -1690,7 +1752,7 @@ def run(
             f'{lat_g_str}{lon_g_str}',
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
-    osm_roads = _load_osm_roads(osm_roads_path)
+    osm_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
     print(f"OSM roads: {len(osm_roads)} ways from {osm_roads_path}")
 
     # ── Exclusion data: water, airports, buildings, railways ─────────────────
@@ -1702,7 +1764,7 @@ def run(
 
     for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
         p = osm_roads_path.replace('_big_roads.osm.bz2', suffix)
-        excl_polys.extend(_load_osm_closed_ways(p))
+        excl_polys.extend(_load_osm_closed_ways(p, cache_dir=cache_dir))
     print(f"Exclusion polygons (water+airports): {len(excl_polys)}")
 
     excl_cache = osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2')
@@ -1712,7 +1774,9 @@ def run(
         ok = _download_and_cache_osm(lat, lon, excl_cache)
     residential_polys = []
     if ok:
-        bld_polys, rail_ways, residential_polys = _parse_excl_osm(excl_cache)
+        bld_polys, rail_ways, residential_polys = _parse_excl_osm(
+            excl_cache, cache_dir=cache_dir
+        )
         existing_bld_polys.extend(bld_polys)
         excl_rails.extend(rail_ways)
         print(
@@ -1795,11 +1859,16 @@ def run(
         return 0
 
     osm_roads = _prepare_roads(osm_roads)
+    osm_roads_index = BBOX.build_bounds_index(osm_roads)
     excl_rails = _prepare_roads(excl_rails)
+    excl_rails_index = BBOX.build_bounds_index(excl_rails)
     sh_network = _prepare_roads(sh_network)
     excl_polys = _prepare_polygons(excl_polys)
+    excl_polys_index = BBOX.build_bounds_index(excl_polys)
     existing_bld_polys = _prepare_polygons(existing_bld_polys)
+    existing_bld_polys_index = BBOX.build_bounds_index(existing_bld_polys)
     residential_polys = _prepare_polygons(residential_polys)
+    residential_polys_index = BBOX.build_bounds_index(residential_polys)
 
     # Heading grid uses simHeaven network only — it represents the full local
     # street grid (minor roads, blocks) which defines actual building alignment.
@@ -1807,6 +1876,7 @@ def run(
     # length-weighted mean and misalign buildings with the local block grid.
     all_roads       = sh_network                          # heading grid source (local street grid)
     separator_roads = (osm_roads or []) + (sh_network or [])  # zone separator: major roads + local streets
+    separator_roads_index = BBOX.build_bounds_index(separator_roads)
     heading_seg_index = _prepare_segment_arrays(all_roads)
     separator_sig = _roads_signature(separator_roads)
     rail_sig = _roads_signature(excl_rails)
@@ -1852,7 +1922,11 @@ def run(
         # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
         # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
         import pickle as _pickle
-        rng = np.random.default_rng(abs(hash(fname)) % (2**32))
+        rng_seed = int.from_bytes(
+            hashlib.sha1(f"bld-place:{fname}".encode("utf-8")).digest()[:8],
+            "big",
+        )
+        rng = np.random.default_rng(rng_seed)
         _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
         _cached_bld = None
         if os.path.exists(_bld_cache_file):
@@ -1956,18 +2030,18 @@ def run(
         # Water/building/aeroway polygons and railways are also subtracted so
         # SegFormer-placed buildings don't appear on mapped features.
         local_separator_roads = _roads_for_bounds(
-            separator_roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            separator_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         local_residential_roads = _residential_roads(
-            _roads_for_bounds(osm_roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            _roads_for_bounds(osm_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         )
         local_rails = _roads_for_bounds(
-            excl_rails, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            excl_rails_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         local_residential_polys = _polys_for_bounds(
-            residential_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            residential_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         local_excl_polys = _polys_for_bounds(
-            excl_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            excl_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         local_existing_bld_polys = _polys_for_bounds(
-            existing_bld_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            existing_bld_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         local_heading_segments = _segments_for_bounds(
             heading_seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
         local_sh_bld_objects = _simheaven_objects_for_bounds(
