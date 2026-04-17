@@ -353,6 +353,14 @@ def load_dds_or_none(path, log_prefix="[SegFormer]", display_name=None):
 _DDS_STD_RE    = re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
                              re.IGNORECASE)
 _DDS_G2XPL_RE  = re.compile(r"^(\d{2})_(\d+)_(\d+)\.dds$", re.IGNORECASE)
+_MASK_TEXTURE_RE = re.compile(r"^\d+_\d+_ZL\d{2}(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE)
+
+
+def is_mask_texture_name(name):
+    """
+    Return True for Ortho4XP mask texture sidecars such as 123_456_ZL19.png.
+    """
+    return bool(_MASK_TEXTURE_RE.match(os.path.basename(name)))
 
 
 def parse_dds_filename(fname):
