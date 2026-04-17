@@ -326,6 +326,21 @@ def _load_dds(path):
     return arr
 
 
+def load_dds_or_none(path, log_prefix="[SegFormer]", display_name=None):
+    """
+    Best-effort DDS loader for batch workflows.
+
+    Returns None when the texture cannot be opened or decoded so callers can
+    skip the bad tile instead of aborting the entire overlay run.
+    """
+    try:
+        return _load_dds(path)
+    except Exception as exc:
+        name = display_name or os.path.basename(path)
+        print(f"{log_prefix}   Could not load {name}: {exc} -- skipping")
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DDS filename parsing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1228,10 +1243,8 @@ def process_sfr_tile(lat, lon, build_dir=None, device=None,
 
             fpath = os.path.join(tex_dir, fname)
             print(f"[SegFormer]   Processing {fname} …")
-            try:
-                img_rgb = _load_dds(fpath)
-            except Exception as e:
-                print(f"[SegFormer]   Could not load {fname}: {e}")
+            img_rgb = load_dds_or_none(fpath, display_name=fname)
+            if img_rgb is None:
                 continue
 
             img_h, img_w = img_rgb.shape[:2]

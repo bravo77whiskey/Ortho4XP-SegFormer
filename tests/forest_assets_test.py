@@ -1,6 +1,9 @@
 import sys
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest import mock
+import contextlib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +29,24 @@ class _IndexRng:
 
 
 class ForestAssetPolicyTests(unittest.TestCase):
+    def test_load_dds_or_none_skips_problem_texture(self):
+        with mock.patch.object(
+            SEGFORMER,
+            "_load_dds",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            out = StringIO()
+            with contextlib.redirect_stdout(out):
+                arr = SEGFORMER.load_dds_or_none(
+                    str(ROOT / "missing.dds"),
+                    log_prefix="[SFR Veg]",
+                    display_name="264000_315952_BI19.dds",
+                )
+        self.assertIsNone(arr)
+        self.assertIn("264000_315952_BI19.dds", out.getvalue())
+        self.assertIn("Permission denied", out.getvalue())
+        self.assertIn("skipping", out.getvalue())
+
     def test_allowlist_contains_default_and_gfv2_assets(self):
         approved = set(FOREST_ASSETS.APPROVED_GENERATED_FOREST_PATHS)
         self.assertEqual(FOREST_ASSETS.HEIGHT_CUTOFF_METERS, 24.0)

@@ -895,7 +895,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     def _load_source_image(fname, source_mode, ortho_dir):
         if source_mode == 'dds':
-            return SEGFORMER._load_dds(os.path.join(tex_dir, fname))
+            return SEGFORMER.load_dds_or_none(
+                os.path.join(tex_dir, fname),
+                log_prefix='[SFR Veg]',
+                display_name=fname,
+            )
         p = _orthophoto_path(fname, ortho_dir)
         if not p:
             return None
