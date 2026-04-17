@@ -371,6 +371,20 @@ def _prepare_roads(roads):
     return prepared
 
 
+def _roads_signature(roads):
+    """Small deterministic signature for cache invalidation."""
+    n_roads = 0
+    n_pts = 0
+    checksum = 0.0
+    for road in roads or []:
+        pts = road.get('pts', ())
+        n_roads += 1
+        n_pts += len(pts)
+        r_s, r_n, r_w, r_e = road.get('_bounds') or _road_bounds(road)
+        checksum += (r_s * 3.0) + (r_n * 5.0) + (r_w * 7.0) + (r_e * 11.0) + len(pts)
+    return (n_roads, n_pts, round(checksum, 6))
+
+
 def _roads_for_bounds(roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     if not roads:
         return []
@@ -401,6 +415,33 @@ def _prepare_polygons(polys):
             continue
         prepared.append({'pts': poly, '_bounds': _poly_bounds(poly)})
     return prepared
+
+
+def _polys_signature(polys):
+    """Small deterministic signature for polygon-mask cache invalidation."""
+    n_polys = 0
+    n_pts = 0
+    checksum = 0.0
+    for poly in polys or []:
+        if isinstance(poly, dict):
+            pts = poly.get('pts', ())
+            bounds = poly.get('_bounds')
+        else:
+            pts = poly
+            bounds = None
+        if not pts:
+            continue
+        n_polys += 1
+        n_pts += len(pts)
+        if bounds is None:
+            bounds = _poly_bounds(pts)
+        south, north, west, east = bounds
+        checksum += (
+            south * 3.0 + north * 5.0 +
+            west * 7.0 + east * 11.0 +
+            len(pts)
+        )
+    return (n_polys, n_pts, round(checksum, 6))
 
 
 def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
@@ -483,6 +524,56 @@ def _build_residential_context_mask(residential_polys, residential_roads,
         return cv2.dilate(road_mask, road_kernel), 'OSM neighborhood roads'
 
     return None, 'unavailable'
+
+
+def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
+                        road_sig, res_road_sig, tree_row_sig, context_poly_sigs,
+                        forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
+                        bld_excl_m, bld_cache_stat,
+                        simheaven_building_buffer_m):
+    return {
+        'version': 1,
+        'fname': fname,
+        'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
+        'shape': (int(img_h), int(img_w)),
+        'mpp': round(float(mpp), 6),
+        'road_sig': road_sig,
+        'res_road_sig': res_road_sig,
+        'tree_row_sig': tree_row_sig,
+        'context_poly_sigs': tuple(sorted(context_poly_sigs.items())),
+        'forest_layer_sigs': forest_layer_sigs,
+        'sh_bld_poly_sig': sh_bld_poly_sig,
+        'sh_bld_obj_sig': sh_bld_obj_sig,
+        'bld_excl_m': round(float(bld_excl_m), 4),
+        'bld_cache_stat': bld_cache_stat,
+        'simheaven_building_buffer_m': round(float(simheaven_building_buffer_m), 4),
+        'residential_buffer_m': float(RESIDENTIAL_FALLBACK_BUFFER_M),
+        'residential_buffer_px_min': int(RESIDENTIAL_FALLBACK_BUFFER_PX_MIN),
+        'tree_row_width_m': float(TREE_ROW_WIDTH_M),
+    }
+
+
+def _load_dds_mask_cache(cache_path, key):
+    import pickle as _pickle
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, 'rb') as f:
+            data = _pickle.load(f)
+        if data.get('key') == key:
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _save_dds_mask_cache(cache_path, key, payload):
+    import pickle as _pickle
+    try:
+        with open(cache_path, 'wb') as f:
+            _pickle.dump({'key': key, **payload}, f, protocol=_pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
 
 def _is_forest_polygon_path(path):
@@ -637,38 +728,67 @@ def _for_entry(veg_cls, frac, shape, region, rng,
 
 
 # ── Polygon helpers ───────────────────────────────────────────────────────────
-def _polygon_fill_frac(mask, cnt):
-    x, y, w, h = cv2.boundingRect(cnt)
-    if w == 0 or h == 0:
+def _polygon_fill_frac(mask, cnt, prepared=None):
+    prepared = prepared or _contour_fill_stats(cnt, m_per_px=1.0, include_ring=False)
+    if prepared is None:
         return 0.0
-    roi  = mask[y:y+h, x:x+w]
-    fill = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(fill, [cnt - np.array([[x, y]])], 0, 1, cv2.FILLED)
-    total = fill.sum()
+    x = prepared['x']
+    y = prepared['y']
+    w = prepared['w']
+    h = prepared['h']
+    fill = prepared['fill']
+    roi = mask[y:y+h, x:x+w]
+    total = prepared['area_px']
     if total == 0:
         return 0.0
     return float((roi * fill).sum()) / float(total)
 
 
-def _contour_context_stats(cnt, masks, m_per_px):
+def _contour_fill_stats(cnt, m_per_px, include_ring=True):
+    """Return reusable rasterized contour stats for fill/context queries."""
     x, y, w, h = cv2.boundingRect(cnt)
     if w == 0 or h == 0:
-        return {}
+        return None
 
     fill = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(fill, [cnt - np.array([[x, y]])], 0, 1, cv2.FILLED)
+    offset = np.array([[x, y]], dtype=np.int32)
+    cv2.drawContours(fill, [cnt - offset], 0, 1, cv2.FILLED)
     area_px = int(fill.sum())
     if area_px <= 0:
+        return None
+
+    result = {
+        'x': x,
+        'y': y,
+        'w': w,
+        'h': h,
+        'fill': fill,
+        'area_px': area_px,
+    }
+    if include_ring:
+        ring_px = max(2, int(round(CONTEXT_RING_M / max(m_per_px, 1e-6))))
+        ring_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (ring_px * 2 + 1, ring_px * 2 + 1)
+        )
+        outer = cv2.dilate(fill, ring_kernel)
+        ring = cv2.subtract(outer, fill)
+        result['ring'] = ring
+        result['ring_area_px'] = int(ring.sum())
+    return result
+
+
+def _contour_context_stats(cnt, masks, m_per_px, prepared=None):
+    prepared = prepared or _contour_fill_stats(cnt, m_per_px)
+    if prepared is None:
         return {}
-
-    ring_px = max(2, int(round(CONTEXT_RING_M / max(m_per_px, 1e-6))))
-    ring_kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (ring_px * 2 + 1, ring_px * 2 + 1)
-    )
-    outer = cv2.dilate(fill, ring_kernel)
-    ring = cv2.subtract(outer, fill)
-    ring_area_px = int(ring.sum())
-
+    x = prepared['x']
+    y = prepared['y']
+    w = prepared['w']
+    h = prepared['h']
+    fill = prepared['fill']
+    area_px = prepared['area_px']
+    ring = prepared['ring']
+    ring_area_px = prepared['ring_area_px']
     stats = {'area_px': float(area_px), 'ring_area_px': float(ring_area_px)}
     for name, mask in (masks or {}).items():
         if mask is None:
@@ -701,8 +821,8 @@ def _contour_shape(cnt, min_area_px, m_per_px):
     return ('treeline' if is_treeline else 'area'), area
 
 
-def _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks):
-    stats = _contour_context_stats(cnt, context_masks, m_per_px)
+def _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks, prepared_stats=None):
+    stats = prepared_stats or _contour_context_stats(cnt, context_masks, m_per_px)
     if not stats:
         return 'natural_woodland_open'
 
@@ -751,12 +871,10 @@ def _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks):
 
 
 def _contour_to_latlon(cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
-    pts = cnt[:, 0, :]
-    result = []
-    for x, y in pts:
-        o_lon, o_lat = px_to_latlon(float(x), float(y),
-                                    img_w, img_h, lat_n, lat_s, lon_w, lon_e)
-        result.append((o_lon, o_lat))
+    pts = cnt[:, 0, :].astype(np.float64, copy=False)
+    lons = lon_w + pts[:, 0] / img_w * (lon_e - lon_w)
+    lats = lat_n - pts[:, 1] / img_h * (lat_n - lat_s)
+    result = list(zip(lons.tolist(), lats.tolist()))
     if result and result[0] != result[-1]:
         result.append(result[0])
     return result
@@ -806,12 +924,22 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         if min(lons) >= tile_lon + 1 or max(lons) <= tile_lon: continue
         if min(lats) >= tile_lat + 1 or max(lats) <= tile_lat: continue
 
-        frac = _polygon_fill_frac(mask, cnt)
+        prepared_stats = None
+        frac = 0.0
         veg_type = None
         if veg_cls == SEGFORMER.CLASS_TREE:
-            veg_type = _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks)
+            prepared_fill = _contour_fill_stats(cnt, m_per_px, include_ring=True)
+            frac = _polygon_fill_frac(mask, cnt, prepared=prepared_fill)
+            prepared_stats = _contour_context_stats(
+                cnt, context_masks, m_per_px, prepared=prepared_fill
+            )
+            veg_type = _classify_tree_cover(
+                cnt, frac, shape, m_per_px, context_masks, prepared_stats=prepared_stats
+            )
             if type_counts is not None:
                 type_counts[veg_type] = type_counts.get(veg_type, 0) + 1
+        else:
+            frac = _polygon_fill_frac(mask, cnt)
 
         fpath, dsf_den = _for_entry(
             veg_cls, frac, shape, region, rng, density_override, veg_type=veg_type
@@ -859,8 +987,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             for root, _, names in os.walk(ortho_dir):
                 for name in names:
                     if name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        if SEGFORMER.is_mask_texture_name(name):
+                            continue
                         candidate = os.path.splitext(name)[0] + '.dds'
-                        if STD_RE.match(candidate):
+                        if STD_RE.match(candidate) and not SEGFORMER.is_mask_texture_name(candidate):
                             jpg_files.append(candidate)
             if jpg_files:
                 print(
@@ -869,7 +999,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 return jpg_files, 'orthophoto', ortho_dir
 
         if os.path.isdir(tex_dir):
-            dds_files = [f for f in os.listdir(tex_dir) if STD_RE.match(f)]
+            dds_files = [
+                f for f in os.listdir(tex_dir)
+                if STD_RE.match(f) and not SEGFORMER.is_mask_texture_name(f)
+            ]
             if dds_files:
                 print(
                     f"Original cached orthophotos missing; using {len(dds_files)} DDS textures from {tex_dir}",
@@ -881,7 +1014,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     def _orthophoto_path(fname, ortho_dir):
         m = STD_RE.match(fname)
-        if not m:
+        if not m or SEGFORMER.is_mask_texture_name(fname):
             return None
         provider = m.group(3)
         zl = int(m.group(4))
@@ -889,7 +1022,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         subdir = os.path.join(ortho_dir, f"{provider}_{zl}")
         for ext in ('.jpg', '.jpeg', '.png'):
             p = os.path.join(subdir, stem + ext)
-            if os.path.exists(p):
+            if os.path.exists(p) and not SEGFORMER.is_mask_texture_name(os.path.basename(p)):
                 return p
         return None
 
@@ -970,6 +1103,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     timings = {
         'scenery_parse': 0.0,
         'cache_load': 0.0,
+        'mask_cache': 0.0,
         'dds_load': 0.0,
         'inference': 0.0,
         'road_excl': 0.0,
@@ -1029,6 +1163,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         for key, value in veg_context.items()
         if key.endswith('_polys')
     }
+    context_poly_sigs = {
+        key: _polys_signature(value)
+        for key, value in veg_context_prepared.items()
+    }
     osm_residential_roads = _prepare_roads(_residential_roads(osm_roads))
     veg_context_tree_rows = _prepare_roads(veg_context.get('tree_rows', []))
 
@@ -1045,6 +1183,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         print(f"  [simHeaven] DSFTool not found at {dsftool_path} — skipping")
 
     all_road_ways = _prepare_roads(osm_roads + excl_rails + sh_network)
+    all_road_sig = _roads_signature(all_road_ways)
+    osm_residential_sig = _roads_signature(osm_residential_roads)
+    tree_row_sig = _roads_signature(veg_context_tree_rows)
 
     forest_layers = []
     if dsftool_path and os.path.exists(dsftool_path):
@@ -1089,6 +1230,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     else:
         if any((avoid_gfv2, avoid_simheaven_forests, avoid_default_forests)):
             print(f"Forest overlap layers: skipped (DSFTool unavailable at {dsftool_path})")
+    forest_layer_sigs = tuple(
+        (layer['name'], round(float(layer['buffer_m']), 4), _polys_signature(layer['polys']))
+        for layer in forest_layers
+    )
 
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
@@ -1101,6 +1246,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     sh_bld_polys = []
     sh_bld_index = None
+    sh_bld_poly_sig = (0, 0, 0.0)
+    sh_bld_obj_sig = (0, 0.0)
     if avoid_simheaven_buildings and dsftool_path and os.path.exists(dsftool_path):
         _t = time.perf_counter()
         sh_bld_polys, sh_bld_objects = _load_simheaven_building_exclusions(
@@ -1115,6 +1262,18 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         n_sh_bld_objs = len(sh_bld_objects)
         sh_bld_polys = _prepare_polygons(sh_bld_polys)
         sh_bld_index = _prepare_simheaven_objects(sh_bld_objects)
+        sh_bld_poly_sig = _polys_signature(sh_bld_polys)
+        if sh_bld_objects:
+            arr = np.asarray(
+                [
+                    (obj['lat'], obj['lon'], obj['heading'], obj['w_m'], obj['h_m'])
+                    for obj in sh_bld_objects
+                ],
+                dtype=np.float32,
+            )
+            checksum = float(np.sum(arr[:, 0] * 3.0 + arr[:, 1] * 5.0 +
+                                    arr[:, 2] * 0.01 + arr[:, 3] + arr[:, 4]))
+            sh_bld_obj_sig = (int(arr.shape[0]), round(checksum, 3))
         print(f"simHeaven buildings: {n_sh_bld_objs} objects  {n_sh_bld_polys} facade polys")
     elif avoid_simheaven_buildings:
         print(f"simHeaven buildings: skipped (DSFTool unavailable at {dsftool_path})")
@@ -1184,80 +1343,125 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         excl_raw  = ((veg_map == SEGFORMER.CLASS_BUILDING) |
                      (veg_map == SEGFORMER.CLASS_ROAD)     |
                      (veg_map == SEGFORMER.CLASS_DEVELOPED)).astype(np.uint8)
-        excl_mask = cv2.dilate(excl_raw, ke)
+        segformer_excl_mask = cv2.dilate(excl_raw, ke)
+        excl_mask = segformer_excl_mask.copy()
+
+        _bld_pkl = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
+        _bld_cache_stat = None
+        if bld_excl_m > 0 and os.path.exists(_bld_pkl):
+            try:
+                _st = os.stat(_bld_pkl)
+                _bld_cache_stat = (_st.st_mtime_ns, _st.st_size)
+            except OSError:
+                _bld_cache_stat = None
+        _mask_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_vegaux.pkl'))
+        _mask_cache_key = _dds_mask_cache_key(
+            fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
+            all_road_sig, osm_residential_sig, tree_row_sig, context_poly_sigs,
+            forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
+            bld_excl_m, _bld_cache_stat, simheaven_building_buffer_m,
+        )
+        _t = time.perf_counter()
+        _mask_cached = _load_dds_mask_cache(_mask_cache_file, _mask_cache_key)
+        timings['mask_cache'] += time.perf_counter() - _t
+        if _mask_cached is not None:
+            road_excl = _mask_cached.get('road_excl')
+            bld_excl_mask = _mask_cached.get('bld_excl_mask')
+            sh_bld_poly_mask = _mask_cached.get('sh_bld_poly_mask')
+            sh_bld_obj_mask = _mask_cached.get('sh_bld_obj_mask')
+            forest_excl_mask = _mask_cached.get('forest_excl_mask')
+            cached_context_masks = _mask_cached.get('context_masks', {})
+            if _bld_cache_stat is not None:
+                n_bld_excl_used += 1
+            elif bld_excl_m > 0:
+                n_bld_excl_missing += 1
+        else:
+            road_excl = None
+            bld_excl_mask = None
+            sh_bld_poly_mask = None
+            sh_bld_obj_mask = None
+            forest_excl_mask = None
+            cached_context_masks = {}
 
         # ── Exclusion layer 2: OSM roads + SimHeaven network + railways
         # Each way is drawn at 2×half_width_m thickness for granular, type-aware clearance
-        if all_road_ways:
+        if road_excl is None and all_road_ways:
             _t = time.perf_counter()
             local_road_ways = _roads_for_bounds(
                 all_road_ways, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
             road_excl = _rasterize_roads_typed(
                 local_road_ways, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp)
-            excl_mask = cv2.bitwise_or(excl_mask, road_excl)
             timings['road_excl'] += time.perf_counter() - _t
+        if road_excl is not None:
+            excl_mask = cv2.bitwise_or(excl_mask, road_excl)
 
         # ── Exclusion layer 3: placed building objects from bld overlay ──────
         # Read the per-DDS placement cache written by src/scripts/generate_bld_overlay.
         # Use a loose circular buffer (bld_excl_m) — much larger than the
         # building-to-building 3 m margin — so trees stay clear of structures
         # without being pushed too far back from the building edge.
-        if bld_excl_m > 0:
+        if bld_excl_m > 0 and bld_excl_mask is None:
             _t = time.perf_counter()
             import pickle as _pickle
-            _bld_pkl = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
             if os.path.exists(_bld_pkl):
                 try:
                     with open(_bld_pkl, 'rb') as _f:
                         _bld_data = _pickle.load(_f)
                     _bld_objs = _bld_data.get('objects', [])
                     _bld_r = max(1, int(bld_excl_m / mpp))
-                    _bld_excl = np.zeros((img_h, img_w), dtype=np.uint8)
+                    bld_excl_mask = np.zeros((img_h, img_w), dtype=np.uint8)
                     for _o_lon, _o_lat, _heading, _obj_path in _bld_objs:
                         _bpx = int((_o_lon - lon_w) / (lon_e - lon_w) * img_w)
                         _bpy = int((lat_n - _o_lat) / (lat_n - lat_s) * img_h)
                         if 0 <= _bpx < img_w and 0 <= _bpy < img_h:
-                            cv2.circle(_bld_excl, (_bpx, _bpy), _bld_r, 1, -1)
-                    excl_mask = cv2.bitwise_or(excl_mask, _bld_excl)
+                            cv2.circle(bld_excl_mask, (_bpx, _bpy), _bld_r, 1, -1)
                     n_bld_excl_used += 1
                 except Exception as _e:
                     print(f"    bld exclusion: failed to load pkl — {_e}", flush=True)
             else:
                 n_bld_excl_missing += 1
             timings['bld_excl'] += time.perf_counter() - _t
+        if bld_excl_mask is not None:
+            excl_mask = cv2.bitwise_or(excl_mask, bld_excl_mask)
 
         # ── Exclusion layer 3b: existing simHeaven buildings ─────────────────
-        if avoid_simheaven_buildings and (sh_bld_polys or sh_bld_index):
+        if avoid_simheaven_buildings and (sh_bld_polys or sh_bld_index) and (
+            sh_bld_poly_mask is None or sh_bld_obj_mask is None
+        ):
             _t = time.perf_counter()
-            local_sh_bld_polys = _polys_for_bounds(
-                sh_bld_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
-            )
-            if local_sh_bld_polys:
-                sh_bld_poly_mask = _rasterize_polygons(
-                    local_sh_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+            if sh_bld_poly_mask is None:
+                local_sh_bld_polys = _polys_for_bounds(
+                    sh_bld_polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
                 )
-                if simheaven_building_buffer_m > 0 and sh_bld_poly_mask.any():
-                    sh_bld_poly_px = max(1, int(simheaven_building_buffer_m / mpp))
-                    k_sh_poly = cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE, (sh_bld_poly_px * 2 + 1, sh_bld_poly_px * 2 + 1)
+                if local_sh_bld_polys:
+                    sh_bld_poly_mask = _rasterize_polygons(
+                        local_sh_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
                     )
-                    sh_bld_poly_mask = cv2.dilate(sh_bld_poly_mask, k_sh_poly)
-                excl_mask = cv2.bitwise_or(excl_mask, sh_bld_poly_mask)
-
-            local_sh_bld_objects = _simheaven_objects_for_bounds(
-                sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
-            )
-            if local_sh_bld_objects:
-                sh_bld_obj_mask = _rasterize_simheaven_objects(
-                    local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, mpp, margin_m=max(0.0, float(simheaven_building_buffer_m))
+                    if simheaven_building_buffer_m > 0 and sh_bld_poly_mask.any():
+                        sh_bld_poly_px = max(1, int(simheaven_building_buffer_m / mpp))
+                        k_sh_poly = cv2.getStructuringElement(
+                            cv2.MORPH_ELLIPSE, (sh_bld_poly_px * 2 + 1, sh_bld_poly_px * 2 + 1)
+                        )
+                        sh_bld_poly_mask = cv2.dilate(sh_bld_poly_mask, k_sh_poly)
+            if sh_bld_obj_mask is None:
+                local_sh_bld_objects = _simheaven_objects_for_bounds(
+                    sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002
                 )
-                excl_mask = cv2.bitwise_or(excl_mask, sh_bld_obj_mask)
+                if local_sh_bld_objects:
+                    sh_bld_obj_mask = _rasterize_simheaven_objects(
+                        local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
+                        img_h, img_w, mpp, margin_m=max(0.0, float(simheaven_building_buffer_m))
+                    )
             timings['bld_excl'] += time.perf_counter() - _t
+        if sh_bld_poly_mask is not None:
+            excl_mask = cv2.bitwise_or(excl_mask, sh_bld_poly_mask)
+        if sh_bld_obj_mask is not None:
+            excl_mask = cv2.bitwise_or(excl_mask, sh_bld_obj_mask)
 
         # ── Exclusion layer 4: existing forest overlays in scenery packages ──
-        if forest_layers:
+        if forest_excl_mask is None and forest_layers:
             _t = time.perf_counter()
+            forest_excl_mask = np.zeros((img_h, img_w), dtype=np.uint8)
             for layer in forest_layers:
                 local_polys = _polys_for_bounds(
                     layer['polys'], lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
@@ -1274,54 +1478,84 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         cv2.MORPH_ELLIPSE, (buffer_px * 2 + 1, buffer_px * 2 + 1)
                     )
                     layer_mask = cv2.dilate(layer_mask, k_layer)
-                excl_mask = cv2.bitwise_or(excl_mask, layer_mask)
+                forest_excl_mask = cv2.bitwise_or(forest_excl_mask, layer_mask)
             timings['forest_layer_excl'] += time.perf_counter() - _t
+        if forest_excl_mask is not None:
+            excl_mask = cv2.bitwise_or(excl_mask, forest_excl_mask)
 
         local_context_masks = {
-            'developed': cv2.dilate(excl_raw, ke),
+            'developed': segformer_excl_mask,
             'agriculture': (veg_map == SEGFORMER.CLASS_AGRICULTURE).astype(np.uint8),
         }
 
-        for key in (
-            'forest_polys',
-            'woodland_hint_polys',
-            'orchard_polys',
-            'managed_polys',
-            'farmland_polys',
-            'water_polys',
-            'residential_polys',
-        ):
-            local_polys = _polys_for_bounds(
-                veg_context_prepared.get(key, []), lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+        if cached_context_masks:
+            local_context_masks.update(cached_context_masks)
+        else:
+            for key in (
+                'forest_polys',
+                'woodland_hint_polys',
+                'orchard_polys',
+                'managed_polys',
+                'farmland_polys',
+                'water_polys',
+                'residential_polys',
+            ):
+                local_polys = _polys_for_bounds(
+                    veg_context_prepared.get(key, []), lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+                )
+                mask_name = key.replace('_polys', '')
+                if local_polys:
+                    local_context_masks[mask_name] = _rasterize_polygons(
+                        local_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                    )
+                else:
+                    local_context_masks[mask_name] = None
+
+            if local_context_masks['residential'] is None:
+                local_residential_roads = _roads_for_bounds(
+                    osm_residential_roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+                )
+                residential_mask, _res_source = _build_residential_context_mask(
+                    None, local_residential_roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp
+                )
+                local_context_masks['residential'] = residential_mask
+
+            local_tree_rows = _roads_for_bounds(
+                veg_context_tree_rows,
+                lat_n, lat_s, lon_w, lon_e, pad_deg=0.001,
             )
-            mask_name = key.replace('_polys', '')
-            if local_polys:
-                local_context_masks[mask_name] = _rasterize_polygons(
-                    local_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+            if local_tree_rows:
+                tree_row_px = max(1, int(round(TREE_ROW_WIDTH_M / max(mpp, 1e-6))))
+                local_context_masks['tree_row'] = _rasterize_ways_constant_width(
+                    local_tree_rows, lat_n, lat_s, lon_w, lon_e, img_h, img_w, tree_row_px
                 )
             else:
-                local_context_masks[mask_name] = None
+                local_context_masks['tree_row'] = None
 
-        if local_context_masks['residential'] is None:
-            local_residential_roads = _roads_for_bounds(
-                osm_residential_roads, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001
+            _save_dds_mask_cache(
+                _mask_cache_file,
+                _mask_cache_key,
+                {
+                    'road_excl': road_excl,
+                    'bld_excl_mask': bld_excl_mask,
+                    'sh_bld_poly_mask': sh_bld_poly_mask,
+                    'sh_bld_obj_mask': sh_bld_obj_mask,
+                    'forest_excl_mask': forest_excl_mask,
+                    'context_masks': {
+                        key: local_context_masks.get(key)
+                        for key in (
+                            'forest',
+                            'woodland_hint',
+                            'orchard',
+                            'managed',
+                            'farmland',
+                            'water',
+                            'residential',
+                            'tree_row',
+                        )
+                    },
+                },
             )
-            residential_mask, _res_source = _build_residential_context_mask(
-                None, local_residential_roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp
-            )
-            local_context_masks['residential'] = residential_mask
-
-        local_tree_rows = _roads_for_bounds(
-            veg_context_tree_rows,
-            lat_n, lat_s, lon_w, lon_e, pad_deg=0.001,
-        )
-        if local_tree_rows:
-            tree_row_px = max(1, int(round(TREE_ROW_WIDTH_M / max(mpp, 1e-6))))
-            local_context_masks['tree_row'] = _rasterize_ways_constant_width(
-                local_tree_rows, lat_n, lat_s, lon_w, lon_e, img_h, img_w, tree_row_px
-            )
-        else:
-            local_context_masks['tree_row'] = None
 
         if local_context_masks.get('farmland') is not None:
             if local_context_masks['agriculture'] is None:
@@ -1402,6 +1636,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         "[Veg timing] "
         f"scenery_parse={timings['scenery_parse']:.1f}s  "
         f"cache_load={timings['cache_load']:.1f}s  "
+        f"mask_cache={timings['mask_cache']:.1f}s  "
         f"dds_load={timings['dds_load']:.1f}s  "
         f"inference={timings['inference']:.1f}s  "
         f"road_excl={timings['road_excl']:.1f}s  "
