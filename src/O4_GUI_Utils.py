@@ -460,6 +460,16 @@ class Ortho4XP_GUI(tk.Tk):
 
         tile_cfg_file = os.path.join(build_dir, "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg")
 
+        # Always seed tile/runtime vars from the current global tile defaults so
+        # older tile configs that predate newer settings inherit them.
+        for var in list_global_tile_vars:
+            tile_var = var.replace(global_prefix, "")
+            value = getattr(CFG, var)
+            if cfg_global_tile_vars[var]["type"] in (bool, list):
+                setattr(CFG, tile_var, value)
+            else:
+                setattr(CFG, tile_var, cfg_global_tile_vars[var]["type"](value))
+
         if os.path.exists(tile_cfg_file):
             f = open(tile_cfg_file, "r")
             for line in f.readlines():
@@ -505,16 +515,6 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, f"Configuration loaded for tile at {lat} {lon}")
             f.close()
         else:
-            for var in list_global_tile_vars:
-                # Set the value of CFG.* from the value of CFG.global_*
-                _var = "CFG." + var.replace(global_prefix, "")
-                # Get the value of CFG.global_*
-                value = eval("CFG." + var)
-                if cfg_global_tile_vars[var]["type"] in (bool, list):
-                    cmd = _var + "=" + str(value)
-                else:
-                    cmd = _var + "=cfg_global_tile_vars['" + var + "']['type'](value)"
-                exec(cmd)
             self.tile_cfg_exists.set(False)
         # Update config window tile tab values if it's open
         if self.config_window is not None and self.config_window.winfo_exists():
@@ -713,7 +713,7 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
         SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
         SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
-        SFR.sfr_veg_del           = tile.sfr_veg_del
+        SFR.sfr_veg_disable_cache = tile.sfr_veg_disable_cache
         SFR.sfr_patch_size        = tile.sfr_patch_size
         SFR.sfr_overlap           = tile.sfr_overlap
         SFR.sfr_batch_size        = tile.sfr_batch_size
@@ -740,7 +740,7 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_use_default_assets = tile.sfr_bld_use_default_assets
         SFR.sfr_bld_use_sfd_assets = tile.sfr_bld_use_sfd_assets
         SFR.sfr_bld_use_simheaven_assets = tile.sfr_bld_use_simheaven_assets
-        SFR.sfr_bld_del         = tile.sfr_bld_del
+        SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
         SFR.sfr_patch_size      = tile.sfr_patch_size
         SFR.sfr_overlap         = tile.sfr_overlap
         SFR.sfr_batch_size      = tile.sfr_batch_size

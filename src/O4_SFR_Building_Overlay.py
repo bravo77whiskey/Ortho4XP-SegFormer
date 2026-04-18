@@ -1586,6 +1586,7 @@ def run(
     min_zone_m2=None,
     make_viz=False,
     cache_dir=None,
+    disable_cache=False,
     grid_n=HEADING_GRID_N,
     osm_roads_path=None,
     dsftool_path=None,
@@ -1683,6 +1684,29 @@ def run(
             return np.asarray(Image.open(p).convert('RGB'))
         except Exception:
             return None
+
+    def _dds_cache_paths(fname):
+        if not cache_dir:
+            return ()
+        stem = fname.replace('.dds', '')
+        return tuple(
+            os.path.join(cache_dir, stem + suffix)
+            for suffix in (
+                '_veg.npy',
+                '_road.pkl',
+                '_bld.pkl',
+                '_vegaux.pkl',
+                '_vegpoly.pkl',
+            )
+        )
+
+    def _remove_cache_files(paths):
+        for path in paths:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
     # Collect all DDS files; resolve overlapping zoom levels.
     # Each ZL tile maps to exactly 4 children at ZL+1, 16 at ZL+2, etc.
@@ -1917,481 +1941,461 @@ def run(
     for fi, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
         if not m: continue
+        _dds_cache_files = _dds_cache_paths(fname)
+        if disable_cache:
+            # Drop any stale per-DDS cache before starting this DDS.
+            _remove_cache_files(_dds_cache_files)
 
-        # ── Building placement cache ──────────────────────────────────────────
-        # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
-        # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
-        import pickle as _pickle
-        rng_seed = int.from_bytes(
-            hashlib.sha1(f"bld-place:{fname}".encode("utf-8")).digest()[:8],
-            "big",
-        )
-        rng = np.random.default_rng(rng_seed)
-        _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
-        _cached_bld = None
-        if os.path.exists(_bld_cache_file):
-            try:
-                with open(_bld_cache_file, 'rb') as _f:
-                    _cd = _pickle.load(_f)
-                if _cd.get('params') == _bld_params:
-                    _cached_bld = _cd['placements']
-            except Exception:
-                pass
-        if _cached_bld is not None:
-            placed_objects.extend(_cached_bld.get('objects', ()))
-            placed_facades.extend(_cached_bld.get('facades', ()))
-            cached_count = len(_cached_bld.get('objects', ())) + len(_cached_bld.get('facades', ()))
-            print(f"  [{fi:3d}/{n_files}] {fname}  (bld cached — {cached_count} placements)", flush=True)
-            continue
-        _start_object_idx = len(placed_objects)
-        _start_facade_idx = len(placed_facades)
-        til_y_top  = int(m.group(1))
-        til_x_left = int(m.group(2))
-        zl         = int(m.group(4))
-
-        # Geographic bounds
-        lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
-
-        # Inference (cached per DDS filename — filename encodes tile coords + ZL)
-        cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
-        img = None
-        if os.path.exists(cache_path):
-            _t = time.perf_counter()
-            veg_map = np.load(cache_path)
-            timings['cache_load'] += time.perf_counter() - _t
-        else:
-            _t = time.perf_counter()
-            img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-            if img is None:
-                continue
-            timings['dds_load'] += time.perf_counter() - _t
-            if model is None:
-                model, proc, device = SEGFORMER.load_vegetation_model(device)
-            _t = time.perf_counter()
-            veg_map = SEGFORMER.run_inference(model, device, img, proc)
-            timings['inference'] += time.perf_counter() - _t
-            np.save(cache_path, veg_map)
-
-        img_h, img_w = veg_map.shape[:2]
-
-        # Pixel size in metres (approximate, using mid-latitude)
-        mid_lat_rad = math.radians((lat_n + lat_s) / 2)
-        lon_span_m  = (lon_e - lon_w) * 111320 * math.cos(mid_lat_rad)
-        lat_span_m  = (lat_n - lat_s) * 110540
-
-        # Spacing in pixels at this tile's native resolution
-        m_per_px_x = lon_span_m / img_w
-        m_per_px_y = lat_span_m / img_h
-        m_per_px   = (m_per_px_x + m_per_px_y) / 2
-        sp_px = max(3, int(spacing_m / m_per_px))
-        road_width_px = max(
-            ROAD_WIDTH_PX_MIN,
-            int(round(ROAD_CENTERLINE_WIDTH_M / max(m_per_px, 1e-6))),
-        )
-        road_dilate_px = max(
-            ROAD_DILATE_PX_MIN,
-            int(round(ROAD_EXTRA_BUFFER_M / max(m_per_px, 1e-6))),
-        )
-        k_road = cv2.getStructuringElement(
-            cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
-
-        # Zone cleanup
-        bld_raw  = (veg_map == SEGFORMER.CLASS_BUILDING).astype(np.uint8)
-        bld_zone = cv2.morphologyEx(bld_raw,  cv2.MORPH_CLOSE, k_close)
-        bld_zone = cv2.morphologyEx(bld_zone, cv2.MORPH_OPEN,  k_open)
-
-        # Re-subtract SegFormer road/developed pixels that were filled over by
-        # the morphological close.  This restores street gaps between building
-        # blocks that close_k would otherwise bridge (streets narrower than
-        # close_k×2 metres are vulnerable without this step).
-        # Dilation radius matches road rasterization width so the exclusion zone
-        # fully covers each detected road segment.
-        sfr_road_raw = (
-            (veg_map == SEGFORMER.CLASS_ROAD) | (veg_map == SEGFORMER.CLASS_DEVELOPED)
-        ).astype(np.uint8)
-        sfr_road_dilated = None
-        if sfr_road_raw.any():
-            _sfr_r  = road_dilate_px
-            _sfr_ks = _sfr_r * 2 + 1
-            _ksfr   = cv2.getStructuringElement(cv2.MORPH_RECT, (_sfr_ks, _sfr_ks))
-            sfr_road_dilated = cv2.dilate(sfr_road_raw, _ksfr)
-            bld_zone = bld_zone & (~sfr_road_dilated)
-
-        # Seed a thin strip at each DDS tile edge into the occupancy mask.
-        # This pushes buildings back from the seam by one footprint width without
-        # clearing the zone — so a real block at the edge still gets buildings,
-        # just not crammed right against the tile boundary where adjacent tiles
-        # would also be packing from their side.
-        TILE_EDGE_MARGIN_M = 20.0
-        edge_px = max(2, int(TILE_EDGE_MARGIN_M / m_per_px))
-
-        # ── OSM exclusion masks ──────────────────────────────────────────────
-        # Roads split zones and seed the occupancy mask.
-        # Water/building/aeroway polygons and railways are also subtracted so
-        # SegFormer-placed buildings don't appear on mapped features.
-        local_separator_roads = _roads_for_bounds(
-            separator_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        local_residential_roads = _residential_roads(
-            _roads_for_bounds(osm_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        )
-        local_rails = _roads_for_bounds(
-            excl_rails_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        local_residential_polys = _polys_for_bounds(
-            residential_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        local_excl_polys = _polys_for_bounds(
-            excl_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        local_existing_bld_polys = _polys_for_bounds(
-            existing_bld_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        local_heading_segments = _segments_for_bounds(
-            heading_seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-        local_sh_bld_objects = _simheaven_objects_for_bounds(
-            sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
-        nearest_heading_segments = (
-            local_heading_segments or
-            _segments_for_bounds(heading_seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.02) or
-            heading_seg_index
-        )
-
-        _road_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_road.pkl'))
-        _road_key = _dds_road_cache_key(
-            fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
-            grid_n, road_width_px, road_dilate_px,
-            separator_sig, rail_sig, heading_sig, residential_poly_sig,
-            excl_poly_sig, existing_bld_poly_sig, sh_bld_sig,
-        )
-        _t = time.perf_counter()
-        _road_cached = _load_dds_road_cache(_road_cache_file, _road_key)
-        timings['road_cache'] += time.perf_counter() - _t
-
-        if _road_cached is not None:
-            road_mask = _road_cached['road_mask']
-            rail_mask = _road_cached['rail_mask']
-            hgrid = _road_cached['hgrid'].copy()
-            n_osm_cells = int(_road_cached['n_osm_cells'])
-            residential_area_mask = _road_cached.get('residential_area_mask')
-            residential_area_source = _road_cached.get(
-                'residential_area_source', 'unknown'
+        try:
+            # ── Building placement cache ──────────────────────────────────────
+            # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
+            # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
+            import pickle as _pickle
+            rng_seed = int.from_bytes(
+                hashlib.sha1(f"bld-place:{fname}".encode("utf-8")).digest()[:8],
+                "big",
             )
-            poly_mask = _road_cached.get('poly_mask')
-            existing_bld_mask = _road_cached.get('existing_bld_mask')
-            sh_bld_mask = _road_cached.get('sh_bld_mask')
-            n_road_cache_hits += 1
-        else:
-            n_road_cache_misses += 1
-            _t = time.perf_counter()
-            if local_separator_roads:
-                road_mask = _rasterize_roads(
-                    local_separator_roads, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, road_width_px=road_width_px)
-                road_mask = cv2.dilate(road_mask, k_road)
-            else:
-                road_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            rng = np.random.default_rng(rng_seed)
+            _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
+            _cached_bld = None
+            if not disable_cache and os.path.exists(_bld_cache_file):
+                try:
+                    with open(_bld_cache_file, 'rb') as _f:
+                        _cd = _pickle.load(_f)
+                    if _cd.get('params') == _bld_params:
+                        _cached_bld = _cd['placements']
+                except Exception:
+                    pass
+            if _cached_bld is not None:
+                placed_objects.extend(_cached_bld.get('objects', ()))
+                placed_facades.extend(_cached_bld.get('facades', ()))
+                cached_count = len(_cached_bld.get('objects', ())) + len(_cached_bld.get('facades', ()))
+                print(f"  [{fi:3d}/{n_files}] {fname}  (bld cached — {cached_count} placements)", flush=True)
+                continue
+            _start_object_idx = len(placed_objects)
+            _start_facade_idx = len(placed_facades)
+            til_y_top  = int(m.group(1))
+            til_x_left = int(m.group(2))
+            zl         = int(m.group(4))
 
-            if local_rails:
-                rail_mask = _rasterize_roads(
-                    local_rails, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, road_width_px=road_width_px)
-                rail_mask = cv2.dilate(rail_mask, k_road)
-            else:
-                rail_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-            timings['road_raster'] += time.perf_counter() - _t
+            # Geographic bounds
+            lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
-            # ── Heading grid ─────────────────────────────────────────────────
+            # Inference (cached per DDS filename — filename encodes tile coords + ZL)
+            cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
+            img = None
+            if not disable_cache and os.path.exists(cache_path):
+                _t = time.perf_counter()
+                veg_map = np.load(cache_path)
+                timings['cache_load'] += time.perf_counter() - _t
+            else:
+                _t = time.perf_counter()
+                img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                if img is None:
+                    continue
+                timings['dds_load'] += time.perf_counter() - _t
+                if model is None:
+                    model, proc, device = SEGFORMER.load_vegetation_model(device)
+                _t = time.perf_counter()
+                veg_map = SEGFORMER.run_inference(model, device, img, proc)
+                timings['inference'] += time.perf_counter() - _t
+                if not disable_cache:
+                    np.save(cache_path, veg_map)
+
+            img_h, img_w = veg_map.shape[:2]
+
+            # Pixel size in metres (approximate, using mid-latitude)
+            mid_lat_rad = math.radians((lat_n + lat_s) / 2)
+            lon_span_m  = (lon_e - lon_w) * 111320 * math.cos(mid_lat_rad)
+            lat_span_m  = (lat_n - lat_s) * 110540
+
+            # Spacing in pixels at this tile's native resolution
+            m_per_px_x = lon_span_m / img_w
+            m_per_px_y = lat_span_m / img_h
+            m_per_px   = (m_per_px_x + m_per_px_y) / 2
+            sp_px = max(3, int(spacing_m / m_per_px))
+            road_width_px = max(
+                ROAD_WIDTH_PX_MIN,
+                int(round(ROAD_CENTERLINE_WIDTH_M / max(m_per_px, 1e-6))),
+            )
+            road_dilate_px = max(
+                ROAD_DILATE_PX_MIN,
+                int(round(ROAD_EXTRA_BUFFER_M / max(m_per_px, 1e-6))),
+            )
+            k_road = cv2.getStructuringElement(
+                cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
+
+            # Zone cleanup
+            bld_raw  = (veg_map == SEGFORMER.CLASS_BUILDING).astype(np.uint8)
+            bld_zone = cv2.morphologyEx(bld_raw,  cv2.MORPH_CLOSE, k_close)
+            bld_zone = cv2.morphologyEx(bld_zone, cv2.MORPH_OPEN,  k_open)
+
+            # Re-subtract SegFormer road/developed pixels that were filled over by
+            # the morphological close.  This restores street gaps between building
+            # blocks that close_k would otherwise bridge.
+            sfr_road_raw = (
+                (veg_map == SEGFORMER.CLASS_ROAD) | (veg_map == SEGFORMER.CLASS_DEVELOPED)
+            ).astype(np.uint8)
+            sfr_road_dilated = None
+            if sfr_road_raw.any():
+                _sfr_r  = road_dilate_px
+                _sfr_ks = _sfr_r * 2 + 1
+                _ksfr   = cv2.getStructuringElement(cv2.MORPH_RECT, (_sfr_ks, _sfr_ks))
+                sfr_road_dilated = cv2.dilate(sfr_road_raw, _ksfr)
+                bld_zone = bld_zone & (~sfr_road_dilated)
+
+            TILE_EDGE_MARGIN_M = 20.0
+            edge_px = max(2, int(TILE_EDGE_MARGIN_M / m_per_px))
+
+            local_separator_roads = _roads_for_bounds(
+                separator_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            local_residential_roads = _residential_roads(
+                _roads_for_bounds(osm_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            )
+            local_rails = _roads_for_bounds(
+                excl_rails_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            local_residential_polys = _polys_for_bounds(
+                residential_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            local_excl_polys = _polys_for_bounds(
+                excl_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            local_existing_bld_polys = _polys_for_bounds(
+                existing_bld_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            local_heading_segments = _segments_for_bounds(
+                heading_seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
+            local_sh_bld_objects = _simheaven_objects_for_bounds(
+                sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
+            nearest_heading_segments = (
+                local_heading_segments or
+                _segments_for_bounds(heading_seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.02) or
+                heading_seg_index
+            )
+
+            _road_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_road.pkl'))
+            _road_key = _dds_road_cache_key(
+                fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
+                grid_n, road_width_px, road_dilate_px,
+                separator_sig, rail_sig, heading_sig, residential_poly_sig,
+                excl_poly_sig, existing_bld_poly_sig, sh_bld_sig,
+            )
+            _road_cached = None
+            if not disable_cache:
+                _t = time.perf_counter()
+                _road_cached = _load_dds_road_cache(_road_cache_file, _road_key)
+                timings['road_cache'] += time.perf_counter() - _t
+
+            if _road_cached is not None:
+                road_mask = _road_cached['road_mask']
+                rail_mask = _road_cached['rail_mask']
+                hgrid = _road_cached['hgrid'].copy()
+                n_osm_cells = int(_road_cached['n_osm_cells'])
+                residential_area_mask = _road_cached.get('residential_area_mask')
+                residential_area_source = _road_cached.get(
+                    'residential_area_source', 'unknown'
+                )
+                poly_mask = _road_cached.get('poly_mask')
+                existing_bld_mask = _road_cached.get('existing_bld_mask')
+                sh_bld_mask = _road_cached.get('sh_bld_mask')
+                n_road_cache_hits += 1
+            else:
+                n_road_cache_misses += 1
+                _t = time.perf_counter()
+                if local_separator_roads:
+                    road_mask = _rasterize_roads(
+                        local_separator_roads, lat_n, lat_s, lon_w, lon_e,
+                        img_h, img_w, road_width_px=road_width_px)
+                    road_mask = cv2.dilate(road_mask, k_road)
+                else:
+                    road_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+
+                if local_rails:
+                    rail_mask = _rasterize_roads(
+                        local_rails, lat_n, lat_s, lon_w, lon_e,
+                        img_h, img_w, road_width_px=road_width_px)
+                    rail_mask = cv2.dilate(rail_mask, k_road)
+                else:
+                    rail_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                timings['road_raster'] += time.perf_counter() - _t
+
+                # ── Heading grid ─────────────────────────────────────────────
+                _t = time.perf_counter()
+                if local_heading_segments:
+                    if img is None:
+                        _img_t = time.perf_counter()
+                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                        if img is None:
+                            continue
+                        timings['dds_load'] += time.perf_counter() - _img_t
+                    hgrid = _road_heading_grid(
+                        None, lat_n, lat_s, lon_w, lon_e,
+                        img_h, img_w, grid_n, img=img,
+                        segments=local_heading_segments,
+                    )
+                else:
+                    hgrid = np.full((grid_n, grid_n), np.nan)
+                n_osm_cells = int(np.sum(~np.isnan(hgrid)))
+                hgrid = _fill_heading_grid_nearest(
+                    hgrid, nearest_heading_segments, lat_n, lat_s, lon_w, lon_e,
+                    img_h, img_w, grid_n,
+                )
+                residential_area_mask, residential_area_source = _build_residential_area_mask(
+                    local_residential_polys,
+                    local_residential_roads,
+                    lat_n,
+                    lat_s,
+                    lon_w,
+                    lon_e,
+                    img_h,
+                    img_w,
+                    m_per_px,
+                )
+                timings['heading_grid'] += time.perf_counter() - _t
+
+                poly_mask = None
+                if local_excl_polys:
+                    _t = time.perf_counter()
+                    poly_mask = _rasterize_polygons(
+                        local_excl_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                    )
+                    timings['road_raster'] += time.perf_counter() - _t
+
+                existing_bld_mask = None
+                if local_existing_bld_polys:
+                    _t = time.perf_counter()
+                    existing_bld_mask = _rasterize_polygons(
+                        local_existing_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                    )
+                    timings['existing_bld_excl'] += time.perf_counter() - _t
+
+                sh_bld_mask = None
+                if local_sh_bld_objects:
+                    _t = time.perf_counter()
+                    sh_bld_mask = _rasterize_simheaven_objects(
+                        local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
+                        img_h, img_w, m_per_px
+                    )
+                    timings['existing_bld_excl'] += time.perf_counter() - _t
+
+                if not disable_cache:
+                    _save_dds_road_cache(
+                        _road_cache_file,
+                        _road_key,
+                        road_mask,
+                        rail_mask,
+                        hgrid,
+                        n_osm_cells,
+                        residential_area_mask,
+                        residential_area_source,
+                        poly_mask,
+                        existing_bld_mask,
+                        sh_bld_mask,
+                    )
+
+            bld_zone = bld_zone & (~road_mask)
+            occ_mask = road_mask.copy()
+
+            if poly_mask is not None and poly_mask.any():
+                bld_zone  = bld_zone & (~poly_mask)
+                occ_mask  = occ_mask | poly_mask
+
+            if existing_bld_mask is not None and existing_bld_mask.any():
+                occ_mask = occ_mask | existing_bld_mask
+
+            if rail_mask.any():
+                bld_zone  = bld_zone & (~rail_mask)
+                occ_mask  = occ_mask | rail_mask
+
+            if sh_bld_mask is not None and sh_bld_mask.any():
+                occ_mask = occ_mask | sh_bld_mask
+
+            DEGREE_TOL = 1e-4
+            if lat_n >= lat + 1 - DEGREE_TOL:   occ_mask[:edge_px,  :]  = 1
+            if lat_s <= lat     + DEGREE_TOL:   occ_mask[-edge_px:, :]  = 1
+            if lon_w <= lon     + DEGREE_TOL:   occ_mask[:,  :edge_px]  = 1
+            if lon_e >= lon + 1 - DEGREE_TOL:   occ_mask[:, -edge_px:]  = 1
+
+            cell_h = img_h // grid_n
+            cell_w = img_w // grid_n
+
+            if np.any(np.isnan(hgrid)):
+                hgrid = np.where(np.isnan(hgrid), float(rng.integers(0, 360)), hgrid)
+
             _t = time.perf_counter()
-            if local_heading_segments:
+            min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
+            n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(bld_zone, connectivity=8)
+            cc_area = cc_stats[:, cv2.CC_STAT_AREA]
+            label_class = np.zeros(n_cc, dtype=np.uint8)
+            valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
+            if valid_labels.size:
+                valid_area = cc_area[valid_labels]
+                label_class[valid_labels[valid_area < ZONE_SMALL_PX]] = 1
+                label_class[valid_labels[(valid_area >= ZONE_SMALL_PX)
+                                         & (valid_area < ZONE_LARGE_PX)]] = 2
+                label_class[valid_labels[valid_area >= ZONE_LARGE_PX]] = 3
+            zone_class = label_class[cc_labels]
+
+            zone_heading = np.full(n_cc, np.nan, dtype=np.float32)
+            if valid_labels.size:
+                centroid_x = np.clip(
+                    np.rint(cc_centroids[valid_labels, 0]).astype(np.int32), 0, img_w - 1
+                )
+                centroid_y = np.clip(
+                    np.rint(cc_centroids[valid_labels, 1]).astype(np.int32), 0, img_h - 1
+                )
+                zone_heading[valid_labels] = hgrid[
+                    np.minimum(grid_n - 1, centroid_y // cell_h),
+                    np.minimum(grid_n - 1, centroid_x // cell_w),
+                ]
+
+            half = sp_px // 2
+            pts_this = []
+            candidate_grid_key = (img_w, img_h, sp_px)
+            base_candidates = candidate_grid_cache.get(candidate_grid_key)
+            if base_candidates is None:
+                xs = np.arange(half, img_w, sp_px, dtype=np.int32)
+                ys = np.arange(half, img_h, sp_px, dtype=np.int32)
+                if xs.size and ys.size:
+                    grid_x, grid_y = np.meshgrid(xs, ys)
+                    base_candidates = (grid_x.ravel(), grid_y.ravel())
+                else:
+                    base_candidates = (np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32))
+                candidate_grid_cache[candidate_grid_key] = base_candidates
+            base_x, base_y = base_candidates
+            if base_x.size and base_y.size:
+                n_candidates = base_x.size
+                jitter = rng.integers(-half, half + 1, size=(n_candidates, 2),
+                                      dtype=np.int32)
+                cand_x = np.clip(base_x + jitter[:, 0], 0, img_w - 1)
+                cand_y = np.clip(base_y + jitter[:, 1], 0, img_h - 1)
+                cand_cls = zone_class[cand_y, cand_x]
+                keep = cand_cls != 0
+                cand_x = cand_x[keep]
+                cand_y = cand_y[keep]
+                cand_cls = cand_cls[keep]
+            else:
+                cand_x = cand_y = cand_cls = ()
+
+            for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
+                jx = int(jx)
+                jy = int(jy)
+                zone_cls = int(zone_cls)
+
+                zone_label = int(cc_labels[jy, jx])
+                dom_h = float(zone_heading[zone_label]) if (
+                    0 <= zone_label < zone_heading.shape[0]
+                    and not np.isnan(zone_heading[zone_label])
+                ) else float(hgrid[
+                    min(grid_n - 1, jy // cell_h),
+                    min(grid_n - 1, jx // cell_w),
+                ])
+                jitter  = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
+                heading = (dom_h + jitter) % 360.0
+
+                for try_cls in [zone_cls]:
+                    if (
+                        try_cls == 1 and
+                        residential_area_mask is not None and
+                        not bool(residential_area_mask[jy, jx])
+                    ):
+                        continue
+
+                    pool = asset_pools[try_cls]
+                    if not pool:
+                        continue
+                    asset = pool[int(rng.integers(0, len(pool)))]
+                    bounds_m = asset.get('bounds_m')
+                    if bounds_m is None:
+                        n_unknown_skipped += 1
+                        continue
+
+                    fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+                    mark_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M)
+
+                    final_h = final_poly = None
+                    poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
+                    if _poly_fits(occ_mask, poly):
+                        final_h = heading
+                        final_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
+                    else:
+                        h90 = (heading + 90.0) % 360.0
+                        poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
+                        if _poly_fits(occ_mask, poly90):
+                            final_h = h90
+                            final_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+
+                    if final_h is None:
+                        continue
+
+                    o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
+                                                lat_n, lat_s, lon_w, lon_e)
+                    if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
+                        break
+                    pts_this.append((jx, jy, final_h, try_cls))
+                    if asset['kind'] == 'object':
+                        placed_objects.append((o_lon, o_lat, final_h, asset['path']))
+                    else:
+                        placed_facades.append((
+                            _pixel_ring_to_latlon(final_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
+                            asset['path'],
+                            float(asset.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
+                        ))
+                    _mark_poly(occ_mask, final_poly)
+                    break
+
+            timings['placement'] += time.perf_counter() - _t
+
+            col = (til_x_left - x_min) // x_step
+            row = (til_y_top  - y_min) // y_step
+            bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
+            n_s = sum(1 for p in pts_this if p[3] == 1)
+            n_m = sum(1 for p in pts_this if p[3] == 2)
+            n_l = sum(1 for p in pts_this if p[3] == 3)
+            print(
+                f"  [{fi:3d}/{n_files}] {fname}  "
+                f"{_describe_placement_summary(n_s, n_m, n_l, bld_pct, n_osm_cells, grid_n, sp_px, sp_px * m_per_px)}"
+                f"  small-house areas={residential_area_source}"
+            )
+
+            if not disable_cache:
+                try:
+                    with open(_bld_cache_file, 'wb') as _f:
+                        _pickle.dump({
+                            'params': _bld_params,
+                            'placements': {
+                                'objects': placed_objects[_start_object_idx:],
+                                'facades': placed_facades[_start_facade_idx:],
+                            },
+                        }, _f)
+                except Exception:
+                    pass
+
+            if make_viz and composite is not None:
                 if img is None:
                     _img_t = time.perf_counter()
                     img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                     if img is None:
                         continue
                     timings['dds_load'] += time.perf_counter() - _img_t
-                hgrid = _road_heading_grid(
-                    None, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, grid_n, img=img,
-                    segments=local_heading_segments,
-                )
-            else:
-                hgrid = np.full((grid_n, grid_n), np.nan)
-            n_osm_cells = int(np.sum(~np.isnan(hgrid)))
-            hgrid = _fill_heading_grid_nearest(
-                hgrid, nearest_heading_segments, lat_n, lat_s, lon_w, lon_e,
-                img_h, img_w, grid_n,
-            )
-            residential_area_mask, residential_area_source = _build_residential_area_mask(
-                local_residential_polys,
-                local_residential_roads,
-                lat_n,
-                lat_s,
-                lon_w,
-                lon_e,
-                img_h,
-                img_w,
-                m_per_px,
-            )
-            timings['heading_grid'] += time.perf_counter() - _t
-
-            poly_mask = None
-            if local_excl_polys:
-                _t = time.perf_counter()
-                poly_mask = _rasterize_polygons(
-                    local_excl_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                )
-                timings['road_raster'] += time.perf_counter() - _t
-
-            existing_bld_mask = None
-            if local_existing_bld_polys:
-                _t = time.perf_counter()
-                existing_bld_mask = _rasterize_polygons(
-                    local_existing_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                )
-                timings['existing_bld_excl'] += time.perf_counter() - _t
-
-            sh_bld_mask = None
-            if local_sh_bld_objects:
-                _t = time.perf_counter()
-                sh_bld_mask = _rasterize_simheaven_objects(
-                    local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, m_per_px
-                )
-                timings['existing_bld_excl'] += time.perf_counter() - _t
-
-            _save_dds_road_cache(
-                _road_cache_file,
-                _road_key,
-                road_mask,
-                rail_mask,
-                hgrid,
-                n_osm_cells,
-                residential_area_mask,
-                residential_area_source,
-                poly_mask,
-                existing_bld_mask,
-                sh_bld_mask,
-            )
-
-        bld_zone = bld_zone & (~road_mask)
-        occ_mask = road_mask.copy()
-
-        if poly_mask is not None and poly_mask.any():
-            bld_zone  = bld_zone & (~poly_mask)
-            occ_mask  = occ_mask | poly_mask
-
-        if existing_bld_mask is not None and existing_bld_mask.any():
-            occ_mask = occ_mask | existing_bld_mask
-
-        if rail_mask.any():
-            bld_zone  = bld_zone & (~rail_mask)
-            occ_mask  = occ_mask | rail_mask
-
-        if sh_bld_mask is not None and sh_bld_mask.any():
-            occ_mask = occ_mask | sh_bld_mask
-
-        # Seed edge strip into occ_mask only on sides that touch the degree-tile
-        # boundary (where the next tile is default X-Plane scenery with no
-        # buildings).  Interior DDS-DDS boundaries are left alone.
-        DEGREE_TOL = 1e-4   # tolerance for floating-point boundary comparison
-        if lat_n >= lat + 1 - DEGREE_TOL:   occ_mask[:edge_px,  :]  = 1  # north edge
-        if lat_s <= lat     + DEGREE_TOL:   occ_mask[-edge_px:, :]  = 1  # south edge
-        if lon_w <= lon     + DEGREE_TOL:   occ_mask[:,  :edge_px]  = 1  # west edge
-        if lon_e >= lon + 1 - DEGREE_TOL:   occ_mask[:, -edge_px:]  = 1  # east edge
-
-        cell_h = img_h // grid_n
-        cell_w = img_w // grid_n
-
-        # Last resort: if all_roads was empty, use a random heading
-        if np.any(np.isnan(hgrid)):
-            hgrid = np.where(np.isnan(hgrid), float(rng.integers(0, 360)), hgrid)
-
-        # ── Zone classification ───────────────────────────────────────────
-        _t = time.perf_counter()
-        # Convert the configured minimum building zone area from square metres
-        # to pixels at the actual source resolution for this DDS.
-        min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
-        # zone_class: 0=skip  1=small  2=medium  3=large
-        n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(bld_zone, connectivity=8)
-        cc_area = cc_stats[:, cv2.CC_STAT_AREA]
-        label_class = np.zeros(n_cc, dtype=np.uint8)
-        valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
-        if valid_labels.size:
-            valid_area = cc_area[valid_labels]
-            label_class[valid_labels[valid_area < ZONE_SMALL_PX]] = 1
-            label_class[valid_labels[(valid_area >= ZONE_SMALL_PX)
-                                     & (valid_area < ZONE_LARGE_PX)]] = 2
-            label_class[valid_labels[valid_area >= ZONE_LARGE_PX]] = 3
-        zone_class = label_class[cc_labels]
-
-        # ── Per-block dominant heading ────────────────────────────────────
-        # Sample hgrid once at each CC's centroid.  hgrid is built from
-        # all road segments in a ~350 m cell (16×16 grid over the DDS),
-        # so it aggregates many segments and is naturally robust to outliers.
-        # Every building in the same road-separated block gets the same
-        # base heading — no per-placement-point drift across cell boundaries.
-        zone_heading = np.full(n_cc, np.nan, dtype=np.float32)  # label → dominant heading (degrees)
-        if valid_labels.size:
-            centroid_x = np.clip(
-                np.rint(cc_centroids[valid_labels, 0]).astype(np.int32), 0, img_w - 1
-            )
-            centroid_y = np.clip(
-                np.rint(cc_centroids[valid_labels, 1]).astype(np.int32), 0, img_h - 1
-            )
-            zone_heading[valid_labels] = hgrid[
-                np.minimum(grid_n - 1, centroid_y // cell_h),
-                np.minimum(grid_n - 1, centroid_x // cell_w),
-            ]
-
-        # Procedural fill with rectangular footprint collision detection.
-        # Each connected building zone gets one size class. Within that class we
-        # still try a 90° rotation so rectangular objects can fit narrow sites.
-        half = sp_px // 2
-        pts_this = []   # (jx, jy, heading, cls) for viz
-        candidate_grid_key = (img_w, img_h, sp_px)
-        base_candidates = candidate_grid_cache.get(candidate_grid_key)
-        if base_candidates is None:
-            xs = np.arange(half, img_w, sp_px, dtype=np.int32)
-            ys = np.arange(half, img_h, sp_px, dtype=np.int32)
-            if xs.size and ys.size:
-                grid_x, grid_y = np.meshgrid(xs, ys)
-                base_candidates = (grid_x.ravel(), grid_y.ravel())
-            else:
-                base_candidates = (np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32))
-            candidate_grid_cache[candidate_grid_key] = base_candidates
-        base_x, base_y = base_candidates
-        if base_x.size and base_y.size:
-            n_candidates = base_x.size
-            jitter = rng.integers(-half, half + 1, size=(n_candidates, 2),
-                                  dtype=np.int32)
-            cand_x = np.clip(base_x + jitter[:, 0], 0, img_w - 1)
-            cand_y = np.clip(base_y + jitter[:, 1], 0, img_h - 1)
-            cand_cls = zone_class[cand_y, cand_x]
-            keep = cand_cls != 0
-            cand_x = cand_x[keep]
-            cand_y = cand_y[keep]
-            cand_cls = cand_cls[keep]
-        else:
-            cand_x = cand_y = cand_cls = ()
-
-        for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
-            jx = int(jx)
-            jy = int(jy)
-            zone_cls = int(zone_cls)
-
-            zone_label = int(cc_labels[jy, jx])
-            dom_h = float(zone_heading[zone_label]) if (
-                0 <= zone_label < zone_heading.shape[0]
-                and not np.isnan(zone_heading[zone_label])
-            ) else float(hgrid[
-                min(grid_n - 1, jy // cell_h),
-                min(grid_n - 1, jx // cell_w),
-            ])
-            jitter  = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
-            heading = (dom_h + jitter) % 360.0
-
-            # Each zone class uses only its own building size — no cascade.
-            for try_cls in [zone_cls]:
-                if (
-                    try_cls == 1 and
-                    residential_area_mask is not None and
-                    not bool(residential_area_mask[jy, jx])
-                ):
-                    continue
-
-                pool = asset_pools[try_cls]
-                if not pool:
-                    continue
-                asset = pool[int(rng.integers(0, len(pool)))]
-                bounds_m = asset.get('bounds_m')
-                if bounds_m is None:
-                    n_unknown_skipped += 1
-                    continue
-
-                fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
-                mark_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M)
-
-                # Try original orientation, then 90° rotation for non-square footprints
-                final_h = final_poly = None
-                poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
-                if _poly_fits(occ_mask, poly):
-                    final_h = heading
-                    final_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
-                else:
-                    h90 = (heading + 90.0) % 360.0
-                    poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
-                    if _poly_fits(occ_mask, poly90):
-                        final_h = h90
-                        final_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
-
-                if final_h is None:
-                    continue  # doesn't fit in either orientation at this point
-
-                o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
-                                            lat_n, lat_s, lon_w, lon_e)
-                if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
-                    break  # outside degree tile — skip entirely
-                pts_this.append((jx, jy, final_h, try_cls))
-                if asset['kind'] == 'object':
-                    placed_objects.append((o_lon, o_lat, final_h, asset['path']))
-                else:
-                    placed_facades.append((
-                        _pixel_ring_to_latlon(final_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
-                        asset['path'],
-                        float(asset.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
-                    ))
-                _mark_poly(occ_mask, final_poly)
-                break  # placed — move to next grid point
-
-        timings['placement'] += time.perf_counter() - _t
-
-        col = (til_x_left - x_min) // x_step
-        row = (til_y_top  - y_min) // y_step
-        bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
-        n_s = sum(1 for p in pts_this if p[3] == 1)
-        n_m = sum(1 for p in pts_this if p[3] == 2)
-        n_l = sum(1 for p in pts_this if p[3] == 3)
-        print(
-            f"  [{fi:3d}/{n_files}] {fname}  "
-            f"{_describe_placement_summary(n_s, n_m, n_l, bld_pct, n_osm_cells, grid_n, sp_px, sp_px * m_per_px)}"
-            f"  small-house areas={residential_area_source}"
-        )
-
-        # Save per-DDS placement cache
-        try:
-            with open(_bld_cache_file, 'wb') as _f:
-                _pickle.dump({
-                    'params': _bld_params,
-                    'placements': {
-                        'objects': placed_objects[_start_object_idx:],
-                        'facades': placed_facades[_start_facade_idx:],
-                    },
-                }, _f)
-        except Exception:
-            pass
-
-        # Visualisation panel — zones colour-coded by class
-        if make_viz and composite is not None:
-            if img is None:
-                _img_t = time.perf_counter()
-                img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-                if img is None:
-                    continue
-                timings['dds_load'] += time.perf_counter() - _img_t
-            scale = TILE_VIZ / img_w
-            panel = np.array(Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS))
-            zc_small = np.array(Image.fromarray((zone_class == 1).astype(np.uint8)*255)
-                                .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
-            zc_med   = np.array(Image.fromarray((zone_class == 2).astype(np.uint8)*255)
-                                .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
-            zc_large = np.array(Image.fromarray((zone_class == 3).astype(np.uint8)*255)
-                                .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
-            for mask, colour in ((zc_small, ZONE_COLOURS[1]),
-                                 (zc_med,   ZONE_COLOURS[2]),
-                                 (zc_large, ZONE_COLOURS[3])):
-                panel[mask] = (panel[mask] * 0.45 + colour * 0.55).astype(np.uint8)
-            pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil)
-            dot_colours = {1: (0, 220, 0), 2: (255, 220, 0), 3: (0, 160, 255)}
-            for px2, py2, _, cls2 in pts_this:
-                sx, sy = int(px2*scale), int(py2*scale)
-                draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
-            composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
+                scale = TILE_VIZ / img_w
+                panel = np.array(Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS))
+                zc_small = np.array(Image.fromarray((zone_class == 1).astype(np.uint8)*255)
+                                    .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
+                zc_med   = np.array(Image.fromarray((zone_class == 2).astype(np.uint8)*255)
+                                    .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
+                zc_large = np.array(Image.fromarray((zone_class == 3).astype(np.uint8)*255)
+                                    .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
+                for mask, colour in ((zc_small, ZONE_COLOURS[1]),
+                                     (zc_med,   ZONE_COLOURS[2]),
+                                     (zc_large, ZONE_COLOURS[3])):
+                    panel[mask] = (panel[mask] * 0.45 + colour * 0.55).astype(np.uint8)
+                pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil)
+                dot_colours = {1: (0, 220, 0), 2: (255, 220, 0), 3: (0, 160, 255)}
+                for px2, py2, _, cls2 in pts_this:
+                    sx, sy = int(px2*scale), int(py2*scale)
+                    draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
+                composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
+        finally:
+            if disable_cache:
+                _remove_cache_files(_dds_cache_files)
 
     total_time = time.time() - t_start
     total_placements = len(placed_objects) + len(placed_facades)

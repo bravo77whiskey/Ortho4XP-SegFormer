@@ -108,7 +108,7 @@ sfr_veg_simheaven_buffer_m = 0.0
 sfr_veg_avoid_default_forests = True
 sfr_veg_default_buffer_m = 0.0
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
-sfr_veg_del           = False
+sfr_veg_disable_cache = False
 
 sfr_bld_spacing_m     = 20.0
 sfr_bld_close_m       = 30.0
@@ -118,7 +118,7 @@ sfr_bld_grid_n        = 16
 sfr_bld_use_default_assets = False
 sfr_bld_use_sfd_assets = True
 sfr_bld_use_simheaven_assets = False
-sfr_bld_del           = False
+sfr_bld_disable_cache = False
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -324,6 +324,7 @@ def process_veg_tile(lat, lon, build_dir):
         f"    make_viz         = False,\n"
         f"    density_override = {density_override!r},\n"
         f"    res_m            = {res_m!r},\n"
+        f"    disable_cache    = {sfr_veg_disable_cache!r},\n"
         f"    excl_buffer_m    = {sfr_veg_excl_buffer_m!r},\n"
         f"    use_simheaven    = {sfr_veg_use_simheaven!r},\n"
         f"    avoid_simheaven_buildings = {sfr_veg_avoid_simheaven_buildings!r},\n"
@@ -334,7 +335,7 @@ def process_veg_tile(lat, lon, build_dir):
         f"    simheaven_buffer_m = {sfr_veg_simheaven_buffer_m!r},\n"
         f"    avoid_default_forests = {sfr_veg_avoid_default_forests!r},\n"
         f"    default_buffer_m = {sfr_veg_default_buffer_m!r},\n"
-        f"    bld_excl_m       = 10.0,\n"
+        f"    bld_excl_m       = {0.0 if sfr_veg_disable_cache else 10.0!r},\n"
         f"    dsftool_path     = {dsftool!r},\n"
         f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
         f"    custom_overlay_src = {custom_overlay_src!r},\n"
@@ -344,8 +345,6 @@ def process_veg_tile(lat, lon, build_dir):
     ret = _run_venv(code)
     if ret != 0:
         raise RuntimeError(f"SegFormer veg overlay subprocess failed (exit {ret})")
-    if sfr_veg_del:
-        _delete_cache_files(cache_dir, ['*_veg.npy'], 'veg')
     print(f"[SFR Veg] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
@@ -388,6 +387,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    open_k       = {open_k!r},\n"
         f"    min_zone_m2  = {sfr_bld_min_zone_m2!r},\n"
         f"    make_viz                 = False,\n"
+        f"    disable_cache            = {sfr_bld_disable_cache!r},\n"
         f"    cache_dir                = {cache_dir!r},\n"
         f"    grid_n                   = {sfr_bld_grid_n!r},\n"
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
@@ -401,8 +401,6 @@ def process_bld_tile(lat, lon, build_dir):
     ret = _run_venv(code)
     if ret != 0:
         raise RuntimeError(f"SegFormer bld overlay subprocess failed (exit {ret})")
-    if sfr_bld_del:
-        _delete_cache_files(cache_dir, ['*_bld.pkl'], 'bld')
     print(f"[SFR Bld] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 

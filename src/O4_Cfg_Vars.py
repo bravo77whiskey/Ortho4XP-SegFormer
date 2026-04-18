@@ -427,11 +427,11 @@ cfg_tile_vars = {
         "short_name": "sfr_veg_res",
         "hint": "Downsample inference maps to this ground resolution in metres before polygon extraction. 0 = native DDS detail (about 2 m at ZL16). Use 5–10 m to reduce polygon count on performance-critical tiles.",
     },
-    "sfr_veg_del": {
+    "sfr_veg_disable_cache": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_veg_del",
-        "hint": "Automatically delete the SFR vegetation cache (*_veg.npy) for this tile after a successful vegetation overlay build.",
+        "short_name": "sfr_veg_no_cache",
+        "hint": "Disable persistent per-DDS vegetation cache files for this tile. When enabled, vegetation cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
     "sfr_patch_size": {
         "type": int,
@@ -512,11 +512,11 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_simh",
         "hint": "Allow simHeaven building assets when matching simHeaven scenery is available.",
     },
-    "sfr_bld_del": {
+    "sfr_bld_disable_cache": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_bld_del",
-        "hint": "Automatically delete the SFR building cache (*_bld.pkl) for this tile after a successful building overlay build.",
+        "short_name": "sfr_bld_no_cache",
+        "hint": "Disable persistent per-DDS building cache files for this tile. When enabled, building cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
     # Other
     "custom_dem": {
@@ -635,7 +635,7 @@ list_sfr_veg_vars = [
     "sfr_veg_avoid_default_forests",
     "sfr_veg_default_buffer_m",
     "sfr_veg_res_m",
-    "sfr_veg_del",
+    "sfr_veg_disable_cache",
     "sfr_patch_size",
     "sfr_overlap",
     "sfr_batch_size",
@@ -650,7 +650,7 @@ list_sfr_bld_vars = [
     "sfr_bld_use_default_assets",
     "sfr_bld_use_sfd_assets",
     "sfr_bld_use_simheaven_assets",
-    "sfr_bld_del",
+    "sfr_bld_disable_cache",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars

@@ -403,7 +403,7 @@ def build_tile_list(
             SFR.sfr_bld_use_default_assets = tile.sfr_bld_use_default_assets
             SFR.sfr_bld_use_sfd_assets = tile.sfr_bld_use_sfd_assets
             SFR.sfr_bld_use_simheaven_assets = tile.sfr_bld_use_simheaven_assets
-            SFR.sfr_bld_del         = tile.sfr_bld_del
+            SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap
             SFR.sfr_batch_size      = tile.sfr_batch_size
@@ -434,7 +434,7 @@ def build_tile_list(
             SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
             SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
             SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
-            SFR.sfr_veg_del           = tile.sfr_veg_del
+            SFR.sfr_veg_disable_cache = tile.sfr_veg_disable_cache
             SFR.sfr_patch_size        = tile.sfr_patch_size
             SFR.sfr_overlap           = tile.sfr_overlap
             SFR.sfr_batch_size        = tile.sfr_batch_size

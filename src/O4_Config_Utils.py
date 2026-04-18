@@ -97,8 +97,12 @@ def normalize_config_entry(var: str, value: str) -> tuple[str, str]:
     aliases = {
         "sfr_bld_close_k": "sfr_bld_close_m",
         "sfr_bld_open_k": "sfr_bld_open_m",
+        "sfr_bld_del": "sfr_bld_disable_cache",
+        "sfr_veg_del": "sfr_veg_disable_cache",
         f"{global_prefix}sfr_bld_close_k": f"{global_prefix}sfr_bld_close_m",
         f"{global_prefix}sfr_bld_open_k": f"{global_prefix}sfr_bld_open_m",
+        f"{global_prefix}sfr_bld_del": f"{global_prefix}sfr_bld_disable_cache",
+        f"{global_prefix}sfr_veg_del": f"{global_prefix}sfr_veg_disable_cache",
     }
     if var not in aliases:
         return var, value
@@ -178,7 +182,9 @@ class Tile:
         self.build_dir = FNAMES.build_dir(lat, lon, custom_build_dir)
         self.dem = None
         for var in list_tile_vars:
-            exec("self." + var + "=" + var)
+            global_var = global_prefix + var
+            source_var = global_var if global_var in cfg_global_tile_vars else var
+            setattr(self, var, globals()[source_var])
 
     def make_dirs(self):
         if os.path.isdir(self.build_dir):
@@ -1102,6 +1108,20 @@ class Ortho4XP_Config(tk.Toplevel):
             return 0
         custom_build_dir = self.parent.custom_build_dir_entry.get()
         build_dir = FNAMES.build_dir(lat, lon, custom_build_dir)
+
+        # Start from the current global tile settings so missing keys in older
+        # tile configs inherit global defaults instead of stale tab values.
+        for var in list_tile_vars:
+            if var == "zone_list":
+                continue
+            if var == "default_website":
+                self.v_[var].set(self.parent.default_website.get())
+                continue
+            if var == "default_zl":
+                self.v_[var].set(self.parent.default_zl.get())
+                continue
+            self.v_[var].set(self.v_[global_prefix + var].get())
+
         try:
             f = open(
                 os.path.join(

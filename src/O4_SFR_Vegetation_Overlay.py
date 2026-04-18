@@ -1091,7 +1091,8 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 def run(tex_dir, lat, lon, out_dsf, cache_dir,
         close_m, open_m, min_area_m2, simplify_m,
-        make_viz, density_override=None, res_m=None, excl_buffer_m=EXCL_BUFFER_M,
+        make_viz, density_override=None, res_m=None, disable_cache=False,
+        excl_buffer_m=EXCL_BUFFER_M,
         bld_excl_m=10.0,
         osm_roads_path=None, use_simheaven=True, dsftool_path=None,
         download_veg_context=True,
@@ -1178,6 +1179,29 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             return np.asarray(Image.open(p).convert('RGB'))
         except Exception:
             return None
+
+    def _dds_cache_paths(fname):
+        if not cache_dir:
+            return ()
+        stem = fname.replace('.dds', '')
+        return tuple(
+            os.path.join(cache_dir, stem + suffix)
+            for suffix in (
+                '_veg.npy',
+                '_road.pkl',
+                '_bld.pkl',
+                '_vegaux.pkl',
+                '_vegpoly.pkl',
+            )
+        )
+
+    def _remove_cache_files(paths):
+        for path in paths:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
     # Collect all DDS files; resolve overlapping zoom levels.
     # Each ZL tile maps to exactly 4 children at ZL+1, 16 at ZL+2, etc.
@@ -1434,6 +1458,17 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     for idx, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
         if not m: continue
+        _dds_cache_files = _dds_cache_paths(fname)
+        if disable_cache:
+            # Delete stale per-DDS cache before this DDS starts. Keep the
+            # building placement cache only until we've consumed it below.
+            _pre_dds_cleanup = tuple(
+                path for path in _dds_cache_files
+                if not (bld_excl_m > 0 and path.endswith('_bld.pkl'))
+            )
+            _remove_cache_files(
+                _pre_dds_cleanup
+            )
         til_y_top  = int(m.group(1))
         til_x_left = int(m.group(2))
         zl         = int(m.group(4))
@@ -1441,7 +1476,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
         cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
-        if os.path.exists(cache_path):
+        if not disable_cache and os.path.exists(cache_path):
             _t = time.perf_counter()
             veg_map = np.load(cache_path)
             timings['cache_load'] += time.perf_counter() - _t
@@ -1450,20 +1485,27 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             print(f"  [{idx}/{n_files}] {fname}  (inferring…)", flush=True)
             _t = time.perf_counter()
             img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-            if img is None: continue
+            if img is None:
+                if disable_cache:
+                    _remove_cache_files(_dds_cache_files)
+                continue
             timings['dds_load'] += time.perf_counter() - _t
             if model is None:
                 model, proc, device = SEGFORMER.load_vegetation_model(device)
             _t = time.perf_counter()
             veg_map = SEGFORMER.run_inference(model, device, img, proc)
             timings['inference'] += time.perf_counter() - _t
-            np.save(cache_path, veg_map)
+            if not disable_cache:
+                np.save(cache_path, veg_map)
 
-        try:
-            _veg_st = os.stat(cache_path)
-            veg_cache_stat = (_veg_st.st_mtime_ns, _veg_st.st_size)
-        except OSError:
+        if disable_cache:
             veg_cache_stat = None
+        else:
+            try:
+                _veg_st = os.stat(cache_path)
+                veg_cache_stat = (_veg_st.st_mtime_ns, _veg_st.st_size)
+            except OSError:
+                veg_cache_stat = None
 
         img_h, img_w = veg_map.shape
         mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
@@ -1520,9 +1562,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
             bld_excl_m, _bld_cache_stat, simheaven_building_buffer_m,
         )
-        _t = time.perf_counter()
-        _mask_cached = _load_dds_mask_cache(_mask_cache_file, _mask_cache_key)
-        timings['mask_cache'] += time.perf_counter() - _t
+        _mask_cached = None
+        if not disable_cache:
+            _t = time.perf_counter()
+            _mask_cached = _load_dds_mask_cache(_mask_cache_file, _mask_cache_key)
+            timings['mask_cache'] += time.perf_counter() - _t
         if _mask_cached is not None:
             road_excl = _mask_cached.get('road_excl')
             bld_excl_mask = _mask_cached.get('bld_excl_mask')
@@ -1582,6 +1626,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             timings['bld_excl'] += time.perf_counter() - _t
         if bld_excl_mask is not None:
             excl_mask = cv2.bitwise_or(excl_mask, bld_excl_mask)
+        if disable_cache and bld_excl_m > 0:
+            _remove_cache_files((_bld_pkl,))
 
         # ── Exclusion layer 3b: existing simHeaven buildings ─────────────────
         if avoid_simheaven_buildings and (sh_bld_polys or sh_bld_index) and (
@@ -1691,30 +1737,31 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             else:
                 local_context_masks['tree_row'] = None
 
-            _save_dds_mask_cache(
-                _mask_cache_file,
-                _mask_cache_key,
-                {
-                    'road_excl': road_excl,
-                    'bld_excl_mask': bld_excl_mask,
-                    'sh_bld_poly_mask': sh_bld_poly_mask,
-                    'sh_bld_obj_mask': sh_bld_obj_mask,
-                    'forest_excl_mask': forest_excl_mask,
-                    'context_masks': {
-                        key: local_context_masks.get(key)
-                        for key in (
-                            'forest',
-                            'woodland_hint',
-                            'orchard',
-                            'managed',
-                            'farmland',
-                            'water',
-                            'residential',
-                            'tree_row',
-                        )
+            if not disable_cache:
+                _save_dds_mask_cache(
+                    _mask_cache_file,
+                    _mask_cache_key,
+                    {
+                        'road_excl': road_excl,
+                        'bld_excl_mask': bld_excl_mask,
+                        'sh_bld_poly_mask': sh_bld_poly_mask,
+                        'sh_bld_obj_mask': sh_bld_obj_mask,
+                        'forest_excl_mask': forest_excl_mask,
+                        'context_masks': {
+                            key: local_context_masks.get(key)
+                            for key in (
+                                'forest',
+                                'woodland_hint',
+                                'orchard',
+                                'managed',
+                                'farmland',
+                                'water',
+                                'residential',
+                                'tree_row',
+                            )
+                        },
                     },
-                },
-            )
+                )
 
         if local_context_masks.get('farmland') is not None:
             if local_context_masks['agriculture'] is None:
@@ -1745,15 +1792,19 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             excl_buffer_m,
             region,
         )
-        _t = time.perf_counter()
-        _poly_cached = _load_dds_polygon_cache(_poly_cache_file, _poly_cache_key)
-        timings['poly_cache'] += time.perf_counter() - _t
+        _poly_cached = None
+        if not disable_cache:
+            _t = time.perf_counter()
+            _poly_cached = _load_dds_polygon_cache(_poly_cache_file, _poly_cache_key)
+            timings['poly_cache'] += time.perf_counter() - _t
         if _poly_cached is not None:
             p = list(_poly_cached.get('polygons', ()))
             for veg_type, count in (_poly_cached.get('type_counts', {}) or {}).items():
                 tree_type_counts[veg_type] = tree_type_counts.get(veg_type, 0) + int(count)
             n_tree += len(p)
             polygons.extend(p)
+            if disable_cache:
+                _remove_cache_files(_dds_cache_files)
             continue
 
         kwargs = dict(img_w=img_w, img_h=img_h,
@@ -1781,7 +1832,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         n_tree += len(p); polygons.extend(p)
         for veg_type, count in dds_type_counts.items():
             tree_type_counts[veg_type] = tree_type_counts.get(veg_type, 0) + int(count)
-        _save_dds_polygon_cache(_poly_cache_file, _poly_cache_key, p, dds_type_counts)
+        if not disable_cache:
+            _save_dds_polygon_cache(_poly_cache_file, _poly_cache_key, p, dds_type_counts)
+        if disable_cache:
+            _remove_cache_files(_dds_cache_files)
 
     print(f"Loaded {len(files)} DDS  ({time.time()-t_inf:.1f}s)  "
           f"climate={region}  "
