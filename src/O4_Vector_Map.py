@@ -16,6 +16,26 @@ import O4_Airport_Utils as APT
 good_imagery_list = ()
 
 ################################################################################
+def ensure_tile_dem(tile):
+    if tile.dem is not None:
+        return tile.dem
+    UI.vprint(1, "   Loading elevation data.")
+    tile.dem = DEM.DEM(
+        tile.lat,
+        tile.lon,
+        tile.custom_dem,
+        tile.fill_nodata or "to zero",
+        info_only=False,
+    )
+    return tile.dem
+
+
+################################################################################
+def empty_airport_data():
+    return (numpy.zeros((1001, 1001), dtype=bool), geometry.Polygon())
+
+
+################################################################################
 def build_poly_file(tile):
     if UI.is_working:
         return 0
@@ -51,6 +71,8 @@ def build_poly_file(tile):
 
     # Airports
     (apt_array, apt_area) = include_airports(vector_map, tile)
+    ensure_tile_dem(tile)
+    tile.dem.write_to_file(FNAMES.alt_file(tile))
     UI.vprint(
         1, "   Number of edges at this point:", len(vector_map.dico_edges)
     )
@@ -192,7 +214,7 @@ def include_airports(vector_map, tile):
         tags_of_interest,
         cached_suffix="airports",
     ):
-        return (0, 0)
+        return empty_airport_data()
     dico_airports = {}
     APT.discover_airport_names(airport_layer, dico_airports)
     APT.attach_surfaces_to_airports(airport_layer, dico_airports)
@@ -203,14 +225,8 @@ def include_airports(vector_map, tile):
     APT.build_taxiway_areas(tile, airport_layer, dico_airports)
     APT.update_airport_boundaries(tile, dico_airports)
     APT.list_airports_and_runways(dico_airports)
-    UI.vprint(1, "   Loading elevation data and smoothing it over airports.")
-    tile.dem = DEM.DEM(
-        tile.lat,
-        tile.lon,
-        tile.custom_dem,
-        tile.fill_nodata or "to zero",
-        info_only=False,
-    )
+    UI.vprint(1, "   Preparing elevation data and smoothing it over airports.")
+    ensure_tile_dem(tile)
     APT.smooth_raster_over_airports(tile, dico_airports)
     (patches_area, patches_list) = include_patches(vector_map, tile)
     runway_taxiway_apron_area = APT.encode_runways_taxiways_and_aprons(
