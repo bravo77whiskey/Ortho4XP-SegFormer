@@ -367,7 +367,7 @@ def process_bld_tile(lat, lon, build_dir):
     close_k = max(1, int(round(sfr_bld_close_m / native_zl16_m_per_px)))
     open_k = max(1, int(round(sfr_bld_open_m / native_zl16_m_per_px)))
     dsftool     = _dsftool_path()
-    out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Overlays')
+    out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Bld_Overlays')
     custom_scenery_dir, _, _ = _scenery_paths()
 
     code = (

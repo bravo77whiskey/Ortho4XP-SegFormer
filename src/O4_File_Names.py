@@ -48,6 +48,7 @@ Geotiff_dir   = user_path("Geotiffs")
 Tile_dir      = user_path("Tiles")
 Tmp_dir       = user_path("tmp")
 Overlay_dir   = user_path("yOrtho4XP_Overlays")
+SFR_Bld_Overlay_dir = user_path("yOrtho4XP_Bld_Overlays")
 SFR_cache_dir = user_path("SFR_cache")
 
 ##############################################################################

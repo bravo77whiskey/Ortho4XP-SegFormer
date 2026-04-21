@@ -22,7 +22,7 @@ does NOT re-run inference, only the fast fill + write steps.
 Example:
     python src/scripts/generate_bld_overlay.py ^
         "H:/XP12/Tiles/zOrtho4XP_-02+037/textures" -2 37 ^
-        "H:/XP12/Custom Scenery/yOrtho4XP_SFR_Overlays/-02+037.dsf" ^
+        "H:/XP12/Custom Scenery/yOrtho4XP_Bld_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
 import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib
@@ -53,7 +53,7 @@ def parse_args():
     ap.add_argument('lat',     type=float)
     ap.add_argument('lon',     type=float)
     ap.add_argument('out_dsf', nargs='?', default=None,
-                    help='Output DSF path (auto-derived under yOrtho4XP_SFR_Overlays if omitted)')
+                    help='Output DSF path (auto-derived under yOrtho4XP_Bld_Overlays if omitted)')
     ap.add_argument('--spacing',   type=float, default=20.0)
     ap.add_argument('--close',     type=int,   default=15)
     ap.add_argument('--open-k',    type=int,   default=5,  dest='open_k')
@@ -2499,10 +2499,10 @@ def main():
 
     out_dsf = args.out_dsf
     if out_dsf is None:
-        # Auto-derive: <o4xp_root>/yOrtho4XP_SFR_Overlays/Earth nav data/<lat_g><lon_g>/<lat><lon>.dsf
+        # Auto-derive: <o4xp_root>/yOrtho4XP_Bld_Overlays/Earth nav data/<lat_g><lon_g>/<lat><lon>.dsf
         out_dsf = os.path.join(
             o4xp_root,
-            'yOrtho4XP_SFR_Overlays',
+            'yOrtho4XP_Bld_Overlays',
             'Earth nav data',
             f'{lat_gs}{lon_gs}',
             f'{lat_s}{lon_s}.dsf',

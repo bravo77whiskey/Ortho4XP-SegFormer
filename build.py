@@ -11,7 +11,7 @@ What it does:
 
 User data that is never deleted:
   Tiles, OSM_data, Orthophotos, Masks, yOrtho4XP_Overlays,
-  yOrtho4XP_Veg_Overlays, Elevation_data, Geotiffs, tmp,
+  yOrtho4XP_Veg_Overlays, yOrtho4XP_Bld_Overlays, Elevation_data, Geotiffs, tmp,
   Ortho4XP.cfg, .last_gui_params.txt, .venv/
 
 Usage:
@@ -37,6 +37,7 @@ PRESERVE = {
     "Masks",
     "yOrtho4XP_Overlays",
     "yOrtho4XP_Veg_Overlays",
+    "yOrtho4XP_Bld_Overlays",
     "Elevation_data",
     "Geotiffs",
     "tmp",

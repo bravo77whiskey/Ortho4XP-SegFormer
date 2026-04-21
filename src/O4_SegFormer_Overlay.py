@@ -5,7 +5,7 @@ Uses the nave1616/SegFormer-landcover-FT model to segment orthophoto DDS texture
   - Vegetation (tree, rangeland) → X-Plane .for forest overlays
   - Buildings                   → X-Plane .fac facade overlays
 
-Output is a compiled binary DSF overlay placed in yOrtho4XP_SFR_Overlays/.
+Output is a compiled binary DSF overlay placed in the configured SFR overlay folder.
 
 Usage (standalone):
     python src/scripts/generate_sfr_overlay.py --lat 45 --lon 7

@@ -15,7 +15,7 @@ runtime by O4_SFR_Overlay._activate_venv().  This keeps the bundle small
 
 User data preserved on rebuild (never overwritten by build.py):
     Tiles, OSM_data, Orthophotos, Masks, yOrtho4XP_Overlays,
-    yOrtho4XP_Veg_Overlays, Elevation_data, Geotiffs, tmp,
+    yOrtho4XP_Veg_Overlays, yOrtho4XP_Bld_Overlays, Elevation_data, Geotiffs, tmp,
     Ortho4XP.cfg, .last_gui_params.txt, sfr_venv/
 """
 
