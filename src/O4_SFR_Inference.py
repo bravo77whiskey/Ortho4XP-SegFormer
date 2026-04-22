@@ -149,7 +149,11 @@ segformer_canvas_px        = 16384   # stitch resolution (0 = legacy per-DDS mod
 segformer_patch_size       = 512     # pixels fed to the model per forward pass
 segformer_overlap          = 64      # pixel overlap between adjacent patches (blending)
 segformer_max_vram_gb      = 0.0     # 0 = uncapped; otherwise cap auto mode to this many GB
-segformer_batch_size       = 0       # 0 = auto-size from available VRAM
+segformer_batch_size       = 0       # 0 = recommended default batch size
+segformer_default_cuda_batch_size = 8
+segformer_use_amp          = os.environ.get("O4_SFR_USE_AMP", "").strip() == "1"
+segformer_channels_last    = os.environ.get("O4_SFR_CHANNELS_LAST", "").strip() == "1"
+segformer_compile_mode     = ""      # torch.compile is too costly for this workflow.
 segformer_confidence_threshold   = 0.5     # minimum softmax probability for a pixel to be assigned
 segformer_min_veg_area_px        = 200   # minimum vegetation blob area in pixels
 segformer_min_bld_area_px        = 15    # minimum building blob area in pixels
@@ -461,6 +465,48 @@ def _vram_budget_bytes(device):
     return max(1, min(int(free_bytes), int(limit_bytes)))
 
 
+def _should_use_cuda_amp(device):
+    """Return True when CUDA autocast should wrap model inference."""
+    return (
+        segformer_use_amp
+        and hasattr(device, 'type')
+        and device.type == 'cuda'
+    )
+
+
+def _prepare_cuda_inference_tensor(t, torch):
+    """Apply the preferred CUDA memory format to an NCHW tensor."""
+    if segformer_channels_last:
+        return t.contiguous(memory_format=torch.channels_last)
+    return t
+
+
+def _optimize_model_for_inference(model, device):
+    """Apply CUDA inference optimizations in one place."""
+    import torch
+
+    model = model.to(device).eval()
+    if not (hasattr(device, 'type') and device.type == 'cuda'):
+        return model
+
+    try:
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+    if segformer_channels_last:
+        try:
+            model = model.to(memory_format=torch.channels_last)
+        except Exception as exc:
+            print(f"[SegFormer] channels-last model layout disabled: {exc}")
+
+    return model
+
+
 def load_vegetation_model(device=None):
     """
     Load (once) the 9-class SegFormer-landcover vegetation model.
@@ -484,7 +530,7 @@ def load_vegetation_model(device=None):
     _model_veg = SegformerForSemanticSegmentation.from_pretrained(_MODEL_VEG_REPO)
     if device.type == 'cuda':
         _model_veg = _model_veg.half()
-    _model_veg = _model_veg.to(device).eval()
+    _model_veg = _optimize_model_for_inference(_model_veg, device)
     # Keep legacy aliases in sync
     _model     = _model_veg
     _processor = _processor_veg
@@ -510,7 +556,7 @@ def load_building_model(device=None):
     _model_bld = SegformerForSemanticSegmentation.from_pretrained(_MODEL_BLD_REPO)
     if device.type == 'cuda':
         _model_bld = _model_bld.half()
-    _model_bld = _model_bld.to(device).eval()
+    _model_bld = _optimize_model_for_inference(_model_bld, device)
     print("[SegFormer] Building model ready.")
     return _model_bld, _processor_bld, device
 
@@ -528,25 +574,17 @@ def load_model(device=None):
 def _infer_batch_size(device, patch_size, num_classes):
     """Return the number of patches to process per forward pass.
 
-    In auto mode, uses the full currently available VRAM budget unless the
-    user configured a smaller maximum VRAM limit.
+    In default mode, use a conservative fixed CUDA batch size. The old
+    run-time autotune path was expensive and noisy enough to choose slower
+    batches on real tiles.
 
     Falls back to 1 on CPU or if the query fails.
     """
-    import torch
     if segformer_batch_size and segformer_batch_size > 0:
         return max(1, int(segformer_batch_size))
     if not (hasattr(device, 'type') and device.type == 'cuda'):
         return 1
-    try:
-        budget_bytes = _vram_budget_bytes(device)
-        if budget_bytes is None:
-            return 1
-        # Conservative: SegFormer activations run ~40× raw input bytes at fp16.
-        bytes_per_patch = 40 * 3 * patch_size * patch_size * 2
-        return max(1, min(64, int(budget_bytes / bytes_per_patch)))
-    except Exception:
-        return 1
+    return max(1, int(segformer_default_cuda_batch_size))
 
 
 def _is_cuda_oom(exc):
@@ -555,93 +593,17 @@ def _is_cuda_oom(exc):
 
 
 def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size, num_classes, mean, std):
-    """Pick the fastest CUDA batch size up to max_batch_size for this model shape."""
-    import time
-    import torch
-    import torch.nn.functional as F
+    """Return the selected batch size.
 
+    This used to benchmark several candidate batches at runtime. On real tiles
+    that cost more than it saved and could select slower batches due to noisy
+    one-pass timing, so the default path now uses a fixed recommended batch.
+    """
     if segformer_batch_size and segformer_batch_size > 0:
         print(f"[SegFormer] Inference batch size: {max_batch_size} (configured)")
         return max_batch_size
-    if not (hasattr(device, 'type') and device.type == 'cuda'):
-        return max_batch_size
-
-    try:
-        model_dtype = next(model.parameters()).dtype
-    except Exception:
-        model_dtype = torch.float16
-    # Empirically on the RTX 4080, very large batches can fill VRAM while
-    # reducing throughput badly. Keep auto mode below that cliff; explicit
-    # segformer_batch_size still lets the user force a larger value.
-    max_batch_size = min(int(max_batch_size), 32)
-    cache_key = (id(model), str(device), int(patch_size), int(num_classes),
-                 str(model_dtype), int(max_batch_size))
-    cached = _batch_benchmark_cache.get(cache_key)
-    if cached:
-        return cached
-
-    base_candidates = (1, 2, 4, 8, 12, 16, 24, 32)
-    candidates = [n for n in base_candidates if n <= max_batch_size]
-    if max_batch_size not in candidates:
-        candidates.append(max_batch_size)
-    candidates = sorted(set(max(1, int(n)) for n in candidates))
-
-    sample = np.ascontiguousarray(sample_patch)
-    base = torch.from_numpy(sample).permute(2, 0, 1).unsqueeze(0)
-    base = base.to(device=device, dtype=torch.float16)
-    base = (base / 255.0 - mean) / std
-
-    best_n = 1
-    best_rate = 0.0
-    results = []
-
-    for n in candidates:
-        try:
-            print(f"[SegFormer] Autotune batch {n}/{max_batch_size} …", flush=True)
-            batch = base.expand(n, -1, -1, -1).contiguous()
-            # Warm up this shape once, then time one representative pass. This
-            # costs a few seconds once per model, but avoids pathological
-            # over-batching when VRAM is full but throughput is worse.
-            with torch.inference_mode():
-                logits = model(pixel_values=batch).logits
-                up = F.interpolate(logits, size=(patch_size, patch_size),
-                                   mode="bilinear", align_corners=False)
-                _ = torch.softmax(up, dim=1)
-            torch.cuda.synchronize(device)
-
-            t0 = time.perf_counter()
-            with torch.inference_mode():
-                logits = model(pixel_values=batch).logits
-                up = F.interpolate(logits, size=(patch_size, patch_size),
-                                   mode="bilinear", align_corners=False)
-                _ = torch.softmax(up, dim=1)
-            torch.cuda.synchronize(device)
-            elapsed = max(1e-6, time.perf_counter() - t0)
-            rate = n / elapsed
-            results.append(f"{n}:{rate:.1f}/s")
-            print(f"[SegFormer] Autotune batch {n}: {rate:.1f} patches/s", flush=True)
-            if rate > best_rate:
-                best_rate = rate
-                best_n = n
-            del batch, logits, up, _
-        except RuntimeError as exc:
-            if _is_cuda_oom(exc):
-                results.append(f"{n}:oom")
-                print(f"[SegFormer] Autotune batch {n}: OOM", flush=True)
-                torch.cuda.empty_cache()
-                continue
-            raise
-        except Exception as exc:
-            results.append(f"{n}:err")
-            print(f"[SegFormer] Batch autotune skipped candidate {n}: {exc}", flush=True)
-        finally:
-            torch.cuda.empty_cache()
-
-    best_n = max(1, min(best_n, max_batch_size))
-    _batch_benchmark_cache[cache_key] = best_n
-    if results:
-        print(f"[SegFormer] Inference batch autotune: {'  '.join(results)}  -> {best_n}", flush=True)
-    return best_n
+    print(f"[SegFormer] Inference batch size: {max_batch_size} (default)")
+    return max_batch_size
 
 
 def run_inference(model, device, img_rgb, processor=None):
@@ -736,13 +698,21 @@ def run_inference(model, device, img_rgb, processor=None):
         if device.type == 'cuda':
             t = t.to(device=device, dtype=torch.float16)     # one transfer: uint8→GPU float16
             t = (t / 255.0 - _gpu_mean) / _gpu_std
+            t = _prepare_cuda_inference_tensor(t, torch)
         else:
             t = t.to(dtype=torch.float32) / 255.0
             t = (t - _cpu_mean) / _cpu_std
-        logits = model(pixel_values=t).logits                # (B, C, Hm, Wm)
-        up     = F.interpolate(logits, size=(P, P),
-                               mode="bilinear", align_corners=False)
-        probs  = torch.softmax(up, dim=1)
+        if _should_use_cuda_amp(device):
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                logits = model(pixel_values=t).logits        # (B, C, Hm, Wm)
+                up     = F.interpolate(logits, size=(P, P),
+                                       mode="bilinear", align_corners=False)
+                probs  = torch.softmax(up, dim=1)
+        else:
+            logits = model(pixel_values=t).logits            # (B, C, Hm, Wm)
+            up     = F.interpolate(logits, size=(P, P),
+                                   mode="bilinear", align_corners=False)
+            probs  = torch.softmax(up, dim=1)
         if _gpu_accum_enabled:
             for i, (row, col, ph, pw, resized) in enumerate(meta):
                 p = probs[i]

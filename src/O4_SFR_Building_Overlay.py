@@ -25,7 +25,7 @@ Example:
         "H:/XP12/Custom Scenery/yOrtho4XP_Bld_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
-import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib
+import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib, fnmatch
 warnings.filterwarnings('ignore')
 
 import numpy as np
@@ -43,6 +43,131 @@ from O4_SFR_DSF_Utils import (
     find_simheaven_building_dsfs,
     find_simheaven_network_dsfs,
 )
+
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _record_elapsed(timings, file_timings, key, start):
+    elapsed = time.perf_counter() - start
+    timings[key] += elapsed
+    if file_timings is not None:
+        file_timings[key] = file_timings.get(key, 0.0) + elapsed
+    return elapsed
+
+
+def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
+    ordered = (
+        ("load", "dds_load"),
+        ("cache", "cache_load"),
+        ("infer", "inference"),
+        ("zone", "zone_cleanup"),
+        ("lookup", "lookup"),
+        ("road", "road_raster"),
+        ("road_cache", "road_cache"),
+        ("heading", "heading_grid"),
+        ("excl", "existing_bld_excl"),
+        ("mask", "mask_apply"),
+        ("cc", "connected_components"),
+        ("candidates", "candidate_grid"),
+        ("fit", "fit_loop"),
+        ("save", "cache_save"),
+        ("viz", "viz"),
+    )
+    parts = [f"total={total_elapsed:.2f}s"]
+    parts.extend(
+        f"{label}={file_timings.get(key, 0.0):.2f}s"
+        for label, key in ordered
+        if file_timings.get(key, 0.0) >= 0.005
+    )
+    if file_counts:
+        parts.extend(
+            f"{label}={int(file_counts.get(key, 0))}"
+            for label, key in (
+                ("cand", "candidates"),
+                ("initial_blocked", "initial_center_blocked"),
+                ("dynamic_blocked", "dynamic_center_blocked"),
+                ("cap", "candidate_cap"),
+                ("fit_checks", "fit_checks"),
+                ("placed", "placed"),
+            )
+            if file_counts.get(key, 0)
+        )
+    print(f"    [Bld DDS timing] {fname}  " + "  ".join(parts), flush=True)
+
+
+def _env_patterns(name):
+    value = os.environ.get(name, "")
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _limit_candidates_by_component(cand_x, cand_y, cand_cls, cand_labels, max_candidates, rng):
+    """Keep a deterministic, component-balanced sample of placement candidates."""
+    n_candidates = int(cand_x.size)
+    if max_candidates <= 0 or n_candidates <= max_candidates:
+        return cand_x, cand_y, cand_cls, 0
+
+    labels, inverse, counts = np.unique(cand_labels, return_inverse=True, return_counts=True)
+    n_labels = labels.size
+    if n_labels == 0:
+        return cand_x[:0], cand_y[:0], cand_cls[:0], n_candidates
+
+    reserve = np.minimum(counts, 64)
+    if int(reserve.sum()) > max_candidates:
+        reserve = np.zeros_like(counts)
+
+    remaining = max_candidates - int(reserve.sum())
+    alloc = reserve.astype(np.int64, copy=True)
+    needs = counts - alloc
+    if remaining > 0 and np.any(needs > 0):
+        weights = np.sqrt(needs.astype(np.float64))
+        raw = remaining * (weights / weights.sum())
+        extra = np.minimum(needs, np.floor(raw).astype(np.int64))
+        alloc += extra
+        leftover = max_candidates - int(alloc.sum())
+        if leftover > 0:
+            fractional_order = np.argsort(raw - np.floor(raw))[::-1]
+            for idx in fractional_order:
+                if leftover <= 0:
+                    break
+                if alloc[idx] < counts[idx]:
+                    alloc[idx] += 1
+                    leftover -= 1
+
+    selected = []
+    for label_idx in range(n_labels):
+        label_candidates = np.flatnonzero(inverse == label_idx)
+        keep_count = int(min(alloc[label_idx], label_candidates.size))
+        if keep_count <= 0:
+            continue
+        if keep_count == label_candidates.size:
+            selected.append(label_candidates)
+        else:
+            selected.append(
+                label_candidates[
+                    np.linspace(0, label_candidates.size - 1, keep_count, dtype=np.int64)
+                ]
+            )
+
+    if not selected:
+        return cand_x[:0], cand_y[:0], cand_cls[:0], n_candidates
+
+    keep_idx = np.sort(np.concatenate(selected))
+    return cand_x[keep_idx], cand_y[keep_idx], cand_cls[keep_idx], n_candidates - keep_idx.size
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -1199,7 +1324,8 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 11
+BLD_PLACEMENT_CACHE_VERSION = 13
+BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
@@ -1503,7 +1629,7 @@ def _footprint_poly(cx: int, cy: int, bounds_m, heading_deg: float, m_per_px: fl
     return np.round(np.asarray(pts, dtype=np.float32)).astype(np.int32)
 
 
-def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray) -> bool:
+def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray | None = None) -> bool:
     """Return True if polygon pts have no overlap with any set pixel in occ_mask."""
     x1 = max(0, int(pts[:, 0].min()))
     x2 = min(occ_mask.shape[1], int(pts[:, 0].max()) + 1)
@@ -1513,9 +1639,14 @@ def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray) -> bool:
         return True
     if cv2.countNonZero(occ_mask[y1:y2, x1:x2]) == 0:
         return True
-    tmp = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    if scratch_mask is None:
+        tmp = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    else:
+        tmp = scratch_mask[y1:y2, x1:x2]
+        tmp.fill(0)
     cv2.fillPoly(tmp, [pts - np.int32([x1, y1])], 1)
-    return not bool(np.any(occ_mask[y1:y2, x1:x2] & tmp))
+    cv2.bitwise_and(occ_mask[y1:y2, x1:x2], tmp, dst=tmp)
+    return cv2.countNonZero(tmp) == 0
 
 
 def _expand_bounds(bounds_m, pad_m: float):
@@ -1741,6 +1872,13 @@ def run(
         for _y, _x, _f in _by_zl[_zl]
         if not _fully_covered(_y, _x, _zl)
     )
+    file_filter = _env_patterns("O4_SFR_FILE_FILTER")
+    if file_filter:
+        files = [
+            name for name in files
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in file_filter)
+        ]
+        print(f"DDS filter: {', '.join(file_filter)} -> {len(files)} files")
     if not files:
         print("No DDS files found."); return
     _used_zls = sorted(set(int(STD_RE.match(_f).group(4)) for _f in files))
@@ -1816,14 +1954,27 @@ def run(
         'cache_load': 0.0,
         'dds_load': 0.0,
         'inference': 0.0,
+        'zone_cleanup': 0.0,
+        'lookup': 0.0,
         'road_cache': 0.0,
         'road_raster': 0.0,
         'existing_bld_excl': 0.0,
         'heading_grid': 0.0,
+        'mask_apply': 0.0,
+        'connected_components': 0.0,
+        'candidate_grid': 0.0,
+        'fit_loop': 0.0,
+        'cache_save': 0.0,
+        'viz': 0.0,
         'placement': 0.0,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
     }
+    detail_timing = _env_flag("O4_SFR_TIMING_DETAIL")
+    slow_timing_s = _env_float("O4_SFR_TIMING_SLOW", 3.0)
+    max_candidates_per_dds = max(
+        0, int(_env_float("O4_SFR_BLD_MAX_CANDIDATES", BLD_MAX_CANDIDATES_PER_DDS))
+    )
     n_unknown_skipped = 0
     _t = time.perf_counter()
 
@@ -1881,6 +2032,15 @@ def run(
     if not any(asset_pools.values()):
         print("Building assets: none available for placement")
         return 0
+    for pool in asset_pools.values():
+        for asset in pool:
+            bounds_m = asset.get('bounds_m')
+            if bounds_m is None:
+                continue
+            asset['fit_bounds_m'] = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+            asset['mark_bounds_m'] = _expand_bounds(
+                bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+            )
 
     osm_roads = _prepare_roads(osm_roads)
     osm_roads_index = BBOX.build_bounds_index(osm_roads)
@@ -1926,6 +2086,7 @@ def run(
     candidate_grid_cache = {}
     _bld_params = (
         BLD_PLACEMENT_CACHE_VERSION, spacing_m, close_k, open_k, min_zone_m2,
+        max_candidates_per_dds,
         PLACE_UNKNOWN_OBJECTS,
         FOOTPRINT_PAD_M,
         ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
@@ -1942,6 +2103,9 @@ def run(
         m = STD_RE.match(fname)
         if not m: continue
         _dds_cache_files = _dds_cache_paths(fname)
+        file_timings = {}
+        file_counts = {}
+        file_t0 = time.perf_counter()
         if disable_cache:
             # Drop any stale per-DDS cache before starting this DDS.
             _remove_cache_files(_dds_cache_files)
@@ -1987,20 +2151,22 @@ def run(
             if not disable_cache and os.path.exists(cache_path):
                 _t = time.perf_counter()
                 veg_map = np.load(cache_path)
-                timings['cache_load'] += time.perf_counter() - _t
+                _record_elapsed(timings, file_timings, 'cache_load', _t)
             else:
                 _t = time.perf_counter()
                 img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                 if img is None:
                     continue
-                timings['dds_load'] += time.perf_counter() - _t
+                _record_elapsed(timings, file_timings, 'dds_load', _t)
                 if model is None:
                     model, proc, device = SEGFORMER.load_vegetation_model(device)
                 _t = time.perf_counter()
                 veg_map = SEGFORMER.run_inference(model, device, img, proc)
-                timings['inference'] += time.perf_counter() - _t
+                _record_elapsed(timings, file_timings, 'inference', _t)
                 if not disable_cache:
+                    _t = time.perf_counter()
                     np.save(cache_path, veg_map)
+                    _record_elapsed(timings, file_timings, 'cache_save', _t)
 
             img_h, img_w = veg_map.shape[:2]
 
@@ -2026,6 +2192,7 @@ def run(
                 cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
 
             # Zone cleanup
+            _t = time.perf_counter()
             bld_raw  = (veg_map == SEGFORMER.CLASS_BUILDING).astype(np.uint8)
             bld_zone = cv2.morphologyEx(bld_raw,  cv2.MORPH_CLOSE, k_close)
             bld_zone = cv2.morphologyEx(bld_zone, cv2.MORPH_OPEN,  k_open)
@@ -2043,10 +2210,12 @@ def run(
                 _ksfr   = cv2.getStructuringElement(cv2.MORPH_RECT, (_sfr_ks, _sfr_ks))
                 sfr_road_dilated = cv2.dilate(sfr_road_raw, _ksfr)
                 bld_zone = bld_zone & (~sfr_road_dilated)
+            _record_elapsed(timings, file_timings, 'zone_cleanup', _t)
 
             TILE_EDGE_MARGIN_M = 20.0
             edge_px = max(2, int(TILE_EDGE_MARGIN_M / m_per_px))
 
+            _t = time.perf_counter()
             local_separator_roads = _roads_for_bounds(
                 separator_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
             local_residential_roads = _residential_roads(
@@ -2069,6 +2238,7 @@ def run(
                 _segments_for_bounds(heading_seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.02) or
                 heading_seg_index
             )
+            _record_elapsed(timings, file_timings, 'lookup', _t)
 
             _road_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_road.pkl'))
             _road_key = _dds_road_cache_key(
@@ -2081,7 +2251,7 @@ def run(
             if not disable_cache:
                 _t = time.perf_counter()
                 _road_cached = _load_dds_road_cache(_road_cache_file, _road_key)
-                timings['road_cache'] += time.perf_counter() - _t
+                _record_elapsed(timings, file_timings, 'road_cache', _t)
 
             if _road_cached is not None:
                 road_mask = _road_cached['road_mask']
@@ -2114,7 +2284,7 @@ def run(
                     rail_mask = cv2.dilate(rail_mask, k_road)
                 else:
                     rail_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-                timings['road_raster'] += time.perf_counter() - _t
+                _record_elapsed(timings, file_timings, 'road_raster', _t)
 
                 # ── Heading grid ─────────────────────────────────────────────
                 _t = time.perf_counter()
@@ -2124,7 +2294,7 @@ def run(
                         img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                         if img is None:
                             continue
-                        timings['dds_load'] += time.perf_counter() - _img_t
+                        _record_elapsed(timings, file_timings, 'dds_load', _img_t)
                     hgrid = _road_heading_grid(
                         None, lat_n, lat_s, lon_w, lon_e,
                         img_h, img_w, grid_n, img=img,
@@ -2148,7 +2318,7 @@ def run(
                     img_w,
                     m_per_px,
                 )
-                timings['heading_grid'] += time.perf_counter() - _t
+                _record_elapsed(timings, file_timings, 'heading_grid', _t)
 
                 poly_mask = None
                 if local_excl_polys:
@@ -2156,7 +2326,7 @@ def run(
                     poly_mask = _rasterize_polygons(
                         local_excl_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
                     )
-                    timings['road_raster'] += time.perf_counter() - _t
+                    _record_elapsed(timings, file_timings, 'road_raster', _t)
 
                 existing_bld_mask = None
                 if local_existing_bld_polys:
@@ -2164,7 +2334,7 @@ def run(
                     existing_bld_mask = _rasterize_polygons(
                         local_existing_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
                     )
-                    timings['existing_bld_excl'] += time.perf_counter() - _t
+                    _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
                 sh_bld_mask = None
                 if local_sh_bld_objects:
@@ -2173,9 +2343,10 @@ def run(
                         local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
                         img_h, img_w, m_per_px
                     )
-                    timings['existing_bld_excl'] += time.perf_counter() - _t
+                    _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
                 if not disable_cache:
+                    _t = time.perf_counter()
                     _save_dds_road_cache(
                         _road_cache_file,
                         _road_key,
@@ -2189,7 +2360,9 @@ def run(
                         existing_bld_mask,
                         sh_bld_mask,
                     )
+                    _record_elapsed(timings, file_timings, 'cache_save', _t)
 
+            _t = time.perf_counter()
             bld_zone = bld_zone & (~road_mask)
             occ_mask = road_mask.copy()
 
@@ -2212,6 +2385,7 @@ def run(
             if lat_s <= lat     + DEGREE_TOL:   occ_mask[-edge_px:, :]  = 1
             if lon_w <= lon     + DEGREE_TOL:   occ_mask[:,  :edge_px]  = 1
             if lon_e >= lon + 1 - DEGREE_TOL:   occ_mask[:, -edge_px:]  = 1
+            _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
             cell_h = img_h // grid_n
             cell_w = img_w // grid_n
@@ -2245,7 +2419,10 @@ def run(
                     np.minimum(grid_n - 1, centroid_y // cell_h),
                     np.minimum(grid_n - 1, centroid_x // cell_w),
                 ]
+            cc_elapsed = _record_elapsed(timings, file_timings, 'connected_components', _t)
+            timings['placement'] += cc_elapsed
 
+            _t = time.perf_counter()
             half = sp_px // 2
             pts_this = []
             candidate_grid_key = (img_w, img_h, sp_px)
@@ -2271,13 +2448,38 @@ def run(
                 cand_x = cand_x[keep]
                 cand_y = cand_y[keep]
                 cand_cls = cand_cls[keep]
+                file_counts['candidates'] = int(cand_x.size)
+                if cand_x.size:
+                    cand_labels = cc_labels[cand_y, cand_x]
+                    open_center = occ_mask[cand_y, cand_x] == 0
+                    file_counts['initial_center_blocked'] = int(
+                        cand_x.size - np.count_nonzero(open_center)
+                    )
+                    cand_x = cand_x[open_center]
+                    cand_y = cand_y[open_center]
+                    cand_cls = cand_cls[open_center]
+                    cand_labels = cand_labels[open_center]
+                if max_candidates_per_dds and cand_x.size > max_candidates_per_dds:
+                    cand_x, cand_y, cand_cls, n_dropped = _limit_candidates_by_component(
+                        cand_x, cand_y, cand_cls, cand_labels, max_candidates_per_dds, rng
+                    )
+                    file_counts['candidate_cap'] = int(n_dropped)
             else:
                 cand_x = cand_y = cand_cls = ()
+            candidate_elapsed = _record_elapsed(timings, file_timings, 'candidate_grid', _t)
+            timings['placement'] += candidate_elapsed
 
+            _t = time.perf_counter()
+            fit_scratch = np.zeros_like(occ_mask)
             for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
                 jx = int(jx)
                 jy = int(jy)
                 zone_cls = int(zone_cls)
+                if occ_mask[jy, jx]:
+                    file_counts['dynamic_center_blocked'] = (
+                        file_counts.get('dynamic_center_blocked', 0) + 1
+                    )
+                    continue
 
                 zone_label = int(cc_labels[jy, jx])
                 dom_h = float(zone_heading[zone_label]) if (
@@ -2307,18 +2509,25 @@ def run(
                         n_unknown_skipped += 1
                         continue
 
-                    fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
-                    mark_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M)
+                    fit_bounds = asset.get('fit_bounds_m')
+                    mark_bounds = asset.get('mark_bounds_m')
+                    if fit_bounds is None or mark_bounds is None:
+                        fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+                        mark_bounds = _expand_bounds(
+                            bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+                        )
 
                     final_h = final_poly = None
                     poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
-                    if _poly_fits(occ_mask, poly):
+                    file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+                    if _poly_fits(occ_mask, poly, fit_scratch):
                         final_h = heading
                         final_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
                     else:
                         h90 = (heading + 90.0) % 360.0
                         poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
-                        if _poly_fits(occ_mask, poly90):
+                        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+                        if _poly_fits(occ_mask, poly90, fit_scratch):
                             final_h = h90
                             final_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
 
@@ -2341,7 +2550,9 @@ def run(
                     _mark_poly(occ_mask, final_poly)
                     break
 
-            timings['placement'] += time.perf_counter() - _t
+            fit_elapsed = _record_elapsed(timings, file_timings, 'fit_loop', _t)
+            timings['placement'] += fit_elapsed
+            file_counts['placed'] = len(pts_this)
 
             col = (til_x_left - x_min) // x_step
             row = (til_y_top  - y_min) // y_step
@@ -2357,6 +2568,7 @@ def run(
 
             if not disable_cache:
                 try:
+                    _t = time.perf_counter()
                     with open(_bld_cache_file, 'wb') as _f:
                         _pickle.dump({
                             'params': _bld_params,
@@ -2365,16 +2577,18 @@ def run(
                                 'facades': placed_facades[_start_facade_idx:],
                             },
                         }, _f)
+                    _record_elapsed(timings, file_timings, 'cache_save', _t)
                 except Exception:
                     pass
 
             if make_viz and composite is not None:
+                _t_viz = time.perf_counter()
                 if img is None:
                     _img_t = time.perf_counter()
                     img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                     if img is None:
                         continue
-                    timings['dds_load'] += time.perf_counter() - _img_t
+                    _record_elapsed(timings, file_timings, 'dds_load', _img_t)
                 scale = TILE_VIZ / img_w
                 panel = np.array(Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS))
                 zc_small = np.array(Image.fromarray((zone_class == 1).astype(np.uint8)*255)
@@ -2393,7 +2607,11 @@ def run(
                     sx, sy = int(px2*scale), int(py2*scale)
                     draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
                 composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
+                _record_elapsed(timings, file_timings, 'viz', _t_viz)
         finally:
+            file_elapsed = time.perf_counter() - file_t0
+            if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
+                _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
             if disable_cache:
                 _remove_cache_files(_dds_cache_files)
 
@@ -2473,6 +2691,18 @@ def run(
         f"road_cache_hits={n_road_cache_hits}/{n_files}  "
         f"unknown_skipped={n_unknown_skipped}"
     )
+    if detail_timing:
+        print(
+            "[Bld timing detail] "
+            f"zone={timings['zone_cleanup']:.1f}s  "
+            f"lookup={timings['lookup']:.1f}s  "
+            f"mask={timings['mask_apply']:.1f}s  "
+            f"cc={timings['connected_components']:.1f}s  "
+            f"candidates={timings['candidate_grid']:.1f}s  "
+            f"fit={timings['fit_loop']:.1f}s  "
+            f"cache_save={timings['cache_save']:.1f}s  "
+            f"viz={timings['viz']:.1f}s"
+        )
 
     return total_placements
 

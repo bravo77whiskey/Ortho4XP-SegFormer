@@ -449,7 +449,7 @@ cfg_tile_vars = {
         "type": int,
         "default": 0,
         "short_name": "sfr_batch",
-        "hint": "SegFormer inference batch size. 0 = auto-size from available GPU VRAM; raise only if your GPU has enough memory.",
+        "hint": "SegFormer inference batch size. 0 = recommended default (8 on CUDA, 1 on CPU). Raise only after timing a representative tile.",
     },
     # SegFormer building overlay (src/scripts/generate_bld_overlay.py)
     "sfr_bld_spacing_m": {

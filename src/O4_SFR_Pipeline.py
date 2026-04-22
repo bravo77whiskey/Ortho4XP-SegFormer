@@ -123,7 +123,7 @@ sfr_bld_disable_cache = False
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
 sfr_overlap           = 64
-sfr_batch_size        = 0
+sfr_batch_size        = 0      # 0 = recommended default in O4_SFR_Inference
 
 
 def _dsf_output_path(lat, lon, folder):
