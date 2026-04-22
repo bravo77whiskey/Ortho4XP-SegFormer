@@ -456,7 +456,7 @@ cfg_tile_vars = {
         "type": float,
         "default": 20.0,
         "short_name": "bld_spacing_m",
-        "hint": "Minimum placement spacing between SFD Global building objects in metres. Lower values produce denser fills; raise to reduce object count in performance-critical areas.",
+        "hint": "Residential building placement spacing in metres. Medium and large building zones use coarser derived spacing so low values can preserve dense suburbs without slowing every zone equally.",
     },
     "sfr_bld_close_m": {
         "type": float,

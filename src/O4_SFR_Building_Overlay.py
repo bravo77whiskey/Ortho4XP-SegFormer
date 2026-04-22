@@ -1324,8 +1324,15 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 13
+BLD_PLACEMENT_CACHE_VERSION = 14
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
+
+# Treat the configured building spacing as the residential target.  Medium and
+# large zones get coarser candidate grids so a dense residential-looking setting
+# such as 10 m does not explode candidate counts across apartment/industrial
+# blocks that do not need the same fine sampling.
+BLD_CLASS_SPACING_MULTIPLIER = {1: 1.0, 2: 2.4, 3: 3.6}
+BLD_CLASS_SPACING_CAP_M = {1: 0.0, 2: 30.0, 3: 45.0}
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
@@ -1594,9 +1601,40 @@ def _build_residential_area_mask(residential_polys, residential_roads,
     return None, 'unavailable'
 
 
+def _spacing_for_zone_class_m(base_spacing_m, zone_class):
+    """Return candidate spacing for a building-zone class in metres."""
+    spacing = float(base_spacing_m) * BLD_CLASS_SPACING_MULTIPLIER.get(
+        int(zone_class), 1.0
+    )
+    cap = BLD_CLASS_SPACING_CAP_M.get(int(zone_class), 0.0)
+    if cap > 0:
+        spacing = min(spacing, cap)
+    return max(float(base_spacing_m), spacing)
+
+
+def _class_spacing_px(base_spacing_m, m_per_px):
+    """Return per-zone-class candidate spacing in native image pixels."""
+    return {
+        cls: max(
+            3,
+            int(_spacing_for_zone_class_m(base_spacing_m, cls) / max(m_per_px, 1e-6)),
+        )
+        for cls in (1, 2, 3)
+    }
+
+
+def _format_class_spacing(spacing_px_by_class, m_per_px):
+    """Return compact spacing summary: small/medium/large metres and pixels."""
+    metres = "/".join(
+        f"{spacing_px_by_class[cls] * m_per_px:.1f}" for cls in (1, 2, 3)
+    )
+    pixels = "/".join(str(int(spacing_px_by_class[cls])) for cls in (1, 2, 3))
+    return f"spacing≈{metres}m ({pixels}px s/m/l)"
+
+
 def _describe_placement_summary(small_count, medium_count, large_count,
                                 building_coverage_pct, osm_cell_count,
-                                grid_n, spacing_px, spacing_m):
+                                grid_n, spacing_label):
     """Return a user-facing summary for one DDS building-placement pass."""
     return (
         f"placed={small_count + medium_count + large_count:4d}  "
@@ -1605,7 +1643,7 @@ def _describe_placement_summary(small_count, medium_count, large_count,
         f"large buildings={large_count}  "
         f"building cover={building_coverage_pct:.1f}%  "
         f"street-guided cells={osm_cell_count}/{grid_n * grid_n}  "
-        f"spacing≈{spacing_m:.1f}m ({spacing_px}px)"
+        f"{spacing_label}"
     )
 
 
@@ -2086,6 +2124,8 @@ def run(
     candidate_grid_cache = {}
     _bld_params = (
         BLD_PLACEMENT_CACHE_VERSION, spacing_m, close_k, open_k, min_zone_m2,
+        tuple(sorted(BLD_CLASS_SPACING_MULTIPLIER.items())),
+        tuple(sorted(BLD_CLASS_SPACING_CAP_M.items())),
         max_candidates_per_dds,
         PLACE_UNKNOWN_OBJECTS,
         FOOTPRINT_PAD_M,
@@ -2179,7 +2219,7 @@ def run(
             m_per_px_x = lon_span_m / img_w
             m_per_px_y = lat_span_m / img_h
             m_per_px   = (m_per_px_x + m_per_px_y) / 2
-            sp_px = max(3, int(spacing_m / m_per_px))
+            spacing_px_by_class = _class_spacing_px(spacing_m, m_per_px)
             road_width_px = max(
                 ROAD_WIDTH_PX_MIN,
                 int(round(ROAD_CENTERLINE_WIDTH_M / max(m_per_px, 1e-6))),
@@ -2423,49 +2463,95 @@ def run(
             timings['placement'] += cc_elapsed
 
             _t = time.perf_counter()
-            half = sp_px // 2
             pts_this = []
-            candidate_grid_key = (img_w, img_h, sp_px)
-            base_candidates = candidate_grid_cache.get(candidate_grid_key)
-            if base_candidates is None:
-                xs = np.arange(half, img_w, sp_px, dtype=np.int32)
-                ys = np.arange(half, img_h, sp_px, dtype=np.int32)
-                if xs.size and ys.size:
-                    grid_x, grid_y = np.meshgrid(xs, ys)
-                    base_candidates = (grid_x.ravel(), grid_y.ravel())
+            cand_x_parts = []
+            cand_y_parts = []
+            cand_cls_parts = []
+            cand_label_parts = []
+            n_initial_blocked = 0
+            n_candidates_total = 0
+            for target_cls in (1, 2, 3):
+                spacing_passes = []
+                fine_sp_px = spacing_px_by_class[1]
+                coarse_sp_px = spacing_px_by_class[target_cls]
+                if target_cls > 1 and residential_area_mask is not None:
+                    spacing_passes.append((fine_sp_px, True))
+                    spacing_passes.append((coarse_sp_px, False))
                 else:
-                    base_candidates = (np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32))
-                candidate_grid_cache[candidate_grid_key] = base_candidates
-            base_x, base_y = base_candidates
-            if base_x.size and base_y.size:
-                n_candidates = base_x.size
-                jitter = rng.integers(-half, half + 1, size=(n_candidates, 2),
-                                      dtype=np.int32)
-                cand_x = np.clip(base_x + jitter[:, 0], 0, img_w - 1)
-                cand_y = np.clip(base_y + jitter[:, 1], 0, img_h - 1)
-                cand_cls = zone_class[cand_y, cand_x]
-                keep = cand_cls != 0
-                cand_x = cand_x[keep]
-                cand_y = cand_y[keep]
-                cand_cls = cand_cls[keep]
-                file_counts['candidates'] = int(cand_x.size)
-                if cand_x.size:
-                    cand_labels = cc_labels[cand_y, cand_x]
-                    open_center = occ_mask[cand_y, cand_x] == 0
-                    file_counts['initial_center_blocked'] = int(
-                        cand_x.size - np.count_nonzero(open_center)
+                    spacing_passes.append((coarse_sp_px, None))
+
+                for cls_sp_px, residential_only in spacing_passes:
+                    half = cls_sp_px // 2
+                    candidate_grid_key = (img_w, img_h, cls_sp_px)
+                    base_candidates = candidate_grid_cache.get(candidate_grid_key)
+                    if base_candidates is None:
+                        xs = np.arange(half, img_w, cls_sp_px, dtype=np.int32)
+                        ys = np.arange(half, img_h, cls_sp_px, dtype=np.int32)
+                        if xs.size and ys.size:
+                            grid_x, grid_y = np.meshgrid(xs, ys)
+                            base_candidates = (grid_x.ravel(), grid_y.ravel())
+                        else:
+                            base_candidates = (
+                                np.empty(0, dtype=np.int32),
+                                np.empty(0, dtype=np.int32),
+                            )
+                        candidate_grid_cache[candidate_grid_key] = base_candidates
+
+                    base_x, base_y = base_candidates
+                    if not (base_x.size and base_y.size):
+                        continue
+
+                    n_candidates = base_x.size
+                    jitter = rng.integers(
+                        -half, half + 1, size=(n_candidates, 2), dtype=np.int32
                     )
-                    cand_x = cand_x[open_center]
-                    cand_y = cand_y[open_center]
-                    cand_cls = cand_cls[open_center]
-                    cand_labels = cand_labels[open_center]
+                    cls_cand_x = np.clip(base_x + jitter[:, 0], 0, img_w - 1)
+                    cls_cand_y = np.clip(base_y + jitter[:, 1], 0, img_h - 1)
+                    keep = zone_class[cls_cand_y, cls_cand_x] == target_cls
+                    if residential_only is True:
+                        keep &= residential_area_mask[cls_cand_y, cls_cand_x] != 0
+                    elif residential_only is False:
+                        keep &= residential_area_mask[cls_cand_y, cls_cand_x] == 0
+                    cls_cand_x = cls_cand_x[keep]
+                    cls_cand_y = cls_cand_y[keep]
+                    n_candidates_total += int(cls_cand_x.size)
+                    if not cls_cand_x.size:
+                        continue
+
+                    cls_labels = cc_labels[cls_cand_y, cls_cand_x]
+                    open_center = occ_mask[cls_cand_y, cls_cand_x] == 0
+                    n_initial_blocked += int(
+                        cls_cand_x.size - np.count_nonzero(open_center)
+                    )
+                    cls_cand_x = cls_cand_x[open_center]
+                    cls_cand_y = cls_cand_y[open_center]
+                    cls_labels = cls_labels[open_center]
+                    if not cls_cand_x.size:
+                        continue
+
+                    cand_x_parts.append(cls_cand_x)
+                    cand_y_parts.append(cls_cand_y)
+                    cand_cls_parts.append(
+                        np.full(cls_cand_x.shape, target_cls, dtype=np.uint8)
+                    )
+                    cand_label_parts.append(cls_labels)
+
+            file_counts['candidates'] = n_candidates_total
+            file_counts['initial_center_blocked'] = n_initial_blocked
+            if cand_x_parts:
+                cand_x = np.concatenate(cand_x_parts)
+                cand_y = np.concatenate(cand_y_parts)
+                cand_cls = np.concatenate(cand_cls_parts)
+                cand_labels = np.concatenate(cand_label_parts)
                 if max_candidates_per_dds and cand_x.size > max_candidates_per_dds:
                     cand_x, cand_y, cand_cls, n_dropped = _limit_candidates_by_component(
                         cand_x, cand_y, cand_cls, cand_labels, max_candidates_per_dds, rng
                     )
                     file_counts['candidate_cap'] = int(n_dropped)
             else:
-                cand_x = cand_y = cand_cls = ()
+                cand_x = np.empty(0, dtype=np.int32)
+                cand_y = np.empty(0, dtype=np.int32)
+                cand_cls = np.empty(0, dtype=np.uint8)
             candidate_elapsed = _record_elapsed(timings, file_timings, 'candidate_grid', _t)
             timings['placement'] += candidate_elapsed
 
@@ -2560,9 +2646,10 @@ def run(
             n_s = sum(1 for p in pts_this if p[3] == 1)
             n_m = sum(1 for p in pts_this if p[3] == 2)
             n_l = sum(1 for p in pts_this if p[3] == 3)
+            spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
             print(
                 f"  [{fi:3d}/{n_files}] {fname}  "
-                f"{_describe_placement_summary(n_s, n_m, n_l, bld_pct, n_osm_cells, grid_n, sp_px, sp_px * m_per_px)}"
+                f"{_describe_placement_summary(n_s, n_m, n_l, bld_pct, n_osm_cells, grid_n, spacing_label)}"
                 f"  small-house areas={residential_area_source}"
             )
 
