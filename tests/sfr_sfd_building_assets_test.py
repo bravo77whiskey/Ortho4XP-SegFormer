@@ -227,7 +227,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
 
         self.assertIn("simheaven/houses/house_09x12x1.obj", asia_paths)
-        self.assertIn("simheaven/commercial/petrol_18x18.obj", asia_paths)
+        self.assertIn("simheaven/commercial/commercial_18x42.obj", asia_paths)
         self.assertNotIn("simheaven/industrial/industrial_30x60.obj", asia_paths)
         self.assertIn("simheaven/industrial/industrial_30x60.obj", europe_paths)
 
@@ -249,6 +249,31 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 "h_m": 40.0,
             },
             {
+                "path": "simheaven/commercial/petrol_18x18.obj",
+                "w_m": 18.0,
+                "h_m": 18.0,
+            },
+            {
+                "path": "simheaven/commercial/supermarket_30x24.obj",
+                "w_m": 30.0,
+                "h_m": 24.0,
+            },
+            {
+                "path": "simheaven/commercial/hospital_30x40.obj",
+                "w_m": 30.0,
+                "h_m": 40.0,
+            },
+            {
+                "path": "simheaven/commercial/townhall_20x20.obj",
+                "w_m": 20.0,
+                "h_m": 20.0,
+            },
+            {
+                "path": "simheaven/commercial/bank_15x20.obj",
+                "w_m": 15.0,
+                "h_m": 20.0,
+            },
+            {
                 "path": "simheaven/residential/residential_15x20x4.obj",
                 "w_m": 15.0,
                 "h_m": 20.0,
@@ -265,7 +290,19 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertNotIn("simheaven/landmarks/church_20x30.obj", paths)
         self.assertNotIn("simheaven/landmarks/cathedral_40x60.obj", paths)
         self.assertNotIn("simheaven/commercial/school_30x40.obj", paths)
+        self.assertNotIn("simheaven/commercial/petrol_18x18.obj", paths)
+        self.assertNotIn("simheaven/commercial/supermarket_30x24.obj", paths)
+        self.assertNotIn("simheaven/commercial/hospital_30x40.obj", paths)
+        self.assertNotIn("simheaven/commercial/townhall_20x20.obj", paths)
+        self.assertNotIn("simheaven/commercial/bank_15x20.obj", paths)
         self.assertIn("simheaven/residential/residential_15x20x4.obj", paths)
+
+        catalog_paths = _paths_for_classes(
+            BLD._build_simheaven_asset_pools([], 45.0, 7.0),
+            BLD.BLD_PLACEMENT_CLASSES,
+        )
+        self.assertNotIn("simheaven/commercial/petrol_18x18.obj", catalog_paths)
+        self.assertNotIn("simheaven/commercial/supermarket_30x24.obj", catalog_paths)
 
     def test_long_slab_and_industrial_assets_stay_out_of_residential_pools(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
