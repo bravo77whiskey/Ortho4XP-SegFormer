@@ -115,9 +115,6 @@ sfr_bld_close_m       = 30.0
 sfr_bld_open_m        = 10.0
 sfr_bld_min_zone_m2   = 200.0
 sfr_bld_grid_n        = 16
-sfr_bld_use_default_assets = False
-sfr_bld_use_sfd_assets = True
-sfr_bld_use_simheaven_assets = False
 sfr_bld_disable_cache = False
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
@@ -393,9 +390,6 @@ def process_bld_tile(lat, lon, build_dir):
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
         f"    dsftool_path             = {dsftool!r},\n"
         f"    skip_osm_excl_download   = False,\n"
-        f"    include_default_assets   = {sfr_bld_use_default_assets!r},\n"
-        f"    include_sfd_assets       = {sfr_bld_use_sfd_assets!r},\n"
-        f"    include_simheaven_assets = {sfr_bld_use_simheaven_assets!r},\n"
         f")\n"
     )
     ret = _run_venv(code)

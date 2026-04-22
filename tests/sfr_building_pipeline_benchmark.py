@@ -163,9 +163,6 @@ def main() -> int:
             dsftool_path=str(dsftool) if dsftool else None,
             skip_osm_excl_download=args.skip_osm_download,
             custom_scenery_dir=str(custom_scenery_dir) if custom_scenery_dir else None,
-            include_default_assets=False,
-            include_sfd_assets=True,
-            include_simheaven_assets=False,
         )
         print(f"[bench] total wall={time.perf_counter() - t0:.2f}s")
     finally:

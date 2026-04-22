@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import O4_Forest_Assets as FOREST_ASSETS
+import O4_SFR_Climate_Regions as CLIMATE_REGIONS
 import O4_SFR_Vegetation_Overlay as SFR_VEG
 import O4_SFR_Inference as SEGFORMER
 
@@ -83,6 +84,18 @@ class ForestAssetPolicyTests(unittest.TestCase):
             northnorth,
         )
         self.assertTrue(any(path.startswith("lib/vegetation/") for path in northnorth))
+
+    def test_koppen_grid_drives_vegetation_climate_region(self):
+        self.assertEqual(CLIMATE_REGIONS.koppen_code(1.35, 103.8), "Af")
+        self.assertEqual(FOREST_ASSETS.climate_region(1.35, 103.8), "tropical")
+        self.assertEqual(CLIMATE_REGIONS.koppen_code(42.0, 12.0), "Csa")
+        self.assertEqual(FOREST_ASSETS.climate_region(42.0, 12.0), "northsouth")
+        self.assertEqual(CLIMATE_REGIONS.koppen_code(43.7, -79.4), "Dfb")
+        self.assertEqual(FOREST_ASSETS.climate_region(43.7, -79.4), "northmiddle")
+
+    def test_latitude_only_climate_region_keeps_legacy_fallback(self):
+        self.assertEqual(FOREST_ASSETS.climate_region(0.0), "tropical")
+        self.assertEqual(FOREST_ASSETS.climate_region(34.0), "northsouth")
 
     def test_tree_selection_biases_toward_lighter_gfv2_assets(self):
         region = "northsouth"

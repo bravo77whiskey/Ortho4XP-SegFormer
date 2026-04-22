@@ -27,6 +27,7 @@ from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 import O4_Forest_Assets as FOREST_ASSETS
+from O4_SFR_Region_Boundaries import asset_region_for_latlon
 
 # ── Ortho4XP imports ─────────────────────────────────────────────────────────
 # Allow running from repo root or from src/
@@ -125,20 +126,23 @@ _SFD_OBJ_POOLS = {
 
 def _sfd_obj_pool(lat, lon):
     """Return the SFD Global suburban object path list most appropriate for (lat, lon)."""
-    if 55 <= lat and 3 <= lon <= 35:          # Scandinavia
+    region = asset_region_for_latlon(lat, lon)
+    if region == "scandinavia":
         return _SFD_OBJ_POOLS["scandinavia"]
-    if 30 <= lat <= 72 and -25 <= lon <= 45:  # Europe
-        return _SFD_OBJ_POOLS["scandinavia"] if lat >= 55 else _SFD_OBJ_POOLS["med"]
-    if 25 <= lat <= 72 and -170 <= lon <= -50: # North America
-        return _SFD_OBJ_POOLS["namerica_w"] if lon <= -100 else _SFD_OBJ_POOLS["namerica_e"]
-    if -55 <= lat <= 15 and -82 <= lon <= -34: # South America
+    if region in ("europe", "mediterranean"):
+        return _SFD_OBJ_POOLS["med"]
+    if region == "north_america_west":
+        return _SFD_OBJ_POOLS["namerica_w"]
+    if region in ("north_america", "north_america_ne"):
+        return _SFD_OBJ_POOLS["namerica_e"]
+    if region == "south_america":
         return _SFD_OBJ_POOLS["samerica"]
-    if -35 <= lat <= 37 and -17 <= lon <= 51:  # Africa
+    if region == "africa":
         return _SFD_OBJ_POOLS["africa"]
-    if 0 <= lat <= 55 and 60 <= lon <= 145:    # Asia (mainland)
-        return _SFD_OBJ_POOLS["asia"]
-    if -10 <= lat < 0 and 60 <= lon <= 145:   # South-East Asia tropical
+    if region == "se_asia":
         return _SFD_OBJ_POOLS["asia_south"]
+    if region in ("asia", "australia_oceania"):
+        return _SFD_OBJ_POOLS["asia"]
     return _SFD_OBJ_POOLS["namerica_e"]        # generic fallback
 
 # ── Module-level tunables (overridable from tile config / O4_Cfg_Vars) ────────

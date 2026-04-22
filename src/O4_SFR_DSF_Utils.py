@@ -5,6 +5,19 @@ import os
 import subprocess
 
 
+def resolve_custom_scenery_dir(custom_scenery_dir):
+    """Accept either X-Plane root or Custom Scenery and return Custom Scenery."""
+    if not custom_scenery_dir:
+        return custom_scenery_dir
+    custom_scenery_dir = os.path.abspath(custom_scenery_dir)
+    if os.path.basename(custom_scenery_dir).lower() == "custom scenery":
+        return custom_scenery_dir
+    child = os.path.join(custom_scenery_dir, "Custom Scenery")
+    if os.path.isdir(child):
+        return child
+    return custom_scenery_dir
+
+
 def _tile_dsf_relpath(lat, lon):
     """Return the Earth nav data relative path for a 1x1 tile DSF."""
     lat_int = int(lat)
@@ -20,6 +33,7 @@ def _tile_dsf_relpath(lat, lon):
 
 def _scan_custom_scenery(custom_scenery_dir, tile_dsf_relpath, folder_filter):
     """Yield matching DSF files from a configured Custom Scenery directory."""
+    custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
     if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
         return []
 

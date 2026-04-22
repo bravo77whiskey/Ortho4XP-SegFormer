@@ -42,7 +42,9 @@ from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
     find_simheaven_building_dsfs,
     find_simheaven_network_dsfs,
+    resolve_custom_scenery_dir,
 )
+from O4_SFR_Region_Boundaries import asset_region_for_latlon
 
 
 def _env_flag(name, default=False):
@@ -189,20 +191,7 @@ def parse_args():
     ap.add_argument('--osm-roads', default=None,
                     help='Path to *_big_roads.osm.bz2 (auto-discovered if omitted)')
     ap.add_argument('--custom-scenery-dir', default=None,
-                    help='Configured X-Plane Custom Scenery directory used to locate simHeaven.')
-    ap.add_argument('--default-assets', dest='default_assets', action='store_true',
-                    help='Allow default X-Plane facade assets.')
-    ap.add_argument('--no-default-assets', dest='default_assets', action='store_false',
-                    help='Disable default X-Plane facade assets.')
-    ap.add_argument('--sfd-assets', dest='sfd_assets', action='store_true',
-                    help='Allow SFD Global object assets.')
-    ap.add_argument('--no-sfd-assets', dest='sfd_assets', action='store_false',
-                    help='Disable SFD Global object assets.')
-    ap.add_argument('--simheaven-assets', dest='simheaven_assets', action='store_true',
-                    help='Allow simHeaven object assets when simHeaven scenery is available.')
-    ap.add_argument('--no-simheaven-assets', dest='simheaven_assets', action='store_false',
-                    help='Disable simHeaven object assets.')
-    ap.set_defaults(default_assets=False, sfd_assets=True, simheaven_assets=False)
+                    help='Configured X-Plane root or Custom Scenery directory used to locate building libraries.')
     return ap.parse_args()
 
 
@@ -838,6 +827,9 @@ def _is_simheaven_building_polygon(path):
 
 
 _SIMHEAVEN_DIMS_RE = re.compile(r'_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:x\d+(?:\.\d+)?)?')
+_DEFAULT_OBJECT_DIMS_RE = re.compile(
+    r'(?:^|/)(?:feat_Building|(?:hill|in|ind|out)_sq)_(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)'
+)
 
 
 def _simheaven_object_dims(path):
@@ -849,6 +841,15 @@ def _simheaven_object_dims(path):
     if any(token in name for token in ('church', 'chapel', 'mosque')):
         return 26.0, 26.0
     return 14.0, 14.0
+
+
+def _default_object_dims(path):
+    """Infer a default-library object footprint from its virtual path."""
+    p = (path or '').replace('\\', '/')
+    match = _DEFAULT_OBJECT_DIMS_RE.search(p)
+    if not match:
+        return None
+    return float(match.group(1)), float(match.group(2))
 
 
 def _load_simheaven_building_exclusions(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
@@ -1156,13 +1157,44 @@ def _zone_heading(img, bx, by, bw, bh, pad=80):
     return (90.0 - dominant_img_angle) % 360.0
 
 
-# ── SFD object pools by zone size ─────────────────────────────────────────────
+# ── SFD object pools by footprint size ────────────────────────────────────────
+BLD_CLASS_COMPACT_RESIDENTIAL = 1
+BLD_CLASS_MEDIUM = 2
+BLD_CLASS_SMALL_APARTMENT = 3
+BLD_CLASS_APARTMENT_BLOCK = 4
+BLD_CLASS_LARGE = 5
+# Legacy internal name retained for compatibility with any existing callers.
+BLD_CLASS_STANDARD_RESIDENTIAL = BLD_CLASS_MEDIUM
+BLD_PLACEMENT_CLASSES = (
+    BLD_CLASS_COMPACT_RESIDENTIAL,
+    BLD_CLASS_MEDIUM,
+    BLD_CLASS_SMALL_APARTMENT,
+    BLD_CLASS_APARTMENT_BLOCK,
+    BLD_CLASS_LARGE,
+)
+BLD_CLASS_LABELS = {
+    BLD_CLASS_COMPACT_RESIDENTIAL: "compact residential",
+    BLD_CLASS_MEDIUM: "medium footprint",
+    BLD_CLASS_SMALL_APARTMENT: "small apartment",
+    BLD_CLASS_APARTMENT_BLOCK: "apartment block",
+    BLD_CLASS_LARGE: "large footprint",
+}
+
 # Zone size thresholds (pixels²) after morphological cleanup at ZL16 native res.
-# At ~2.4 m/px:  SMALL < 3 000 px²  ≈ < 55×55 m cluster  → houses
-#                MEDIUM 3 000-30 000 px²  ≈ 55-175 m      → apartments
-#                LARGE  > 30 000 px²  ≈ > 175 m           → industrial / hi-rise
-ZONE_SMALL_PX  =  3_000
-ZONE_LARGE_PX  = 30_000
+# These classify building-zone clusters into progressively larger footprint
+# candidates; the per-asset footprint fit remains the final placement gate.
+ZONE_COMPACT_PX = 1_500
+ZONE_MEDIUM_PX = 3_000
+ZONE_SMALL_APARTMENT_PX = 10_000
+ZONE_APARTMENT_BLOCK_PX = 30_000
+
+# SFD footprint thresholds in square metres. Height is intentionally ignored:
+# tall objects are acceptable when the footprint is modest.
+SFD_COMPACT_RESIDENTIAL_MAX_M2 = 180.0
+SFD_MEDIUM_MAX_M2 = 325.0
+SFD_SMALL_APARTMENT_MAX_M2 = 500.0
+SFD_APARTMENT_BLOCK_MAX_M2 = 650.0
+SFD_APARTMENT_BLOCK_MAX_SIDE_M = 50.0
 
 # Heading alignment — grid-based Hough.
 # Each DDS is divided into HEADING_GRID_N × HEADING_GRID_N cells.  Hough line
@@ -1180,10 +1212,16 @@ HOUGH_PREVIEW_PX     = 512    # resize cell to this before Hough (speed vs preci
 # After placing a building its centre is marked with a filled circle on an
 # occupancy mask; future candidates within that radius are rejected.
 # This prevents geometric overlap without probabilistic thinning:
-#   SMALL:  7 m  → ~14 m exclusion diameter  (suburban houses, fine packing)
-#   MEDIUM: 22 m → ~44 m exclusion diameter  (apartment slabs, small industry)
-#   LARGE:  42 m → ~84 m exclusion diameter  (large warehouse/industry boxes)
-OBJ_CLEARANCE_M = {1: 14.0, 2: 32.0, 3: 55.0}  # legacy fallback for unknown footprints
+#   compact/medium: suburban houses, fine packing
+#   apartments: larger clearance but still footprint-fit constrained
+#   large: conservative fallback for broad warehouse/industrial objects
+OBJ_CLEARANCE_M = {
+    BLD_CLASS_COMPACT_RESIDENTIAL: 14.0,
+    BLD_CLASS_MEDIUM: 20.0,
+    BLD_CLASS_SMALL_APARTMENT: 28.0,
+    BLD_CLASS_APARTMENT_BLOCK: 36.0,
+    BLD_CLASS_LARGE: 55.0,
+}  # legacy fallback for unknown footprints
 PLACE_UNKNOWN_OBJECTS = False
 
 # Per-object footprint dimensions (width × depth in metres).
@@ -1212,6 +1250,10 @@ OBJ_DIMS: dict = {
     "SFD_Global/Asia/Apartment_1.obj": (26.66, 9.5),
     "SFD_Global/Asia/Apartment_2.obj": (60.0,  10.37),
     "SFD_Global/Asia/Apartment_3.obj": (35.0,  9.12),
+    "SFD_Global/Buildings/Apartment_30m_1.obj": (34.5, 16.1),
+    "SFD_Global/Buildings/Apartment_30m_2.obj": (18.0, 27.0),
+    "SFD_Global/Buildings/Apartment_30m_3.obj": (28.9, 16.7),
+    "SFD_Global/Buildings/Apartment_30m_4.obj": (28.0, 18.1),
     # ── Asia industrial (library aliases Industry_NxM.obj → colour variants) ──
     "SFD_Global/Asia/Industry_20x40.obj": (20.48, 38.89),
     "SFD_Global/Asia/Industry_30x40.obj": (32.06, 40.66),
@@ -1244,12 +1286,36 @@ OBJ_DIMS: dict = {
            (20.93, 12.51), (24.08, 11.64), (18.33, 11.07), (16.19, 11.44),
            (16.79, 11.6),  (13.0,  15.6),  (23.66, 13.19), (12.0,  18.07),
        ], 1)},
+    # ── Mediterranean urban residential row blocks ───────────────────────────
+    "SFD_Global/Med/Residential/Urban_Mid_7m.obj": (7.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_9m.obj": (9.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_12m.obj": (12.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_15m.obj": (15.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_18m.obj": (18.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_22m.obj": (22.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_25m.obj": (25.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_30m.obj": (30.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_90.obj": (13.0, 13.0),
+    "SFD_Global/Med/Residential/Urban_Mid_-90.obj": (13.0, 13.0),
+    "SFD_Global/Med/Residential/Urban_Mid_Corner_1L.obj": (17.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_Corner_1R.obj": (12.0, 11.9),
+    "SFD_Global/Med/Residential/Urban_Mid_Corner_2L.obj": (14.0, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_Corner_2R.obj": (12.0, 8.0),
+    "SFD_Global/Med/Residential/Urban_Mid_Corner_3L.obj": (19.9, 12.0),
+    "SFD_Global/Med/Residential/Urban_Mid_Corner_3R.obj": (10.5, 14.7),
     # ── New England ──────────────────────────────────────────────────────────
     **{f"SFD_Global/New_England/Residential/Suburban_{i}.obj": d
        for i, d in enumerate([
            (9.69,  14.13), (8.98, 12.79), (8.0,  16.63), (10.09, 12.22),
            (10.76,  7.29), (9.21, 16.12), (9.56, 14.8),  (8.12,  12.8),
        ], 1)},
+    "SFD_Global/New_England/Residential/Garage.obj": (4.6, 6.6),
+    # ── Small accessory buildings ────────────────────────────────────────────
+    "SFD_Global/Asia/Carport_1.obj": (2.5, 4.9),
+    "SFD_Global/Asia/Carport_2.obj": (3.0, 5.1),
+    "SFD_Global/Asia/Shed_1.obj": (1.5, 2.5),
+    "SFD_Global/Australia/Shed.obj": (8.9, 6.0),
+    "SFD_Global/Australia/Carport.obj": (4.3, 5.9),
     # ── US West Coast ─────────────────────────────────────────────────────────
     **{f"SFD_Global/US_West_Coast/Suburban_{i}.obj": d
        for i, d in enumerate([
@@ -1324,15 +1390,27 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 14
+BLD_PLACEMENT_CACHE_VERSION = 18
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Treat the configured building spacing as the residential target.  Medium and
 # large zones get coarser candidate grids so a dense residential-looking setting
 # such as 10 m does not explode candidate counts across apartment/industrial
 # blocks that do not need the same fine sampling.
-BLD_CLASS_SPACING_MULTIPLIER = {1: 1.0, 2: 2.4, 3: 3.6}
-BLD_CLASS_SPACING_CAP_M = {1: 0.0, 2: 30.0, 3: 45.0}
+BLD_CLASS_SPACING_MULTIPLIER = {
+    BLD_CLASS_COMPACT_RESIDENTIAL: 1.0,
+    BLD_CLASS_MEDIUM: 1.5,
+    BLD_CLASS_SMALL_APARTMENT: 2.1,
+    BLD_CLASS_APARTMENT_BLOCK: 2.8,
+    BLD_CLASS_LARGE: 3.6,
+}
+BLD_CLASS_SPACING_CAP_M = {
+    BLD_CLASS_COMPACT_RESIDENTIAL: 0.0,
+    BLD_CLASS_MEDIUM: 22.0,
+    BLD_CLASS_SMALL_APARTMENT: 28.0,
+    BLD_CLASS_APARTMENT_BLOCK: 36.0,
+    BLD_CLASS_LARGE: 45.0,
+}
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
@@ -1355,89 +1433,315 @@ RESIDENTIAL_FALLBACK_BUFFER_M = 45.0
 RESIDENTIAL_FALLBACK_BUFFER_PX_MIN = 16
 
 DEFAULT_FACADE_BOUNDS = {
-    1: (-7.0, 7.0, -7.0, 7.0),
-    2: (-12.0, 12.0, -9.0, 9.0),
-    3: (-24.0, 24.0, -24.0, 24.0),
+    BLD_CLASS_COMPACT_RESIDENTIAL: (-7.0, 7.0, -7.0, 7.0),
+    BLD_CLASS_MEDIUM: (-10.0, 10.0, -8.0, 8.0),
+    BLD_CLASS_SMALL_APARTMENT: (-14.0, 14.0, -9.0, 9.0),
+    BLD_CLASS_APARTMENT_BLOCK: (-18.0, 18.0, -12.0, 12.0),
+    BLD_CLASS_LARGE: (-24.0, 24.0, -24.0, 24.0),
 }
 DEFAULT_FACADE_PATHS = {
-    1: SEGFORMER._FAC_DEFS["medium"],
-    2: SEGFORMER._FAC_DEFS["medium"],
-    3: SEGFORMER._FAC_DEFS["large"],
+    BLD_CLASS_COMPACT_RESIDENTIAL: SEGFORMER._FAC_DEFS["medium"],
+    BLD_CLASS_MEDIUM: SEGFORMER._FAC_DEFS["medium"],
+    BLD_CLASS_SMALL_APARTMENT: SEGFORMER._FAC_DEFS["medium"],
+    BLD_CLASS_APARTMENT_BLOCK: SEGFORMER._FAC_DEFS["medium"],
+    BLD_CLASS_LARGE: SEGFORMER._FAC_DEFS["large"],
+}
+DEFAULT_FACADE_VARIANTS_BY_CLASS = {
+    BLD_CLASS_COMPACT_RESIDENTIAL: (
+        "lib/buildings/facades/generic/low_modern_01.fac",
+        "lib/buildings/facades/commercial/low_commercial_01.fac",
+        "lib/buildings/facades/commercial/low_commercial_02.fac",
+        "lib/buildings/facades/commercial/low_commercial_03.fac",
+    ),
+    BLD_CLASS_MEDIUM: (
+        "lib/buildings/facades/generic/mid_classic_01.fac",
+        "lib/buildings/facades/generic/mid_classic_02.fac",
+        "lib/buildings/facades/generic/mid_modern_01.fac",
+        "lib/buildings/facades/generic/mid_modern_02.fac",
+        "lib/buildings/facades/generic/mid_modern_03.fac",
+        "lib/buildings/facades/generic/mid_modern_04.fac",
+        "lib/buildings/facades/generic/mid_modern_05.fac",
+    ),
+    BLD_CLASS_SMALL_APARTMENT: (
+        "lib/buildings/facades/generic/mid_classic_01.fac",
+        "lib/buildings/facades/generic/mid_classic_02.fac",
+        "lib/buildings/facades/generic/high_classic_01.fac",
+        "lib/buildings/facades/generic/high_glass_01.fac",
+        "lib/buildings/facades/generic/high_modern_02.fac",
+    ),
+    BLD_CLASS_APARTMENT_BLOCK: (
+        "lib/buildings/facades/generic/high_classic_01.fac",
+        "lib/buildings/facades/generic/high_glass_01.fac",
+        "lib/buildings/facades/generic/high_modern_01.fac",
+        "lib/buildings/facades/generic/high_modern_02.fac",
+        "lib/buildings/facades/generic/high_universal_01.fac",
+    ),
+    BLD_CLASS_LARGE: (
+        "lib/buildings/facades/industrial/warehouse_01_45x45.fac",
+        "lib/buildings/facades/industrial/warehouse_02_45x45.fac",
+        "lib/buildings/facades/industrial/warehouse_03_60x60.fac",
+        "lib/buildings/facades/industrial/warehouse_04_60x60.fac",
+        "lib/buildings/facades/industrial/warehouse_05_60x60.fac",
+        "lib/buildings/facades/industrial/warehouse_06_90x40.fac",
+        "lib/buildings/facades/industrial/warehouse_07_90x40.fac",
+        "lib/buildings/facades/industrial/warehouse_08_90x90.fac",
+        "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
+        "lib/buildings/facades/industrial/warehouse_10_90x90.fac",
+    ),
 }
 DEFAULT_FACADE_HEIGHT_M = {
-    1: 4.0,
-    2: 9.0,
-    3: 14.0,
+    BLD_CLASS_COMPACT_RESIDENTIAL: 4.0,
+    BLD_CLASS_MEDIUM: 7.0,
+    BLD_CLASS_SMALL_APARTMENT: 9.0,
+    BLD_CLASS_APARTMENT_BLOCK: 12.0,
+    BLD_CLASS_LARGE: 14.0,
 }
+
+DEFAULT_OBJECT_CATALOG_OLD_WORLD = (
+    # Default library aliases with simple rectangular footprints. These aliases
+    # randomize among multiple physical building variants in X-Plane's library.
+    "/lib/global8/us/hill_sq_30_30r.obj",
+    "/lib/global8/us/hill_sq_30_30f.obj",
+    "/lib/global8/us/in_sq_30_30r.obj",
+    "/lib/global8/us/out_sq_30_30r.obj",
+    "/lib/global8/us/out_sq_30_30f.obj",
+    "/lib/global8/us/ind_sq_30_30r.obj",
+    "/lib/global8/us/hill_sq_60_60f.obj",
+    "/lib/global8/us/ind_sq_60_60r.obj",
+    "/lib/global8/us/out_sq_60_60f.obj",
+)
+DEFAULT_OBJECT_CATALOG_NORTH_AMERICA = (
+    "/lib/global8/us/feat_Building_50_40_600r20.obj",
+    "/lib/global8/us/feat_Building_50_40_600r30.obj",
+    "/lib/global8/us/feat_Building_50_40_600r40.obj",
+    "/lib/global8/us/feat_Building_50_40_600r50.obj",
+    "/lib/global8/us/feat_Building_50_40_600r80.obj",
+    "/lib/global8/us/feat_Building_50_40_600r90.obj",
+    "/lib/global8/us/feat_Building_50_40_600r100.obj",
+    "/lib/global8/us/feat_Building_50_40_600r120.obj",
+    "/lib/global8/us/feat_Building_50_40_600r160.obj",
+    "/lib/global8/us/feat_Building_50_40_600r200.obj",
+)
+
+SIMHEAVEN_SMALL_BUILDING_CATALOG = (
+    "simheaven/sheds/shed_02x03x1.obj",
+    "simheaven/houses/house_06x12x1.obj",
+    "simheaven/houses/house_09x09x1.obj",
+    "simheaven/houses/house_09x12x1.obj",
+    "simheaven/houses/house_09x12x2.obj",
+    "simheaven/houses/house_12x12x1.obj",
+    "simheaven/houses/house_12x12x2.obj",
+    "simheaven/houses/house_12x15x2.obj",
+    "simheaven/houses/house_15x15x2.obj",
+    "simheaven/houses/house_15x20x2.obj",
+    "simheaven/houses/house_20x25x2.obj",
+)
+SIMHEAVEN_RESIDENTIAL_CATALOG = (
+    "simheaven/residential/residential_10x10x3.obj",
+    "simheaven/residential/residential_10x15x3.obj",
+    "simheaven/residential/residential_10x20x3.obj",
+    "simheaven/residential/residential_15x15x5.obj",
+    "simheaven/residential/residential_15x20x4.obj",
+    "simheaven/residential/residential_20x20x3.obj",
+    "simheaven/residential/residential_20x25x3.obj",
+    "simheaven/residential/residential_20x30x3.obj",
+)
+SIMHEAVEN_COMMERCIAL_CATALOG = (
+    "simheaven/commercial/petrol_14x14.obj",
+    "simheaven/commercial/petrol_18x18.obj",
+    "simheaven/commercial/petrol_22x22.obj",
+    "simheaven/commercial/commercial_18x42.obj",
+    "simheaven/commercial/commercial_24x30.obj",
+    "simheaven/commercial/supermarket_26x30.obj",
+    "simheaven/commercial/supermarket_30x24.obj",
+    "simheaven/commercial/supermarket_32x29.obj",
+    "simheaven/commercial/supermarket_37x34.obj",
+    "simheaven/commercial/supermarket_38x43.obj",
+    "simheaven/commercial/supermarket_65x32.obj",
+)
+SIMHEAVEN_INDUSTRIAL_CATALOG = (
+    "simheaven/industrial/industrial_18x30.obj",
+    "simheaven/industrial/industrial_18x36.obj",
+    "simheaven/industrial/industrial_24x36.obj",
+    "simheaven/industrial/industrial_30x54.obj",
+    "simheaven/industrial/industrial_30x60.obj",
+    "simheaven/industrial/industrial_36x36.obj",
+    "simheaven/industrial/industrial_45x30.obj",
+    "simheaven/industrial/industrial_60x30.obj",
+    "simheaven/industrial/industrial_60x60.obj",
+)
 
 # Viz colours per zone class (BGR→RGB in numpy overlay)
 ZONE_COLOURS = {
-    1: np.array([255,  80,  80]),   # red    — small/residential
-    2: np.array([255, 160,  40]),   # orange — medium/apartments
-    3: np.array([ 80, 120, 255]),   # blue   — large/industrial
+    BLD_CLASS_COMPACT_RESIDENTIAL: np.array([255,  80,  80]),
+    BLD_CLASS_MEDIUM: np.array([255, 150,  50]),
+    BLD_CLASS_SMALL_APARTMENT: np.array([245, 220,  70]),
+    BLD_CLASS_APARTMENT_BLOCK: np.array([ 80, 180, 255]),
+    BLD_CLASS_LARGE: np.array([ 80, 120, 255]),
 }
 
+def _asset_region(tile_lat, tile_lon):
+    """Return the asset region key from Natural Earth boundary polygons."""
+    return asset_region_for_latlon(tile_lat, tile_lon)
 
-def _sfd_pools_by_size(tile_lat, tile_lon):
-    """Return {1: small_pool, 2: medium_pool, 3: large_pool} for this location."""
 
-    if tile_lat >= 55:  # Scandinavia
-        # Global audit rule: keep only measured 4-sided footprints with strong
-        # rectangular fill. This avoids T/L/U-shaped models contributing large
-        # overlaps even when centre-to-centre spacing looks acceptable.
-        s = [f"SFD_Global/Scandinavia/Residential/Suburban_{i}.obj" for i in (3, 5, 7)]
-        return {1: s, 2: s, 3: s}
+def _default_object_catalog_paths(tile_lat, tile_lon):
+    """Return default object aliases that fit the regional context."""
+    region = _asset_region(tile_lat, tile_lon)
+    if region in ("north_america", "north_america_ne", "north_america_west"):
+        return DEFAULT_OBJECT_CATALOG_NORTH_AMERICA
+    if region in ("scandinavia", "mediterranean", "europe", "generic"):
+        return DEFAULT_OBJECT_CATALOG_OLD_WORLD
+    return ()
 
-    if tile_lon >= 60 and tile_lon <= 150 and tile_lat >= 10:  # Asia
-        suburban = [f"SFD_Global/Asia/Suburban_{i}.obj" for i in (3, 10)]
-        apts     = ["SFD_Global/Asia/Apartment_3.obj"]
-        ind_med  = [
-            "SFD_Global/Asia/Industry_20x40.obj",
-            "SFD_Global/Asia/Industry_30x40.obj",
+
+def _simheaven_catalog_paths(tile_lat, tile_lon):
+    """Return simHeaven virtual objects suited to the tile's region."""
+    region = _asset_region(tile_lat, tile_lon)
+    if region in ("asia", "se_asia", "africa", "australia_oceania", "south_america"):
+        return (
+            SIMHEAVEN_SMALL_BUILDING_CATALOG +
+            SIMHEAVEN_RESIDENTIAL_CATALOG[:5] +
+            SIMHEAVEN_COMMERCIAL_CATALOG[:3]
+        )
+    if region in ("scandinavia", "mediterranean", "europe", "generic"):
+        return (
+            SIMHEAVEN_SMALL_BUILDING_CATALOG +
+            SIMHEAVEN_RESIDENTIAL_CATALOG +
+            SIMHEAVEN_COMMERCIAL_CATALOG[:8] +
+            SIMHEAVEN_INDUSTRIAL_CATALOG
+        )
+    return (
+        SIMHEAVEN_SMALL_BUILDING_CATALOG +
+        SIMHEAVEN_RESIDENTIAL_CATALOG +
+        SIMHEAVEN_COMMERCIAL_CATALOG +
+        SIMHEAVEN_INDUSTRIAL_CATALOG
+    )
+
+
+def _sfd_catalog_paths(tile_lat, tile_lon):
+    """Return the strict audited SFD object allowlist for this location."""
+    region = _asset_region(tile_lat, tile_lon)
+
+    if region == "scandinavia":
+        return [
+            f"SFD_Global/Scandinavia/Residential/Suburban_{i}.obj"
+            for i in range(1, 9)
         ]
-        ind_large = [
-            "SFD_Global/Asia/Industry_60x50.obj",
-            "SFD_Global/Asia/Industry_70x90.obj",
-            "SFD_Global/Asia/Industry_150x80.obj",
+
+    if region == "australia_oceania":
+        return (
+            [f"SFD_Global/Asia/Suburban_South_{i}.obj" for i in range(1, 9)] +
+            [
+                "SFD_Global/Australia/Shed.obj",
+                "SFD_Global/Australia/Carport.obj",
+            ]
+        )
+
+    if region == "asia":
+        return (
+            [f"SFD_Global/Asia/Suburban_{i}.obj" for i in range(1, 11)] +
+            [
+                "SFD_Global/Asia/Carport_1.obj",
+                "SFD_Global/Asia/Carport_2.obj",
+                "SFD_Global/Asia/Shed_1.obj",
+            ] +
+            ["SFD_Global/Asia/Apartment_1.obj", "SFD_Global/Asia/Apartment_3.obj"] +
+            [f"SFD_Global/Buildings/Apartment_30m_{i}.obj" for i in range(1, 5)] +
+            [
+                "SFD_Global/Asia/Industry_20x40.obj",
+                "SFD_Global/Asia/Industry_30x40.obj",
+                "SFD_Global/Asia/Industry_60x50.obj",
+                "SFD_Global/Asia/Industry_70x90.obj",
+                "SFD_Global/Asia/Industry_150x80.obj",
+            ]
+        )
+
+    if region == "se_asia":
+        return (
+            [f"SFD_Global/Asia/Suburban_South_{i}.obj" for i in range(1, 9)] +
+            [
+                "SFD_Global/Asia/Carport_1.obj",
+                "SFD_Global/Asia/Carport_2.obj",
+                "SFD_Global/Asia/Shed_1.obj",
+            ]
+        )
+
+    if region == "africa":
+        return [
+            f"SFD_Global/Africa/Residential/Suburban_{i}.obj"
+            for i in range(1, 9)
         ]
-        return {
-            1: suburban,
-            2: suburban + apts + ind_med,
-            3: apts + ind_med + ind_large,
-        }
 
-    if tile_lon >= 60 and tile_lat < 10:  # SE Asia south
-        s = [f"SFD_Global/Asia/Suburban_South_{i}.obj" for i in (1, 3, 7, 8)]
-        return {1: s, 2: s, 3: s}
+    if region == "mediterranean":
+        return (
+            [f"SFD_Global/Med/Residential/Suburban_{i}.obj" for i in range(1, 9)] +
+            [f"SFD_Global/Med/Residential/Apartment_North_{i}.obj" for i in range(1, 9)] +
+            [
+                "SFD_Global/Med/Residential/Urban_Mid_7m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_9m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_12m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_15m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_18m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_22m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_25m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_30m.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_90.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_-90.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_Corner_1L.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_Corner_1R.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_Corner_2L.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_Corner_2R.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_Corner_3L.obj",
+                "SFD_Global/Med/Residential/Urban_Mid_Corner_3R.obj",
+            ]
+        )
 
-    if -20 <= tile_lon <= 55 and tile_lat < 20:  # Africa tropical
-        s = [f"SFD_Global/Africa/Residential/Suburban_{i}.obj" for i in (4, 6)]
-        return {1: s, 2: s, 3: s}
+    if region == "north_america_ne":
+        return (
+            [
+                f"SFD_Global/New_England/Residential/Suburban_{i}.obj"
+                for i in range(1, 9)
+            ] +
+            ["SFD_Global/New_England/Residential/Garage.obj"]
+        )
 
-    if -20 <= tile_lon <= 55 and tile_lat >= 20:  # Med / N Africa / Middle East
-        sub  = [f"SFD_Global/Med/Residential/Suburban_{i}.obj" for i in (3, 5, 6, 8)]
-        apts = [f"SFD_Global/Med/Residential/Apartment_North_{i}.obj" for i in (1, 2, 3, 4, 5)]
-        return {1: sub, 2: sub + apts, 3: apts}
+    if region in ("north_america", "north_america_west"):
+        return (
+            [f"SFD_Global/US_West_Coast/Suburban_{i}.obj" for i in range(1, 9)] +
+            [f"SFD_Global/New_England/Residential/Suburban_{i}.obj" for i in range(1, 9)] +
+            ["SFD_Global/New_England/Residential/Garage.obj"]
+        )
 
-    if tile_lon < -30 and tile_lat >= 40:  # N America north-east
-        s = [f"SFD_Global/New_England/Residential/Suburban_{i}.obj" for i in (1, 2, 5, 6)]
-        return {1: s, 2: s, 3: s}
-
-    if tile_lon < -30 and tile_lat >= 15:  # N America west / south
-        wc = ["SFD_Global/US_West_Coast/Suburban_4.obj"]
-        ne = [f"SFD_Global/New_England/Residential/Suburban_{i}.obj" for i in (1, 2, 5, 6)]
-        s = wc + ne
-        return {1: s, 2: s, 3: s}
-
-    if tile_lon < -30 and tile_lat < 15:  # S America
-        sub = [f"SFD_Global/South_America/Suburban_{i}.obj" for i in (1, 2, 3, 6, 7, 8, 9, 10)]
-        med = [f"SFD_Global/South_America/Med_{i}.obj" for i in (1, 2, 3, 6, 7, 8)]
-        return {1: sub, 2: sub + med, 3: med}
+    if region == "south_america":
+        return (
+            [f"SFD_Global/South_America/Suburban_{i}.obj" for i in range(1, 11)] +
+            [f"SFD_Global/South_America/Med_{i}.obj" for i in range(1, 9)]
+        )
 
     # Default — Mediterranean (same exclusions as Med region above)
-    sub  = [f"SFD_Global/Med/Residential/Suburban_{i}.obj" for i in (3, 5, 6, 8)]
-    apts = [f"SFD_Global/Med/Residential/Apartment_North_{i}.obj" for i in (1, 2, 3, 4, 5)]
-    return {1: sub, 2: sub + apts, 3: apts}
+    return (
+        [f"SFD_Global/Med/Residential/Suburban_{i}.obj" for i in range(1, 9)] +
+        [f"SFD_Global/Med/Residential/Apartment_North_{i}.obj" for i in range(1, 9)] +
+        [
+            "SFD_Global/Med/Residential/Urban_Mid_7m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_9m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_12m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_15m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_18m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_22m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_25m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_30m.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_90.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_-90.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_Corner_1L.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_Corner_1R.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_Corner_2L.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_Corner_2R.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_Corner_3L.obj",
+            "SFD_Global/Med/Residential/Urban_Mid_Corner_3R.obj",
+        ]
+    )
 
 
 def _bounds_from_dimensions(width_m, depth_m):
@@ -1456,79 +1760,143 @@ def _bounds_for_object_path(obj_path):
     return _bounds_from_dimensions(dims[0], dims[1])
 
 
+def _footprint_metrics(bounds_m):
+    """Return (area_m2, max_side_m) for local footprint bounds."""
+    xmin, xmax, zmin, zmax = bounds_m
+    width_m = float(xmax) - float(xmin)
+    depth_m = float(zmax) - float(zmin)
+    return width_m * depth_m, max(width_m, depth_m)
+
+
+def _class_for_footprint(bounds_m):
+    """Classify an asset by footprint only; height does not affect placement."""
+    area_m2, max_side_m = _footprint_metrics(bounds_m)
+    if area_m2 <= SFD_COMPACT_RESIDENTIAL_MAX_M2:
+        return BLD_CLASS_COMPACT_RESIDENTIAL
+    if area_m2 <= SFD_MEDIUM_MAX_M2:
+        return BLD_CLASS_MEDIUM
+    if area_m2 <= SFD_SMALL_APARTMENT_MAX_M2:
+        return BLD_CLASS_SMALL_APARTMENT
+    if (
+        area_m2 <= SFD_APARTMENT_BLOCK_MAX_M2 and
+        max_side_m <= SFD_APARTMENT_BLOCK_MAX_SIDE_M
+    ):
+        return BLD_CLASS_APARTMENT_BLOCK
+    return BLD_CLASS_LARGE
+
+
+def _append_object_asset(asset_pools, obj_path, bounds_m, source):
+    """Append one rectangular object asset to the footprint-classed pool map."""
+    if bounds_m is None:
+        return False
+    zone_class = _class_for_footprint(bounds_m)
+    area_m2, max_side_m = _footprint_metrics(bounds_m)
+    asset_pools[zone_class].append({
+        'kind': 'object',
+        'path': obj_path,
+        'bounds_m': bounds_m,
+        'footprint_area_m2': area_m2,
+        'footprint_max_side_m': max_side_m,
+        'footprint_class': zone_class,
+        'source': source,
+    })
+    return True
+
+
 def _build_sfd_asset_pools(tile_lat, tile_lon):
-    """Return SFD object candidates grouped by placement size class."""
-    asset_pools = {1: [], 2: [], 3: []}
-    for zone_class, obj_paths in _sfd_pools_by_size(tile_lat, tile_lon).items():
-        for obj_path in obj_paths:
-            bounds_m = _bounds_for_object_path(obj_path)
-            if bounds_m is None:
-                continue
-            asset_pools[zone_class].append({
-                'kind': 'object',
-                'path': obj_path,
-                'bounds_m': bounds_m,
-                'source': 'SFD Global',
-            })
+    """Return strict tree-free SFD candidates grouped by footprint class."""
+    asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
+    seen_paths = set()
+    for obj_path in _sfd_catalog_paths(tile_lat, tile_lon):
+        if obj_path in seen_paths:
+            continue
+        seen_paths.add(obj_path)
+        bounds_m = _bounds_for_object_path(obj_path)
+        if bounds_m is None:
+            continue
+        _append_object_asset(asset_pools, obj_path, bounds_m, 'SFD Global')
     return asset_pools
 
 
-def _build_default_asset_pools():
-    """Return default X-Plane facade candidates grouped by placement size class."""
-    asset_pools = {1: [], 2: [], 3: []}
-    for zone_class in (1, 2, 3):
-        asset_pools[zone_class].append({
-            'kind': 'facade',
-            'path': DEFAULT_FACADE_PATHS[zone_class],
-            'bounds_m': DEFAULT_FACADE_BOUNDS[zone_class],
-            'height_m': DEFAULT_FACADE_HEIGHT_M[zone_class],
-            'source': 'Default X-Plane',
-        })
+def _build_default_asset_pools(tile_lat=45.0, tile_lon=7.0):
+    """Return default X-Plane candidates grouped by footprint placement class."""
+    asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        for facade_path in DEFAULT_FACADE_VARIANTS_BY_CLASS.get(
+            zone_class, (DEFAULT_FACADE_PATHS[zone_class],)
+        ):
+            asset_pools[zone_class].append({
+                'kind': 'facade',
+                'path': facade_path,
+                'bounds_m': DEFAULT_FACADE_BOUNDS[zone_class],
+                'height_m': DEFAULT_FACADE_HEIGHT_M[zone_class],
+                'source': 'Default X-Plane',
+            })
+    seen_paths = set()
+    for obj_path in _default_object_catalog_paths(tile_lat, tile_lon):
+        if obj_path in seen_paths:
+            continue
+        seen_paths.add(obj_path)
+        dims = _default_object_dims(obj_path)
+        if dims is None:
+            continue
+        _append_object_asset(
+            asset_pools,
+            obj_path,
+            _bounds_from_dimensions(dims[0], dims[1]),
+            'Default X-Plane',
+        )
     return asset_pools
 
 
 def _simheaven_zone_class(width_m, depth_m):
-    """Classify a simHeaven object into the overlay's small/medium/large buckets."""
-    area_m2 = float(width_m) * float(depth_m)
-    if area_m2 < 350.0:
-        return 1
-    if area_m2 < 2500.0:
-        return 2
-    return 3
+    """Classify a simHeaven object into footprint placement buckets."""
+    return _class_for_footprint(_bounds_from_dimensions(width_m, depth_m))
 
 
-def _build_simheaven_asset_pools(simheaven_objects):
+def _build_simheaven_asset_pools(simheaven_objects=None, tile_lat=45.0, tile_lon=7.0):
     """Return simHeaven object candidates grouped by placement size class."""
-    asset_pools = {1: [], 2: [], 3: []}
+    asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
+    for obj_path in _simheaven_catalog_paths(tile_lat, tile_lon):
+        if obj_path in seen_paths:
+            continue
+        seen_paths.add(obj_path)
+        dims = _simheaven_object_dims(obj_path)
+        _append_object_asset(
+            asset_pools,
+            obj_path,
+            _bounds_from_dimensions(dims[0], dims[1]),
+            'simHeaven',
+        )
     for obj in simheaven_objects or ():
         obj_path = obj.get('path')
         if not obj_path or obj_path in seen_paths:
             continue
         seen_paths.add(obj_path)
-        zone_class = _simheaven_zone_class(obj['w_m'], obj['h_m'])
-        asset_pools[zone_class].append({
-            'kind': 'object',
-            'path': obj_path,
-            'bounds_m': _bounds_from_dimensions(obj['w_m'], obj['h_m']),
-            'source': 'simHeaven',
-        })
+        _append_object_asset(
+            asset_pools,
+            obj_path,
+            _bounds_from_dimensions(obj['w_m'], obj['h_m']),
+            'simHeaven',
+        )
     return asset_pools
 
 
 def _merge_asset_pools(*pool_maps):
     """Merge multiple ``{class: [asset, ...]}`` mappings into one pool map."""
-    merged = {1: [], 2: [], 3: []}
+    merged = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     for pool_map in pool_maps:
         if not pool_map:
             continue
-        for zone_class in merged:
+        for zone_class in BLD_PLACEMENT_CLASSES:
             merged[zone_class].extend(pool_map.get(zone_class, ()))
     return merged
 
 
 def _find_library_export(custom_scenery_dir, library_prefix):
     """Return True if any installed scenery package exports the requested prefix."""
+    custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
     if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
         return False
     library_prefix = library_prefix.lower()
@@ -1545,16 +1913,15 @@ def _find_library_export(custom_scenery_dir, library_prefix):
     return False
 
 
-def _describe_asset_sources(enabled_default, enabled_sfd, enabled_simheaven,
-                            sfd_available, simheaven_available):
+def _describe_asset_sources(default_available, sfd_available, simheaven_available):
     """Return a short user-facing summary of building asset source selection."""
     parts = []
-    if enabled_default:
+    if default_available:
         parts.append('default')
-    if enabled_sfd:
-        parts.append('SFD' if sfd_available else 'SFD unavailable')
-    if enabled_simheaven:
-        parts.append('simHeaven' if simheaven_available else 'simHeaven unavailable')
+    if sfd_available:
+        parts.append('SFD')
+    if simheaven_available:
+        parts.append('simHeaven')
     if not parts:
         return 'none'
     return ', '.join(parts)
@@ -1619,28 +1986,30 @@ def _class_spacing_px(base_spacing_m, m_per_px):
             3,
             int(_spacing_for_zone_class_m(base_spacing_m, cls) / max(m_per_px, 1e-6)),
         )
-        for cls in (1, 2, 3)
+        for cls in BLD_PLACEMENT_CLASSES
     }
 
 
 def _format_class_spacing(spacing_px_by_class, m_per_px):
-    """Return compact spacing summary: small/medium/large metres and pixels."""
+    """Return compact spacing summary for footprint classes."""
     metres = "/".join(
-        f"{spacing_px_by_class[cls] * m_per_px:.1f}" for cls in (1, 2, 3)
+        f"{spacing_px_by_class[cls] * m_per_px:.1f}" for cls in BLD_PLACEMENT_CLASSES
     )
-    pixels = "/".join(str(int(spacing_px_by_class[cls])) for cls in (1, 2, 3))
-    return f"spacing≈{metres}m ({pixels}px s/m/l)"
+    pixels = "/".join(str(int(spacing_px_by_class[cls])) for cls in BLD_PLACEMENT_CLASSES)
+    return f"spacing≈{metres}m ({pixels}px c/s/a/b/l)"
 
 
-def _describe_placement_summary(small_count, medium_count, large_count,
-                                building_coverage_pct, osm_cell_count,
+def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_count,
                                 grid_n, spacing_label):
     """Return a user-facing summary for one DDS building-placement pass."""
+    total_count = sum(class_counts.values())
+    class_bits = "  ".join(
+        f"{BLD_CLASS_LABELS[cls]}={class_counts.get(cls, 0)}"
+        for cls in BLD_PLACEMENT_CLASSES
+    )
     return (
-        f"placed={small_count + medium_count + large_count:4d}  "
-        f"small homes={small_count}  "
-        f"medium blocks={medium_count}  "
-        f"large buildings={large_count}  "
+        f"placed={total_count:4d}  "
+        f"{class_bits}  "
         f"building cover={building_coverage_pct:.1f}%  "
         f"street-guided cells={osm_cell_count}/{grid_n * grid_n}  "
         f"{spacing_label}"
@@ -1761,12 +2130,12 @@ def run(
     dsftool_path=None,
     skip_osm_excl_download=False,
     custom_scenery_dir=None,
-    include_default_assets=False,
-    include_sfd_assets=True,
-    include_simheaven_assets=False,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
+    legacy_kwargs.pop('include_default_assets', None)
+    legacy_kwargs.pop('include_sfd_assets', None)
+    legacy_kwargs.pop('include_simheaven_assets', None)
     if legacy_kwargs:
         bad_keys = ", ".join(sorted(legacy_kwargs))
         raise TypeError(f"run() got unexpected keyword argument(s): {bad_keys}")
@@ -2049,20 +2418,23 @@ def run(
                   _simheaven_objects_signature(sh_bld_objects))
     print(f"simHeaven buildings: {len(sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
 
+    default_assets_available = True
     sfd_assets_available = _find_library_export(custom_scenery_dir, 'sfd_global/')
-    simheaven_assets_available = bool(sh_bld_objects)
-    enabled_asset_pools = []
-    if include_default_assets:
-        enabled_asset_pools.append(_build_default_asset_pools())
-    if include_sfd_assets and sfd_assets_available:
-        enabled_asset_pools.append(_build_sfd_asset_pools(lat + 0.5, lon + 0.5))
-    if include_simheaven_assets and simheaven_assets_available:
-        enabled_asset_pools.append(_build_simheaven_asset_pools(sh_bld_objects))
+    simheaven_assets_available = (
+        bool(sh_bld_objects) or _find_library_export(custom_scenery_dir, 'simheaven/')
+    )
+    asset_lat = lat + 0.5
+    asset_lon = lon + 0.5
+    enabled_asset_pools = [_build_default_asset_pools(asset_lat, asset_lon)]
+    if sfd_assets_available:
+        enabled_asset_pools.append(_build_sfd_asset_pools(asset_lat, asset_lon))
+    if simheaven_assets_available:
+        enabled_asset_pools.append(_build_simheaven_asset_pools(
+            sh_bld_objects, asset_lat, asset_lon
+        ))
     asset_pools = _merge_asset_pools(*enabled_asset_pools)
     asset_sources_label = _describe_asset_sources(
-        include_default_assets,
-        include_sfd_assets,
-        include_simheaven_assets,
+        default_assets_available,
         sfd_assets_available,
         simheaven_assets_available,
     )
@@ -2133,8 +2505,8 @@ def run(
         ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
         excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
         residential_poly_sig,
-        include_default_assets, include_sfd_assets, include_simheaven_assets,
-        sfd_assets_available, simheaven_assets_available,
+        default_assets_available, sfd_assets_available, simheaven_assets_available,
+        _asset_region(asset_lat, asset_lon),
     )
 
     t_start = time.time()
@@ -2441,10 +2813,24 @@ def run(
             valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
             if valid_labels.size:
                 valid_area = cc_area[valid_labels]
-                label_class[valid_labels[valid_area < ZONE_SMALL_PX]] = 1
-                label_class[valid_labels[(valid_area >= ZONE_SMALL_PX)
-                                         & (valid_area < ZONE_LARGE_PX)]] = 2
-                label_class[valid_labels[valid_area >= ZONE_LARGE_PX]] = 3
+                label_class[valid_labels[valid_area < ZONE_COMPACT_PX]] = (
+                    BLD_CLASS_COMPACT_RESIDENTIAL
+                )
+                label_class[valid_labels[
+                    (valid_area >= ZONE_COMPACT_PX) &
+                    (valid_area < ZONE_MEDIUM_PX)
+                ]] = BLD_CLASS_MEDIUM
+                label_class[valid_labels[
+                    (valid_area >= ZONE_MEDIUM_PX) &
+                    (valid_area < ZONE_SMALL_APARTMENT_PX)
+                ]] = BLD_CLASS_SMALL_APARTMENT
+                label_class[valid_labels[
+                    (valid_area >= ZONE_SMALL_APARTMENT_PX) &
+                    (valid_area < ZONE_APARTMENT_BLOCK_PX)
+                ]] = BLD_CLASS_APARTMENT_BLOCK
+                label_class[valid_labels[valid_area >= ZONE_APARTMENT_BLOCK_PX]] = (
+                    BLD_CLASS_LARGE
+                )
             zone_class = label_class[cc_labels]
 
             zone_heading = np.full(n_cc, np.nan, dtype=np.float32)
@@ -2470,17 +2856,18 @@ def run(
             cand_label_parts = []
             n_initial_blocked = 0
             n_candidates_total = 0
-            for target_cls in (1, 2, 3):
+            for target_cls in BLD_PLACEMENT_CLASSES:
                 spacing_passes = []
-                fine_sp_px = spacing_px_by_class[1]
+                fine_sp_px = spacing_px_by_class[BLD_CLASS_COMPACT_RESIDENTIAL]
                 coarse_sp_px = spacing_px_by_class[target_cls]
-                if target_cls > 1 and residential_area_mask is not None:
-                    spacing_passes.append((fine_sp_px, True))
-                    spacing_passes.append((coarse_sp_px, False))
+                if target_cls > BLD_CLASS_MEDIUM and residential_area_mask is not None:
+                    residential_cls = min(target_cls, BLD_CLASS_SMALL_APARTMENT)
+                    spacing_passes.append((fine_sp_px, True, residential_cls))
+                    spacing_passes.append((coarse_sp_px, False, target_cls))
                 else:
-                    spacing_passes.append((coarse_sp_px, None))
+                    spacing_passes.append((coarse_sp_px, None, target_cls))
 
-                for cls_sp_px, residential_only in spacing_passes:
+                for cls_sp_px, residential_only, placement_cls in spacing_passes:
                     half = cls_sp_px // 2
                     candidate_grid_key = (img_w, img_h, cls_sp_px)
                     base_candidates = candidate_grid_cache.get(candidate_grid_key)
@@ -2532,7 +2919,7 @@ def run(
                     cand_x_parts.append(cls_cand_x)
                     cand_y_parts.append(cls_cand_y)
                     cand_cls_parts.append(
-                        np.full(cls_cand_x.shape, target_cls, dtype=np.uint8)
+                        np.full(cls_cand_x.shape, placement_cls, dtype=np.uint8)
                     )
                     cand_label_parts.append(cls_labels)
 
@@ -2580,7 +2967,7 @@ def run(
 
                 for try_cls in [zone_cls]:
                     if (
-                        try_cls == 1 and
+                        try_cls <= BLD_CLASS_MEDIUM and
                         residential_area_mask is not None and
                         not bool(residential_area_mask[jy, jx])
                     ):
@@ -2643,13 +3030,14 @@ def run(
             col = (til_x_left - x_min) // x_step
             row = (til_y_top  - y_min) // y_step
             bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
-            n_s = sum(1 for p in pts_this if p[3] == 1)
-            n_m = sum(1 for p in pts_this if p[3] == 2)
-            n_l = sum(1 for p in pts_this if p[3] == 3)
+            class_counts = {
+                cls: sum(1 for p in pts_this if p[3] == cls)
+                for cls in BLD_PLACEMENT_CLASSES
+            }
             spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
             print(
                 f"  [{fi:3d}/{n_files}] {fname}  "
-                f"{_describe_placement_summary(n_s, n_m, n_l, bld_pct, n_osm_cells, grid_n, spacing_label)}"
+                f"{_describe_placement_summary(class_counts, bld_pct, n_osm_cells, grid_n, spacing_label)}"
                 f"  small-house areas={residential_area_source}"
             )
 
@@ -2678,18 +3066,20 @@ def run(
                     _record_elapsed(timings, file_timings, 'dds_load', _img_t)
                 scale = TILE_VIZ / img_w
                 panel = np.array(Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS))
-                zc_small = np.array(Image.fromarray((zone_class == 1).astype(np.uint8)*255)
-                                    .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
-                zc_med   = np.array(Image.fromarray((zone_class == 2).astype(np.uint8)*255)
-                                    .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
-                zc_large = np.array(Image.fromarray((zone_class == 3).astype(np.uint8)*255)
-                                    .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)) > 127
-                for mask, colour in ((zc_small, ZONE_COLOURS[1]),
-                                     (zc_med,   ZONE_COLOURS[2]),
-                                     (zc_large, ZONE_COLOURS[3])):
+                for cls, colour in ZONE_COLOURS.items():
+                    mask = np.array(
+                        Image.fromarray((zone_class == cls).astype(np.uint8) * 255)
+                        .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)
+                    ) > 127
                     panel[mask] = (panel[mask] * 0.45 + colour * 0.55).astype(np.uint8)
                 pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil)
-                dot_colours = {1: (0, 220, 0), 2: (255, 220, 0), 3: (0, 160, 255)}
+                dot_colours = {
+                    BLD_CLASS_COMPACT_RESIDENTIAL: (0, 220, 0),
+                    BLD_CLASS_MEDIUM: (160, 220, 0),
+                    BLD_CLASS_SMALL_APARTMENT: (255, 220, 0),
+                    BLD_CLASS_APARTMENT_BLOCK: (0, 190, 255),
+                    BLD_CLASS_LARGE: (0, 120, 255),
+                }
                 for px2, py2, _, cls2 in pts_this:
                     sx, sy = int(px2*scale), int(py2*scale)
                     draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
@@ -2840,9 +3230,6 @@ def main():
         grid_n          = args.grid_n,
         osm_roads_path  = args.osm_roads,
         custom_scenery_dir = args.custom_scenery_dir,
-        include_default_assets = args.default_assets,
-        include_sfd_assets = args.sfd_assets,
-        include_simheaven_assets = args.simheaven_assets,
     )
 
 

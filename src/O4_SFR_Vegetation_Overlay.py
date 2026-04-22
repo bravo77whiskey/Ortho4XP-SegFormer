@@ -42,6 +42,7 @@ from math import pi, atan, exp
 from PIL import Image
 
 import O4_Forest_Assets as FOREST_ASSETS
+import O4_SFR_Climate_Regions as CLIMATE_REGIONS
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
@@ -58,6 +59,7 @@ from O4_SFR_DSF_Utils import (
     find_simheaven_network_dsfs,
     find_simheaven_vegetation_dsfs,
 )
+from O4_SFR_Region_Boundaries import asset_region_for_latlon
 
 # ── Defaults (all spatial params in metres) ───────────────────────────────────
 CLOSE_M       = 10.0   # close kernel radius — fill gaps within a patch
@@ -652,9 +654,10 @@ def _dds_polygon_cache_key(
     density_override,
     excl_buffer_m,
     region,
+    climate_code=None,
 ):
     return {
-        'version': 1,
+        'version': 2,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -667,6 +670,7 @@ def _dds_polygon_cache_key(
         'density_override': None if density_override is None else round(float(density_override), 6),
         'excl_buffer_m': round(float(excl_buffer_m), 4),
         'region': region,
+        'climate_code': climate_code,
     }
 
 
@@ -1259,7 +1263,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     device = __import__('torch').device('cuda' if __import__('torch').cuda.is_available() else 'cpu')
     model = proc = None
 
-    region  = FOREST_ASSETS.climate_region(lat)
+    tile_center_lat = lat + 0.5
+    tile_center_lon = lon + 0.5
+    asset_region = asset_region_for_latlon(tile_center_lat, tile_center_lon)
+    koppen_code = CLIMATE_REGIONS.koppen_code(tile_center_lat, tile_center_lon)
+    region = FOREST_ASSETS.climate_region(tile_center_lat, tile_center_lon)
+    print(
+        f"vegetation context: climate={region}"
+        f" koppen={koppen_code or 'ocean/unknown'} asset_region={asset_region}"
+    )
     polygons = []   # (for_path, dsf_density, ring)
     timings = {
         'scenery_parse': 0.0,
@@ -1791,6 +1803,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             density_override,
             excl_buffer_m,
             region,
+            koppen_code,
         )
         _poly_cached = None
         if not disable_cache:

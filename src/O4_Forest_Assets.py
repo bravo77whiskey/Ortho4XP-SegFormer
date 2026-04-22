@@ -11,6 +11,8 @@ outside the current regeneration set remain untouched on disk.
 
 from __future__ import annotations
 
+import O4_SFR_Climate_Regions as CLIMATE
+
 HEIGHT_CUTOFF_METERS = 24.0
 
 GFV2_REGIONS = (
@@ -101,18 +103,15 @@ GFV2_MESH_DEFS_DEFAULT = 12
 TREE_LOW_IMPACT_CONTEXTS = frozenset({"managed", "treeline"})
 
 
-def climate_region(lat: float) -> str:
-    """Return the coarse climate bucket used by the SFR vegetation pipeline."""
-    a = abs(lat + 0.5)
-    if a < 15:
-        return "tropical"
-    if a < 25:
-        return "subtropical"
-    if a < 35:
-        return "northsouth"
-    if a < 55:
-        return "northmiddle"
-    return "northnorth"
+def climate_region(lat: float, lon: float | None = None) -> str:
+    """Return the climate bucket used by the SFR vegetation pipeline.
+
+    When longitude is provided this uses the vendored Koppen-Geiger climate
+    grid; latitude-only callers keep the old latitude-band fallback.
+    """
+    if lon is not None:
+        return CLIMATE.forest_region_for_latlon(lat, lon)
+    return CLIMATE.latitude_band_region(lat + 0.5)
 
 
 def default_short_tree_candidates_for_region(region: str) -> tuple[str, ...]:

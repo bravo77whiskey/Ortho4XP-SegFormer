@@ -494,24 +494,6 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_grid",
         "hint": "Heading-grid resolution per texture tile. Higher values follow street direction changes more closely but can make orientation noisier.",
     },
-    "sfr_bld_use_default_assets": {
-        "type": bool,
-        "default": False,
-        "short_name": "sfr_bld_def",
-        "hint": "Allow default X-Plane facade assets in the SegFormer building overlay output.",
-    },
-    "sfr_bld_use_sfd_assets": {
-        "type": bool,
-        "default": True,
-        "short_name": "sfr_bld_sfd",
-        "hint": "Allow SFD Global building assets in the SegFormer building overlay output.",
-    },
-    "sfr_bld_use_simheaven_assets": {
-        "type": bool,
-        "default": False,
-        "short_name": "sfr_bld_simh",
-        "hint": "Allow simHeaven building assets when matching simHeaven scenery is available.",
-    },
     "sfr_bld_disable_cache": {
         "type": bool,
         "default": False,
@@ -647,9 +629,6 @@ list_sfr_bld_vars = [
     "sfr_bld_open_m",
     "sfr_bld_min_zone_m2",
     "sfr_bld_grid_n",
-    "sfr_bld_use_default_assets",
-    "sfr_bld_use_sfd_assets",
-    "sfr_bld_use_simheaven_assets",
     "sfr_bld_disable_cache",
 ]
 
