@@ -1390,7 +1390,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 18
+BLD_PLACEMENT_CACHE_VERSION = 19
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Treat the configured building spacing as the residential target.  Medium and
@@ -1571,6 +1571,45 @@ SIMHEAVEN_INDUSTRIAL_CATALOG = (
     "simheaven/industrial/industrial_60x60.obj",
 )
 
+SIMHEAVEN_REPEATABLE_ASSET_DIRS = (
+    "/houses/",
+    "/residential/",
+    "/sheds/",
+    "/industrial/",
+    "/commercial/",
+)
+SIMHEAVEN_SPECIAL_ASSET_TOKENS = (
+    "/landmarks/",
+    "/church",
+    "church",
+    "chapel",
+    "cathedral",
+    "mosque",
+    "synagogue",
+    "temple",
+    "monument",
+    "memorial",
+    "castle",
+    "palace",
+    "stadium",
+    "school",
+    "university",
+    "hospital",
+    "fire_station",
+    "police",
+    "museum",
+    "library",
+    "courthouse",
+    "prison",
+    "train_station",
+    "railway_station",
+    "airport",
+    "terminal",
+    "tower",
+    "windmill",
+    "lighthouse",
+)
+
 # Viz colours per zone class (BGR→RGB in numpy overlay)
 ZONE_COLOURS = {
     BLD_CLASS_COMPACT_RESIDENTIAL: np.array([255,  80,  80]),
@@ -1617,6 +1656,16 @@ def _simheaven_catalog_paths(tile_lat, tile_lon):
         SIMHEAVEN_COMMERCIAL_CATALOG +
         SIMHEAVEN_INDUSTRIAL_CATALOG
     )
+
+
+def _is_repeatable_simheaven_asset(path):
+    """Return True for generic simHeaven assets safe for non-factual placement."""
+    p = (path or '').replace('\\', '/').lower()
+    if not p.startswith('simheaven/'):
+        return False
+    if any(token in p for token in SIMHEAVEN_SPECIAL_ASSET_TOKENS):
+        return False
+    return any(token in p for token in SIMHEAVEN_REPEATABLE_ASSET_DIRS)
 
 
 def _sfd_catalog_paths(tile_lat, tile_lon):
@@ -1861,6 +1910,8 @@ def _build_simheaven_asset_pools(simheaven_objects=None, tile_lat=45.0, tile_lon
     for obj_path in _simheaven_catalog_paths(tile_lat, tile_lon):
         if obj_path in seen_paths:
             continue
+        if not _is_repeatable_simheaven_asset(obj_path):
+            continue
         seen_paths.add(obj_path)
         dims = _simheaven_object_dims(obj_path)
         _append_object_asset(
@@ -1872,6 +1923,8 @@ def _build_simheaven_asset_pools(simheaven_objects=None, tile_lat=45.0, tile_lon
     for obj in simheaven_objects or ():
         obj_path = obj.get('path')
         if not obj_path or obj_path in seen_paths:
+            continue
+        if not _is_repeatable_simheaven_asset(obj_path):
             continue
         seen_paths.add(obj_path)
         _append_object_asset(

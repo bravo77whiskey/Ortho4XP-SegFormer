@@ -231,6 +231,42 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertNotIn("simheaven/industrial/industrial_30x60.obj", asia_paths)
         self.assertIn("simheaven/industrial/industrial_30x60.obj", europe_paths)
 
+    def test_simheaven_special_landmarks_are_not_reused_as_assets(self):
+        special_objects = [
+            {
+                "path": "simheaven/landmarks/church_20x30.obj",
+                "w_m": 20.0,
+                "h_m": 30.0,
+            },
+            {
+                "path": "simheaven/landmarks/cathedral_40x60.obj",
+                "w_m": 40.0,
+                "h_m": 60.0,
+            },
+            {
+                "path": "simheaven/commercial/school_30x40.obj",
+                "w_m": 30.0,
+                "h_m": 40.0,
+            },
+            {
+                "path": "simheaven/residential/residential_15x20x4.obj",
+                "w_m": 15.0,
+                "h_m": 20.0,
+            },
+        ]
+        paths = _paths_for_classes(
+            BLD._build_simheaven_asset_pools(special_objects, 45.0, 7.0),
+            BLD.BLD_PLACEMENT_CLASSES,
+        )
+
+        self.assertTrue(
+            BLD._is_simheaven_building_object("simheaven/landmarks/church_20x30.obj")
+        )
+        self.assertNotIn("simheaven/landmarks/church_20x30.obj", paths)
+        self.assertNotIn("simheaven/landmarks/cathedral_40x60.obj", paths)
+        self.assertNotIn("simheaven/commercial/school_30x40.obj", paths)
+        self.assertIn("simheaven/residential/residential_15x20x4.obj", paths)
+
     def test_long_slab_and_industrial_assets_stay_out_of_residential_pools(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         residential_and_apartment_paths = _paths_for_classes(
