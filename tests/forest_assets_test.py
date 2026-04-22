@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
 
 import O4_Forest_Assets as FOREST_ASSETS
 import O4_SFR_Vegetation_Overlay as SFR_VEG
-import O4_SegFormer_Overlay as SEGFORMER
+import O4_SFR_Inference as SEGFORMER
 
 
 class _IndexRng:

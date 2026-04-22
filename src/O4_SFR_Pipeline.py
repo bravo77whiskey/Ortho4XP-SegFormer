@@ -1,5 +1,5 @@
 """
-O4_SFR_Overlay.py — Pipeline bridge for SegFormer-based vegetation and building overlays.
+O4_SFR_Pipeline.py — Pipeline bridge for SFR vegetation and building overlays.
 
 Exposes process_veg_tile() / process_bld_tile() entry points that the Ortho4XP
 pipeline calls after Build Imagery/DSF, using module-level config vars synced from
@@ -149,7 +149,7 @@ def _dsftool_path():
         utils_dir = os.path.join(sys._MEIPASS, 'Ortho4XP_Data', 'Utils')
     else:
         try:
-            import O4_SegFormer_Overlay as _SEG
+            import O4_SFR_Inference as _SEG
             return _SEG._dsftool
         except Exception:
             return None
@@ -305,7 +305,7 @@ def process_veg_tile(lat, lon, build_dir):
     custom_scenery_dir, custom_overlay_src, custom_overlay_src_alternate = _scenery_paths()
 
     code = (
-        f"import O4_SegFormer_Overlay as SEG\n"
+        f"import O4_SFR_Inference as SEG\n"
         f"SEG.segformer_patch_size = {sfr_patch_size!r}\n"
         f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
         f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"
@@ -371,7 +371,7 @@ def process_bld_tile(lat, lon, build_dir):
     custom_scenery_dir, _, _ = _scenery_paths()
 
     code = (
-        f"import O4_SegFormer_Overlay as SEG\n"
+        f"import O4_SFR_Inference as SEG\n"
         f"SEG.segformer_patch_size = {sfr_patch_size!r}\n"
         f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
         f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"

@@ -44,7 +44,7 @@ from PIL import Image
 import O4_Forest_Assets as FOREST_ASSETS
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
-import O4_SegFormer_Overlay as SEGFORMER
+import O4_SFR_Inference as SEGFORMER
 from O4_SFR_Building_Overlay import (
     _load_simheaven_building_exclusions,
     _prepare_simheaven_objects,

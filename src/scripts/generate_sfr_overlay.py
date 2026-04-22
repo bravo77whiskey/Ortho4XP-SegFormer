@@ -9,7 +9,7 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from O4_SegFormer_Overlay import process_sfr_tile
+from O4_SFR_Inference import process_sfr_tile
 
 
 def parse_args():

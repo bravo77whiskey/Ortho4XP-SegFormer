@@ -13,7 +13,7 @@ import O4_Mesh_Utils as MESH
 import O4_Mask_Utils as MASK
 import O4_DSF_Utils as DSF
 import O4_Overlay_Utils as OVL
-import O4_SFR_Overlay as SFR
+import O4_SFR_Pipeline as SFR
 from O4_Parallel_Utils import parallel_launch, parallel_join
 
 max_download_slots = 1

@@ -10,7 +10,7 @@ Output:  dist/Ortho4XP/Ortho4XP.exe  (one-dir bundle)
 
 NOTE: AI packages (torch, transformers, huggingface_hub) are NOT bundled into
 the exe.  They live in sfr_venv/ next to the exe and are added to sys.path at
-runtime by O4_SFR_Overlay._activate_venv().  This keeps the bundle small
+runtime by O4_SFR_Pipeline._activate_venv().  This keeps the bundle small
 (<500 MB) and lets users upgrade to a CUDA torch wheel independently.
 
 User data preserved on rebuild (never overwritten by build.py):
@@ -50,7 +50,7 @@ added_datas = [
     (os.path.join(SPEC_DIR, "src", "O4_Forest_Assets.py"),               "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Bounds_Index.py"),            "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Persistent_Cache.py"),        "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SegFormer_Overlay.py"),      "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_Inference.py"),          "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Building_Overlay.py"),   "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Utils.py"),          "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Vegetation_Overlay.py"), "sfr_scripts/src"),
@@ -103,8 +103,8 @@ hidden = [
     "O4_Forest_Assets",
     "O4_SFR_Bounds_Index",
     "O4_SFR_Persistent_Cache",
-    "O4_SFR_Overlay",
-    "O4_SegFormer_Overlay",
+    "O4_SFR_Pipeline",
+    "O4_SFR_Inference",
     "O4_SFR_Building_Overlay",
     "O4_SFR_DSF_Utils",
     "O4_SFR_Vegetation_Overlay",

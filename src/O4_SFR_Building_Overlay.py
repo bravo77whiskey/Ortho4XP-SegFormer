@@ -37,7 +37,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
-import O4_SegFormer_Overlay as SEGFORMER
+import O4_SFR_Inference as SEGFORMER
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
     find_simheaven_building_dsfs,

@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_Overlay as SFR
+import O4_SFR_Pipeline as SFR
 import O4_File_Names as FNAMES
 
 

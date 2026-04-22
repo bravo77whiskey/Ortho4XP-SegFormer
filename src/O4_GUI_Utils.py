@@ -41,7 +41,7 @@ import O4_Mask_Utils as MASK
 import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_Config_Utils as CFG
-import O4_SFR_Overlay as SFR
+import O4_SFR_Pipeline as SFR
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)

@@ -1,5 +1,5 @@
 """
-O4_SegFormer_Overlay.py — SegFormer-based vegetation and building overlay generation for Ortho4XP.
+O4_SFR_Inference.py — Shared SFR SegFormer inference helpers for Ortho4XP.
 
 Uses the nave1616/SegFormer-landcover-FT model to segment orthophoto DDS textures into:
   - Vegetation (tree, rangeland) → X-Plane .for forest overlays
