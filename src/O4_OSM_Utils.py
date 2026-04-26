@@ -18,7 +18,10 @@ overpass_servers = {
 }
 # KU server does not rate limit as of 2024-07-08
 overpass_server_choice = "KU"
-max_osm_tentatives = 8
+max_osm_tentatives = 4
+# Developer/testing switch. Existing OSM cache is still reused first.
+disable_osm_downloads = False
+_simulator_water_geometry_cache = {}
 
 ################################################################################
 class OSM_layer:
@@ -391,6 +394,824 @@ class OSM_layer:
         return 1
 
 ################################################################################
+def _create_synthetic_way(osm_layer, lon_lat_points, tags=None, first=True):
+    nodeids = []
+    for lonp, latp in lon_lat_points:
+        node_key = (lonp, latp)
+        if node_key in osm_layer.dicosmn_reverse:
+            nodeid = osm_layer.dicosmn_reverse[node_key]
+        else:
+            nodeid = osm_layer.next_node_id
+            osm_layer.next_node_id -= 1
+            osm_layer.dicosmn_reverse[node_key] = nodeid
+            osm_layer.dicosmn[nodeid] = node_key
+        nodeids.append(nodeid)
+    if len(nodeids) < 2:
+        return None
+    wayid = osm_layer.next_way_id
+    osm_layer.next_way_id -= 1
+    osm_layer.dicosmw[wayid] = nodeids
+    if first:
+        osm_layer.dicosmfirst["w"].add(wayid)
+    if tags:
+        osm_layer.dicosmtags["w"][wayid] = dict(tags)
+    return wayid
+
+
+def _add_synthetic_way(osm_layer, lon_lat_points, tags):
+    """Append one generated way to an OSM layer without writing a cache file."""
+    return 1 if _create_synthetic_way(osm_layer, lon_lat_points, tags) else 0
+
+
+def _add_synthetic_node(osm_layer, lonp, latp, tags):
+    node_key = (lonp, latp)
+    if node_key in osm_layer.dicosmn_reverse:
+        nodeid = osm_layer.dicosmn_reverse[node_key]
+    else:
+        nodeid = osm_layer.next_node_id
+        osm_layer.next_node_id -= 1
+        osm_layer.dicosmn_reverse[node_key] = nodeid
+        osm_layer.dicosmn[nodeid] = node_key
+    osm_layer.dicosmfirst["n"].add(nodeid)
+    osm_layer.dicosmtags["n"][nodeid] = dict(tags)
+    return nodeid
+
+
+def _add_synthetic_multipolygon(osm_layer, polygon, tags):
+    relation_id = osm_layer.next_rel_id
+    osm_layer.next_rel_id -= 1
+    osm_layer.dicosmr[relation_id] = {"outer": [], "inner": []}
+    osm_layer.dicosmrorig[relation_id] = {"outer": [], "inner": []}
+    outer_way_id = _create_synthetic_way(
+        osm_layer, list(polygon.exterior.coords), first=False
+    )
+    if not outer_way_id:
+        return 0
+    osm_layer.dicosmr[relation_id]["outer"].append(osm_layer.dicosmw[outer_way_id])
+    osm_layer.dicosmrorig[relation_id]["outer"].append(outer_way_id)
+    for interior in polygon.interiors:
+        inner_way_id = _create_synthetic_way(
+            osm_layer, list(interior.coords), first=False
+        )
+        if not inner_way_id:
+            continue
+        osm_layer.dicosmr[relation_id]["inner"].append(osm_layer.dicosmw[inner_way_id])
+        osm_layer.dicosmrorig[relation_id]["inner"].append(inner_way_id)
+    osm_layer.dicosmfirst["r"].add(relation_id)
+    osm_layer.dicosmtags["r"][relation_id] = dict(tags)
+    return 1
+
+
+def _candidate_xplane_roots():
+    roots = []
+    try:
+        import O4_Overlay_Utils as OVL
+    except Exception:
+        OVL = None
+    try:
+        import O4_Config_Utils as CFG
+    except Exception:
+        CFG = None
+    candidates = []
+    if OVL:
+        candidates.extend((OVL.custom_overlay_src, OVL.custom_overlay_src_alternate))
+    if CFG:
+        candidates.append(getattr(CFG, "custom_scenery_dir", ""))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)
+        if os.path.basename(candidate).lower() == "custom scenery":
+            roots.append(os.path.dirname(candidate))
+        if os.path.isdir(os.path.join(candidate, "Custom Scenery")):
+            roots.append(candidate)
+        if os.path.isdir(os.path.join(candidate, "Global Scenery")):
+            roots.append(candidate)
+        probe = candidate
+        for _ in range(6):
+            apt_dat = os.path.join(
+                probe,
+                "Resources",
+                "default scenery",
+                "default apt dat",
+                "Earth nav data",
+                "apt.dat",
+            )
+            if os.path.isfile(apt_dat):
+                roots.append(probe)
+                break
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                break
+            probe = parent
+    unique_roots = []
+    seen = set()
+    for root in roots:
+        real_root = os.path.realpath(root)
+        if real_root in seen:
+            continue
+        seen.add(real_root)
+        unique_roots.append(root)
+    return unique_roots
+
+
+def _configured_scenery_source_dirs():
+    sources = []
+    try:
+        import O4_Overlay_Utils as OVL
+    except Exception:
+        OVL = None
+    if OVL:
+        sources.extend((OVL.custom_overlay_src, OVL.custom_overlay_src_alternate))
+    for root in _candidate_xplane_roots():
+        global_scenery = os.path.join(root, "Global Scenery")
+        if not os.path.isdir(global_scenery):
+            continue
+        sources.extend(
+            os.path.join(global_scenery, entry.name)
+            for entry in os.scandir(global_scenery)
+            if entry.is_dir()
+        )
+
+    normalized_sources = []
+    seen = set()
+    for source in sources:
+        if not source:
+            continue
+        source = os.path.abspath(source)
+        candidates = [source]
+        if os.path.basename(source).lower() == "earth nav data":
+            candidates.insert(0, os.path.dirname(source))
+        global_scenery = os.path.join(source, "Global Scenery")
+        if os.path.isdir(global_scenery):
+            candidates.extend(
+                os.path.join(global_scenery, entry.name)
+                for entry in os.scandir(global_scenery)
+                if entry.is_dir()
+            )
+        for candidate in candidates:
+            if not os.path.isdir(os.path.join(candidate, "Earth nav data")):
+                continue
+            real_path = os.path.realpath(candidate)
+            if real_path in seen:
+                continue
+            seen.add(real_path)
+            normalized_sources.append(candidate)
+    return normalized_sources
+
+
+def _configured_overlay_dsf(lat, lon):
+    try:
+        import O4_Overlay_Utils as OVL
+    except Exception:
+        return (None, None)
+    checked = []
+    for overlay_src in _configured_scenery_source_dirs():
+        dsf_path = os.path.join(
+            overlay_src,
+            "Earth nav data",
+            FNAMES.long_latlon(lat, lon) + ".dsf",
+        )
+        checked.append(dsf_path)
+        if os.path.exists(dsf_path):
+            return (dsf_path, OVL)
+    if checked:
+        UI.vprint(
+            1,
+            "      Simulator fallback checked",
+            len(checked),
+            "DSF path(s); no DSF found for",
+            FNAMES.short_latlon(lat, lon) + ".",
+        )
+    return (None, OVL)
+
+
+def _candidate_apt_dat_files():
+    apt_dat_files = []
+    for root in _candidate_xplane_roots():
+        apt_dat = os.path.join(
+            root,
+            "Resources",
+            "default scenery",
+            "default apt dat",
+            "Earth nav data",
+            "apt.dat",
+        )
+        if os.path.isfile(apt_dat):
+            apt_dat_files.append(apt_dat)
+        custom_scenery = os.path.join(root, "Custom Scenery")
+        if os.path.isdir(custom_scenery):
+            for entry in sorted(os.scandir(custom_scenery), key=lambda item: item.name.lower()):
+                if not entry.is_dir():
+                    continue
+                custom_apt = os.path.join(entry.path, "Earth nav data", "apt.dat")
+                if os.path.isfile(custom_apt):
+                    apt_dat_files.insert(0, custom_apt)
+    unique_files = []
+    seen = set()
+    for apt_dat in apt_dat_files:
+        real_path = os.path.realpath(apt_dat)
+        if real_path in seen:
+            continue
+        seen.add(real_path)
+        unique_files.append(apt_dat)
+    return unique_files
+
+
+def _point_in_tile(latp, lonp, lat, lon, margin=0.05):
+    return (
+        lat - margin <= latp <= lat + 1 + margin
+        and lon - margin <= lonp <= lon + 1 + margin
+    )
+
+
+def _apt_dat_airport_fallback(osm_layer, lat, lon, cached_suffix):
+    if cached_suffix != "airports":
+        return 0
+    apt_dat_files = _candidate_apt_dat_files()
+    if not apt_dat_files:
+        UI.vprint(1, "      apt.dat airport fallback skipped: no apt.dat found.")
+        return 0
+
+    airport_count = 0
+    runway_count = 0
+    seen_airports = set()
+    for apt_dat in apt_dat_files:
+        try:
+            with open(apt_dat, "r", encoding="utf-8", errors="ignore") as apt_file:
+                current_airport = None
+                current_has_runway = False
+                pending_runways = []
+                for raw_line in apt_file:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    code = parts[0]
+                    if code in ("1", "16", "17"):
+                        if current_airport and current_has_runway:
+                            apt_key = current_airport["id"]
+                            if apt_key not in seen_airports:
+                                seen_airports.add(apt_key)
+                                _add_synthetic_node(
+                                    osm_layer,
+                                    current_airport["lon"],
+                                    current_airport["lat"],
+                                    current_airport["tags"],
+                                )
+                                airport_count += 1
+                                for runway in pending_runways:
+                                    runway_count += _add_synthetic_way(
+                                        osm_layer, runway["points"], runway["tags"]
+                                    )
+                        current_airport = None
+                        current_has_runway = False
+                        pending_runways = []
+                        if len(parts) < 5:
+                            continue
+                        airport_id = parts[4]
+                        name = " ".join(parts[5:]) if len(parts) > 5 else airport_id
+                        tags = {
+                            "aeroway": "aerodrome",
+                            "local_ref": airport_id,
+                            "name": name,
+                            "source": "xplane_apt_dat",
+                        }
+                        if len(airport_id) == 4:
+                            tags["icao"] = airport_id
+                        current_airport = {
+                            "id": airport_id,
+                            "name": name,
+                            "lat": None,
+                            "lon": None,
+                            "tags": tags,
+                        }
+                    elif code == "100" and current_airport and len(parts) >= 20:
+                        try:
+                            width_m = float(parts[1])
+                            lat1 = float(parts[9])
+                            lon1 = float(parts[10])
+                            lat2 = float(parts[18])
+                            lon2 = float(parts[19])
+                        except (ValueError, IndexError):
+                            continue
+                        center_lat = (lat1 + lat2) / 2
+                        center_lon = (lon1 + lon2) / 2
+                        if not (
+                            _point_in_tile(lat1, lon1, lat, lon)
+                            or _point_in_tile(lat2, lon2, lat, lon)
+                            or _point_in_tile(center_lat, center_lon, lat, lon)
+                        ):
+                            continue
+                        current_airport["lat"] = (
+                            center_lat
+                            if current_airport["lat"] is None
+                            else (current_airport["lat"] + center_lat) / 2
+                        )
+                        current_airport["lon"] = (
+                            center_lon
+                            if current_airport["lon"] is None
+                            else (current_airport["lon"] + center_lon) / 2
+                        )
+                        current_has_runway = True
+                        pending_runways.append(
+                            {
+                                "points": [(lon1, lat1), (lon2, lat2)],
+                                "tags": {
+                                    "aeroway": "runway",
+                                    "width": str(width_m),
+                                    "source": "xplane_apt_dat",
+                                },
+                            }
+                        )
+                if current_airport and current_has_runway:
+                    apt_key = current_airport["id"]
+                    if apt_key not in seen_airports:
+                        seen_airports.add(apt_key)
+                        _add_synthetic_node(
+                            osm_layer,
+                            current_airport["lon"],
+                            current_airport["lat"],
+                            current_airport["tags"],
+                        )
+                        airport_count += 1
+                        for runway in pending_runways:
+                            runway_count += _add_synthetic_way(
+                                osm_layer, runway["points"], runway["tags"]
+                            )
+        except Exception as exc:
+            UI.vprint(1, "      apt.dat airport fallback failed:", apt_dat, exc)
+
+    if airport_count:
+        UI.vprint(
+            1,
+            "      apt.dat airport fallback added",
+            airport_count,
+            "airport(s) and",
+            runway_count,
+            "runway(s).",
+        )
+        return 1
+    UI.vprint(1, "      apt.dat airport fallback found no airports in tile.")
+    return 0
+
+
+def _terrain_def_is_water(terrain_def, dsf_path=None):
+    normalized = terrain_def.replace("\\", "/").strip()
+    stem = os.path.splitext(os.path.basename(normalized))[0].lower()
+    if stem in ("water", "terrain_water"):
+        return True
+    if not normalized.lower().endswith(".ter") or not dsf_path:
+        return False
+
+    dsf_parts = os.path.normpath(dsf_path).split(os.sep)
+    try:
+        end_nav_idx = dsf_parts.index("Earth nav data")
+    except ValueError:
+        return False
+    scenery_root = os.sep.join(dsf_parts[:end_nav_idx])
+    ter_path = os.path.join(scenery_root, *normalized.split("/"))
+    if not os.path.isfile(ter_path):
+        return False
+    try:
+        with open(ter_path, "r", encoding="utf-8", errors="ignore") as ter_file:
+            return any("WATER_COLOR_MASK" in line for line in ter_file)
+    except Exception:
+        return False
+
+
+def _triangles_from_primitive(primitive_type, vertices):
+    if len(vertices) < 3:
+        return []
+    if primitive_type == 0:
+        return [vertices[i : i + 3] for i in range(0, len(vertices) - 2, 3)]
+    if primitive_type == 1:
+        return [vertices[i : i + 3] for i in range(len(vertices) - 2)]
+    if primitive_type == 2:
+        return [[vertices[0], vertices[i], vertices[i + 1]] for i in range(1, len(vertices) - 1)]
+    return []
+
+
+def _as_multipolygon(geom):
+    if geom.is_empty:
+        return geometry.MultiPolygon()
+    if geom.geom_type == "Polygon":
+        return geometry.MultiPolygon([geom])
+    if geom.geom_type == "MultiPolygon":
+        return geom
+    if "Collection" in geom.geom_type:
+        return geometry.MultiPolygon([item for item in geom.geoms if item.geom_type == "Polygon"])
+    return geometry.MultiPolygon()
+
+
+def _water_geometry_from_dsf_text(lines, lat, lon, dsf_path=None):
+    terrain_defs = []
+    water_triangles = []
+    current_patch_is_water = False
+    current_primitive_type = None
+    current_vertices = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("TERRAIN_DEF "):
+            terrain_defs.append(line.split(None, 1)[1])
+        elif line.startswith("BEGIN_PATCH "):
+            parts = line.split()
+            current_patch_is_water = False
+            try:
+                terrain_idx = int(parts[1])
+                flags = int(parts[4])
+            except (IndexError, ValueError):
+                continue
+            if terrain_idx < len(terrain_defs):
+                current_patch_is_water = (
+                    _terrain_def_is_water(terrain_defs[terrain_idx], dsf_path)
+                    and bool(flags & 1)
+                )
+        elif line.startswith("BEGIN_PRIMITIVE "):
+            try:
+                current_primitive_type = int(line.split()[1])
+            except (IndexError, ValueError):
+                current_primitive_type = None
+            current_vertices = []
+        elif line.startswith("PATCH_VERTEX ") and current_patch_is_water:
+            parts = line.split()
+            try:
+                current_vertices.append((float(parts[1]), float(parts[2])))
+            except (IndexError, ValueError):
+                pass
+        elif line.startswith("END_PRIMITIVE"):
+            if current_patch_is_water and current_primitive_type is not None:
+                water_triangles.extend(
+                    _triangles_from_primitive(current_primitive_type, current_vertices)
+                )
+            current_primitive_type = None
+            current_vertices = []
+        elif line.startswith("END_PATCH"):
+            current_patch_is_water = False
+
+    polygons = []
+    tile_bounds = geometry.box(lon, lat, lon + 1, lat + 1)
+    for triangle in water_triangles:
+        try:
+            polygon = geometry.Polygon(triangle)
+        except Exception:
+            continue
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if polygon.is_empty or not polygon.area:
+            continue
+        clipped = polygon.intersection(tile_bounds)
+        if clipped.is_empty:
+            continue
+        polygons.extend(_as_multipolygon(clipped).geoms)
+    if not polygons:
+        return geometry.MultiPolygon()
+    return _as_multipolygon(ops.unary_union(polygons).buffer(0))
+
+
+def _read_simulator_dsf_text(dsf_path, ovl_module, lat, lon, tmp_suffix):
+    import shutil
+    import subprocess
+
+    dsftool = ovl_module.dsftool_cmd.strip()
+    if not dsftool or not os.path.exists(dsftool):
+        UI.vprint(1, "      Simulator fallback skipped: DSFTool not found.")
+        return []
+    tmp_dsf = os.path.join(
+        FNAMES.Tmp_dir, FNAMES.short_latlon(lat, lon) + "_" + tmp_suffix + ".dsf"
+    )
+    tmp_txt = os.path.join(
+        FNAMES.Tmp_dir, FNAMES.short_latlon(lat, lon) + "_" + tmp_suffix + ".txt"
+    )
+    tmp_extract_dir = os.path.join(
+        FNAMES.Tmp_dir, FNAMES.short_latlon(lat, lon) + "_" + tmp_suffix
+    )
+    try:
+        os.makedirs(FNAMES.Tmp_dir, exist_ok=True)
+        shutil.copyfile(dsf_path, tmp_dsf)
+        with open(tmp_dsf, "rb") as dsf_file:
+            dsfid = dsf_file.read(2).decode("ascii", errors="ignore")
+        if dsfid == "7z":
+            archive_path = tmp_dsf
+            os.makedirs(tmp_extract_dir, exist_ok=True)
+            subprocess.run(
+                [
+                    ovl_module.unzip_cmd,
+                    "e",
+                    "-y",
+                    f"-o{tmp_extract_dir}",
+                    archive_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(ovl_module, "_CREATE_NO_WINDOW", 0),
+                check=True,
+            )
+            extracted_dsf = os.path.join(
+                tmp_extract_dir, FNAMES.short_latlon(lat, lon) + ".dsf"
+            )
+            if not os.path.isfile(extracted_dsf):
+                extracted_dsfs = [
+                    os.path.join(tmp_extract_dir, name)
+                    for name in os.listdir(tmp_extract_dir)
+                    if name.lower().endswith(".dsf")
+                ]
+                if not extracted_dsfs:
+                    raise FileNotFoundError("No DSF was extracted from archive")
+                extracted_dsf = extracted_dsfs[0]
+            os.remove(archive_path)
+            shutil.move(extracted_dsf, tmp_dsf)
+        subprocess.run(
+            [dsftool, "-dsf2text", tmp_dsf, tmp_txt],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            creationflags=getattr(ovl_module, "_CREATE_NO_WINDOW", 0),
+            check=True,
+        )
+        with open(tmp_txt, "r", encoding="utf-8", errors="ignore") as text_file:
+            return list(text_file)
+    finally:
+        for tmp_path in (tmp_dsf, tmp_txt, tmp_dsf + ".7z"):
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+        tmp_txt_prefix = os.path.basename(tmp_txt) + "."
+        try:
+            for name in os.listdir(FNAMES.Tmp_dir):
+                if name.startswith(tmp_txt_prefix):
+                    os.remove(os.path.join(FNAMES.Tmp_dir, name))
+        except Exception:
+            pass
+        try:
+            if os.path.isdir(tmp_extract_dir):
+                shutil.rmtree(tmp_extract_dir)
+        except Exception:
+            pass
+
+
+def _parse_simulator_water_dsf(dsf_path, ovl_module, lat, lon):
+    try:
+        cache_key = (
+            os.path.realpath(dsf_path),
+            os.path.getmtime(dsf_path),
+            os.path.getsize(dsf_path),
+            lat,
+            lon,
+        )
+        if cache_key in _simulator_water_geometry_cache:
+            return _simulator_water_geometry_cache[cache_key]
+        lines = _read_simulator_dsf_text(
+            dsf_path, ovl_module, lat, lon, "fallback_water_dsf"
+        )
+        water_area = _water_geometry_from_dsf_text(lines, lat, lon, dsf_path)
+        _simulator_water_geometry_cache[cache_key] = water_area
+        return water_area
+    except Exception as exc:
+        UI.vprint(1, "      Simulator water fallback failed:", exc)
+        return geometry.MultiPolygon()
+
+
+def _on_tile_boundary(point, lat, lon, eps=1e-7):
+    x, y = point
+    return (
+        abs(x - lon) <= eps
+        or abs(x - (lon + 1)) <= eps
+        or abs(y - lat) <= eps
+        or abs(y - (lat + 1)) <= eps
+    )
+
+
+def _tile_boundary_segment(p1, p2, lat, lon, eps=1e-7):
+    return (
+        (abs(p1[0] - p2[0]) <= eps and (abs(p1[0] - lon) <= eps or abs(p1[0] - (lon + 1)) <= eps))
+        or (abs(p1[1] - p2[1]) <= eps and (abs(p1[1] - lat) <= eps or abs(p1[1] - (lat + 1)) <= eps))
+    )
+
+
+def _coastline_segments_from_water_polygon(polygon, lat, lon):
+    if not polygon.boundary.intersects(geometry.box(lon, lat, lon + 1, lat + 1).boundary):
+        return []
+
+    def exterior_segments(coords):
+        coords = list(coords)[::-1]
+        segment_count = len(coords) - 1
+        if segment_count <= 0:
+            return []
+        start = 0
+        for idx in range(segment_count):
+            if _tile_boundary_segment(coords[idx], coords[idx + 1], lat, lon):
+                start = (idx + 1) % segment_count
+                break
+        ordered = coords[start:segment_count] + coords[: start + 1]
+        lines = []
+        current = []
+        for p1, p2 in zip(ordered, ordered[1:]):
+            if _tile_boundary_segment(p1, p2, lat, lon):
+                if len(current) >= 2:
+                    lines.append(current)
+                current = []
+                continue
+            if not current:
+                current = [p1]
+            current.append(p2)
+        if len(current) >= 2:
+            lines.append(current)
+        return lines
+
+    segments = exterior_segments(polygon.exterior.coords)
+    for interior in polygon.interiors:
+        ring = list(interior.coords)
+        if not geometry.LinearRing(ring).is_ccw:
+            ring = ring[::-1]
+        segments.append(ring)
+    return segments
+
+
+def _simulator_water_fallback(osm_layer, lat, lon, cached_suffix):
+    if cached_suffix not in ("water", "coastline"):
+        return 0
+    if cached_suffix == "coastline":
+        UI.vprint(
+            1,
+            "      Simulator coastline fallback skipped: default DSF water",
+            "is only used for inland water bodies.",
+        )
+        return 0
+    dsf_path, ovl_module = _configured_overlay_dsf(lat, lon)
+    if not dsf_path or not ovl_module:
+        UI.vprint(
+            1,
+            "      Simulator water fallback skipped: default scenery source",
+            "is not configured or missing.",
+        )
+        return 0
+    UI.vprint(1, "      Trying simulator water fallback from", dsf_path)
+    water_area = _parse_simulator_water_dsf(dsf_path, ovl_module, lat, lon)
+    if water_area.is_empty:
+        UI.vprint(1, "      Simulator water fallback found no water mesh patches.")
+        return 0
+
+    count = 0
+    tags = {"natural": "water", "source": "xplane_default_scenery"}
+    for polygon in water_area.geoms:
+        count += _add_synthetic_multipolygon(osm_layer, polygon, tags)
+    if count:
+        UI.vprint(
+            1,
+            "      Simulator water fallback added",
+            count,
+            "water polygon(s).",
+        )
+        return 1
+    UI.vprint(1, "      Simulator water fallback found no usable geometry.")
+    return 0
+
+
+def _parse_simulator_network_dsf(dsf_path, ovl_module, lat, lon):
+    import shutil
+    import subprocess
+
+    dsftool = ovl_module.dsftool_cmd.strip()
+    if not dsftool or not os.path.exists(dsftool):
+        UI.vprint(1, "      Simulator fallback skipped: DSFTool not found.")
+        return []
+    tmp_dsf = os.path.join(FNAMES.Tmp_dir, FNAMES.short_latlon(lat, lon) + ".dsf")
+    tmp_txt = os.path.join(
+        FNAMES.Tmp_dir, FNAMES.short_latlon(lat, lon) + "_fallback_dsf.txt"
+    )
+    try:
+        os.makedirs(FNAMES.Tmp_dir, exist_ok=True)
+        shutil.copy(dsf_path, tmp_dsf)
+        with open(tmp_dsf, "rb") as dsf_file:
+            dsfid = dsf_file.read(2).decode("ascii", errors="ignore")
+        if dsfid == "7z":
+            archive_path = tmp_dsf + ".7z"
+            os.replace(tmp_dsf, archive_path)
+            subprocess.run(
+                [
+                    ovl_module.unzip_cmd,
+                    "e",
+                    f"-o{FNAMES.Tmp_dir}",
+                    archive_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(ovl_module, "_CREATE_NO_WINDOW", 0),
+                check=True,
+            )
+            os.remove(archive_path)
+        subprocess.run(
+            [dsftool, "-dsf2text", tmp_dsf, tmp_txt],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            creationflags=getattr(ovl_module, "_CREATE_NO_WINDOW", 0),
+            check=True,
+        )
+        segments = []
+        current_points = None
+        with open(tmp_txt, "r", encoding="utf-8", errors="ignore") as text_file:
+            for raw_line in text_file:
+                line = raw_line.strip()
+                if line.startswith("BEGIN_SEGMENT "):
+                    parts = line.split()
+                    try:
+                        current_points = [(float(parts[4]), float(parts[5]))]
+                    except (IndexError, ValueError):
+                        current_points = None
+                elif line.startswith("SHAPE_POINT ") and current_points is not None:
+                    parts = line.split()
+                    try:
+                        current_points.append((float(parts[1]), float(parts[2])))
+                    except (IndexError, ValueError):
+                        pass
+                elif line.startswith("END_SEGMENT ") and current_points is not None:
+                    parts = line.split()
+                    try:
+                        current_points.append((float(parts[2]), float(parts[3])))
+                    except (IndexError, ValueError):
+                        pass
+                    if len(current_points) >= 2:
+                        segments.append(current_points)
+                    current_points = None
+        return segments
+    except Exception as exc:
+        UI.vprint(1, "      Simulator network fallback failed:", exc)
+        return []
+    finally:
+        for tmp_path in (tmp_dsf, tmp_txt):
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def _simulator_network_fallback(osm_layer, lat, lon, cached_suffix):
+    if cached_suffix not in ("big_roads", "small_roads"):
+        return 0
+    dsf_path, ovl_module = _configured_overlay_dsf(lat, lon)
+    if not dsf_path or not ovl_module:
+        UI.vprint(
+            1,
+            "      Simulator network fallback skipped: default overlay source",
+            "is not configured or missing.",
+        )
+        return 0
+    UI.vprint(1, "      Trying simulator network fallback from", dsf_path)
+    highway_type = "primary" if cached_suffix == "big_roads" else "residential"
+    tags = {"highway": highway_type, "source": "xplane_default_scenery"}
+    segment_count = 0
+    for segment in _parse_simulator_network_dsf(dsf_path, ovl_module, lat, lon):
+        segment_count += _add_synthetic_way(osm_layer, segment, tags)
+    if segment_count:
+        UI.vprint(
+            1,
+            "      Simulator network fallback added",
+            segment_count,
+            "road segment(s).",
+        )
+        return 1
+    UI.vprint(1, "      Simulator network fallback found no usable segments.")
+    return 0
+
+
+def _layer_has_data(osm_layer):
+    return bool(
+        osm_layer.dicosmfirst["n"]
+        or osm_layer.dicosmfirst["w"]
+        or osm_layer.dicosmfirst["r"]
+    )
+
+
+def _apply_failed_download_fallback(osm_layer, lat, lon, cached_suffix):
+    if _apt_dat_airport_fallback(osm_layer, lat, lon, cached_suffix):
+        return 1
+    if cached_suffix == "coastline":
+        UI.vprint(
+            1,
+            "      Coastline fallback disabled;",
+            "continuing without that OSM layer.",
+        )
+        return 1
+    if _simulator_water_fallback(osm_layer, lat, lon, cached_suffix):
+        return 1
+    if _simulator_network_fallback(osm_layer, lat, lon, cached_suffix):
+        return 1
+    if cached_suffix in ("airports", "coastline", "water"):
+        UI.vprint(
+            1,
+            "      No simulator fallback available for",
+            cached_suffix + ";",
+            "continuing without that OSM layer.",
+        )
+    return 1 if _layer_has_data(osm_layer) else 0
+
+################################################################################
 def OSM_queries_to_OSM_layer(
     queries,
     osm_layer,
@@ -457,7 +1278,9 @@ def OSM_queries_to_OSM_layer(
                 max_osm_tentatives,
                 ", skipping it.",
             )
-            return 0
+            return _apply_failed_download_fallback(
+                osm_layer, lat, lon, cached_suffix
+            )
         osm_layer.update_dicosm(response, input_tags, target_tags)
     if cached_suffix:
         osm_layer.write_to_file(cached_data_filename)
@@ -513,6 +1336,12 @@ def OSM_query_to_OSM_layer(
 
 ################################################################################
 def get_overpass_data(query, bbox, server_code=None):
+    if disable_osm_downloads:
+        UI.vprint(
+            1,
+            "        OSM downloads disabled for fallback testing; skipping live request.",
+        )
+        return 0
     tentative = 1
     while True:
         s = requests.Session()
