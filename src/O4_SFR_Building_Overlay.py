@@ -827,6 +827,9 @@ def _is_simheaven_building_polygon(path):
 
 
 _SIMHEAVEN_DIMS_RE = re.compile(r'_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:x\d+(?:\.\d+)?)?')
+_SIMHEAVEN_FLOORS_RE = re.compile(
+    r'_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:\.obj)?$'
+)
 _DEFAULT_OBJECT_DIMS_RE = re.compile(
     r'(?:^|/)(?:feat_Building|(?:hill|in|ind|out)_sq)_(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)'
 )
@@ -841,6 +844,15 @@ def _simheaven_object_dims(path):
     if any(token in name for token in ('church', 'chapel', 'mosque')):
         return 26.0, 26.0
     return 14.0, 14.0
+
+
+def _simheaven_object_floor_count(path):
+    """Infer a simHeaven object's floor count from names like house_09x12x2."""
+    name = os.path.basename((path or '').replace('\\', '/')).lower()
+    match = _SIMHEAVEN_FLOORS_RE.search(name)
+    if not match:
+        return None
+    return float(match.group(3))
 
 
 def _default_object_dims(path):
@@ -1860,11 +1872,30 @@ def _class_for_footprint(bounds_m):
     return BLD_CLASS_LARGE
 
 
+def _minimum_class_for_object_path(obj_path):
+    """Return the smallest placement class allowed by an asset's visual scale."""
+    p = (obj_path or '').replace('\\', '/').lower()
+    if '/urban_mid_' in p:
+        return BLD_CLASS_MEDIUM
+    floors = _simheaven_object_floor_count(p)
+    if floors is not None and floors > 2.0:
+        return BLD_CLASS_MEDIUM
+    return BLD_CLASS_COMPACT_RESIDENTIAL
+
+
+def _class_for_object_asset(obj_path, bounds_m):
+    """Classify an object by footprint, with compact kept to low-rise assets."""
+    return max(
+        _class_for_footprint(bounds_m),
+        _minimum_class_for_object_path(obj_path),
+    )
+
+
 def _append_object_asset(asset_pools, obj_path, bounds_m, source):
     """Append one rectangular object asset to the footprint-classed pool map."""
     if bounds_m is None:
         return False
-    zone_class = _class_for_footprint(bounds_m)
+    zone_class = _class_for_object_asset(obj_path, bounds_m)
     area_m2, max_side_m = _footprint_metrics(bounds_m)
     asset_pools[zone_class].append({
         'kind': 'object',

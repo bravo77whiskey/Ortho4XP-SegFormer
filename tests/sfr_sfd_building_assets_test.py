@@ -124,6 +124,35 @@ class SfdBuildingAssetTests(unittest.TestCase):
             BLD.BLD_CLASS_SMALL_APARTMENT,
         )
 
+    def test_compact_residential_excludes_midrise_row_blocks(self):
+        pools = BLD._build_sfd_asset_pools(42.0, 12.0)
+        compact_paths = _paths_for_classes(
+            pools,
+            (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
+        )
+        medium_paths = _paths_for_classes(
+            pools,
+            (BLD.BLD_CLASS_MEDIUM,),
+        )
+
+        self.assertNotIn("SFD_Global/Med/Residential/Urban_Mid_7m.obj", compact_paths)
+        self.assertIn("SFD_Global/Med/Residential/Urban_Mid_7m.obj", medium_paths)
+
+    def test_compact_simheaven_residential_stays_one_or_two_floor(self):
+        pools = BLD._build_simheaven_asset_pools([], 45.0, 7.0)
+        compact_paths = _paths_for_classes(
+            pools,
+            (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
+        )
+        medium_paths = _paths_for_classes(
+            pools,
+            (BLD.BLD_CLASS_MEDIUM,),
+        )
+
+        self.assertIn("simheaven/houses/house_09x12x2.obj", compact_paths)
+        self.assertNotIn("simheaven/residential/residential_10x10x3.obj", compact_paths)
+        self.assertIn("simheaven/residential/residential_10x10x3.obj", medium_paths)
+
     def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         apartment_paths = _paths_for_classes(
