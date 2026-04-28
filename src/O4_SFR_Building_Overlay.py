@@ -102,7 +102,9 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
             for label, key in (
                 ("cand", "candidates"),
                 ("initial_blocked", "initial_center_blocked"),
+                ("static_clearance_blocked", "static_clearance_blocked"),
                 ("dynamic_blocked", "dynamic_center_blocked"),
+                ("dynamic_clearance_blocked", "dynamic_clearance_blocked"),
                 ("cap", "candidate_cap"),
                 ("fit_checks", "fit_checks"),
                 ("placed", "placed"),
@@ -1402,7 +1404,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 22
+BLD_PLACEMENT_CACHE_VERSION = 23
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Treat the configured building spacing as the residential target.  Medium and
@@ -2259,6 +2261,20 @@ def _expand_bounds(bounds_m, pad_m: float):
 def _mark_poly(occ_mask: np.ndarray, pts: np.ndarray) -> None:
     """Fill polygon footprint into occ_mask (in-place)."""
     cv2.fillPoly(occ_mask, [np.int32(pts)], 1)
+
+
+def _mark_dynamic_center_blockers(center_block_masks, cx, cy, heading, mark_bounds,
+                                  m_per_px, class_min_fit_inradius_m):
+    """Mark centers where no future class-minimum footprint can fit."""
+    if mark_bounds is None:
+        return
+    for zone_class, center_mask in center_block_masks.items():
+        radius_m = class_min_fit_inradius_m.get(zone_class, 0.0)
+        if radius_m <= 0.0:
+            continue
+        block_bounds = _expand_bounds(mark_bounds, radius_m)
+        block_poly = _footprint_poly(cx, cy, block_bounds, heading, m_per_px)
+        cv2.fillPoly(center_mask, [np.int32(block_poly)], 1)
 
 
 def _pixel_ring_to_latlon(points_px, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
@@ -3165,6 +3181,10 @@ def run(
 
             _t = time.perf_counter()
             fit_scratch = np.zeros_like(occ_mask)
+            dynamic_center_block_masks = {
+                cls: np.zeros_like(occ_mask)
+                for cls in BLD_PLACEMENT_CLASSES
+            }
             for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
                 jx = int(jx)
                 jy = int(jy)
@@ -3172,6 +3192,11 @@ def run(
                 if occ_mask[jy, jx]:
                     file_counts['dynamic_center_blocked'] = (
                         file_counts.get('dynamic_center_blocked', 0) + 1
+                    )
+                    continue
+                if dynamic_center_block_masks[zone_cls][jy, jx]:
+                    file_counts['dynamic_clearance_blocked'] = (
+                        file_counts.get('dynamic_clearance_blocked', 0) + 1
                     )
                     continue
 
@@ -3220,6 +3245,15 @@ def run(
                             float(asset.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
                         ))
                     _mark_poly(occ_mask, final_poly)
+                    _mark_dynamic_center_blockers(
+                        dynamic_center_block_masks,
+                        jx,
+                        jy,
+                        final_h,
+                        asset.get('mark_bounds_m'),
+                        m_per_px,
+                        class_min_fit_inradius_m,
+                    )
                     break
 
             fit_elapsed = _record_elapsed(timings, file_timings, 'fit_loop', _t)

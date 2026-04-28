@@ -242,6 +242,32 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertEqual(min_radius[BLD.BLD_CLASS_COMPACT_RESIDENTIAL], 2.0)
 
+    def test_dynamic_center_blocker_marks_future_impossible_centers(self):
+        masks = {
+            cls: np.zeros((50, 50), dtype=np.uint8)
+            for cls in BLD.BLD_PLACEMENT_CLASSES
+        }
+        min_radius = {
+            cls: 0.0
+            for cls in BLD.BLD_PLACEMENT_CLASSES
+        }
+        min_radius[BLD.BLD_CLASS_COMPACT_RESIDENTIAL] = 3.0
+
+        BLD._mark_dynamic_center_blockers(
+            masks,
+            25,
+            25,
+            0.0,
+            (-2.0, 2.0, -2.0, 2.0),
+            1.0,
+            min_radius,
+        )
+
+        self.assertEqual(masks[BLD.BLD_CLASS_COMPACT_RESIDENTIAL][25, 25], 1)
+        self.assertEqual(masks[BLD.BLD_CLASS_COMPACT_RESIDENTIAL][25, 29], 1)
+        self.assertEqual(masks[BLD.BLD_CLASS_COMPACT_RESIDENTIAL][25, 32], 0)
+        self.assertEqual(masks[BLD.BLD_CLASS_MEDIUM][25, 25], 0)
+
     def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         apartment_paths = _paths_for_classes(
