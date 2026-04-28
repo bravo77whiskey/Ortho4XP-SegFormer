@@ -1,6 +1,9 @@
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
+
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,6 +155,47 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIn("simheaven/houses/house_09x12x2.obj", compact_paths)
         self.assertNotIn("simheaven/residential/residential_10x10x3.obj", compact_paths)
         self.assertIn("simheaven/residential/residential_10x10x3.obj", medium_paths)
+
+    def test_fit_selection_retries_assets_until_one_fits(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "too-large.obj",
+                "bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "fit_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "mark_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+            },
+            {
+                "kind": "object",
+                "path": "small-enough.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "mark_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+            },
+        ]
+        occ_mask = np.zeros((40, 40), dtype=np.uint8)
+        occ_mask[20, 27] = 1
+        scratch = np.zeros_like(occ_mask)
+        counts = {}
+
+        with mock.patch.object(BLD, "_shuffled_asset_indices", return_value=(0, 1)):
+            asset, final_h, final_poly, skipped = BLD._find_fitting_asset(
+                pool,
+                np.random.default_rng(1),
+                20,
+                20,
+                0.0,
+                1.0,
+                occ_mask,
+                scratch,
+                counts,
+            )
+
+        self.assertEqual(asset["path"], "small-enough.obj")
+        self.assertEqual(final_h, 0.0)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(counts["fit_checks"], 3)
+        self.assertIsNotNone(final_poly)
 
     def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)

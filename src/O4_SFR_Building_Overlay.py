@@ -1891,6 +1891,15 @@ def _class_for_object_asset(obj_path, bounds_m):
     )
 
 
+def _shuffled_asset_indices(pool_size, rng):
+    """Return randomized asset indices for exhaustive fit retries."""
+    if pool_size <= 0:
+        return ()
+    if pool_size == 1:
+        return (0,)
+    return rng.permutation(pool_size)
+
+
 def _append_object_asset(asset_pools, obj_path, bounds_m, source):
     """Append one rectangular object asset to the footprint-classed pool map."""
     if bounds_m is None:
@@ -2164,6 +2173,45 @@ def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray |
     cv2.fillPoly(tmp, [pts - np.int32([x1, y1])], 1)
     cv2.bitwise_and(occ_mask[y1:y2, x1:x2], tmp, dst=tmp)
     return cv2.countNonZero(tmp) == 0
+
+
+def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
+                        occ_mask, fit_scratch, file_counts):
+    """Return the first asset fitting this candidate after exhausting retries."""
+    unknown_skipped = 0
+    for asset_idx in _shuffled_asset_indices(len(pool), rng):
+        asset = pool[int(asset_idx)]
+        bounds_m = asset.get('bounds_m')
+        if bounds_m is None:
+            unknown_skipped += 1
+            continue
+
+        fit_bounds = asset.get('fit_bounds_m')
+        mark_bounds = asset.get('mark_bounds_m')
+        if fit_bounds is None or mark_bounds is None:
+            fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+            mark_bounds = _expand_bounds(
+                bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+            )
+
+        final_h = final_poly = None
+        poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
+        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+        if _poly_fits(occ_mask, poly, fit_scratch):
+            final_h = heading
+            final_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
+        else:
+            h90 = (heading + 90.0) % 360.0
+            poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
+            file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+            if _poly_fits(occ_mask, poly90, fit_scratch):
+                final_h = h90
+                final_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+
+        if final_h is not None:
+            return asset, final_h, final_poly, unknown_skipped
+
+    return None, None, None, unknown_skipped
 
 
 def _expand_bounds(bounds_m, pad_m: float):
@@ -3086,35 +3134,13 @@ def run(
                     pool = asset_pools[try_cls]
                     if not pool:
                         continue
-                    asset = pool[int(rng.integers(0, len(pool)))]
-                    bounds_m = asset.get('bounds_m')
-                    if bounds_m is None:
-                        n_unknown_skipped += 1
-                        continue
 
-                    fit_bounds = asset.get('fit_bounds_m')
-                    mark_bounds = asset.get('mark_bounds_m')
-                    if fit_bounds is None or mark_bounds is None:
-                        fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
-                        mark_bounds = _expand_bounds(
-                            bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
-                        )
-
-                    final_h = final_poly = None
-                    poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
-                    file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-                    if _poly_fits(occ_mask, poly, fit_scratch):
-                        final_h = heading
-                        final_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
-                    else:
-                        h90 = (heading + 90.0) % 360.0
-                        poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
-                        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-                        if _poly_fits(occ_mask, poly90, fit_scratch):
-                            final_h = h90
-                            final_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
-
-                    if final_h is None:
+                    asset, final_h, final_poly, skipped = _find_fitting_asset(
+                        pool, rng, jx, jy, heading, m_per_px,
+                        occ_mask, fit_scratch, file_counts
+                    )
+                    n_unknown_skipped += skipped
+                    if asset is None:
                         continue
 
                     o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
