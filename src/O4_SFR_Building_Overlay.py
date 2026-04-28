@@ -1404,7 +1404,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 24
+BLD_PLACEMENT_CACHE_VERSION = 25
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Use the configured building spacing consistently across all placement classes.
@@ -1932,6 +1932,16 @@ def _sort_asset_pools_for_retry(asset_pools):
         asset_pools[zone_class].sort(key=_asset_retry_sort_key)
 
 
+def _asset_retry_sequence(pool, rng):
+    """Yield every asset once, starting from a random offset in sorted order."""
+    n_assets = len(pool)
+    if n_assets <= 0:
+        return
+    start = 0 if n_assets == 1 else int(rng.integers(0, n_assets))
+    for offset in range(n_assets):
+        yield pool[(start + offset) % n_assets]
+
+
 def _asset_fit_inradius_m(asset):
     """Return the guaranteed occupied centre radius for an asset fit footprint."""
     bounds_m = asset.get('fit_bounds_m')
@@ -2218,7 +2228,7 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                         occ_mask, fit_scratch, file_counts):
     """Return the first asset fitting this candidate after exhausting retries."""
     unknown_skipped = 0
-    for asset in pool:
+    for asset in _asset_retry_sequence(pool, rng):
         bounds_m = asset.get('bounds_m')
         if bounds_m is None:
             unknown_skipped += 1

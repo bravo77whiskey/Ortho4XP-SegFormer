@@ -234,6 +234,21 @@ class SfdBuildingAssetTests(unittest.TestCase):
             ["smaller.obj", "larger.obj"],
         )
 
+    def test_asset_retry_sequence_wraps_from_random_offset(self):
+        pool = [
+            {"path": "a.obj"},
+            {"path": "b.obj"},
+            {"path": "c.obj"},
+            {"path": "d.obj"},
+        ]
+
+        sequence = list(BLD._asset_retry_sequence(pool, np.random.default_rng(1)))
+
+        self.assertEqual(
+            [asset["path"] for asset in sequence],
+            ["b.obj", "c.obj", "d.obj", "a.obj"],
+        )
+
     def test_class_min_fit_inradius_uses_smallest_available_asset(self):
         pools = {
             cls: []
