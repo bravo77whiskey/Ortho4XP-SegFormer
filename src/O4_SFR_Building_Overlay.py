@@ -1402,7 +1402,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 20
+BLD_PLACEMENT_CACHE_VERSION = 21
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Treat the configured building spacing as the residential target.  Medium and
@@ -1891,15 +1891,6 @@ def _class_for_object_asset(obj_path, bounds_m):
     )
 
 
-def _shuffled_asset_indices(pool_size, rng):
-    """Return randomized asset indices for exhaustive fit retries."""
-    if pool_size <= 0:
-        return ()
-    if pool_size == 1:
-        return (0,)
-    return rng.permutation(pool_size)
-
-
 def _append_object_asset(asset_pools, obj_path, bounds_m, source):
     """Append one rectangular object asset to the footprint-classed pool map."""
     if bounds_m is None:
@@ -1916,6 +1907,28 @@ def _append_object_asset(asset_pools, obj_path, bounds_m, source):
         'source': source,
     })
     return True
+
+
+def _asset_retry_sort_key(asset):
+    """Sort assets so exhaustive retries test tighter footprints first."""
+    area_m2 = asset.get('footprint_area_m2')
+    max_side_m = asset.get('footprint_max_side_m')
+    if area_m2 is None or max_side_m is None:
+        bounds_m = asset.get('bounds_m')
+        if bounds_m is not None:
+            area_m2, max_side_m = _footprint_metrics(bounds_m)
+    return (
+        float('inf') if area_m2 is None else float(area_m2),
+        float('inf') if max_side_m is None else float(max_side_m),
+        asset.get('source', ''),
+        asset.get('path', ''),
+    )
+
+
+def _sort_asset_pools_for_retry(asset_pools):
+    """Order each regional/class pool for fast exhaustive fit retry."""
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        asset_pools[zone_class].sort(key=_asset_retry_sort_key)
 
 
 def _build_sfd_asset_pools(tile_lat, tile_lon):
@@ -2179,8 +2192,7 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                         occ_mask, fit_scratch, file_counts):
     """Return the first asset fitting this candidate after exhausting retries."""
     unknown_skipped = 0
-    for asset_idx in _shuffled_asset_indices(len(pool), rng):
-        asset = pool[int(asset_idx)]
+    for asset in pool:
         bounds_m = asset.get('bounds_m')
         if bounds_m is None:
             unknown_skipped += 1
@@ -2600,6 +2612,7 @@ def run(
     if not any(asset_pools.values()):
         print("Building assets: none available for placement")
         return 0
+    _sort_asset_pools_for_retry(asset_pools)
     for pool in asset_pools.values():
         for asset in pool:
             bounds_m = asset.get('bounds_m')

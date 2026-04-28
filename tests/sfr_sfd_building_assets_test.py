@@ -1,6 +1,5 @@
 import sys
 import unittest
-from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -178,24 +177,50 @@ class SfdBuildingAssetTests(unittest.TestCase):
         scratch = np.zeros_like(occ_mask)
         counts = {}
 
-        with mock.patch.object(BLD, "_shuffled_asset_indices", return_value=(0, 1)):
-            asset, final_h, final_poly, skipped = BLD._find_fitting_asset(
-                pool,
-                np.random.default_rng(1),
-                20,
-                20,
-                0.0,
-                1.0,
-                occ_mask,
-                scratch,
-                counts,
-            )
+        asset, final_h, final_poly, skipped = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            occ_mask,
+            scratch,
+            counts,
+        )
 
         self.assertEqual(asset["path"], "small-enough.obj")
         self.assertEqual(final_h, 0.0)
         self.assertEqual(skipped, 0)
         self.assertEqual(counts["fit_checks"], 3)
         self.assertIsNotNone(final_poly)
+
+    def test_asset_retry_order_prefers_smaller_footprints(self):
+        pools = {
+            cls: []
+            for cls in BLD.BLD_PLACEMENT_CLASSES
+        }
+        pools[BLD.BLD_CLASS_COMPACT_RESIDENTIAL] = [
+            {
+                "path": "larger.obj",
+                "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+                "footprint_area_m2": 100.0,
+                "footprint_max_side_m": 10.0,
+            },
+            {
+                "path": "smaller.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "footprint_area_m2": 16.0,
+                "footprint_max_side_m": 4.0,
+            },
+        ]
+
+        BLD._sort_asset_pools_for_retry(pools)
+
+        self.assertEqual(
+            [asset["path"] for asset in pools[BLD.BLD_CLASS_COMPACT_RESIDENTIAL]],
+            ["smaller.obj", "larger.obj"],
+        )
 
     def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
