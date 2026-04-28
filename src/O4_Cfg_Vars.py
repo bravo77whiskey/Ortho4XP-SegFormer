@@ -456,7 +456,7 @@ cfg_tile_vars = {
         "type": float,
         "default": 20.0,
         "short_name": "bld_spacing_m",
-        "hint": "Residential building placement spacing in metres. Medium and large building zones use coarser derived spacing so low values can preserve dense suburbs without slowing every zone equally.",
+        "hint": "Building placement spacing in metres. The same candidate spacing is used for every building size class; per-asset footprint fitting decides whether larger buildings can sit close together.",
     },
     "sfr_bld_close_m": {
         "type": float,

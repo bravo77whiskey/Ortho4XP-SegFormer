@@ -1404,26 +1404,25 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 23
+BLD_PLACEMENT_CACHE_VERSION = 24
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
-# Treat the configured building spacing as the residential target.  Medium and
-# large zones get coarser candidate grids so a dense residential-looking setting
-# such as 10 m does not explode candidate counts across apartment/industrial
-# blocks that do not need the same fine sampling.
+# Use the configured building spacing consistently across all placement classes.
+# Per-asset footprint fitting and clearance masks decide whether larger assets
+# can actually sit close together in a zone.
 BLD_CLASS_SPACING_MULTIPLIER = {
     BLD_CLASS_COMPACT_RESIDENTIAL: 1.0,
-    BLD_CLASS_MEDIUM: 1.5,
-    BLD_CLASS_SMALL_APARTMENT: 2.1,
-    BLD_CLASS_APARTMENT_BLOCK: 2.8,
-    BLD_CLASS_LARGE: 3.6,
+    BLD_CLASS_MEDIUM: 1.0,
+    BLD_CLASS_SMALL_APARTMENT: 1.0,
+    BLD_CLASS_APARTMENT_BLOCK: 1.0,
+    BLD_CLASS_LARGE: 1.0,
 }
 BLD_CLASS_SPACING_CAP_M = {
     BLD_CLASS_COMPACT_RESIDENTIAL: 0.0,
-    BLD_CLASS_MEDIUM: 22.0,
-    BLD_CLASS_SMALL_APARTMENT: 28.0,
-    BLD_CLASS_APARTMENT_BLOCK: 36.0,
-    BLD_CLASS_LARGE: 45.0,
+    BLD_CLASS_MEDIUM: 0.0,
+    BLD_CLASS_SMALL_APARTMENT: 0.0,
+    BLD_CLASS_APARTMENT_BLOCK: 0.0,
+    BLD_CLASS_LARGE: 0.0,
 }
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles

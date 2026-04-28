@@ -27,6 +27,18 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(BLD.BLD_CLASS_LABELS[BLD.BLD_CLASS_MEDIUM], "medium footprint")
         self.assertEqual(BLD.BLD_CLASS_STANDARD_RESIDENTIAL, BLD.BLD_CLASS_MEDIUM)
 
+    def test_building_spacing_is_uniform_across_classes(self):
+        self.assertEqual(
+            {
+                cls: BLD._spacing_for_zone_class_m(20.0, cls)
+                for cls in BLD.BLD_PLACEMENT_CLASSES
+            },
+            {
+                cls: 20.0
+                for cls in BLD.BLD_PLACEMENT_CLASSES
+            },
+        )
+
     def test_asset_regions_use_non_rectangular_boundaries(self):
         self.assertEqual(BLD._asset_region(45.0, -75.0), "north_america_ne")
         self.assertEqual(BLD._asset_region(35.0, -120.0), "north_america_west")
