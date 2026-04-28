@@ -183,7 +183,12 @@ def parse_args():
     ap.add_argument('lon',     type=float)
     ap.add_argument('out_dsf', nargs='?', default=None,
                     help='Output DSF path (auto-derived under yOrtho4XP_Bld_Overlays if omitted)')
-    ap.add_argument('--spacing',   type=float, default=20.0)
+    ap.add_argument(
+        '--spacing',
+        type=float,
+        default=20.0,
+        help='Target edge gap in metres between generated building footprints',
+    )
     ap.add_argument('--close',     type=int,   default=15)
     ap.add_argument('--open-k',    type=int,   default=5,  dest='open_k')
     ap.add_argument('--min-zone', '--min-zone-m2', type=float, default=200.0, dest='min_zone_m2')
@@ -1402,28 +1407,10 @@ OBJ_FOOTPRINTS: dict = {
     "SFD_Global/South_America/Med_8.obj": (-6.00, 6.00, -8.25, 8.25),
     "SFD_Global/US_West_Coast/Suburban_4.obj": (-7.19, 7.18, -5.87, 7.53),
 }
-PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
+PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 25
+BLD_PLACEMENT_CACHE_VERSION = 26
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
-
-# Use the configured building spacing consistently across all placement classes.
-# Per-asset footprint fitting and clearance masks decide whether larger assets
-# can actually sit close together in a zone.
-BLD_CLASS_SPACING_MULTIPLIER = {
-    BLD_CLASS_COMPACT_RESIDENTIAL: 1.0,
-    BLD_CLASS_MEDIUM: 1.0,
-    BLD_CLASS_SMALL_APARTMENT: 1.0,
-    BLD_CLASS_APARTMENT_BLOCK: 1.0,
-    BLD_CLASS_LARGE: 1.0,
-}
-BLD_CLASS_SPACING_CAP_M = {
-    BLD_CLASS_COMPACT_RESIDENTIAL: 0.0,
-    BLD_CLASS_MEDIUM: 0.0,
-    BLD_CLASS_SMALL_APARTMENT: 0.0,
-    BLD_CLASS_APARTMENT_BLOCK: 0.0,
-    BLD_CLASS_LARGE: 0.0,
-}
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
@@ -1932,6 +1919,36 @@ def _sort_asset_pools_for_retry(asset_pools):
         asset_pools[zone_class].sort(key=_asset_retry_sort_key)
 
 
+def _asset_footprint_span_m(asset):
+    """Return the larger raw footprint side for centre-spacing estimates."""
+    max_side_m = asset.get('footprint_max_side_m')
+    if max_side_m is not None:
+        return float(max_side_m)
+    bounds_m = asset.get('bounds_m')
+    if bounds_m is None:
+        return None
+    _, max_side_m = _footprint_metrics(bounds_m)
+    return float(max_side_m)
+
+
+def _class_min_footprint_span_m(asset_pools):
+    """Return the smallest raw footprint span available for each class."""
+    min_by_class = {}
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        spans = [
+            span
+            for span in (_asset_footprint_span_m(asset) for asset in asset_pools[zone_class])
+            if span is not None
+        ]
+        min_by_class[zone_class] = min(spans) if spans else 0.0
+    return min_by_class
+
+
+def _mark_pad_for_edge_spacing_m(edge_spacing_m):
+    """Return mark expansion that yields the requested raw-footprint edge gap."""
+    return max(0.0, float(edge_spacing_m) - FOOTPRINT_PAD_M)
+
+
 def _asset_retry_sequence(pool, rng):
     """Yield every asset once, starting from a random offset in sorted order."""
     n_assets = len(pool)
@@ -2136,23 +2153,25 @@ def _build_residential_area_mask(residential_polys, residential_roads,
     return None, 'unavailable'
 
 
-def _spacing_for_zone_class_m(base_spacing_m, zone_class):
-    """Return candidate spacing for a building-zone class in metres."""
-    spacing = float(base_spacing_m) * BLD_CLASS_SPACING_MULTIPLIER.get(
-        int(zone_class), 1.0
-    )
-    cap = BLD_CLASS_SPACING_CAP_M.get(int(zone_class), 0.0)
-    if cap > 0:
-        spacing = min(spacing, cap)
-    return max(float(base_spacing_m), spacing)
+def _spacing_for_zone_class_m(edge_spacing_m, zone_class,
+                              class_min_footprint_span_m=None):
+    """Return candidate centre spacing from class footprint span + edge gap."""
+    class_span_m = 0.0
+    if class_min_footprint_span_m is not None:
+        class_span_m = float(
+            class_min_footprint_span_m.get(int(zone_class), 0.0)
+        )
+    return max(0.0, float(edge_spacing_m)) + max(0.0, class_span_m)
 
 
-def _class_spacing_px(base_spacing_m, m_per_px):
+def _class_spacing_px(edge_spacing_m, m_per_px, class_min_footprint_span_m=None):
     """Return per-zone-class candidate spacing in native image pixels."""
     return {
         cls: max(
             3,
-            int(_spacing_for_zone_class_m(base_spacing_m, cls) / max(m_per_px, 1e-6)),
+            int(_spacing_for_zone_class_m(
+                edge_spacing_m, cls, class_min_footprint_span_m
+            ) / max(m_per_px, 1e-6)),
         )
         for cls in BLD_PLACEMENT_CLASSES
     }
@@ -2225,7 +2244,7 @@ def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray |
 
 
 def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
-                        occ_mask, fit_scratch, file_counts):
+                        occ_mask, fit_scratch, file_counts, mark_pad_m=None):
     """Return the first asset fitting this candidate after exhausting retries."""
     unknown_skipped = 0
     for asset in _asset_retry_sequence(pool, rng):
@@ -2238,8 +2257,12 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
         mark_bounds = asset.get('mark_bounds_m')
         if fit_bounds is None or mark_bounds is None:
             fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+            mark_pad = (
+                FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+                if mark_pad_m is None else float(mark_pad_m)
+            )
             mark_bounds = _expand_bounds(
-                bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+                bounds_m, mark_pad
             )
 
         final_h = final_poly = None
@@ -2522,7 +2545,7 @@ def run(
 
     print(f"Tile: lat={lat} lon={lon}  DDS: {len(files)} ({_zl_str})  Grid: {n_cols}×{n_rows}")
     print(
-        f"Params: spacing={spacing_m}m  close={close_k}px  open={open_k}px  "
+        f"Params: edge_spacing={spacing_m}m  close={close_k}px  open={open_k}px  "
         f"min_zone={min_zone_m2}m²"
     )
 
@@ -2663,6 +2686,8 @@ def run(
         print("Building assets: none available for placement")
         return 0
     _sort_asset_pools_for_retry(asset_pools)
+    class_min_footprint_span_m = _class_min_footprint_span_m(asset_pools)
+    mark_pad_m = _mark_pad_for_edge_spacing_m(spacing_m)
     for pool in asset_pools.values():
         for asset in pool:
             bounds_m = asset.get('bounds_m')
@@ -2670,7 +2695,7 @@ def run(
                 continue
             asset['fit_bounds_m'] = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
             asset['mark_bounds_m'] = _expand_bounds(
-                bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+                bounds_m, mark_pad_m
             )
     class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
 
@@ -2718,11 +2743,11 @@ def run(
     candidate_grid_cache = {}
     _bld_params = (
         BLD_PLACEMENT_CACHE_VERSION, spacing_m, close_k, open_k, min_zone_m2,
-        tuple(sorted(BLD_CLASS_SPACING_MULTIPLIER.items())),
-        tuple(sorted(BLD_CLASS_SPACING_CAP_M.items())),
         max_candidates_per_dds,
         PLACE_UNKNOWN_OBJECTS,
         FOOTPRINT_PAD_M,
+        mark_pad_m,
+        tuple(sorted(class_min_footprint_span_m.items())),
         ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
         ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
         excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
@@ -2813,7 +2838,9 @@ def run(
             m_per_px_x = lon_span_m / img_w
             m_per_px_y = lat_span_m / img_h
             m_per_px   = (m_per_px_x + m_per_px_y) / 2
-            spacing_px_by_class = _class_spacing_px(spacing_m, m_per_px)
+            spacing_px_by_class = _class_spacing_px(
+                spacing_m, m_per_px, class_min_footprint_span_m
+            )
             road_width_px = max(
                 ROAD_WIDTH_PX_MIN,
                 int(round(ROAD_CENTERLINE_WIDTH_M / max(m_per_px, 1e-6))),
@@ -3234,7 +3261,7 @@ def run(
 
                     asset, final_h, final_poly, skipped = _find_fitting_asset(
                         pool, rng, jx, jy, heading, m_per_px,
-                        occ_mask, fit_scratch, file_counts
+                        occ_mask, fit_scratch, file_counts, mark_pad_m
                     )
                     n_unknown_skipped += skipped
                     if asset is None:

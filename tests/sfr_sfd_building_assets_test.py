@@ -27,15 +27,26 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(BLD.BLD_CLASS_LABELS[BLD.BLD_CLASS_MEDIUM], "medium footprint")
         self.assertEqual(BLD.BLD_CLASS_STANDARD_RESIDENTIAL, BLD.BLD_CLASS_MEDIUM)
 
-    def test_building_spacing_is_uniform_across_classes(self):
+    def test_building_spacing_is_edge_gap_plus_class_span(self):
+        class_spans = {
+            BLD.BLD_CLASS_COMPACT_RESIDENTIAL: 8.0,
+            BLD.BLD_CLASS_MEDIUM: 20.0,
+            BLD.BLD_CLASS_SMALL_APARTMENT: 30.0,
+            BLD.BLD_CLASS_APARTMENT_BLOCK: 40.0,
+            BLD.BLD_CLASS_LARGE: 50.0,
+        }
+
         self.assertEqual(
             {
-                cls: BLD._spacing_for_zone_class_m(20.0, cls)
+                cls: BLD._spacing_for_zone_class_m(20.0, cls, class_spans)
                 for cls in BLD.BLD_PLACEMENT_CLASSES
             },
             {
-                cls: 20.0
-                for cls in BLD.BLD_PLACEMENT_CLASSES
+                BLD.BLD_CLASS_COMPACT_RESIDENTIAL: 28.0,
+                BLD.BLD_CLASS_MEDIUM: 40.0,
+                BLD.BLD_CLASS_SMALL_APARTMENT: 50.0,
+                BLD.BLD_CLASS_APARTMENT_BLOCK: 60.0,
+                BLD.BLD_CLASS_LARGE: 70.0,
             },
         )
 
@@ -233,6 +244,29 @@ class SfdBuildingAssetTests(unittest.TestCase):
             [asset["path"] for asset in pools[BLD.BLD_CLASS_COMPACT_RESIDENTIAL]],
             ["smaller.obj", "larger.obj"],
         )
+
+    def test_class_min_footprint_span_uses_smallest_raw_asset_span(self):
+        pools = {
+            cls: []
+            for cls in BLD.BLD_PLACEMENT_CLASSES
+        }
+        pools[BLD.BLD_CLASS_COMPACT_RESIDENTIAL] = [
+            {
+                "path": "wider.obj",
+                "bounds_m": (-5.0, 5.0, -3.0, 3.0),
+            },
+            {
+                "path": "narrower.obj",
+                "bounds_m": (-2.0, 2.0, -4.0, 4.0),
+            },
+        ]
+
+        min_span = BLD._class_min_footprint_span_m(pools)
+
+        self.assertEqual(min_span[BLD.BLD_CLASS_COMPACT_RESIDENTIAL], 8.0)
+
+    def test_mark_pad_for_edge_spacing_accounts_for_fit_pad(self):
+        self.assertEqual(BLD._mark_pad_for_edge_spacing_m(20.0), 16.0)
 
     def test_asset_retry_sequence_wraps_from_random_offset(self):
         pool = [

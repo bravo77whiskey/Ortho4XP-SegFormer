@@ -456,7 +456,7 @@ cfg_tile_vars = {
         "type": float,
         "default": 20.0,
         "short_name": "bld_spacing_m",
-        "hint": "Building placement spacing in metres. The same candidate spacing is used for every building size class; per-asset footprint fitting decides whether larger buildings can sit close together.",
+        "hint": "Minimum target gap in metres between building footprint edges. Candidate centre spacing is derived from this gap plus the smallest asset footprint span in each size class.",
     },
     "sfr_bld_close_m": {
         "type": float,
