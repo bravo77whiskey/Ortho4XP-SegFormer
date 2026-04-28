@@ -1402,7 +1402,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # clearance gap (metres) added around each footprint
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 21
+BLD_PLACEMENT_CACHE_VERSION = 22
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Treat the configured building spacing as the residential target.  Medium and
@@ -1929,6 +1929,31 @@ def _sort_asset_pools_for_retry(asset_pools):
     """Order each regional/class pool for fast exhaustive fit retry."""
     for zone_class in BLD_PLACEMENT_CLASSES:
         asset_pools[zone_class].sort(key=_asset_retry_sort_key)
+
+
+def _asset_fit_inradius_m(asset):
+    """Return the guaranteed occupied centre radius for an asset fit footprint."""
+    bounds_m = asset.get('fit_bounds_m')
+    if bounds_m is None:
+        base_bounds_m = asset.get('bounds_m')
+        if base_bounds_m is None:
+            return None
+        bounds_m = _expand_bounds(base_bounds_m, FOOTPRINT_PAD_M)
+    xmin, xmax, zmin, zmax = bounds_m
+    return 0.5 * min(float(xmax) - float(xmin), float(zmax) - float(zmin))
+
+
+def _class_min_fit_inradius_m(asset_pools):
+    """Return the smallest centre-blocker clearance needed by each class."""
+    min_by_class = {}
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        radii = [
+            radius
+            for radius in (_asset_fit_inradius_m(asset) for asset in asset_pools[zone_class])
+            if radius is not None
+        ]
+        min_by_class[zone_class] = min(radii) if radii else 0.0
+    return min_by_class
 
 
 def _build_sfd_asset_pools(tile_lat, tile_lon):
@@ -2622,6 +2647,7 @@ def run(
             asset['mark_bounds_m'] = _expand_bounds(
                 bounds_m, FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
             )
+    class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
 
     osm_roads = _prepare_roads(osm_roads)
     osm_roads_index = BBOX.build_bounds_index(osm_roads)
@@ -2968,6 +2994,12 @@ def run(
             if lat_s <= lat     + DEGREE_TOL:   occ_mask[-edge_px:, :]  = 1
             if lon_w <= lon     + DEGREE_TOL:   occ_mask[:,  :edge_px]  = 1
             if lon_e >= lon + 1 - DEGREE_TOL:   occ_mask[:, -edge_px:]  = 1
+            static_occ_mask = occ_mask.copy()
+            static_clearance_m = cv2.distanceTransform(
+                (static_occ_mask == 0).astype(np.uint8),
+                cv2.DIST_L2,
+                3,
+            ) * m_per_px
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
             cell_h = img_h // grid_n
@@ -3086,6 +3118,24 @@ def run(
                     cls_labels = cls_labels[open_center]
                     if not cls_cand_x.size:
                         continue
+
+                    min_clearance_m = class_min_fit_inradius_m.get(
+                        int(placement_cls), 0.0
+                    )
+                    if min_clearance_m > 0.0:
+                        static_clear = (
+                            static_clearance_m[cls_cand_y, cls_cand_x] >=
+                            min_clearance_m
+                        )
+                        file_counts['static_clearance_blocked'] = (
+                            file_counts.get('static_clearance_blocked', 0) +
+                            int(cls_cand_x.size - np.count_nonzero(static_clear))
+                        )
+                        cls_cand_x = cls_cand_x[static_clear]
+                        cls_cand_y = cls_cand_y[static_clear]
+                        cls_labels = cls_labels[static_clear]
+                        if not cls_cand_x.size:
+                            continue
 
                     cand_x_parts.append(cls_cand_x)
                     cand_y_parts.append(cls_cand_y)

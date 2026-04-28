@@ -222,6 +222,26 @@ class SfdBuildingAssetTests(unittest.TestCase):
             ["smaller.obj", "larger.obj"],
         )
 
+    def test_class_min_fit_inradius_uses_smallest_available_asset(self):
+        pools = {
+            cls: []
+            for cls in BLD.BLD_PLACEMENT_CLASSES
+        }
+        pools[BLD.BLD_CLASS_COMPACT_RESIDENTIAL] = [
+            {
+                "path": "larger.obj",
+                "fit_bounds_m": (-7.0, 7.0, -5.0, 5.0),
+            },
+            {
+                "path": "smaller.obj",
+                "fit_bounds_m": (-3.0, 3.0, -2.0, 2.0),
+            },
+        ]
+
+        min_radius = BLD._class_min_fit_inradius_m(pools)
+
+        self.assertEqual(min_radius[BLD.BLD_CLASS_COMPACT_RESIDENTIAL], 2.0)
+
     def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         apartment_paths = _paths_for_classes(
