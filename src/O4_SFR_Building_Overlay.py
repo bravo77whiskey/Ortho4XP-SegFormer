@@ -113,6 +113,8 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("gap_cap", "gap_candidate_cap"),
                 ("gap_placed", "gap_placed"),
                 ("res_asset_skip", "residential_asset_skipped"),
+                ("side_head", "side_heading_zones"),
+                ("sh_head", "simheaven_heading_zones"),
                 ("fit_checks", "fit_checks"),
                 ("placed", "placed"),
             )
@@ -594,6 +596,292 @@ def _cell_edge_hist(patch, bin_deg=5.0, resize_to=128):
     n_bins = int(180 / bin_deg)
     hist, _ = np.histogram(edge_deg, bins=n_bins, range=(0.0, 180.0), weights=mag)
     return hist
+
+
+def _contact_patch_straightness(xs, ys, band_px):
+    """Return (is_straight, length_px) for one road-contact patch."""
+    if len(xs) < 2:
+        return False, 0.0
+    pts = np.column_stack([
+        np.asarray(xs, dtype=np.float32),
+        np.asarray(ys, dtype=np.float32),
+    ])
+    centred = pts - pts.mean(axis=0, keepdims=True)
+    if float(np.sum(centred * centred)) <= 0.0:
+        return False, 0.0
+    _, singular_values, vh = np.linalg.svd(centred, full_matrices=False)
+    axis = vh[0]
+    along = centred @ axis
+    length_px = float(along.max() - along.min())
+    if length_px <= 0.0:
+        return False, 0.0
+    if singular_values.size < 2 or float(singular_values[1]) <= 1e-6:
+        rms_off_axis = 0.0
+    else:
+        off_axis = centred @ vh[1]
+        rms_off_axis = float(np.sqrt(np.mean(off_axis * off_axis)))
+    min_len = max(10.0, float(band_px) * 2.0)
+    max_rms = max(2.0, length_px * 0.12)
+    return length_px >= min_len and rms_off_axis <= max_rms, length_px
+
+
+def _component_side_touch_headings(labels, stats, valid_labels, roads,
+                                   lat_n, lat_s, lon_w, lon_e, img_h, img_w,
+                                   band_px=8, img=None, bin_deg=5.0):
+    """Estimate component headings from distinct road contacts on its outline.
+
+    The contact search follows the actual component boundary rather than an
+    axis-aligned bounding box, so rotated or irregular blocks are handled the
+    same way as rectangular blocks. Each connected contact patch contributes
+    one vote, so short local streets framing a block are not overwhelmed by a
+    longer nearby segment.
+    """
+    headings = np.full(labels.max() + 1 if labels.size else 0, np.nan, dtype=np.float32)
+    contact_counts = np.zeros(headings.shape, dtype=np.uint8)
+    if headings.size == 0 or len(valid_labels) == 0:
+        return headings, contact_counts
+    if not roads:
+        return headings, contact_counts
+
+    n_bins90 = int(90 / bin_deg)
+    n_bins180 = int(180 / bin_deg)
+    band_px = max(2, int(band_px))
+    ring_labels = np.zeros(labels.shape, dtype=np.int32)
+    ring_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (band_px * 2 + 1, band_px * 2 + 1)
+    )
+    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    for label in valid_labels:
+        label = int(label)
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if w <= 0 or h <= 0:
+            continue
+        x0 = max(0, x - band_px - 1)
+        y0 = max(0, y - band_px - 1)
+        x1 = min(img_w, x + w + band_px + 1)
+        y1 = min(img_h, y + h + band_px + 1)
+        local_component = (labels[y0:y1, x0:x1] == label).astype(np.uint8)
+        if not local_component.any():
+            continue
+        dilated = cv2.dilate(local_component, ring_kernel)
+        eroded = cv2.erode(local_component, erode_kernel)
+        boundary_ring = (dilated != 0) & (eroded == 0)
+        target = ring_labels[y0:y1, x0:x1]
+        target[(target == 0) & boundary_ring] = label
+
+    def ll_to_px(lat, lon):
+        x = (float(lon) - lon_w) / (lon_e - lon_w) * img_w
+        y = (lat_n - float(lat)) / (lat_n - lat_s) * img_h
+        return x, y
+
+    mid_lat_rad = math.radians((lat_n + lat_s) * 0.5)
+    m_per_lon = 111320.0 * math.cos(mid_lat_rad)
+    m_per_lat = 110540.0
+    margin = float(band_px + 2)
+    contact_points = {}
+    for road in roads:
+        pts = road.get('pts', ())
+        if len(pts) < 2:
+            continue
+        for (lat1, lon1), (lat2, lon2) in zip(pts[:-1], pts[1:]):
+            x1, y1 = ll_to_px(lat1, lon1)
+            x2, y2 = ll_to_px(lat2, lon2)
+            if (
+                max(x1, x2) < -margin or min(x1, x2) >= img_w + margin or
+                max(y1, y2) < -margin or min(y1, y2) >= img_h + margin
+            ):
+                continue
+            px_len = math.hypot(x2 - x1, y2 - y1)
+            if px_len <= 0.0:
+                continue
+            dx_m = (float(lon2) - float(lon1)) * m_per_lon
+            dy_m = (float(lat2) - float(lat1)) * m_per_lat
+            if dx_m == 0.0 and dy_m == 0.0:
+                continue
+            raw_deg = (math.degrees(math.atan2(dy_m, dx_m)) % 180.0)
+            b180 = int((raw_deg % 180.0) / bin_deg) % n_bins180
+            n_samples = max(2, min(192, int(px_len / max(1.0, band_px * 0.5)) + 1))
+            xs = np.rint(np.linspace(x1, x2, n_samples)).astype(np.int32)
+            ys = np.rint(np.linspace(y1, y2, n_samples)).astype(np.int32)
+            valid = (xs >= 0) & (xs < img_w) & (ys >= 0) & (ys < img_h)
+            if not np.any(valid):
+                continue
+            xs = xs[valid]
+            ys = ys[valid]
+            touched_labels = ring_labels[ys, xs]
+            touched = touched_labels != 0
+            if not np.any(touched):
+                continue
+            for label, px, py in zip(touched_labels[touched], xs[touched], ys[touched]):
+                contact_points.setdefault(int(label), []).append((int(px), int(py), b180))
+
+    for label in valid_labels:
+        label = int(label)
+        points = contact_points.get(label)
+        if not points:
+            continue
+
+        pts_arr = np.asarray(points, dtype=np.int32)
+        pxs = pts_arr[:, 0]
+        pys = pts_arr[:, 1]
+        bins = pts_arr[:, 2]
+        x0 = max(0, int(pxs.min()) - band_px)
+        x1 = min(img_w, int(pxs.max()) + band_px + 1)
+        y0 = max(0, int(pys.min()) - band_px)
+        y1 = min(img_h, int(pys.max()) + band_px + 1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        connect_px = max(1, min(3, band_px // 2))
+        connect_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (connect_px * 2 + 1, connect_px * 2 + 1)
+        )
+
+        votes90 = np.zeros(n_bins90, dtype=np.float32)
+        votes180 = np.zeros(n_bins180, dtype=np.float32)
+        contact_votes = []
+        remaining = np.ones(bins.shape, dtype=bool)
+        while np.any(remaining):
+            orient_hist = np.bincount(bins[remaining], minlength=n_bins180)
+            peak_bin = int(np.argmax(orient_hist))
+            circular_dist = np.abs(
+                ((bins - peak_bin + n_bins180 // 2) % n_bins180) - n_bins180 // 2
+            )
+            orient_sel = remaining & (circular_dist <= 1)
+            remaining[orient_sel] = False
+            if not np.any(orient_sel):
+                continue
+
+            sel_x = pxs[orient_sel]
+            sel_y = pys[orient_sel]
+            sel_bins = bins[orient_sel]
+            local_contact = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+            local_contact[sel_y - y0, sel_x - x0] = 1
+            local_contact = cv2.dilate(local_contact, connect_kernel)
+            n_contact_labels, contact_labels = cv2.connectedComponents(
+                local_contact, connectivity=8
+            )
+            sample_contact_labels = contact_labels[sel_y - y0, sel_x - x0]
+            for contact_label in range(1, n_contact_labels):
+                patch_mask = sample_contact_labels == contact_label
+                contact_bins = sel_bins[patch_mask]
+                if contact_bins.size == 0:
+                    continue
+                straight, length_px = _contact_patch_straightness(
+                    sel_x[patch_mask],
+                    sel_y[patch_mask],
+                    band_px,
+                )
+                side_hist = np.bincount(contact_bins, minlength=n_bins180).astype(np.float32)
+                smooth = (
+                    np.roll(side_hist, 1) +
+                    side_hist +
+                    np.roll(side_hist, -1)
+                ) / 3.0
+                peak180 = int(np.argmax(smooth))
+                contact_votes.append((peak180, bool(straight), length_px))
+
+        if not contact_votes:
+            continue
+
+        straight_votes = [vote for vote in contact_votes if vote[1]]
+        usable_votes = straight_votes or contact_votes
+        contact_counts[label] = min(len(usable_votes), 255)
+        for peak180, _straight, _length_px in usable_votes:
+            raw_angle = peak180 * bin_deg + bin_deg * 0.5
+            votes180[peak180] += 1.0
+            votes90[int((raw_angle % 90.0) / bin_deg) % n_bins90] += 1.0
+        v90s = (np.roll(votes90, 1) + votes90 + np.roll(votes90, -1)) / 3.0
+        dom_mod90 = int(np.argmax(v90s)) * bin_deg + bin_deg * 0.5
+        opt1 = dom_mod90
+        opt2 = dom_mod90 + 90.0
+
+        dom_angle = None
+        if img is not None:
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            x0 = max(0, x - band_px)
+            y0 = max(0, y - band_px)
+            x1 = min(img_w, x + w + band_px)
+            y1 = min(img_h, y + h + band_px)
+            edge_hist = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=bin_deg)
+            if edge_hist is not None:
+                def _img_score(angle):
+                    b = int(angle / bin_deg) % n_bins180
+                    return (
+                        edge_hist[(b - 1) % n_bins180] +
+                        edge_hist[b] +
+                        edge_hist[(b + 1) % n_bins180]
+                    )
+                dom_angle = opt1 if _img_score(opt1) >= _img_score(opt2) else opt2
+
+        if dom_angle is None:
+            def _road_score(angle):
+                b = int(angle / bin_deg) % n_bins180
+                return (
+                    votes180[(b - 1) % n_bins180] +
+                    votes180[b] +
+                    votes180[(b + 1) % n_bins180]
+                )
+            dom_angle = opt1 if _road_score(opt1) >= _road_score(opt2) else opt2
+
+        headings[label] = (90.0 - dom_angle) % 360.0
+
+    return headings, contact_counts
+
+
+def _simheaven_building_zone_headings(objects, labels, valid_labels,
+                                      lat_n, lat_s, lon_w, lon_e,
+                                      img_h, img_w, bin_deg=5.0):
+    """Return per-component headings from simHeaven buildings inside it."""
+    headings = np.full(labels.max() + 1 if labels.size else 0, np.nan, dtype=np.float32)
+    counts = np.zeros(headings.shape, dtype=np.uint16)
+    if headings.size == 0 or len(valid_labels) == 0 or not objects:
+        return headings, counts
+
+    px = np.rint((objects['lon'] - lon_w) / (lon_e - lon_w) * img_w).astype(np.int32)
+    py = np.rint((lat_n - objects['lat']) / (lat_n - lat_s) * img_h).astype(np.int32)
+    in_img = (px >= 0) & (px < img_w) & (py >= 0) & (py < img_h)
+    if not bool(np.any(in_img)):
+        return headings, counts
+
+    px = px[in_img]
+    py = py[in_img]
+    obj_heading = objects['heading'][in_img].astype(np.float32)
+    obj_w = objects['w_m'][in_img].astype(np.float32)
+    obj_h = objects['h_m'][in_img].astype(np.float32)
+    obj_labels = labels[py, px]
+    valid_label_set = set(int(label) for label in valid_labels)
+
+    n_bins = int(180 / bin_deg)
+    per_label_votes = {}
+    for label, heading, width_m, height_m in zip(obj_labels, obj_heading, obj_w, obj_h):
+        label = int(label)
+        if label == 0 or label not in valid_label_set:
+            continue
+        long_side = max(float(width_m), float(height_m))
+        short_side = max(1e-6, min(float(width_m), float(height_m)))
+        aspect = long_side / short_side
+        if aspect < 1.15:
+            continue
+        b = int((float(heading) % 180.0) / bin_deg) % n_bins
+        weight = min(4.0, max(1.0, aspect - 0.15))
+        per_label_votes.setdefault(label, np.zeros(n_bins, dtype=np.float32))[b] += weight
+        counts[label] += 1
+
+    for label, hist in per_label_votes.items():
+        if counts[label] <= 0 or float(hist.sum()) <= 0.0:
+            continue
+        smooth = (np.roll(hist, 1) + hist + np.roll(hist, -1)) / 3.0
+        peak = int(np.argmax(smooth))
+        headings[label] = (peak * bin_deg + bin_deg * 0.5) % 180.0
+
+    return headings, counts
 
 
 def _road_heading_grid(roads, lat_n, lat_s, lon_w, lon_e,
@@ -1527,7 +1815,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 35
+BLD_PLACEMENT_CACHE_VERSION = 37
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
@@ -3321,6 +3609,52 @@ def run(
                     np.minimum(grid_n - 1, centroid_y // cell_h),
                     np.minimum(grid_n - 1, centroid_x // cell_w),
                 ]
+                side_band_px = max(
+                    8,
+                    road_width_px + road_dilate_px + 2,
+                    int(round(14.0 / max(m_per_px, 1e-6))),
+                )
+                side_heading, side_heading_counts = _component_side_touch_headings(
+                    cc_labels,
+                    cc_stats,
+                    valid_labels,
+                    local_separator_roads,
+                    lat_n,
+                    lat_s,
+                    lon_w,
+                    lon_e,
+                    img_h,
+                    img_w,
+                    band_px=side_band_px,
+                    img=img,
+                )
+                side_valid = ~np.isnan(side_heading[valid_labels])
+                if np.any(side_valid):
+                    side_labels = valid_labels[side_valid]
+                    zone_heading[side_labels] = side_heading[side_labels]
+                    file_counts['side_heading_zones'] = int(side_valid.sum())
+                    file_counts['side_heading_touches'] = int(
+                        np.sum(side_heading_counts[side_labels])
+                    )
+                sh_heading, sh_heading_counts = _simheaven_building_zone_headings(
+                    local_sh_bld_objects,
+                    cc_labels,
+                    valid_labels,
+                    lat_n,
+                    lat_s,
+                    lon_w,
+                    lon_e,
+                    img_h,
+                    img_w,
+                )
+                sh_valid = ~np.isnan(sh_heading[valid_labels])
+                if np.any(sh_valid):
+                    sh_labels = valid_labels[sh_valid]
+                    zone_heading[sh_labels] = sh_heading[sh_labels]
+                    file_counts['simheaven_heading_zones'] = int(sh_valid.sum())
+                    file_counts['simheaven_heading_objects'] = int(
+                        np.sum(sh_heading_counts[sh_labels])
+                    )
             cc_elapsed = _record_elapsed(timings, file_timings, 'connected_components', _t)
             timings['placement'] += cc_elapsed
 
@@ -3425,6 +3759,16 @@ def run(
                 for cls in BLD_PLACEMENT_CLASSES
             }
             placed_viz_polys = []
+
+            def _heading_for_candidate(jx, jy, zone_label):
+                return float(zone_heading[zone_label]) if (
+                    0 <= zone_label < zone_heading.shape[0]
+                    and not np.isnan(zone_heading[zone_label])
+                ) else float(hgrid[
+                    min(grid_n - 1, jy // cell_h),
+                    min(grid_n - 1, jx // cell_w),
+                ])
+
             for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
                 jx = int(jx)
                 jy = int(jy)
@@ -3441,13 +3785,7 @@ def run(
                     continue
 
                 zone_label = int(cc_labels[jy, jx])
-                dom_h = float(zone_heading[zone_label]) if (
-                    0 <= zone_label < zone_heading.shape[0]
-                    and not np.isnan(zone_heading[zone_label])
-                ) else float(hgrid[
-                    min(grid_n - 1, jy // cell_h),
-                    min(grid_n - 1, jx // cell_w),
-                ])
+                dom_h = _heading_for_candidate(jx, jy, zone_label)
                 jitter  = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
                 heading = (dom_h + jitter) % 360.0
 
@@ -3529,13 +3867,7 @@ def run(
                         continue
 
                     zone_label = int(cc_labels[jy, jx])
-                    dom_h = float(zone_heading[zone_label]) if (
-                        0 <= zone_label < zone_heading.shape[0]
-                        and not np.isnan(zone_heading[zone_label])
-                    ) else float(hgrid[
-                        min(grid_n - 1, jy // cell_h),
-                        min(grid_n - 1, jx // cell_w),
-                    ])
+                    dom_h = _heading_for_candidate(jx, jy, zone_label)
                     jitter_h = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
                     heading = (dom_h + jitter_h) % 360.0
 

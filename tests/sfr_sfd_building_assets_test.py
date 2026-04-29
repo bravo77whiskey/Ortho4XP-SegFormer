@@ -56,6 +56,136 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertEqual(BLD._gap_fill_class_sequence(0), ())
 
+    def test_component_side_heading_counts_touched_sides_not_road_length(self):
+        labels = np.zeros((100, 100), dtype=np.int32)
+        labels[30:70, 30:70] = 1
+        stats = np.zeros((2, 5), dtype=np.int32)
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 30
+        stats[1, BLD.cv2.CC_STAT_TOP] = 30
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 40
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 40
+        stats[1, BLD.cv2.CC_STAT_AREA] = 1600
+
+        def ll(px, py):
+            return (1.0 - py / 100.0, px / 100.0)
+
+        roads = [
+            {"pts": [ll(31 + i * 4, 28), ll(33 + i * 4, 28)]}
+            for i in range(10)
+        ] + [
+            {"pts": [ll(28, 20), ll(28, 80)]},
+            {"pts": [ll(72, 20), ll(72, 80)]},
+        ]
+
+        headings, side_counts = BLD._component_side_touch_headings(
+            labels,
+            stats,
+            np.array([1], dtype=np.int32),
+            roads,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            band_px=4,
+        )
+
+        self.assertEqual(int(side_counts[1]), 3)
+        self.assertLessEqual(min(abs(float(headings[1])), abs(float(headings[1]) - 360.0)), 5.0)
+
+    def test_dead_end_road_contact_can_supply_heading(self):
+        labels = np.zeros((100, 100), dtype=np.int32)
+        labels[30:70, 30:70] = 1
+        stats = np.zeros((2, 5), dtype=np.int32)
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 30
+        stats[1, BLD.cv2.CC_STAT_TOP] = 30
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 40
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 40
+        stats[1, BLD.cv2.CC_STAT_AREA] = 1600
+
+        def ll(px, py):
+            return (1.0 - py / 100.0, px / 100.0)
+
+        headings, contact_counts = BLD._component_side_touch_headings(
+            labels,
+            stats,
+            np.array([1], dtype=np.int32),
+            [{"pts": [ll(50, 10), ll(50, 32)]}],
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            band_px=4,
+        )
+
+        self.assertGreaterEqual(int(contact_counts[1]), 1)
+        self.assertLessEqual(min(abs(float(headings[1])), abs(float(headings[1]) - 360.0)), 5.0)
+
+    def test_straight_contact_patches_are_preferred_over_noisy_fragments(self):
+        labels = np.zeros((100, 100), dtype=np.int32)
+        labels[30:70, 30:70] = 1
+        stats = np.zeros((2, 5), dtype=np.int32)
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 30
+        stats[1, BLD.cv2.CC_STAT_TOP] = 30
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 40
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 40
+        stats[1, BLD.cv2.CC_STAT_AREA] = 1600
+
+        def ll(px, py):
+            return (1.0 - py / 100.0, px / 100.0)
+
+        roads = [{"pts": [ll(28, 20), ll(28, 80)]}]
+        roads.extend(
+            {"pts": [ll(35 + i * 4, 28), ll(36 + i * 4, 31)]}
+            for i in range(7)
+        )
+
+        headings, contact_counts = BLD._component_side_touch_headings(
+            labels,
+            stats,
+            np.array([1], dtype=np.int32),
+            roads,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            band_px=4,
+        )
+
+        self.assertGreaterEqual(int(contact_counts[1]), 1)
+        self.assertLessEqual(min(abs(float(headings[1])), abs(float(headings[1]) - 360.0)), 5.0)
+
+    def test_simheaven_buildings_supply_zone_heading_after_split(self):
+        labels = np.zeros((100, 100), dtype=np.int32)
+        labels[20:80, 20:80] = 1
+        objects = {
+            "lat": np.array([0.70, 0.60, 0.50], dtype=np.float32),
+            "lon": np.array([0.30, 0.40, 0.50], dtype=np.float32),
+            "heading": np.array([30.0, 32.0, 120.0], dtype=np.float32),
+            "w_m": np.array([10.0, 10.0, 20.0], dtype=np.float32),
+            "h_m": np.array([20.0, 20.0, 20.0], dtype=np.float32),
+        }
+
+        headings, counts = BLD._simheaven_building_zone_headings(
+            objects,
+            labels,
+            np.array([1], dtype=np.int32),
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+        )
+
+        self.assertEqual(int(counts[1]), 2)
+        self.assertLessEqual(abs(float(headings[1]) - 32.5), 5.0)
+
     def test_asset_regions_use_non_rectangular_boundaries(self):
         self.assertEqual(BLD._asset_region(45.0, -75.0), "north_america_ne")
         self.assertEqual(BLD._asset_region(35.0, -120.0), "north_america_west")
