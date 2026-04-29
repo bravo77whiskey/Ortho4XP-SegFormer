@@ -970,8 +970,22 @@ def _road_heading_grid(roads, lat_n, lat_s, lon_w, lon_e,
     return hgrid
 
 
+def _building_zone_cell_mask(bld_zone, img_h, img_w, grid_n):
+    """Return grid cells that contain building-zone pixels."""
+    cell_mask = np.zeros((grid_n, grid_n), dtype=bool)
+    ys, xs = np.nonzero(bld_zone)
+    if xs.size == 0:
+        return cell_mask
+    cell_h = img_h / grid_n
+    cell_w = img_w / grid_n
+    gi = np.minimum(grid_n - 1, (ys / cell_h).astype(np.int32))
+    gj = np.minimum(grid_n - 1, (xs / cell_w).astype(np.int32))
+    cell_mask[gi, gj] = True
+    return cell_mask
+
+
 def _fill_heading_grid_nearest(hgrid, segments, lat_n, lat_s, lon_w, lon_e,
-                               img_h, img_w, grid_n):
+                               img_h, img_w, grid_n, cell_mask=None):
     """Fill NaN heading cells from the nearest precomputed segment midpoint."""
     if not segments or not np.any(np.isnan(hgrid)):
         return hgrid
@@ -983,7 +997,10 @@ def _fill_heading_grid_nearest(hgrid, segments, lat_n, lat_s, lon_w, lon_e,
 
     cell_h = img_h / grid_n
     cell_w = img_w / grid_n
-    missing = np.argwhere(np.isnan(hgrid))
+    missing_mask = np.isnan(hgrid)
+    if cell_mask is not None:
+        missing_mask &= cell_mask
+    missing = np.argwhere(missing_mask)
     for gi, gj in missing:
         cy = (gi + 0.5) * cell_h
         cx = (gj + 0.5) * cell_w
@@ -992,7 +1009,7 @@ def _fill_heading_grid_nearest(hgrid, segments, lat_n, lat_s, lon_w, lon_e,
     return hgrid
 
 
-def _image_heading_grid(img, img_h, img_w, grid_n):
+def _image_heading_grid(img, img_h, img_w, grid_n, cell_mask=None):
     """Estimate per-cell heading from imagery edges when road vectors are absent."""
     hgrid = np.full((grid_n, grid_n), np.nan)
     if img is None:
@@ -1000,20 +1017,26 @@ def _image_heading_grid(img, img_h, img_w, grid_n):
     bin_deg = 5.0
     cell_h = img_h / grid_n
     cell_w = img_w / grid_n
-    for gi in range(grid_n):
+    cells = (
+        np.argwhere(cell_mask)
+        if cell_mask is not None else
+        np.indices((grid_n, grid_n)).reshape(2, -1).T
+    )
+    for gi, gj in cells:
+        gi = int(gi)
+        gj = int(gj)
         y0 = int(gi * cell_h)
         y1 = min(img_h, int((gi + 1) * cell_h))
-        for gj in range(grid_n):
-            x0 = int(gj * cell_w)
-            x1 = min(img_w, int((gj + 1) * cell_w))
-            hist = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=bin_deg)
-            if hist is None:
-                continue
-            smooth = np.convolve(np.r_[hist[-1], hist, hist[0]], [1, 2, 1], mode='same')[1:-1]
-            if float(smooth.max()) <= 0.0:
-                continue
-            edge_angle = float(np.argmax(smooth) * bin_deg + bin_deg / 2.0)
-            hgrid[gi, gj] = (90.0 - edge_angle) % 360.0
+        x0 = int(gj * cell_w)
+        x1 = min(img_w, int((gj + 1) * cell_w))
+        hist = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=bin_deg)
+        if hist is None:
+            continue
+        smooth = np.convolve(np.r_[hist[-1], hist, hist[0]], [1, 2, 1], mode='same')[1:-1]
+        if float(smooth.max()) <= 0.0:
+            continue
+        edge_angle = float(np.argmax(smooth) * bin_deg + bin_deg / 2.0)
+        hgrid[gi, gj] = (90.0 - edge_angle) % 360.0
     return hgrid
 
 
@@ -2013,9 +2036,10 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 37
-BLD_PLACEMENT_FAST_CACHE_VERSION = 40
+BLD_PLACEMENT_CACHE_VERSION = 38
+BLD_PLACEMENT_FAST_CACHE_VERSION = 41
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
+BLD_SMART_GAP_FILL_ENABLED = False
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
@@ -3064,7 +3088,7 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                         residential_context=True, footprint_pad_m=FOOTPRINT_PAD_M,
                         static_occ_integral=None, fit_cache_enabled=True,
                         retry_context=None):
-    """Return the first asset fitting this candidate after exhausting retries."""
+    """Return the selected asset when it fits this candidate."""
     unknown_skipped = 0
     candidate_fit_cache = {}
     angle_basis_cache = {}
@@ -3126,6 +3150,7 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
         candidate_fit_cache[cache_key] = result
         return result
 
+    selected_asset = None
     for asset, skipped_before in _asset_retry_sequence_for_context(
         pool,
         rng,
@@ -3144,75 +3169,82 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                 file_counts.get('residential_asset_skipped', 0) + 1
             )
             continue
-        bounds_m = asset.get('bounds_m')
-        if bounds_m is None:
-            unknown_skipped += 1
-            continue
+        selected_asset = asset
+        break
 
-        fit_bounds = asset.get('fit_bounds_m')
-        mark_bounds = asset.get('mark_bounds_m')
-        bounds_cache_key = asset.get('fit_cache_key')
-        if fit_bounds is None or mark_bounds is None:
-            fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
-            mark_pad = (
-                footprint_pad_m + PLACEMENT_MARGIN_M
-                if mark_pad_m is None else float(mark_pad_m)
-            )
-            mark_bounds = _expand_bounds(
-                bounds_m, mark_pad
-            )
-            bounds_cache_key = None
+    if selected_asset is None:
+        return None, None, None, None, unknown_skipped
 
-        final_h = footprint_poly = spacing_poly = None
-        if not fit_cache_enabled:
-            static_poly = _footprint_poly(jx, jy, bounds_m, heading, m_per_px)
-            dynamic_poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
-            file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-            if (
-                _poly_fits(static_occ_mask, static_poly, fit_scratch) and
-                _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
-            ):
-                final_h = heading
-                footprint_poly = static_poly
-                spacing_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
-            else:
-                h90 = (heading + 90.0) % 360.0
-                static_poly90 = _footprint_poly(jx, jy, bounds_m, h90, m_per_px)
-                dynamic_poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
-                file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-                if (
-                    _poly_fits(static_occ_mask, static_poly90, fit_scratch) and
-                    _poly_fits(building_spacing_mask, dynamic_poly90, fit_scratch)
-                ):
-                    final_h = h90
-                    footprint_poly = static_poly90
-                    spacing_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+    asset = selected_asset
+    bounds_m = asset.get('bounds_m')
+    if bounds_m is None:
+        unknown_skipped += 1
+        return None, None, None, None, unknown_skipped
 
-            if final_h is not None:
-                return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
-            continue
-
-        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-        fits, static_poly, mark_poly = _orientation_fit(
-            bounds_m, fit_bounds, mark_bounds, bounds_cache_key, heading
+    fit_bounds = asset.get('fit_bounds_m')
+    mark_bounds = asset.get('mark_bounds_m')
+    bounds_cache_key = asset.get('fit_cache_key')
+    if fit_bounds is None or mark_bounds is None:
+        fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
+        mark_pad = (
+            footprint_pad_m + PLACEMENT_MARGIN_M
+            if mark_pad_m is None else float(mark_pad_m)
         )
-        if fits:
+        mark_bounds = _expand_bounds(
+            bounds_m, mark_pad
+        )
+        bounds_cache_key = None
+
+    final_h = footprint_poly = spacing_poly = None
+    if not fit_cache_enabled:
+        static_poly = _footprint_poly(jx, jy, bounds_m, heading, m_per_px)
+        dynamic_poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
+        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+        if (
+            _poly_fits(static_occ_mask, static_poly, fit_scratch) and
+            _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
+        ):
             final_h = heading
             footprint_poly = static_poly
-            spacing_poly = mark_poly
+            spacing_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
         else:
             h90 = (heading + 90.0) % 360.0
+            static_poly90 = _footprint_poly(jx, jy, bounds_m, h90, m_per_px)
+            dynamic_poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
             file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-            fits, static_poly90, mark_poly90 = _orientation_fit(
-                bounds_m, fit_bounds, mark_bounds, bounds_cache_key, h90
-            )
-            if fits:
+            if (
+                _poly_fits(static_occ_mask, static_poly90, fit_scratch) and
+                _poly_fits(building_spacing_mask, dynamic_poly90, fit_scratch)
+            ):
                 final_h = h90
                 footprint_poly = static_poly90
-                spacing_poly = mark_poly90
+                spacing_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
 
         if final_h is not None:
             return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
+        return None, None, None, None, unknown_skipped
+
+    file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+    fits, static_poly, mark_poly = _orientation_fit(
+        bounds_m, fit_bounds, mark_bounds, bounds_cache_key, heading
+    )
+    if fits:
+        final_h = heading
+        footprint_poly = static_poly
+        spacing_poly = mark_poly
+    else:
+        h90 = (heading + 90.0) % 360.0
+        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+        fits, static_poly90, mark_poly90 = _orientation_fit(
+            bounds_m, fit_bounds, mark_bounds, bounds_cache_key, h90
+        )
+        if fits:
+            final_h = h90
+            footprint_poly = static_poly90
+            spacing_poly = mark_poly90
+
+    if final_h is not None:
+        return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
 
     return None, None, None, None, unknown_skipped
 
@@ -3566,6 +3598,9 @@ def run(
         smart_gap_fill = _env_flag("O4_SFR_BLD_SMART_GAP_FILL")
     else:
         smart_gap_fill = bool(smart_gap_fill)
+    # Keep the public/config knob accepted for compatibility, but do not run
+    # the retired second placement pass anymore.
+    smart_gap_fill = bool(smart_gap_fill and BLD_SMART_GAP_FILL_ENABLED)
     footprint_pad_m = max(0.0, _env_float("O4_SFR_BLD_FOOTPRINT_PAD_M", FOOTPRINT_PAD_M))
     disable_center_blockers = _env_flag("O4_SFR_BLD_DISABLE_CENTER_BLOCKERS")
     max_gap_candidates_per_dds = max(
@@ -4023,6 +4058,9 @@ def run(
 
                 # ── Heading grid ─────────────────────────────────────────────
                 _t = time.perf_counter()
+                heading_cell_mask = _building_zone_cell_mask(
+                    bld_zone, img_h, img_w, grid_n
+                )
                 if local_heading_segments:
                     if img is None:
                         _img_t = time.perf_counter()
@@ -4040,16 +4078,18 @@ def run(
                 n_osm_cells = int(np.sum(~np.isnan(hgrid)))
                 hgrid = _fill_heading_grid_nearest(
                     hgrid, nearest_heading_segments, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, grid_n,
+                    img_h, img_w, grid_n, cell_mask=heading_cell_mask,
                 )
-                if np.any(np.isnan(hgrid)):
+                if np.any(np.isnan(hgrid) & heading_cell_mask):
                     if img is None:
                         _img_t = time.perf_counter()
                         img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                         if img is None:
                             continue
                         _record_elapsed(timings, file_timings, 'dds_load', _img_t)
-                    image_hgrid = _image_heading_grid(img, img_h, img_w, grid_n)
+                    image_hgrid = _image_heading_grid(
+                        img, img_h, img_w, grid_n, cell_mask=heading_cell_mask
+                    )
                     hgrid = np.where(np.isnan(hgrid), image_hgrid, hgrid)
                 residential_area_mask, residential_area_source = _build_residential_area_mask(
                     local_residential_polys,

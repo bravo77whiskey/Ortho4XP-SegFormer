@@ -52,11 +52,39 @@ class SfdBuildingAssetTests(unittest.TestCase):
             },
         )
 
-    def test_gap_fill_stays_within_zone_class(self):
-        for zone_class in BLD.BLD_PLACEMENT_CLASSES:
-            self.assertEqual(BLD._gap_fill_class_sequence(zone_class), (zone_class,))
+    def test_smart_gap_fill_is_retired(self):
+        self.assertFalse(BLD.BLD_SMART_GAP_FILL_ENABLED)
 
-        self.assertEqual(BLD._gap_fill_class_sequence(0), ())
+    def test_building_zone_cell_mask_tracks_only_occupied_grid_cells(self):
+        bld_zone = np.zeros((8, 8), dtype=np.uint8)
+        bld_zone[1, 1] = 1
+        bld_zone[6, 7] = 1
+
+        cell_mask = BLD._building_zone_cell_mask(bld_zone, 8, 8, 4)
+
+        self.assertEqual(int(cell_mask.sum()), 2)
+        self.assertTrue(cell_mask[0, 0])
+        self.assertTrue(cell_mask[3, 3])
+        self.assertFalse(cell_mask[0, 3])
+
+    def test_image_heading_grid_can_be_limited_to_building_cells(self):
+        img = np.zeros((8, 8, 3), dtype=np.uint8)
+        cell_mask = np.zeros((4, 4), dtype=bool)
+        cell_mask[2, 1] = True
+        calls = []
+
+        def fake_edge_hist(_patch, bin_deg=5.0):
+            calls.append(_patch.shape)
+            hist = np.zeros(int(180 / bin_deg), dtype=np.float32)
+            hist[0] = 1.0
+            return hist
+
+        with mock.patch.object(BLD, "_cell_edge_hist", side_effect=fake_edge_hist):
+            hgrid = BLD._image_heading_grid(img, 8, 8, 4, cell_mask=cell_mask)
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(np.isnan(hgrid[2, 1]))
+        self.assertTrue(np.isnan(hgrid[0, 0]))
 
     def test_oversized_polygon_rasterization_fills_covered_tile(self):
         poly = [
@@ -396,7 +424,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertNotIn("simheaven/residential/residential_10x10x3.obj", compact_paths)
         self.assertIn("simheaven/residential/residential_10x10x3.obj", medium_paths)
 
-    def test_fit_selection_retries_assets_until_one_fits(self):
+    def test_fit_selection_does_not_retry_after_selected_asset_fails(self):
         pool = [
             {
                 "kind": "object",
@@ -433,12 +461,12 @@ class SfdBuildingAssetTests(unittest.TestCase):
             counts,
         )
 
-        self.assertEqual(asset["path"], "small-enough.obj")
-        self.assertEqual(final_h, 0.0)
+        self.assertIsNone(asset)
+        self.assertIsNone(final_h)
         self.assertEqual(skipped, 0)
-        self.assertEqual(counts["fit_checks"], 3)
-        self.assertIsNotNone(final_poly)
-        self.assertIsNotNone(spacing_poly)
+        self.assertEqual(counts["fit_checks"], 2)
+        self.assertIsNone(final_poly)
+        self.assertIsNone(spacing_poly)
 
     def test_static_integral_fit_path_matches_standard_fit_path(self):
         pool = [
@@ -490,7 +518,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(standard[4], integral[4])
         self.assertEqual(standard_counts, integral_counts)
 
-    def test_fit_selection_reuses_repeated_same_footprint_candidates(self):
+    def test_fit_selection_checks_only_selected_asset_orientations(self):
         pool = [
             {
                 "kind": "object",
@@ -535,13 +563,13 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 counts,
             )
 
-        self.assertEqual(asset["path"], "small-enough.obj")
-        self.assertEqual(final_h, 0.0)
+        self.assertIsNone(asset)
+        self.assertIsNone(final_h)
         self.assertEqual(skipped, 0)
-        self.assertEqual(counts["fit_checks"], 5)
-        self.assertIsNotNone(final_poly)
-        self.assertIsNotNone(spacing_poly)
-        self.assertEqual(footprint_poly.call_count, 7)
+        self.assertEqual(counts["fit_checks"], 2)
+        self.assertIsNone(final_poly)
+        self.assertIsNone(spacing_poly)
+        self.assertEqual(footprint_poly.call_count, 4)
 
     def test_static_blockers_use_raw_footprint_not_spacing_pad(self):
         pool = [
