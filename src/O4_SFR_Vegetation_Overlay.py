@@ -48,7 +48,11 @@ import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
 from O4_SFR_Building_Overlay import (
     _load_simheaven_building_exclusions,
+    _load_mesh_water_index,
+    _mesh_file_for_tile,
+    _mesh_water_signature,
     _prepare_simheaven_objects,
+    _rasterize_mesh_water_mask,
     _rasterize_simheaven_objects,
     _simheaven_objects_for_bounds,
 )
@@ -591,9 +595,9 @@ def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
                         road_sig, res_road_sig, tree_row_sig, context_poly_sigs,
                         forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
                         bld_excl_m, bld_cache_stat,
-                        simheaven_building_buffer_m):
+                        simheaven_building_buffer_m, mesh_water_sig=None):
     return {
-        'version': 1,
+        'version': 2,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -608,10 +612,19 @@ def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
         'bld_excl_m': round(float(bld_excl_m), 4),
         'bld_cache_stat': bld_cache_stat,
         'simheaven_building_buffer_m': round(float(simheaven_building_buffer_m), 4),
+        'mesh_water_sig': mesh_water_sig,
         'residential_buffer_m': float(RESIDENTIAL_FALLBACK_BUFFER_M),
         'residential_buffer_px_min': int(RESIDENTIAL_FALLBACK_BUFFER_PX_MIN),
         'tree_row_width_m': float(TREE_ROW_WIDTH_M),
     }
+
+
+def _or_optional_masks(lhs, rhs):
+    if lhs is None:
+        return rhs
+    if rhs is None:
+        return lhs
+    return cv2.bitwise_or(lhs, rhs)
 
 
 def _load_dds_mask_cache(cache_path, key):
@@ -1280,6 +1293,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'poly_cache': 0.0,
         'dds_load': 0.0,
         'inference': 0.0,
+        'mesh_water': 0.0,
         'road_excl': 0.0,
         'bld_excl': 0.0,
         'forest_layer_excl': 0.0,
@@ -1467,6 +1481,19 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     elif avoid_simheaven_buildings:
         print(f"simHeaven buildings: skipped (DSFTool unavailable at {dsftool_path})")
 
+    _t = time.perf_counter()
+    mesh_water_path = _mesh_file_for_tile(tex_dir, lat, lon)
+    mesh_water_sig = _mesh_water_signature(mesh_water_path)
+    mesh_water_index = _load_mesh_water_index(mesh_water_path, cache_dir)
+    timings['mesh_water'] += time.perf_counter() - _t
+    if mesh_water_index:
+        print(
+            f"Mesh water: {len(mesh_water_index['tris'])} water triangles from "
+            f"{mesh_water_path}"
+        )
+    else:
+        print(f"Mesh water: unavailable from {mesh_water_path}")
+
     for idx, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
         if not m: continue
@@ -1488,12 +1515,35 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
         cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
+        img = None
+        veg_map = None
+        mesh_water_mask = None
+        mesh_water_full = False
         if not disable_cache and os.path.exists(cache_path):
             _t = time.perf_counter()
             veg_map = np.load(cache_path)
             timings['cache_load'] += time.perf_counter() - _t
-            print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
-        else:
+            img_h, img_w = veg_map.shape[:2]
+            _t = time.perf_counter()
+            mesh_water_mask = _rasterize_mesh_water_mask(
+                mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+            )
+            timings['mesh_water'] += time.perf_counter() - _t
+            mesh_water_px = int(np.count_nonzero(mesh_water_mask)) if mesh_water_mask is not None else 0
+            mesh_water_full = mesh_water_px == int(img_h * img_w)
+            if (
+                not mesh_water_full and
+                bool(np.all(veg_map == SEGFORMER.CLASS_WATER))
+            ):
+                veg_map = None
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+                print(f"  [{idx}/{n_files}] {fname}  (stale all-water cache ignored)", flush=True)
+            else:
+                print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
+        if veg_map is None:
             print(f"  [{idx}/{n_files}] {fname}  (inferring…)", flush=True)
             _t = time.perf_counter()
             img = _load_source_image(fname, _source_mode, _orthophoto_dir)
@@ -1502,12 +1552,26 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     _remove_cache_files(_dds_cache_files)
                 continue
             timings['dds_load'] += time.perf_counter() - _t
-            if model is None:
-                model, proc, device = SEGFORMER.load_vegetation_model(device)
+            img_h, img_w = img.shape[:2]
             _t = time.perf_counter()
-            veg_map = SEGFORMER.run_inference(model, device, img, proc)
-            timings['inference'] += time.perf_counter() - _t
-            if not disable_cache:
+            mesh_water_mask = _rasterize_mesh_water_mask(
+                mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+            )
+            timings['mesh_water'] += time.perf_counter() - _t
+            mesh_water_full = (
+                mesh_water_mask is not None and
+                int(np.count_nonzero(mesh_water_mask)) == int(img_h * img_w)
+            )
+            if mesh_water_full:
+                veg_map = np.full((img_h, img_w), SEGFORMER.CLASS_WATER, dtype=np.int8)
+                print(f"    {fname}: mesh water full; inference skipped", flush=True)
+            else:
+                if model is None:
+                    model, proc, device = SEGFORMER.load_vegetation_model(device)
+                _t = time.perf_counter()
+                veg_map = SEGFORMER.run_inference(model, device, img, proc)
+                timings['inference'] += time.perf_counter() - _t
+            if not disable_cache and not mesh_water_full:
                 np.save(cache_path, veg_map)
 
         if disable_cache:
@@ -1529,6 +1593,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             new_h   = max(64, int(img_h * scale))
             veg_map = cv2.resize(veg_map.astype(np.uint8), (new_w, new_h),
                                  interpolation=cv2.INTER_NEAREST).astype(veg_map.dtype)
+            if mesh_water_mask is not None:
+                mesh_water_mask = cv2.resize(
+                    mesh_water_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST
+                ).astype(np.uint8, copy=False)
             img_h, img_w = veg_map.shape
             mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
 
@@ -1558,6 +1626,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                      (veg_map == SEGFORMER.CLASS_DEVELOPED)).astype(np.uint8)
         segformer_excl_mask = cv2.dilate(excl_raw, ke)
         excl_mask = segformer_excl_mask.copy()
+        if mesh_water_mask is not None and mesh_water_mask.any():
+            excl_mask = cv2.bitwise_or(excl_mask, mesh_water_mask)
 
         _bld_pkl = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
         _bld_cache_stat = None
@@ -1573,6 +1643,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             all_road_sig, osm_residential_sig, tree_row_sig, context_poly_sigs,
             forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
             bld_excl_m, _bld_cache_stat, simheaven_building_buffer_m,
+            mesh_water_sig,
         )
         _mask_cached = None
         if not disable_cache:
@@ -1782,6 +1853,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 local_context_masks['agriculture'] = cv2.bitwise_or(
                     local_context_masks['agriculture'], local_context_masks['farmland']
                 )
+        if mesh_water_mask is not None and mesh_water_mask.any():
+            local_context_masks['water'] = _or_optional_masks(
+                local_context_masks.get('water'), mesh_water_mask
+            )
 
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
 
@@ -1816,6 +1891,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 tree_type_counts[veg_type] = tree_type_counts.get(veg_type, 0) + int(count)
             n_tree += len(p)
             polygons.extend(p)
+            if disable_cache:
+                _remove_cache_files(_dds_cache_files)
+            continue
+
+        if not tree_mask.any():
+            if not disable_cache:
+                _save_dds_polygon_cache(_poly_cache_file, _poly_cache_key, (), {})
             if disable_cache:
                 _remove_cache_files(_dds_cache_files)
             continue
@@ -1908,6 +1990,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"poly_cache={timings['poly_cache']:.1f}s  "
         f"dds_load={timings['dds_load']:.1f}s  "
         f"inference={timings['inference']:.1f}s  "
+        f"mesh_water={timings['mesh_water']:.1f}s  "
         f"road_excl={timings['road_excl']:.1f}s  "
         f"bld_excl={timings['bld_excl']:.1f}s  "
         f"forest_excl={timings['forest_layer_excl']:.1f}s  "

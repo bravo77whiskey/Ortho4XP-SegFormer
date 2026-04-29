@@ -81,6 +81,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("lookup", "lookup"),
         ("road", "road_raster"),
         ("road_cache", "road_cache"),
+        ("meshwater", "mesh_water"),
         ("heading", "heading_grid"),
         ("excl", "existing_bld_excl"),
         ("mask", "mask_apply"),
@@ -517,7 +518,7 @@ def _dds_road_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
                         residential_poly_sig, excl_poly_sig,
                         existing_bld_poly_sig, sh_bld_sig):
     return {
-        'version': 4,
+        'version': 5,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -1044,6 +1045,54 @@ def _load_osm_closed_ways(osm_bz2_path, cache_dir=None):
     )
 
 
+def _clip_polygon_to_latlon_bounds(poly, south, north, west, east):
+    """Clip a lat/lon polygon to a rectangular lat/lon bounds box."""
+    def _clip(points, inside, intersect):
+        if not points:
+            return []
+        output = []
+        prev = points[-1]
+        prev_inside = inside(prev)
+        for curr in points:
+            curr_inside = inside(curr)
+            if curr_inside:
+                if not prev_inside:
+                    output.append(intersect(prev, curr))
+                output.append(curr)
+            elif prev_inside:
+                output.append(intersect(prev, curr))
+            prev = curr
+            prev_inside = curr_inside
+        return output
+
+    def _intersect_lat(a, b, lat_value):
+        a_lat, a_lon = a
+        b_lat, b_lon = b
+        denom = b_lat - a_lat
+        if abs(denom) < 1e-12:
+            return lat_value, a_lon
+        t = (lat_value - a_lat) / denom
+        return lat_value, a_lon + t * (b_lon - a_lon)
+
+    def _intersect_lon(a, b, lon_value):
+        a_lat, a_lon = a
+        b_lat, b_lon = b
+        denom = b_lon - a_lon
+        if abs(denom) < 1e-12:
+            return a_lat, lon_value
+        t = (lon_value - a_lon) / denom
+        return a_lat + t * (b_lat - a_lat), lon_value
+
+    pts = list(poly)
+    if len(pts) >= 2 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    pts = _clip(pts, lambda p: p[0] >= south, lambda a, b: _intersect_lat(a, b, south))
+    pts = _clip(pts, lambda p: p[0] <= north, lambda a, b: _intersect_lat(a, b, north))
+    pts = _clip(pts, lambda p: p[1] >= west, lambda a, b: _intersect_lon(a, b, west))
+    pts = _clip(pts, lambda p: p[1] <= east, lambda a, b: _intersect_lon(a, b, east))
+    return pts if len(pts) >= 3 else []
+
+
 def _rasterize_polygons(polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w):
     """Rasterize filled closed-way polygons onto a uint8 mask."""
     mask = np.zeros((img_h, img_w), dtype=np.uint8)
@@ -1055,10 +1104,159 @@ def _rasterize_polygons(polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w):
 
     for poly in polys:
         pts_px = np.array([ll_to_px(lat, lon) for lat, lon in poly], dtype=np.int32)
-        # Only draw if at least 1 vertex falls inside this DDS tile
-        if (pts_px[:, 0].max() >= 0 and pts_px[:, 0].min() < img_w and
-                pts_px[:, 1].max() >= 0 and pts_px[:, 1].min() < img_h):
+        min_x = int(pts_px[:, 0].min())
+        max_x = int(pts_px[:, 0].max())
+        min_y = int(pts_px[:, 1].min())
+        max_y = int(pts_px[:, 1].max())
+        # Only draw polygons whose bbox intersects this DDS tile.  Most coastal
+        # polygons are faster through OpenCV directly; clip only pathological
+        # huge offscreen rings that make fillPoly do unnecessary work.
+        if max_x >= 0 and min_x < img_w and max_y >= 0 and min_y < img_h:
+            bbox_w = max_x - min_x + 1
+            bbox_h = max_y - min_y + 1
+            if (
+                bbox_w > img_w * 4 or bbox_h > img_h * 4 or
+                max(abs(min_x), abs(max_x), abs(min_y), abs(max_y)) > 32767
+            ):
+                clipped = _clip_polygon_to_latlon_bounds(
+                    poly, lat_s, lat_n, lon_w, lon_e
+                )
+                if not clipped:
+                    continue
+                pts_px = np.array(
+                    [ll_to_px(lat, lon) for lat, lon in clipped], dtype=np.int32
+                )
             cv2.fillPoly(mask, [pts_px], 1)
+    return mask
+
+
+def _mesh_file_for_tile(tex_dir, lat, lon):
+    """Return the tile mesh path next to an Ortho4XP textures directory."""
+    lat_i = int(lat)
+    lon_i = int(lon)
+    short = f"{lat_i:+03d}{lon_i:+04d}"
+    candidates = []
+    tex_parent = os.path.dirname(os.path.abspath(tex_dir))
+    if os.path.basename(os.path.abspath(tex_dir)).lower() == "textures":
+        candidates.append(os.path.join(tex_parent, f"Data{short}.mesh"))
+    candidates.append(os.path.join(os.path.abspath(tex_dir), f"Data{short}.mesh"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return candidates[0] if candidates else None
+
+
+def _mesh_water_signature(mesh_path):
+    """Return a cache-key-safe signature for the mesh water artifact."""
+    if not mesh_path or not os.path.exists(mesh_path):
+        return None
+    stat = os.stat(mesh_path)
+    return (
+        os.path.realpath(mesh_path),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
+def _read_mesh_water_triangles(mesh_path):
+    """Read only water triangle lat/lon vertices from an Ortho4XP .mesh file."""
+    with open(mesh_path, "r", encoding="utf-8", errors="ignore") as mesh_file:
+        mesh_version = float(mesh_file.readline().strip().split()[-1])
+        for _ in range(3):
+            mesh_file.readline()
+        nbr_nodes = int(mesh_file.readline())
+        node_lons = np.empty(nbr_nodes, dtype=np.float64)
+        node_lats = np.empty(nbr_nodes, dtype=np.float64)
+        for idx in range(nbr_nodes):
+            parts = mesh_file.readline().split()
+            node_lons[idx] = float(parts[0])
+            node_lats[idx] = float(parts[1])
+        for _ in range(3):
+            mesh_file.readline()
+        for _ in range(nbr_nodes):
+            mesh_file.readline()
+        for _ in range(2):
+            mesh_file.readline()
+        nbr_tris = int(mesh_file.readline())
+        has_water = 7 if mesh_version >= 1.3 else 3
+        water_tris = []
+        for _ in range(nbr_tris):
+            parts = mesh_file.readline().split()
+            if len(parts) < 4:
+                continue
+            tri_type = int(parts[3])
+            if not (tri_type & has_water):
+                continue
+            idx = [int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2]) - 1]
+            water_tris.append(
+                [
+                    (node_lats[idx[0]], node_lons[idx[0]]),
+                    (node_lats[idx[1]], node_lons[idx[1]]),
+                    (node_lats[idx[2]], node_lons[idx[2]]),
+                ]
+            )
+    if not water_tris:
+        return np.empty((0, 3, 2), dtype=np.float64)
+    return np.asarray(water_tris, dtype=np.float64)
+
+
+def _load_mesh_water_index(mesh_path, cache_dir):
+    """Load water triangles from the Ortho4XP mesh produced by Step 2.
+
+    The mesh is downstream of Ortho4XP's normal water acquisition path, so this
+    covers both OSM water and the default-scenery fallback used when OSM fails.
+    """
+    if not mesh_path or not os.path.exists(mesh_path):
+        return None
+
+    def _build():
+        tris = _read_mesh_water_triangles(mesh_path)
+        if not tris.size:
+            return None
+        return {
+            "tris": tris,
+            "south": tris[:, :, 0].min(axis=1).astype(np.float64, copy=False),
+            "north": tris[:, :, 0].max(axis=1).astype(np.float64, copy=False),
+            "west": tris[:, :, 1].min(axis=1).astype(np.float64, copy=False),
+            "east": tris[:, :, 1].max(axis=1).astype(np.float64, copy=False),
+        }
+
+    return PCACHE.load_or_build(
+        mesh_path,
+        cache_dir,
+        "mesh_water",
+        _build,
+        version="mesh-water-v2",
+    )
+
+
+def _rasterize_mesh_water_mask(mesh_water_index, lat_n, lat_s, lon_w, lon_e,
+                               img_h, img_w, pad_deg=0.0):
+    """Rasterize mesh water triangles intersecting one DDS bounds."""
+    if not mesh_water_index:
+        return None
+    keep = (
+        (mesh_water_index["north"] >= lat_s - pad_deg) &
+        (mesh_water_index["south"] <= lat_n + pad_deg) &
+        (mesh_water_index["east"] >= lon_w - pad_deg) &
+        (mesh_water_index["west"] <= lon_e + pad_deg)
+    )
+    if not bool(np.any(keep)):
+        return None
+    tris = mesh_water_index["tris"][keep]
+    xs = np.rint((tris[:, :, 1] - lon_w) / (lon_e - lon_w) * img_w).astype(np.int32)
+    ys = np.rint((lat_n - tris[:, :, 0]) / (lat_n - lat_s) * img_h).astype(np.int32)
+    pts = np.stack((xs, ys), axis=2)
+    intersects = (
+        (pts[:, :, 0].max(axis=1) >= 0) &
+        (pts[:, :, 0].min(axis=1) < img_w) &
+        (pts[:, :, 1].max(axis=1) >= 0) &
+        (pts[:, :, 1].min(axis=1) < img_h)
+    )
+    if not bool(np.any(intersects)):
+        return None
+    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.ascontiguousarray(poly) for poly in pts[intersects]], 1)
     return mask
 
 
@@ -1816,7 +2014,7 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 BLD_PLACEMENT_CACHE_VERSION = 37
-BLD_PLACEMENT_FAST_CACHE_VERSION = 38
+BLD_PLACEMENT_FAST_CACHE_VERSION = 40
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
@@ -3346,6 +3544,7 @@ def run(
         'lookup': 0.0,
         'road_cache': 0.0,
         'road_raster': 0.0,
+        'mesh_water': 0.0,
         'existing_bld_excl': 0.0,
         'heading_grid': 0.0,
         'mask_apply': 0.0,
@@ -3478,6 +3677,18 @@ def run(
     existing_bld_polys_index = BBOX.build_bounds_index(existing_bld_polys)
     residential_polys = _prepare_polygons(residential_polys)
     residential_polys_index = BBOX.build_bounds_index(residential_polys)
+    _t = time.perf_counter()
+    mesh_water_path = _mesh_file_for_tile(tex_dir, lat, lon)
+    mesh_water_sig = _mesh_water_signature(mesh_water_path)
+    mesh_water_index = _load_mesh_water_index(mesh_water_path, cache_dir)
+    timings['mesh_water'] += time.perf_counter() - _t
+    if mesh_water_index:
+        print(
+            f"Mesh water: {len(mesh_water_index['tris'])} water triangles from "
+            f"{mesh_water_path}"
+        )
+    else:
+        print(f"Mesh water: unavailable from {mesh_water_path}")
 
     # Heading grid uses simHeaven network only — it represents the full local
     # street grid (minor roads, blocks) which defines actual building alignment.
@@ -3529,6 +3740,7 @@ def run(
         ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
         ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
         excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
+        mesh_water_sig,
         residential_poly_sig,
         default_assets_available, sfd_assets_available, simheaven_assets_available,
         _asset_region(asset_lat, asset_lon),
@@ -3586,31 +3798,84 @@ def run(
             # Inference (cached per DDS filename — filename encodes tile coords + ZL)
             cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
             img = None
+            veg_map = None
+            mesh_water_mask = None
+            mesh_water_full = False
             if not disable_cache and os.path.exists(cache_path):
                 _t = time.perf_counter()
                 veg_map = np.load(cache_path)
                 _record_elapsed(timings, file_timings, 'cache_load', _t)
+                img_h, img_w = veg_map.shape[:2]
+                _t = time.perf_counter()
+                mesh_water_mask = _rasterize_mesh_water_mask(
+                    mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+                _record_elapsed(timings, file_timings, 'mesh_water', _t)
+                mesh_water_px = int(np.count_nonzero(mesh_water_mask)) if mesh_water_mask is not None else 0
+                mesh_water_full = mesh_water_px == int(img_h * img_w)
+                if (
+                    not mesh_water_full and
+                    bool(np.all(veg_map == SEGFORMER.CLASS_WATER))
+                ):
+                    # Earlier mesh-water shortcut builds could write a synthetic
+                    # all-water map into the shared inference cache.  Treat that
+                    # shape as stale when the fixed mesh reader says this DDS is
+                    # not fully water.
+                    veg_map = None
+                    try:
+                        os.remove(cache_path)
+                    except OSError:
+                        pass
+                    if detail_timing:
+                        print(
+                            f"    [Bld stage] {fname} stale all-water class-map ignored",
+                            flush=True,
+                        )
                 if detail_timing:
-                    print(f"    [Bld stage] {fname} class-map cached", flush=True)
-            else:
+                    if veg_map is not None:
+                        print(f"    [Bld stage] {fname} class-map cached", flush=True)
+            if veg_map is None:
                 _t = time.perf_counter()
                 img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                 if img is None:
                     continue
+                img_h, img_w = img.shape[:2]
                 _record_elapsed(timings, file_timings, 'dds_load', _t)
-                if model is None:
-                    model, proc, device = SEGFORMER.load_vegetation_model(device)
                 _t = time.perf_counter()
-                veg_map = SEGFORMER.run_inference(model, device, img, proc)
-                _record_elapsed(timings, file_timings, 'inference', _t)
-                if not disable_cache:
+                mesh_water_mask = _rasterize_mesh_water_mask(
+                    mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+                _record_elapsed(timings, file_timings, 'mesh_water', _t)
+                mesh_water_full = (
+                    mesh_water_mask is not None and
+                    int(np.count_nonzero(mesh_water_mask)) == int(img_h * img_w)
+                )
+                if mesh_water_full:
+                    veg_map = np.full(
+                        (img_h, img_w), SEGFORMER.CLASS_WATER, dtype=np.int8
+                    )
+                    if detail_timing:
+                        print(
+                            f"    [Bld stage] {fname} mesh water full; inference skipped",
+                            flush=True,
+                        )
+                else:
+                    if model is None:
+                        model, proc, device = SEGFORMER.load_vegetation_model(device)
+                    _t = time.perf_counter()
+                    veg_map = SEGFORMER.run_inference(model, device, img, proc)
+                    _record_elapsed(timings, file_timings, 'inference', _t)
+                if not disable_cache and not mesh_water_full:
                     _t = time.perf_counter()
                     np.save(cache_path, veg_map)
                     _record_elapsed(timings, file_timings, 'cache_save', _t)
                 if detail_timing:
-                    print(f"    [Bld stage] {fname} inference complete", flush=True)
-
-            img_h, img_w = veg_map.shape[:2]
+                    if not mesh_water_full:
+                        print(f"    [Bld stage] {fname} inference complete", flush=True)
+            if mesh_water_mask is not None:
+                mesh_water_px = int(np.count_nonzero(mesh_water_mask))
+                file_counts['mesh_water_px'] = mesh_water_px
+                mesh_water_full = mesh_water_px == int(img_h * img_w)
 
             # Pixel size in metres (approximate, using mid-latitude)
             mid_lat_rad = math.radians((lat_n + lat_s) / 2)
@@ -3654,7 +3919,33 @@ def run(
                 _ksfr   = cv2.getStructuringElement(cv2.MORPH_RECT, (_sfr_ks, _sfr_ks))
                 sfr_road_dilated = cv2.dilate(sfr_road_raw, _ksfr)
                 bld_zone = bld_zone & (~sfr_road_dilated)
+            if mesh_water_mask is not None and mesh_water_mask.any():
+                bld_zone = bld_zone & (~mesh_water_mask)
             _record_elapsed(timings, file_timings, 'zone_cleanup', _t)
+
+            if not bld_zone.any():
+                file_counts['candidates'] = 0
+                file_counts['placed'] = 0
+                bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
+                spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
+                class_counts = {cls: 0 for cls in BLD_PLACEMENT_CLASSES}
+                print(
+                    f"  [{fi:3d}/{n_files}] {fname}  "
+                    f"{_describe_placement_summary(class_counts, bld_pct, 0, grid_n, spacing_label)}"
+                    f"  small-house areas=unavailable"
+                )
+                if not disable_cache:
+                    try:
+                        _t = time.perf_counter()
+                        with open(_bld_cache_file, 'wb') as _f:
+                            _pickle.dump({
+                                'params': _bld_params,
+                                'placements': {'objects': (), 'facades': ()},
+                            }, _f)
+                        _record_elapsed(timings, file_timings, 'cache_save', _t)
+                    except Exception:
+                        pass
+                continue
 
             TILE_EDGE_MARGIN_M = 20.0
             edge_px = max(2, int(TILE_EDGE_MARGIN_M / m_per_px))
@@ -3822,6 +4113,10 @@ def run(
             if poly_mask is not None and poly_mask.any():
                 bld_zone  = bld_zone & (~poly_mask)
                 static_occ_mask  = static_occ_mask | poly_mask
+
+            if mesh_water_mask is not None and mesh_water_mask.any():
+                bld_zone = bld_zone & (~mesh_water_mask)
+                static_occ_mask = static_occ_mask | mesh_water_mask
 
             if existing_bld_mask is not None and existing_bld_mask.any():
                 static_occ_mask = static_occ_mask | existing_bld_mask
@@ -4301,6 +4596,7 @@ def run(
                     ).astype(np.uint8)
 
                 _blend_viz_mask(sfr_road_dilated, (255, 150, 0), 0.70)
+                _blend_viz_mask(mesh_water_mask, (0, 60, 255), 0.65)
                 _blend_viz_mask(road_mask, (255, 0, 0), 0.75)
                 _blend_viz_mask(rail_mask, (255, 0, 255), 0.75)
                 _blend_viz_mask(poly_mask, (120, 0, 255), 0.75)
@@ -4444,6 +4740,7 @@ def run(
         f"inference={timings['inference']:.1f}s  "
         f"road_cache={timings['road_cache']:.1f}s  "
         f"road_raster={timings['road_raster']:.1f}s  "
+        f"mesh_water={timings['mesh_water']:.1f}s  "
         f"existing_bld_excl={timings['existing_bld_excl']:.1f}s  "
         f"heading={timings['heading_grid']:.1f}s  "
         f"placement={timings['placement']:.1f}s  "

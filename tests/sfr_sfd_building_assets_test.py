@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -56,6 +57,86 @@ class SfdBuildingAssetTests(unittest.TestCase):
             self.assertEqual(BLD._gap_fill_class_sequence(zone_class), (zone_class,))
 
         self.assertEqual(BLD._gap_fill_class_sequence(0), ())
+
+    def test_oversized_polygon_rasterization_fills_covered_tile(self):
+        poly = [
+            (-1.0, -1.0),
+            (-1.0, 2.0),
+            (2.0, 2.0),
+            (2.0, -1.0),
+            (-1.0, -1.0),
+        ]
+
+        mask = BLD._rasterize_polygons(
+            [poly],
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=32,
+            img_w=32,
+        )
+
+        self.assertTrue(np.all(mask == 1))
+
+    def test_oversized_polygon_rasterization_clips_partial_water(self):
+        poly = [
+            (-1.0, -1.0),
+            (-1.0, 0.5),
+            (2.0, 0.5),
+            (2.0, -1.0),
+            (-1.0, -1.0),
+        ]
+
+        mask = BLD._rasterize_polygons(
+            [poly],
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=32,
+            img_w=32,
+        )
+
+        self.assertTrue(np.all(mask[:, :16] == 1))
+        self.assertTrue(np.all(mask[:, 18:] == 0))
+
+    def test_mesh_water_reader_does_not_treat_land_type_as_water(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mesh_path = Path(tmpdir) / "Data+00+000.mesh"
+            mesh_path.write_text(
+                "\n".join(
+                    [
+                        "MeshVersionFormatted 1.3",
+                        "Dimension 3",
+                        "Vertices",
+                        "unused",
+                        "4",
+                        "0.0 0.0 0.0",
+                        "1.0 0.0 0.0",
+                        "1.0 1.0 0.0",
+                        "0.0 1.0 0.0",
+                        "Normals",
+                        "unused",
+                        "unused",
+                        "0.0 0.0",
+                        "0.0 0.0",
+                        "0.0 0.0",
+                        "0.0 0.0",
+                        "Triangles",
+                        "unused",
+                        "2",
+                        "1 2 3 0",
+                        "1 3 4 2",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            tris = BLD._read_mesh_water_triangles(str(mesh_path))
+
+        self.assertEqual(tris.shape, (1, 3, 2))
+        self.assertTrue(np.allclose(tris[0], [(0.0, 0.0), (1.0, 1.0), (1.0, 0.0)]))
 
     def test_component_side_heading_counts_touched_sides_not_road_length(self):
         labels = np.zeros((100, 100), dtype=np.int32)

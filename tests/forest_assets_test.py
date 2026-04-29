@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest import mock
 import contextlib
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -220,6 +222,45 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 continue
             found.append(path)
         self.assertEqual(found, [])
+
+    def test_vegetation_aux_cache_key_tracks_mesh_water_signature(self):
+        base_args = (
+            "34336_26384_BI16.dds",
+            1.0,
+            0.9,
+            2.0,
+            2.1,
+            64,
+            64,
+            2.4,
+            ("roads",),
+            ("res-roads",),
+            ("tree-rows",),
+            {"water_polys": (0, 0, 0.0)},
+            (),
+            (0, 0, 0.0),
+            (0, 0.0),
+            12.0,
+            None,
+            10.0,
+        )
+
+        key_a = SFR_VEG._dds_mask_cache_key(*base_args, ("mesh-a", 10, 20))
+        key_b = SFR_VEG._dds_mask_cache_key(*base_args, ("mesh-b", 10, 20))
+
+        self.assertNotEqual(key_a, key_b)
+        self.assertEqual(key_a["version"], 2)
+
+    def test_vegetation_optional_mask_or_handles_missing_masks(self):
+        lhs = None
+        rhs = np.zeros((3, 3), dtype=np.uint8)
+        rhs[1, 1] = 1
+        self.assertIs(SFR_VEG._or_optional_masks(lhs, rhs), rhs)
+
+        lhs = np.zeros((3, 3), dtype=np.uint8)
+        lhs[0, 0] = 1
+        combined = SFR_VEG._or_optional_masks(lhs, rhs)
+        self.assertEqual(int(combined.sum()), 2)
 
 
 if __name__ == "__main__":
