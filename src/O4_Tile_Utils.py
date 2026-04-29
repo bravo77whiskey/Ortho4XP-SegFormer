@@ -400,6 +400,7 @@ def build_tile_list(
             SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
             SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
             SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
+            SFR.sfr_bld_smart_gap_fill = tile.sfr_bld_smart_gap_fill
             SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap

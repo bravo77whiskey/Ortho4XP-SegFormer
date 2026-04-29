@@ -106,6 +106,13 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("dynamic_blocked", "dynamic_center_blocked"),
                 ("dynamic_clearance_blocked", "dynamic_clearance_blocked"),
                 ("cap", "candidate_cap"),
+                ("gap_cand", "gap_candidates"),
+                ("gap_static_blocked", "gap_static_blocked"),
+                ("gap_dynamic_blocked", "gap_dynamic_blocked"),
+                ("gap_comp", "gap_components"),
+                ("gap_cap", "gap_candidate_cap"),
+                ("gap_placed", "gap_placed"),
+                ("res_asset_skip", "residential_asset_skipped"),
                 ("fit_checks", "fit_checks"),
                 ("placed", "placed"),
             )
@@ -172,6 +179,92 @@ def _limit_candidates_by_component(cand_x, cand_y, cand_cls, cand_labels, max_ca
 
     keep_idx = np.sort(np.concatenate(selected))
     return cand_x[keep_idx], cand_y[keep_idx], cand_cls[keep_idx], n_candidates - keep_idx.size
+
+
+def _leftover_gap_candidates(leftover_mask, zone_class, max_candidates, rng,
+                             max_per_component=24):
+    """Return high-value gap-fill centers from leftover connected components."""
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        leftover_mask.astype(np.uint8), connectivity=8
+    )
+    if n_labels <= 1:
+        empty_i = np.empty(0, dtype=np.int32)
+        empty_c = np.empty(0, dtype=np.uint8)
+        return empty_i, empty_i, empty_c, empty_i, 0, 0
+
+    rows = []
+    min_area_px = 4
+    peak_kernel = np.ones((3, 3), dtype=np.uint8)
+    for label in range(1, n_labels):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area_px or w <= 0 or h <= 0:
+            continue
+
+        local_labels = labels[y:y + h, x:x + w]
+        component = (local_labels == label).astype(np.uint8)
+        dist = cv2.distanceTransform(component, cv2.DIST_L2, 3)
+        dilated = cv2.dilate(dist, peak_kernel)
+        peak_mask = (component != 0) & (dist >= dilated - 1e-6) & (dist >= 1.0)
+        py, px = np.nonzero(peak_mask)
+        if px.size == 0:
+            py = np.array([int(round(float(centroids[label, 1]) - y))], dtype=np.int32)
+            px = np.array([int(round(float(centroids[label, 0]) - x))], dtype=np.int32)
+            px = np.clip(px, 0, w - 1)
+            py = np.clip(py, 0, h - 1)
+
+        scores = dist[py, px]
+        order = np.argsort(scores)[::-1]
+        component_budget = max(
+            int(max_per_component),
+            min(512, int(math.sqrt(float(area)) * 0.5)),
+        )
+        keep = order[:max(1, min(component_budget, order.size))]
+        gx = (px[keep] + x).astype(np.int32)
+        gy = (py[keep] + y).astype(np.int32)
+        gcls = zone_class[gy, gx].astype(np.uint8)
+        valid = gcls != 0
+        gx = gx[valid]
+        gy = gy[valid]
+        gcls = gcls[valid]
+        if gx.size:
+            glabels = np.full(gx.shape, label, dtype=np.int32)
+            rows.append((gx, gy, gcls, glabels))
+
+    if not rows:
+        empty_i = np.empty(0, dtype=np.int32)
+        empty_c = np.empty(0, dtype=np.uint8)
+        return empty_i, empty_i, empty_c, empty_i, max(0, n_labels - 1), 0
+
+    gap_x = np.concatenate([row[0] for row in rows])
+    gap_y = np.concatenate([row[1] for row in rows])
+    gap_cls = np.concatenate([row[2] for row in rows])
+    gap_labels = np.concatenate([row[3] for row in rows])
+    n_before_cap = int(gap_x.size)
+    if max_candidates and gap_x.size > max_candidates:
+        gap_x, gap_y, gap_cls, n_dropped = _limit_candidates_by_component(
+            gap_x, gap_y, gap_cls, gap_labels, max_candidates, rng
+        )
+        kept = max(0, n_before_cap - int(n_dropped))
+        if kept != gap_x.size:
+            gap_labels = gap_labels[:0]
+        else:
+            gap_labels = gap_labels[:gap_x.size]
+    else:
+        n_dropped = 0
+
+    order = rng.permutation(gap_x.size) if gap_x.size else np.empty(0, dtype=np.int64)
+    return (
+        gap_x[order],
+        gap_y[order],
+        gap_cls[order],
+        gap_labels[order] if gap_labels.size == gap_x.size else gap_labels,
+        max(0, n_labels - 1),
+        int(n_dropped),
+    )
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -422,7 +515,7 @@ def _dds_road_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
                         residential_poly_sig, excl_poly_sig,
                         existing_bld_poly_sig, sh_bld_sig):
     return {
-        'version': 3,
+        'version': 4,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -607,6 +700,31 @@ def _fill_heading_grid_nearest(hgrid, segments, lat_n, lat_s, lon_w, lon_e,
         cx = (gj + 0.5) * cell_w
         d2 = (py - cy) ** 2 + (px - cx) ** 2
         hgrid[gi, gj] = float(segments['heading'][int(np.argmin(d2))])
+    return hgrid
+
+
+def _image_heading_grid(img, img_h, img_w, grid_n):
+    """Estimate per-cell heading from imagery edges when road vectors are absent."""
+    hgrid = np.full((grid_n, grid_n), np.nan)
+    if img is None:
+        return hgrid
+    bin_deg = 5.0
+    cell_h = img_h / grid_n
+    cell_w = img_w / grid_n
+    for gi in range(grid_n):
+        y0 = int(gi * cell_h)
+        y1 = min(img_h, int((gi + 1) * cell_h))
+        for gj in range(grid_n):
+            x0 = int(gj * cell_w)
+            x1 = min(img_w, int((gj + 1) * cell_w))
+            hist = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=bin_deg)
+            if hist is None:
+                continue
+            smooth = np.convolve(np.r_[hist[-1], hist, hist[0]], [1, 2, 1], mode='same')[1:-1]
+            if float(smooth.max()) <= 0.0:
+                continue
+            edge_angle = float(np.argmax(smooth) * bin_deg + bin_deg / 2.0)
+            hgrid[gi, gj] = (90.0 - edge_angle) % 360.0
     return hgrid
 
 
@@ -1409,7 +1527,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 26
+BLD_PLACEMENT_CACHE_VERSION = 35
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
@@ -1562,6 +1680,13 @@ SIMHEAVEN_INDUSTRIAL_CATALOG = (
     "simheaven/industrial/industrial_60x60.obj",
 )
 
+EXCLUDED_BUILDING_FILLER_ASSETS = {
+    "sfd_global/asia/shed_1.obj",
+    "sfd_global/asia/carport_1.obj",
+    "sfd_global/asia/carport_2.obj",
+    "simheaven/sheds/shed_02x03x1.obj",
+}
+
 SIMHEAVEN_REPEATABLE_ASSET_DIRS = (
     "/houses/",
     "/residential/",
@@ -1688,6 +1813,8 @@ def _is_repeatable_simheaven_asset(path):
     """Return True for generic simHeaven assets safe for non-factual placement."""
     p = (path or '').replace('\\', '/').lower()
     if not p.startswith('simheaven/'):
+        return False
+    if p in EXCLUDED_BUILDING_FILLER_ASSETS:
         return False
     if any(token in p for token in SIMHEAVEN_SPECIAL_ASSET_TOKENS):
         return False
@@ -1881,6 +2008,8 @@ def _class_for_object_asset(obj_path, bounds_m):
 
 def _append_object_asset(asset_pools, obj_path, bounds_m, source):
     """Append one rectangular object asset to the footprint-classed pool map."""
+    if (obj_path or '').replace('\\', '/').lower() in EXCLUDED_BUILDING_FILLER_ASSETS:
+        return False
     if bounds_m is None:
         return False
     zone_class = _class_for_object_asset(obj_path, bounds_m)
@@ -1919,6 +2048,17 @@ def _sort_asset_pools_for_retry(asset_pools):
         asset_pools[zone_class].sort(key=_asset_retry_sort_key)
 
 
+def _keep_smallest_asset_per_class(asset_pools):
+    """Reduce each placement class to its smallest available footprint asset."""
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        pool = asset_pools.get(zone_class, [])
+        if not pool:
+            continue
+        pool.sort(key=_asset_retry_sort_key)
+        asset_pools[zone_class] = pool[:1]
+    return asset_pools
+
+
 def _asset_footprint_span_m(asset):
     """Return the larger raw footprint side for centre-spacing estimates."""
     max_side_m = asset.get('footprint_max_side_m')
@@ -1944,19 +2084,47 @@ def _class_min_footprint_span_m(asset_pools):
     return min_by_class
 
 
-def _mark_pad_for_edge_spacing_m(edge_spacing_m):
+def _mark_pad_for_edge_spacing_m(edge_spacing_m, footprint_pad_m=FOOTPRINT_PAD_M):
     """Return mark expansion that yields the requested raw-footprint edge gap."""
-    return max(0.0, float(edge_spacing_m) - FOOTPRINT_PAD_M)
+    return max(0.0, float(edge_spacing_m) - float(footprint_pad_m))
 
 
-def _asset_retry_sequence(pool, rng):
-    """Yield every asset once, starting from a random offset in sorted order."""
+def _asset_retry_sequence(pool, rng, prefer_small=False):
+    """Yield every asset once, randomized while optionally biasing smaller assets."""
     n_assets = len(pool)
     if n_assets <= 0:
+        return
+    if prefer_small:
+        # Pools are sorted by footprint. Shuffle small windows to keep visual
+        # variety while still trying compact assets first in leftover gaps.
+        window = 4
+        for start in range(0, n_assets, window):
+            idx = np.arange(start, min(start + window, n_assets), dtype=np.int32)
+            rng.shuffle(idx)
+            for i in idx:
+                yield pool[int(i)]
         return
     start = 0 if n_assets == 1 else int(rng.integers(0, n_assets))
     for offset in range(n_assets):
         yield pool[(start + offset) % n_assets]
+
+
+def _asset_requires_residential_context(asset):
+    """Return True for house-like assets that should stay in residential areas."""
+    path = (asset.get('path') or '').replace('\\', '/').lower()
+    if asset.get('kind') == 'facade':
+        return False
+    if path.startswith('simheaven/'):
+        return '/houses/' in path or '/residential/' in path
+    if path.startswith('sfd_global/'):
+        return (
+            '/suburban' in path or
+            '/residential/' in path or
+            '/new_england/' in path or
+            '/scandinavia/' in path or
+            '/south_america/suburban' in path
+        )
+    return False
 
 
 def _asset_fit_inradius_m(asset):
@@ -2177,6 +2345,12 @@ def _class_spacing_px(edge_spacing_m, m_per_px, class_min_footprint_span_m=None)
     }
 
 
+def _gap_fill_class_sequence(zone_class):
+    """Return the only placement class allowed for this gap-fill center."""
+    zc = int(zone_class)
+    return (zc,) if zc in BLD_PLACEMENT_CLASSES else ()
+
+
 def _format_class_spacing(spacing_px_by_class, m_per_px):
     """Return compact spacing summary for footprint classes."""
     metres = "/".join(
@@ -2244,10 +2418,17 @@ def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray |
 
 
 def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
-                        occ_mask, fit_scratch, file_counts, mark_pad_m=None):
+                        static_occ_mask, building_spacing_mask, fit_scratch,
+                        file_counts, mark_pad_m=None, prefer_small=False,
+                        residential_context=True, footprint_pad_m=FOOTPRINT_PAD_M):
     """Return the first asset fitting this candidate after exhausting retries."""
     unknown_skipped = 0
-    for asset in _asset_retry_sequence(pool, rng):
+    for asset in _asset_retry_sequence(pool, rng, prefer_small=prefer_small):
+        if not residential_context and _asset_requires_residential_context(asset):
+            file_counts['residential_asset_skipped'] = (
+                file_counts.get('residential_asset_skipped', 0) + 1
+            )
+            continue
         bounds_m = asset.get('bounds_m')
         if bounds_m is None:
             unknown_skipped += 1
@@ -2256,33 +2437,43 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
         fit_bounds = asset.get('fit_bounds_m')
         mark_bounds = asset.get('mark_bounds_m')
         if fit_bounds is None or mark_bounds is None:
-            fit_bounds = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+            fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
             mark_pad = (
-                FOOTPRINT_PAD_M + PLACEMENT_MARGIN_M
+                footprint_pad_m + PLACEMENT_MARGIN_M
                 if mark_pad_m is None else float(mark_pad_m)
             )
             mark_bounds = _expand_bounds(
                 bounds_m, mark_pad
             )
 
-        final_h = final_poly = None
-        poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
+        final_h = footprint_poly = spacing_poly = None
+        static_poly = _footprint_poly(jx, jy, bounds_m, heading, m_per_px)
+        dynamic_poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
         file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-        if _poly_fits(occ_mask, poly, fit_scratch):
+        if (
+            _poly_fits(static_occ_mask, static_poly, fit_scratch) and
+            _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
+        ):
             final_h = heading
-            final_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
+            footprint_poly = static_poly
+            spacing_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
         else:
             h90 = (heading + 90.0) % 360.0
-            poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
+            static_poly90 = _footprint_poly(jx, jy, bounds_m, h90, m_per_px)
+            dynamic_poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
             file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-            if _poly_fits(occ_mask, poly90, fit_scratch):
+            if (
+                _poly_fits(static_occ_mask, static_poly90, fit_scratch) and
+                _poly_fits(building_spacing_mask, dynamic_poly90, fit_scratch)
+            ):
                 final_h = h90
-                final_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+                footprint_poly = static_poly90
+                spacing_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
 
         if final_h is not None:
-            return asset, final_h, final_poly, unknown_skipped
+            return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
 
-    return None, None, None, unknown_skipped
+    return None, None, None, None, unknown_skipped
 
 
 def _expand_bounds(bounds_m, pad_m: float):
@@ -2373,6 +2564,7 @@ def run(
     dsftool_path=None,
     skip_osm_excl_download=False,
     custom_scenery_dir=None,
+    smart_gap_fill=None,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
@@ -2567,11 +2759,11 @@ def run(
     osm_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
     print(f"OSM roads: {len(osm_roads)} ways from {osm_roads_path}")
 
-    # ── Exclusion data: water, airports, buildings, railways ─────────────────
-    # Closed-way polygons (buildings, water bodies, aeroway areas) are rasterized
-    # as filled masks per-DDS.  Railway lines are rasterized like roads.
+    # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
+    # OSM building polygons are parsed for diagnostics only. They describe where
+    # buildings should exist, not what is already visible in the simulator.
     excl_polys = []           # hard exclusions: water / airports
-    existing_bld_polys = []   # occupancy-only blockers: OSM / simHeaven building footprints
+    existing_bld_polys = []   # occupancy-only blockers: simHeaven facade footprints
     excl_rails = []           # road-style dicts for railways
 
     for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
@@ -2589,15 +2781,14 @@ def run(
         bld_polys, rail_ways, residential_polys = _parse_excl_osm(
             excl_cache, cache_dir=cache_dir
         )
-        existing_bld_polys.extend(bld_polys)
         excl_rails.extend(rail_ways)
         print(
-            f"Exclusion buildings: {len(bld_polys)} polys  "
+            f"OSM buildings: {len(bld_polys)} polys (not used as blockers)  "
             f"railways: {len(rail_ways)} ways  "
             f"residential areas: {len(residential_polys)} polys"
         )
     else:
-        print("Exclusion buildings: unavailable (OSM cache/download failed)")
+        print("OSM building/rail/residential data: unavailable (OSM cache/download failed)")
 
     timings = {
         'simheaven_parse': 0.0,
@@ -2624,6 +2815,18 @@ def run(
     slow_timing_s = _env_float("O4_SFR_TIMING_SLOW", 3.0)
     max_candidates_per_dds = max(
         0, int(_env_float("O4_SFR_BLD_MAX_CANDIDATES", BLD_MAX_CANDIDATES_PER_DDS))
+    )
+    if smart_gap_fill is None:
+        smart_gap_fill = _env_flag("O4_SFR_BLD_SMART_GAP_FILL")
+    else:
+        smart_gap_fill = bool(smart_gap_fill)
+    footprint_pad_m = max(0.0, _env_float("O4_SFR_BLD_FOOTPRINT_PAD_M", FOOTPRINT_PAD_M))
+    disable_center_blockers = _env_flag("O4_SFR_BLD_DISABLE_CENTER_BLOCKERS")
+    max_gap_candidates_per_dds = max(
+        0, int(_env_float("O4_SFR_BLD_GAP_MAX_CANDIDATES", max_candidates_per_dds))
+    )
+    max_gap_candidates_per_component = max(
+        1, int(_env_float("O4_SFR_BLD_GAP_MAX_PER_COMPONENT", 24))
     )
     n_unknown_skipped = 0
     _t = time.perf_counter()
@@ -2676,28 +2879,35 @@ def run(
             sh_bld_objects, asset_lat, asset_lon
         ))
     asset_pools = _merge_asset_pools(*enabled_asset_pools)
+    smallest_asset_only = _env_flag("O4_SFR_BLD_SMALLEST_ASSET_ONLY")
+    if smallest_asset_only:
+        _keep_smallest_asset_per_class(asset_pools)
     asset_sources_label = _describe_asset_sources(
         default_assets_available,
         sfd_assets_available,
         simheaven_assets_available,
     )
+    if smallest_asset_only:
+        asset_sources_label += " (smallest asset per class)"
     print(f"Building assets: {asset_sources_label}")
     if not any(asset_pools.values()):
         print("Building assets: none available for placement")
         return 0
     _sort_asset_pools_for_retry(asset_pools)
     class_min_footprint_span_m = _class_min_footprint_span_m(asset_pools)
-    mark_pad_m = _mark_pad_for_edge_spacing_m(spacing_m)
+    mark_pad_m = _mark_pad_for_edge_spacing_m(spacing_m, footprint_pad_m)
     for pool in asset_pools.values():
         for asset in pool:
             bounds_m = asset.get('bounds_m')
             if bounds_m is None:
                 continue
-            asset['fit_bounds_m'] = _expand_bounds(bounds_m, FOOTPRINT_PAD_M)
+            asset['fit_bounds_m'] = _expand_bounds(bounds_m, footprint_pad_m)
             asset['mark_bounds_m'] = _expand_bounds(
                 bounds_m, mark_pad_m
             )
     class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
+    if disable_center_blockers:
+        class_min_fit_inradius_m = {cls: 0.0 for cls in BLD_PLACEMENT_CLASSES}
 
     osm_roads = _prepare_roads(osm_roads)
     osm_roads_index = BBOX.build_bounds_index(osm_roads)
@@ -2735,8 +2945,9 @@ def run(
     k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k*2+1,)*2)
     k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k*2+1,)*2)
 
-    TILE_VIZ = 512
+    TILE_VIZ = max(256, int(_env_float("O4_SFR_BLD_VIZ_SIZE", 512)))
     composite = np.zeros((n_rows*TILE_VIZ, n_cols*TILE_VIZ, 3), dtype=np.uint8) if make_viz else None
+    footprint_composite = np.zeros_like(composite) if composite is not None else None
 
     placed_objects = []   # list of (lon, lat, heading, obj_path)
     placed_facades = []   # list of (lonlat_ring, facade_path, height_m)
@@ -2745,8 +2956,13 @@ def run(
         BLD_PLACEMENT_CACHE_VERSION, spacing_m, close_k, open_k, min_zone_m2,
         max_candidates_per_dds,
         PLACE_UNKNOWN_OBJECTS,
-        FOOTPRINT_PAD_M,
+        footprint_pad_m,
         mark_pad_m,
+        smallest_asset_only,
+        smart_gap_fill,
+        disable_center_blockers,
+        max_gap_candidates_per_dds,
+        max_gap_candidates_per_component,
         tuple(sorted(class_min_footprint_span_m.items())),
         ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
         ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
@@ -2968,6 +3184,15 @@ def run(
                     hgrid, nearest_heading_segments, lat_n, lat_s, lon_w, lon_e,
                     img_h, img_w, grid_n,
                 )
+                if np.any(np.isnan(hgrid)):
+                    if img is None:
+                        _img_t = time.perf_counter()
+                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                        if img is None:
+                            continue
+                        _record_elapsed(timings, file_timings, 'dds_load', _img_t)
+                    image_hgrid = _image_heading_grid(img, img_h, img_w, grid_n)
+                    hgrid = np.where(np.isnan(hgrid), image_hgrid, hgrid)
                 residential_area_mask, residential_area_source = _build_residential_area_mask(
                     local_residential_polys,
                     local_residential_roads,
@@ -3025,40 +3250,36 @@ def run(
 
             _t = time.perf_counter()
             bld_zone = bld_zone & (~road_mask)
-            occ_mask = road_mask.copy()
+            static_occ_mask = road_mask.copy()
 
             if poly_mask is not None and poly_mask.any():
                 bld_zone  = bld_zone & (~poly_mask)
-                occ_mask  = occ_mask | poly_mask
+                static_occ_mask  = static_occ_mask | poly_mask
 
             if existing_bld_mask is not None and existing_bld_mask.any():
-                occ_mask = occ_mask | existing_bld_mask
+                static_occ_mask = static_occ_mask | existing_bld_mask
 
             if rail_mask.any():
                 bld_zone  = bld_zone & (~rail_mask)
-                occ_mask  = occ_mask | rail_mask
+                static_occ_mask  = static_occ_mask | rail_mask
 
             if sh_bld_mask is not None and sh_bld_mask.any():
-                occ_mask = occ_mask | sh_bld_mask
+                static_occ_mask = static_occ_mask | sh_bld_mask
 
             DEGREE_TOL = 1e-4
-            if lat_n >= lat + 1 - DEGREE_TOL:   occ_mask[:edge_px,  :]  = 1
-            if lat_s <= lat     + DEGREE_TOL:   occ_mask[-edge_px:, :]  = 1
-            if lon_w <= lon     + DEGREE_TOL:   occ_mask[:,  :edge_px]  = 1
-            if lon_e >= lon + 1 - DEGREE_TOL:   occ_mask[:, -edge_px:]  = 1
-            static_occ_mask = occ_mask.copy()
-            static_clearance_m = cv2.distanceTransform(
-                (static_occ_mask == 0).astype(np.uint8),
-                cv2.DIST_L2,
-                3,
-            ) * m_per_px
+            if lat_n >= lat + 1 - DEGREE_TOL:   static_occ_mask[:edge_px,  :]  = 1
+            if lat_s <= lat     + DEGREE_TOL:   static_occ_mask[-edge_px:, :]  = 1
+            if lon_w <= lon     + DEGREE_TOL:   static_occ_mask[:,  :edge_px]  = 1
+            if lon_e >= lon + 1 - DEGREE_TOL:   static_occ_mask[:, -edge_px:]  = 1
+            building_spacing_mask = np.zeros_like(static_occ_mask)
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
             cell_h = img_h // grid_n
             cell_w = img_w // grid_n
 
             if np.any(np.isnan(hgrid)):
-                hgrid = np.where(np.isnan(hgrid), float(rng.integers(0, 360)), hgrid)
+                fallback_heading = float(rng.integers(0, 360))
+                hgrid = np.where(np.isnan(hgrid), fallback_heading, hgrid)
 
             _t = time.perf_counter()
             min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
@@ -3161,7 +3382,7 @@ def run(
                         continue
 
                     cls_labels = cc_labels[cls_cand_y, cls_cand_x]
-                    open_center = occ_mask[cls_cand_y, cls_cand_x] == 0
+                    open_center = static_occ_mask[cls_cand_y, cls_cand_x] == 0
                     n_initial_blocked += int(
                         cls_cand_x.size - np.count_nonzero(open_center)
                     )
@@ -3170,24 +3391,6 @@ def run(
                     cls_labels = cls_labels[open_center]
                     if not cls_cand_x.size:
                         continue
-
-                    min_clearance_m = class_min_fit_inradius_m.get(
-                        int(placement_cls), 0.0
-                    )
-                    if min_clearance_m > 0.0:
-                        static_clear = (
-                            static_clearance_m[cls_cand_y, cls_cand_x] >=
-                            min_clearance_m
-                        )
-                        file_counts['static_clearance_blocked'] = (
-                            file_counts.get('static_clearance_blocked', 0) +
-                            int(cls_cand_x.size - np.count_nonzero(static_clear))
-                        )
-                        cls_cand_x = cls_cand_x[static_clear]
-                        cls_cand_y = cls_cand_y[static_clear]
-                        cls_labels = cls_labels[static_clear]
-                        if not cls_cand_x.size:
-                            continue
 
                     cand_x_parts.append(cls_cand_x)
                     cand_y_parts.append(cls_cand_y)
@@ -3216,16 +3419,17 @@ def run(
             timings['placement'] += candidate_elapsed
 
             _t = time.perf_counter()
-            fit_scratch = np.zeros_like(occ_mask)
+            fit_scratch = np.zeros_like(static_occ_mask)
             dynamic_center_block_masks = {
-                cls: np.zeros_like(occ_mask)
+                cls: np.zeros_like(static_occ_mask)
                 for cls in BLD_PLACEMENT_CLASSES
             }
+            placed_viz_polys = []
             for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
                 jx = int(jx)
                 jy = int(jy)
                 zone_cls = int(zone_cls)
-                if occ_mask[jy, jx]:
+                if static_occ_mask[jy, jx]:
                     file_counts['dynamic_center_blocked'] = (
                         file_counts.get('dynamic_center_blocked', 0) + 1
                     )
@@ -3247,21 +3451,22 @@ def run(
                 jitter  = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
                 heading = (dom_h + jitter) % 360.0
 
-                for try_cls in [zone_cls]:
-                    if (
-                        try_cls <= BLD_CLASS_MEDIUM and
-                        residential_area_mask is not None and
-                        not bool(residential_area_mask[jy, jx])
-                    ):
-                        continue
-
+                residential_context = (
+                    residential_area_mask is None or
+                    bool(residential_area_mask[jy, jx])
+                )
+                for try_cls in (zone_cls,):
                     pool = asset_pools[try_cls]
                     if not pool:
                         continue
 
-                    asset, final_h, final_poly, skipped = _find_fitting_asset(
+                    asset, final_h, footprint_poly, spacing_poly, skipped = _find_fitting_asset(
                         pool, rng, jx, jy, heading, m_per_px,
-                        occ_mask, fit_scratch, file_counts, mark_pad_m
+                        static_occ_mask, building_spacing_mask, fit_scratch,
+                        file_counts, mark_pad_m,
+                        prefer_small=(try_cls != zone_cls),
+                        residential_context=residential_context,
+                        footprint_pad_m=footprint_pad_m,
                     )
                     n_unknown_skipped += skipped
                     if asset is None:
@@ -3276,11 +3481,12 @@ def run(
                         placed_objects.append((o_lon, o_lat, final_h, asset['path']))
                     else:
                         placed_facades.append((
-                            _pixel_ring_to_latlon(final_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
+                            _pixel_ring_to_latlon(footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
                             asset['path'],
                             float(asset.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
                         ))
-                    _mark_poly(occ_mask, final_poly)
+                    placed_viz_polys.append((footprint_poly.copy(), try_cls))
+                    _mark_poly(building_spacing_mask, spacing_poly)
                     _mark_dynamic_center_blockers(
                         dynamic_center_block_masks,
                         jx,
@@ -3291,6 +3497,114 @@ def run(
                         class_min_fit_inradius_m,
                     )
                     break
+
+            if smart_gap_fill:
+                leftover_mask = (
+                    (bld_zone != 0) &
+                    (static_occ_mask == 0) &
+                    (building_spacing_mask == 0)
+                ).astype(np.uint8)
+                gap_x, gap_y, gap_cls, _, n_gap_components, n_gap_dropped = (
+                    _leftover_gap_candidates(
+                        leftover_mask,
+                        zone_class,
+                        max_gap_candidates_per_dds,
+                        rng,
+                        max_gap_candidates_per_component,
+                    )
+                )
+                file_counts['gap_components'] = int(n_gap_components)
+                file_counts['gap_candidates'] = int(gap_x.size + n_gap_dropped)
+                if n_gap_dropped:
+                    file_counts['gap_candidate_cap'] = int(n_gap_dropped)
+
+                for jx, jy, zone_cls in zip(gap_x, gap_y, gap_cls):
+                    jx = int(jx)
+                    jy = int(jy)
+                    zone_cls = int(zone_cls)
+                    if static_occ_mask[jy, jx]:
+                        file_counts['gap_static_blocked'] = (
+                            file_counts.get('gap_static_blocked', 0) + 1
+                        )
+                        continue
+
+                    zone_label = int(cc_labels[jy, jx])
+                    dom_h = float(zone_heading[zone_label]) if (
+                        0 <= zone_label < zone_heading.shape[0]
+                        and not np.isnan(zone_heading[zone_label])
+                    ) else float(hgrid[
+                        min(grid_n - 1, jy // cell_h),
+                        min(grid_n - 1, jx // cell_w),
+                    ])
+                    jitter_h = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
+                    heading = (dom_h + jitter_h) % 360.0
+
+                    placed_gap = False
+                    dynamic_blocked = False
+                    residential_context = (
+                        residential_area_mask is None or
+                        bool(residential_area_mask[jy, jx])
+                    )
+                    for try_cls in _gap_fill_class_sequence(zone_cls):
+                        if dynamic_center_block_masks[try_cls][jy, jx]:
+                            dynamic_blocked = True
+                            continue
+
+                        pool = asset_pools[try_cls]
+                        if not pool:
+                            continue
+
+                        asset, final_h, footprint_poly, spacing_poly, skipped = _find_fitting_asset(
+                            pool, rng, jx, jy, heading, m_per_px,
+                            static_occ_mask, building_spacing_mask, fit_scratch,
+                            file_counts, mark_pad_m, prefer_small=True,
+                            residential_context=residential_context,
+                            footprint_pad_m=footprint_pad_m,
+                        )
+                        n_unknown_skipped += skipped
+                        if asset is None:
+                            continue
+
+                        o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
+                                                    lat_n, lat_s, lon_w, lon_e)
+                        if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
+                            break
+                        pts_this.append((jx, jy, final_h, try_cls))
+                        if asset['kind'] == 'object':
+                            placed_objects.append((o_lon, o_lat, final_h, asset['path']))
+                        else:
+                            placed_facades.append((
+                                _pixel_ring_to_latlon(
+                                    footprint_poly, img_w, img_h,
+                                    lat_n, lat_s, lon_w, lon_e,
+                                ),
+                                asset['path'],
+                                float(asset.get(
+                                    'height_m',
+                                    DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0),
+                                )),
+                            ))
+                        placed_viz_polys.append((footprint_poly.copy(), try_cls))
+                        _mark_poly(building_spacing_mask, spacing_poly)
+                        _mark_dynamic_center_blockers(
+                            dynamic_center_block_masks,
+                            jx,
+                            jy,
+                            final_h,
+                            asset.get('mark_bounds_m'),
+                            m_per_px,
+                            class_min_fit_inradius_m,
+                        )
+                        file_counts['gap_placed'] = (
+                            file_counts.get('gap_placed', 0) + 1
+                        )
+                        placed_gap = True
+                        break
+
+                    if not placed_gap and dynamic_blocked:
+                        file_counts['gap_dynamic_blocked'] = (
+                            file_counts.get('gap_dynamic_blocked', 0) + 1
+                        )
 
             fit_elapsed = _record_elapsed(timings, file_timings, 'fit_loop', _t)
             timings['placement'] += fit_elapsed
@@ -3341,6 +3655,24 @@ def run(
                         .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)
                     ) > 127
                     panel[mask] = (panel[mask] * 0.45 + colour * 0.55).astype(np.uint8)
+                def _blend_viz_mask(src_mask, colour, alpha):
+                    if src_mask is None or not np.any(src_mask):
+                        return
+                    viz_mask = np.array(
+                        Image.fromarray((src_mask != 0).astype(np.uint8) * 255)
+                        .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)
+                    ) > 127
+                    panel[viz_mask] = (
+                        panel[viz_mask] * (1.0 - alpha) +
+                        np.asarray(colour, dtype=np.float32) * alpha
+                    ).astype(np.uint8)
+
+                _blend_viz_mask(sfr_road_dilated, (255, 150, 0), 0.70)
+                _blend_viz_mask(road_mask, (255, 0, 0), 0.75)
+                _blend_viz_mask(rail_mask, (255, 0, 255), 0.75)
+                _blend_viz_mask(poly_mask, (120, 0, 255), 0.75)
+                _blend_viz_mask(existing_bld_mask, (0, 0, 0), 0.70)
+                _blend_viz_mask(sh_bld_mask, (255, 255, 255), 0.65)
                 pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil)
                 dot_colours = {
                     BLD_CLASS_COMPACT_RESIDENTIAL: (0, 220, 0),
@@ -3349,10 +3681,53 @@ def run(
                     BLD_CLASS_APARTMENT_BLOCK: (0, 190, 255),
                     BLD_CLASS_LARGE: (0, 120, 255),
                 }
+                footprint_fill = (255, 255, 255)
+                for poly, cls2 in placed_viz_polys:
+                    pts = [
+                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        draw.polygon(pts, outline=dot_colours.get(cls2, (0, 220, 0)))
+                        cx = sum(p[0] for p in pts) / len(pts)
+                        cy = sum(p[1] for p in pts) / len(pts)
+                        inner = [
+                            (
+                                int(round(cx + (p[0] - cx) * 0.88)),
+                                int(round(cy + (p[1] - cy) * 0.88)),
+                            )
+                            for p in pts
+                        ]
+                        draw.polygon(inner, outline=footprint_fill)
                 for px2, py2, _, cls2 in pts_this:
                     sx, sy = int(px2*scale), int(py2*scale)
                     draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
                 composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
+
+                if footprint_composite is not None:
+                    fp_base = Image.fromarray(
+                        np.array(
+                            Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS)
+                        )
+                    ).convert('RGBA')
+                    fp_layer = Image.new('RGBA', (TILE_VIZ, TILE_VIZ), (0, 0, 0, 0))
+                    fp_draw = ImageDraw.Draw(fp_layer)
+                    for poly, cls2 in placed_viz_polys:
+                        pts = [
+                            (
+                                int(round(float(px2) * scale)),
+                                int(round(float(py2) * scale)),
+                            )
+                            for px2, py2 in poly
+                        ]
+                        if len(pts) >= 3:
+                            outline = dot_colours.get(cls2, (0, 220, 0))
+                            fp_draw.polygon(pts, fill=(245, 242, 232, 170), outline=outline + (255,))
+                    fp_img = Image.alpha_composite(fp_base, fp_layer).convert('RGB')
+                    footprint_composite[
+                        row*TILE_VIZ:(row+1)*TILE_VIZ,
+                        col*TILE_VIZ:(col+1)*TILE_VIZ,
+                    ] = np.array(fp_img)
                 _record_elapsed(timings, file_timings, 'viz', _t_viz)
         finally:
             file_elapsed = time.perf_counter() - file_t0
@@ -3420,6 +3795,13 @@ def run(
         viz_path = out_dsf.replace('.dsf', '_overview.png')
         Image.fromarray(composite).save(viz_path)
         print(f"Overview  → {viz_path}  ({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)")
+        if footprint_composite is not None:
+            footprint_viz_path = out_dsf.replace('.dsf', '_footprints.png')
+            Image.fromarray(footprint_composite).save(footprint_viz_path)
+            print(
+                f"Footprints → {footprint_viz_path}  "
+                f"({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)"
+            )
 
     print(
         "[Bld timing] "

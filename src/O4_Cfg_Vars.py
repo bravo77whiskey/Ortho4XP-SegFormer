@@ -494,6 +494,12 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_grid",
         "hint": "Heading-grid resolution per texture tile. Higher values follow street direction changes more closely but can make orientation noisier.",
     },
+    "sfr_bld_smart_gap_fill": {
+        "type": bool,
+        "default": True,
+        "short_name": "bld_gap_fill",
+        "hint": "Run a second randomized building pass that fills leftover narrow spaces with same-class assets while preserving building-to-building spacing.",
+    },
     "sfr_bld_disable_cache": {
         "type": bool,
         "default": False,
@@ -629,6 +635,7 @@ list_sfr_bld_vars = [
     "sfr_bld_open_m",
     "sfr_bld_min_zone_m2",
     "sfr_bld_grid_n",
+    "sfr_bld_smart_gap_fill",
     "sfr_bld_disable_cache",
 ]
 

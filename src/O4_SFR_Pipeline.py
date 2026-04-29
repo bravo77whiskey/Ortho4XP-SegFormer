@@ -115,6 +115,7 @@ sfr_bld_close_m       = 30.0
 sfr_bld_open_m        = 10.0
 sfr_bld_min_zone_m2   = 200.0
 sfr_bld_grid_n        = 16
+sfr_bld_smart_gap_fill = True
 sfr_bld_disable_cache = False
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
@@ -384,6 +385,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    open_k       = {open_k!r},\n"
         f"    min_zone_m2  = {sfr_bld_min_zone_m2!r},\n"
         f"    make_viz                 = False,\n"
+        f"    smart_gap_fill           = {sfr_bld_smart_gap_fill!r},\n"
         f"    disable_cache            = {sfr_bld_disable_cache!r},\n"
         f"    cache_dir                = {cache_dir!r},\n"
         f"    grid_n                   = {sfr_bld_grid_n!r},\n"

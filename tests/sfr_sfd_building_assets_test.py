@@ -50,6 +50,12 @@ class SfdBuildingAssetTests(unittest.TestCase):
             },
         )
 
+    def test_gap_fill_stays_within_zone_class(self):
+        for zone_class in BLD.BLD_PLACEMENT_CLASSES:
+            self.assertEqual(BLD._gap_fill_class_sequence(zone_class), (zone_class,))
+
+        self.assertEqual(BLD._gap_fill_class_sequence(0), ())
+
     def test_asset_regions_use_non_rectangular_boundaries(self):
         self.assertEqual(BLD._asset_region(45.0, -75.0), "north_america_ne")
         self.assertEqual(BLD._asset_region(35.0, -120.0), "north_america_west")
@@ -200,7 +206,9 @@ class SfdBuildingAssetTests(unittest.TestCase):
         scratch = np.zeros_like(occ_mask)
         counts = {}
 
-        asset, final_h, final_poly, skipped = BLD._find_fitting_asset(
+        building_spacing_mask = np.zeros_like(occ_mask)
+
+        asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
             pool,
             np.random.default_rng(1),
             20,
@@ -208,6 +216,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
             0.0,
             1.0,
             occ_mask,
+            building_spacing_mask,
             scratch,
             counts,
         )
@@ -217,6 +226,159 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(skipped, 0)
         self.assertEqual(counts["fit_checks"], 3)
         self.assertIsNotNone(final_poly)
+        self.assertIsNotNone(spacing_poly)
+
+    def test_static_blockers_use_raw_footprint_not_spacing_pad(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "small.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-6.0, 6.0, -6.0, 6.0),
+                "mark_bounds_m": (-10.0, 10.0, -10.0, 10.0),
+            },
+        ]
+        static_occ_mask = np.zeros((50, 50), dtype=np.uint8)
+        static_occ_mask[20, 25] = 1
+        building_spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+        counts = {}
+
+        asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            scratch,
+            counts,
+        )
+
+        self.assertEqual(asset["path"], "small.obj")
+        self.assertEqual(final_h, 0.0)
+        self.assertEqual(skipped, 0)
+        self.assertIsNotNone(final_poly)
+        self.assertIsNotNone(spacing_poly)
+
+    def test_generated_building_spacing_still_uses_padded_footprint(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "small.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-6.0, 6.0, -6.0, 6.0),
+                "mark_bounds_m": (-10.0, 10.0, -10.0, 10.0),
+            },
+        ]
+        static_occ_mask = np.zeros((50, 50), dtype=np.uint8)
+        building_spacing_mask = np.zeros_like(static_occ_mask)
+        building_spacing_mask[20, 25] = 1
+        scratch = np.zeros_like(static_occ_mask)
+        counts = {}
+
+        asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            scratch,
+            counts,
+        )
+
+        self.assertIsNone(asset)
+        self.assertIsNone(final_h)
+        self.assertIsNone(final_poly)
+        self.assertIsNone(spacing_poly)
+        self.assertEqual(skipped, 0)
+
+    def test_fit_selection_tries_rotated_asset_before_next_asset(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "rotates-to-fit.obj",
+                "bounds_m": (-2.0, 2.0, -8.0, 8.0),
+                "fit_bounds_m": (-2.0, 2.0, -8.0, 8.0),
+                "mark_bounds_m": (-2.0, 2.0, -8.0, 8.0),
+            },
+            {
+                "kind": "object",
+                "path": "fallback.obj",
+                "bounds_m": (-1.0, 1.0, -1.0, 1.0),
+                "fit_bounds_m": (-1.0, 1.0, -1.0, 1.0),
+                "mark_bounds_m": (-1.0, 1.0, -1.0, 1.0),
+            },
+        ]
+        static_occ_mask = np.zeros((50, 50), dtype=np.uint8)
+        static_occ_mask[24, 20] = 1
+        building_spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+        counts = {}
+
+        asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            scratch,
+            counts,
+        )
+
+        self.assertEqual(asset["path"], "rotates-to-fit.obj")
+        self.assertEqual(final_h, 90.0)
+        self.assertIsNotNone(final_poly)
+        self.assertIsNotNone(spacing_poly)
+        self.assertEqual(skipped, 0)
+
+    def test_nonresidential_context_skips_house_like_assets_not_facades(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "simheaven/houses/house_09x12x2.obj",
+                "bounds_m": (-4.5, 4.5, -6.0, 6.0),
+                "fit_bounds_m": (-4.5, 4.5, -6.0, 6.0),
+                "mark_bounds_m": (-4.5, 4.5, -6.0, 6.0),
+            },
+            {
+                "kind": "facade",
+                "path": "lib/buildings/facades/commercial/low_commercial_01.fac",
+                "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+                "fit_bounds_m": (-5.0, 5.0, -5.0, 5.0),
+                "mark_bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            },
+        ]
+        static_occ_mask = np.zeros((40, 40), dtype=np.uint8)
+        building_spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+        counts = {}
+
+        asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            scratch,
+            counts,
+            residential_context=False,
+        )
+
+        self.assertEqual(asset["kind"], "facade")
+        self.assertEqual(counts["residential_asset_skipped"], 1)
+        self.assertEqual(skipped, 0)
 
     def test_asset_retry_order_prefers_smaller_footprints(self):
         pools = {
@@ -243,6 +405,33 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(
             [asset["path"] for asset in pools[BLD.BLD_CLASS_COMPACT_RESIDENTIAL]],
             ["smaller.obj", "larger.obj"],
+        )
+
+    def test_keep_smallest_asset_per_class_keeps_one_minimal_asset(self):
+        pools = {
+            cls: []
+            for cls in BLD.BLD_PLACEMENT_CLASSES
+        }
+        pools[BLD.BLD_CLASS_MEDIUM] = [
+            {
+                "path": "larger.obj",
+                "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+                "footprint_area_m2": 100.0,
+                "footprint_max_side_m": 10.0,
+            },
+            {
+                "path": "smaller.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "footprint_area_m2": 16.0,
+                "footprint_max_side_m": 4.0,
+            },
+        ]
+
+        BLD._keep_smallest_asset_per_class(pools)
+
+        self.assertEqual(
+            [asset["path"] for asset in pools[BLD.BLD_CLASS_MEDIUM]],
+            ["smaller.obj"],
         )
 
     def test_class_min_footprint_span_uses_smallest_raw_asset_span(self):
@@ -329,6 +518,27 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(masks[BLD.BLD_CLASS_COMPACT_RESIDENTIAL][25, 32], 0)
         self.assertEqual(masks[BLD.BLD_CLASS_MEDIUM][25, 25], 0)
 
+    def test_leftover_gap_candidates_are_component_capped(self):
+        leftover = np.zeros((30, 30), dtype=np.uint8)
+        leftover[4:14, 4:14] = 1
+        leftover[18:28, 18:28] = 1
+        zone_class = np.zeros_like(leftover, dtype=np.uint8)
+        zone_class[leftover != 0] = BLD.BLD_CLASS_MEDIUM
+
+        gap_x, gap_y, gap_cls, _, n_components, n_dropped = BLD._leftover_gap_candidates(
+            leftover,
+            zone_class,
+            max_candidates=3,
+            rng=np.random.default_rng(1),
+            max_per_component=2,
+        )
+
+        self.assertEqual(n_components, 2)
+        self.assertEqual(gap_x.size, 3)
+        self.assertEqual(gap_y.size, 3)
+        self.assertGreaterEqual(n_dropped, 1)
+        self.assertTrue(np.all(gap_cls == BLD.BLD_CLASS_MEDIUM))
+
     def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         apartment_paths = _paths_for_classes(
@@ -348,11 +558,22 @@ class SfdBuildingAssetTests(unittest.TestCase):
             BLD.BLD_CLASS_SMALL_APARTMENT,
         )
 
-    def test_small_accessory_building_classes_are_included_when_reasonable(self):
+    def test_tiny_fillers_are_excluded_from_building_pools(self):
         asia_paths = _paths_for_classes(
             BLD._build_sfd_asset_pools(35.5, 139.5),
             (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
         )
+        simheaven_paths = _paths_for_classes(
+            BLD._build_simheaven_asset_pools(tile_lat=35.5, tile_lon=139.5),
+            BLD.BLD_PLACEMENT_CLASSES,
+        )
+
+        self.assertNotIn("SFD_Global/Asia/Carport_1.obj", asia_paths)
+        self.assertNotIn("SFD_Global/Asia/Carport_2.obj", asia_paths)
+        self.assertNotIn("SFD_Global/Asia/Shed_1.obj", asia_paths)
+        self.assertNotIn("simheaven/sheds/shed_02x03x1.obj", simheaven_paths)
+
+    def test_small_accessory_building_classes_are_included_when_reasonable(self):
         north_america_paths = _paths_for_classes(
             BLD._build_sfd_asset_pools(45.0, -75.0),
             (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
@@ -362,8 +583,6 @@ class SfdBuildingAssetTests(unittest.TestCase):
             (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
         )
 
-        self.assertIn("SFD_Global/Asia/Carport_1.obj", asia_paths)
-        self.assertIn("SFD_Global/Asia/Shed_1.obj", asia_paths)
         self.assertIn("SFD_Global/New_England/Residential/Garage.obj", north_america_paths)
         self.assertIn("SFD_Global/Australia/Shed.obj", australia_paths)
         self.assertIn("SFD_Global/Australia/Carport.obj", australia_paths)
