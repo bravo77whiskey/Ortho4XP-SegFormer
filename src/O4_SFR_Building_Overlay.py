@@ -1816,6 +1816,7 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 BLD_PLACEMENT_CACHE_VERSION = 37
+BLD_PLACEMENT_FAST_CACHE_VERSION = 38
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
@@ -2310,6 +2311,9 @@ def _append_object_asset(asset_pools, obj_path, bounds_m, source):
         'footprint_max_side_m': max_side_m,
         'footprint_class': zone_class,
         'source': source,
+        'requires_residential_context': _asset_requires_residential_context(
+            {'kind': 'object', 'path': obj_path}
+        ),
     })
     return True
 
@@ -2397,8 +2401,93 @@ def _asset_retry_sequence(pool, rng, prefer_small=False):
         yield pool[(start + offset) % n_assets]
 
 
+def _asset_retry_context(pool):
+    """Return cached context-filter metadata for one sorted asset pool."""
+    requires = tuple(bool(_asset_requires_residential_context(asset)) for asset in pool)
+    prefix = [0]
+    for flag in requires:
+        prefix.append(prefix[-1] + int(flag))
+    eligible = tuple(i for i, flag in enumerate(requires) if not flag)
+    return {
+        'requires_residential': requires,
+        'residential_prefix': tuple(prefix),
+        'nonresidential_indices': eligible,
+    }
+
+
+def _residential_skip_count(retry_context, start, end):
+    """Count residential-only assets in cyclic [start, end)."""
+    prefix = retry_context['residential_prefix']
+    n_assets = len(prefix) - 1
+    if n_assets <= 0 or start == end:
+        return 0
+    if start < end:
+        return int(prefix[end] - prefix[start])
+    return int((prefix[n_assets] - prefix[start]) + prefix[end])
+
+
+def _asset_retry_sequence_for_context(pool, rng, prefer_small, residential_context,
+                                      retry_context=None):
+    """Yield ``(asset, skipped)`` while avoiding known-ineligible assets.
+
+    In nonresidential context, house-like assets can never be selected.  This
+    preserves the original random start/shuffle order for eligible assets and
+    reports the same skipped count without walking every skipped asset in the
+    hot fit loop.
+    """
+    if residential_context or retry_context is None:
+        for asset in _asset_retry_sequence(pool, rng, prefer_small=prefer_small):
+            yield asset, 0
+        return
+
+    n_assets = len(pool)
+    if n_assets <= 0:
+        return
+
+    requires = retry_context['requires_residential']
+    if prefer_small:
+        skipped = 0
+        window = 4
+        for start in range(0, n_assets, window):
+            idx = np.arange(start, min(start + window, n_assets), dtype=np.int32)
+            rng.shuffle(idx)
+            for i in idx:
+                i = int(i)
+                if requires[i]:
+                    skipped += 1
+                    continue
+                yield pool[i], skipped
+                skipped = 0
+        if skipped:
+            yield None, skipped
+        return
+
+    start = 0 if n_assets == 1 else int(rng.integers(0, n_assets))
+    cursor = start
+    eligible = retry_context['nonresidential_indices']
+    yielded = False
+    for i in eligible:
+        if i >= start:
+            yield pool[i], _residential_skip_count(retry_context, cursor, i)
+            cursor = (i + 1) % n_assets
+            yielded = True
+    for i in eligible:
+        if i < start:
+            yield pool[i], _residential_skip_count(retry_context, cursor, i)
+            cursor = (i + 1) % n_assets
+            yielded = True
+    if yielded:
+        trailing = _residential_skip_count(retry_context, cursor, start)
+    else:
+        trailing = int(retry_context['residential_prefix'][-1])
+    if trailing:
+        yield None, trailing
+
+
 def _asset_requires_residential_context(asset):
     """Return True for house-like assets that should stay in residential areas."""
+    if 'requires_residential_context' in asset:
+        return bool(asset['requires_residential_context'])
     path = (asset.get('path') or '').replace('\\', '/').lower()
     if asset.get('kind') == 'facade':
         return False
@@ -2468,6 +2557,7 @@ def _build_default_asset_pools(tile_lat=45.0, tile_lon=7.0):
                 'bounds_m': DEFAULT_FACADE_BOUNDS[zone_class],
                 'height_m': DEFAULT_FACADE_HEIGHT_M[zone_class],
                 'source': 'Default X-Plane',
+                'requires_residential_context': False,
             })
     seen_paths = set()
     for obj_path in _default_object_catalog_paths(tile_lat, tile_lon):
@@ -2665,35 +2755,100 @@ def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_co
     )
 
 
+def _footprint_poly_with_bbox(cx: int, cy: int, bounds_m, heading_deg: float, m_per_px: float):
+    """Return rotated footprint polygon and its pixel bbox."""
+    rad = math.radians(float(heading_deg))
+    return _footprint_poly_with_bbox_basis(
+        cx,
+        cy,
+        bounds_m,
+        1.0 / float(m_per_px),
+        math.cos(rad),
+        math.sin(rad),
+        math.sin(rad),
+        -math.cos(rad),
+    )
+
+
+def _footprint_poly_with_bbox_basis(
+    cx: int,
+    cy: int,
+    bounds_m,
+    inv_m_per_px: float,
+    right_x: float,
+    right_y: float,
+    fwd_x: float,
+    fwd_y: float,
+):
+    """Return rotated footprint polygon and bbox using a precomputed basis."""
+    xmin, xmax, zmin, zmax = bounds_m
+    cx = float(cx)
+    cy = float(cy)
+    pts = np.empty((4, 2), dtype=np.int32)
+    min_x = min_y = 2 ** 31 - 1
+    max_x = max_y = -(2 ** 31)
+    for idx, (lx, lz) in enumerate(((xmin, zmin), (xmax, zmin), (xmax, zmax), (xmin, zmax))):
+        px = int(round(cx + (lx * right_x + lz * fwd_x) * inv_m_per_px))
+        py = int(round(cy + (lx * right_y + lz * fwd_y) * inv_m_per_px))
+        pts[idx, 0] = px
+        pts[idx, 1] = py
+        if px < min_x: min_x = px
+        if px > max_x: max_x = px
+        if py < min_y: min_y = py
+        if py > max_y: max_y = py
+    return pts, (min_x, min_y, max_x + 1, max_y + 1)
+
+
 def _footprint_poly(cx: int, cy: int, bounds_m, heading_deg: float, m_per_px: float):
     """Return the rotated local footprint polygon in image pixel space.
 
     bounds_m are local SFD object bounds relative to the object origin:
     (xmin, xmax, zmin, zmax) in metres.
     """
-    xmin, xmax, zmin, zmax = bounds_m
-    rad = math.radians(float(heading_deg))
-    right_x = math.cos(rad)
-    right_y = math.sin(rad)
-    fwd_x = math.sin(rad)
-    fwd_y = -math.cos(rad)
-    pts = []
-    for lx, lz in ((xmin, zmin), (xmax, zmin), (xmax, zmax), (xmin, zmax)):
-        px = float(cx) + (lx * right_x + lz * fwd_x) / m_per_px
-        py = float(cy) + (lx * right_y + lz * fwd_y) / m_per_px
-        pts.append((px, py))
-    return np.round(np.asarray(pts, dtype=np.float32)).astype(np.int32)
+    pts, _ = _footprint_poly_with_bbox(cx, cy, bounds_m, heading_deg, m_per_px)
+    return pts
 
 
 def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray | None = None) -> bool:
     """Return True if polygon pts have no overlap with any set pixel in occ_mask."""
-    x1 = max(0, int(pts[:, 0].min()))
-    x2 = min(occ_mask.shape[1], int(pts[:, 0].max()) + 1)
-    y1 = max(0, int(pts[:, 1].min()))
-    y2 = min(occ_mask.shape[0], int(pts[:, 1].max()) + 1)
+    return _poly_fits_with_integral(occ_mask, pts, scratch_mask=scratch_mask)
+
+
+def _integral_bbox_sum(integral: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> int:
+    """Return the sum in [x1:x2, y1:y2] from a cv2-style integral image."""
+    return int(
+        integral[y2, x2]
+        - integral[y1, x2]
+        - integral[y2, x1]
+        + integral[y1, x1]
+    )
+
+
+def _poly_fits_with_integral(
+    occ_mask: np.ndarray,
+    pts: np.ndarray,
+    scratch_mask: np.ndarray | None = None,
+    occ_integral: np.ndarray | None = None,
+    bbox=None,
+) -> bool:
+    """Return True if polygon pts have no overlap with any set pixel in occ_mask."""
+    if bbox is None:
+        x1 = max(0, int(pts[:, 0].min()))
+        x2 = min(occ_mask.shape[1], int(pts[:, 0].max()) + 1)
+        y1 = max(0, int(pts[:, 1].min()))
+        y2 = min(occ_mask.shape[0], int(pts[:, 1].max()) + 1)
+    else:
+        x1 = max(0, int(bbox[0]))
+        y1 = max(0, int(bbox[1]))
+        x2 = min(occ_mask.shape[1], int(bbox[2]))
+        y2 = min(occ_mask.shape[0], int(bbox[3]))
     if x1 >= x2 or y1 >= y2:
         return True
-    if cv2.countNonZero(occ_mask[y1:y2, x1:x2]) == 0:
+    if occ_integral is not None:
+        bbox_has_occupancy = _integral_bbox_sum(occ_integral, x1, y1, x2, y2) != 0
+    else:
+        bbox_has_occupancy = cv2.countNonZero(occ_mask[y1:y2, x1:x2]) != 0
+    if not bbox_has_occupancy:
         return True
     if scratch_mask is None:
         tmp = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
@@ -2708,10 +2863,84 @@ def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray |
 def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                         static_occ_mask, building_spacing_mask, fit_scratch,
                         file_counts, mark_pad_m=None, prefer_small=False,
-                        residential_context=True, footprint_pad_m=FOOTPRINT_PAD_M):
+                        residential_context=True, footprint_pad_m=FOOTPRINT_PAD_M,
+                        static_occ_integral=None, fit_cache_enabled=True,
+                        retry_context=None):
     """Return the first asset fitting this candidate after exhausting retries."""
     unknown_skipped = 0
-    for asset in _asset_retry_sequence(pool, rng, prefer_small=prefer_small):
+    candidate_fit_cache = {}
+    angle_basis_cache = {}
+
+    def _bounds_key(bounds):
+        return tuple(float(v) for v in bounds)
+
+    def _angle_basis(angle):
+        angle_norm = float(angle) % 360.0
+        cached = angle_basis_cache.get(angle_norm)
+        if cached is None:
+            rad = math.radians(float(angle))
+            sin_a = math.sin(rad)
+            cos_a = math.cos(rad)
+            cached = (1.0 / float(m_per_px), cos_a, sin_a, sin_a, -cos_a)
+            angle_basis_cache[angle_norm] = cached
+        return angle_norm, cached
+
+    def _orientation_fit(bounds_m, fit_bounds, mark_bounds, bounds_cache_key, angle):
+        if bounds_cache_key is None:
+            raw_key = _bounds_key(bounds_m)
+            fit_key = _bounds_key(fit_bounds)
+            mark_key = _bounds_key(mark_bounds)
+            bounds_cache_key = (raw_key, fit_key, mark_key)
+        else:
+            raw_key, fit_key, mark_key = bounds_cache_key
+        angle_norm, basis = _angle_basis(angle)
+        cache_key = (bounds_cache_key, angle_norm)
+        cached = candidate_fit_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        static_poly, static_bbox = _footprint_poly_with_bbox_basis(
+            jx, jy, bounds_m, *basis
+        )
+        dynamic_poly, dynamic_bbox = _footprint_poly_with_bbox_basis(
+            jx, jy, fit_bounds, *basis
+        )
+        if (
+            _poly_fits_with_integral(
+                static_occ_mask, static_poly, fit_scratch, static_occ_integral,
+                bbox=static_bbox,
+            ) and
+            _poly_fits_with_integral(
+                building_spacing_mask, dynamic_poly, fit_scratch,
+                bbox=dynamic_bbox,
+            )
+        ):
+            mark_poly, _ = _footprint_poly_with_bbox_basis(
+                jx, jy, mark_bounds, *basis
+            )
+            result = (
+                True,
+                static_poly,
+                mark_poly,
+            )
+        else:
+            result = (False, None, None)
+        candidate_fit_cache[cache_key] = result
+        return result
+
+    for asset, skipped_before in _asset_retry_sequence_for_context(
+        pool,
+        rng,
+        prefer_small=prefer_small,
+        residential_context=residential_context,
+        retry_context=retry_context,
+    ):
+        if skipped_before:
+            file_counts['residential_asset_skipped'] = (
+                file_counts.get('residential_asset_skipped', 0) + int(skipped_before)
+            )
+        if asset is None:
+            break
         if not residential_context and _asset_requires_residential_context(asset):
             file_counts['residential_asset_skipped'] = (
                 file_counts.get('residential_asset_skipped', 0) + 1
@@ -2724,6 +2953,7 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
 
         fit_bounds = asset.get('fit_bounds_m')
         mark_bounds = asset.get('mark_bounds_m')
+        bounds_cache_key = asset.get('fit_cache_key')
         if fit_bounds is None or mark_bounds is None:
             fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
             mark_pad = (
@@ -2733,30 +2963,55 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
             mark_bounds = _expand_bounds(
                 bounds_m, mark_pad
             )
+            bounds_cache_key = None
 
         final_h = footprint_poly = spacing_poly = None
-        static_poly = _footprint_poly(jx, jy, bounds_m, heading, m_per_px)
-        dynamic_poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
-        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-        if (
-            _poly_fits(static_occ_mask, static_poly, fit_scratch) and
-            _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
-        ):
-            final_h = heading
-            footprint_poly = static_poly
-            spacing_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
-        else:
-            h90 = (heading + 90.0) % 360.0
-            static_poly90 = _footprint_poly(jx, jy, bounds_m, h90, m_per_px)
-            dynamic_poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
+        if not fit_cache_enabled:
+            static_poly = _footprint_poly(jx, jy, bounds_m, heading, m_per_px)
+            dynamic_poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
             file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
             if (
-                _poly_fits(static_occ_mask, static_poly90, fit_scratch) and
-                _poly_fits(building_spacing_mask, dynamic_poly90, fit_scratch)
+                _poly_fits(static_occ_mask, static_poly, fit_scratch) and
+                _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
             ):
+                final_h = heading
+                footprint_poly = static_poly
+                spacing_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
+            else:
+                h90 = (heading + 90.0) % 360.0
+                static_poly90 = _footprint_poly(jx, jy, bounds_m, h90, m_per_px)
+                dynamic_poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
+                file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+                if (
+                    _poly_fits(static_occ_mask, static_poly90, fit_scratch) and
+                    _poly_fits(building_spacing_mask, dynamic_poly90, fit_scratch)
+                ):
+                    final_h = h90
+                    footprint_poly = static_poly90
+                    spacing_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+
+            if final_h is not None:
+                return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
+            continue
+
+        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+        fits, static_poly, mark_poly = _orientation_fit(
+            bounds_m, fit_bounds, mark_bounds, bounds_cache_key, heading
+        )
+        if fits:
+            final_h = heading
+            footprint_poly = static_poly
+            spacing_poly = mark_poly
+        else:
+            h90 = (heading + 90.0) % 360.0
+            file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+            fits, static_poly90, mark_poly90 = _orientation_fit(
+                bounds_m, fit_bounds, mark_bounds, bounds_cache_key, h90
+            )
+            if fits:
                 final_h = h90
                 footprint_poly = static_poly90
-                spacing_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+                spacing_poly = mark_poly90
 
         if final_h is not None:
             return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
@@ -2779,12 +3034,16 @@ def _mark_dynamic_center_blockers(center_block_masks, cx, cy, heading, mark_boun
     """Mark centers where no future class-minimum footprint can fit."""
     if mark_bounds is None:
         return
+    rad = math.radians(float(heading))
+    sin_a = math.sin(rad)
+    cos_a = math.cos(rad)
+    basis = (1.0 / float(m_per_px), cos_a, sin_a, sin_a, -cos_a)
     for zone_class, center_mask in center_block_masks.items():
         radius_m = class_min_fit_inradius_m.get(zone_class, 0.0)
         if radius_m <= 0.0:
             continue
         block_bounds = _expand_bounds(mark_bounds, radius_m)
-        block_poly = _footprint_poly(cx, cy, block_bounds, heading, m_per_px)
+        block_poly, _ = _footprint_poly_with_bbox_basis(cx, cy, block_bounds, *basis)
         cv2.fillPoly(center_mask, [np.int32(block_poly)], 1)
 
 
@@ -3116,6 +3375,7 @@ def run(
     max_gap_candidates_per_component = max(
         1, int(_env_float("O4_SFR_BLD_GAP_MAX_PER_COMPONENT", 24))
     )
+    strict_fit = _env_flag("O4_SFR_BLD_STRICT_FIT")
     n_unknown_skipped = 0
     _t = time.perf_counter()
 
@@ -3182,16 +3442,26 @@ def run(
         print("Building assets: none available for placement")
         return 0
     _sort_asset_pools_for_retry(asset_pools)
+    asset_retry_context = {
+        cls: _asset_retry_context(asset_pools[cls])
+        for cls in BLD_PLACEMENT_CLASSES
+    }
     class_min_footprint_span_m = _class_min_footprint_span_m(asset_pools)
     mark_pad_m = _mark_pad_for_edge_spacing_m(spacing_m, footprint_pad_m)
     for pool in asset_pools.values():
         for asset in pool:
+            asset['requires_residential_context'] = _asset_requires_residential_context(asset)
             bounds_m = asset.get('bounds_m')
             if bounds_m is None:
                 continue
             asset['fit_bounds_m'] = _expand_bounds(bounds_m, footprint_pad_m)
             asset['mark_bounds_m'] = _expand_bounds(
                 bounds_m, mark_pad_m
+            )
+            asset['fit_cache_key'] = (
+                tuple(float(v) for v in bounds_m),
+                tuple(float(v) for v in asset['fit_bounds_m']),
+                tuple(float(v) for v in asset['mark_bounds_m']),
             )
     class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
     if disable_center_blockers:
@@ -3241,7 +3511,11 @@ def run(
     placed_facades = []   # list of (lonlat_ring, facade_path, height_m)
     candidate_grid_cache = {}
     _bld_params = (
-        BLD_PLACEMENT_CACHE_VERSION, spacing_m, close_k, open_k, min_zone_m2,
+        (
+            BLD_PLACEMENT_CACHE_VERSION
+            if strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
+        ),
+        spacing_m, close_k, open_k, min_zone_m2,
         max_candidates_per_dds,
         PLACE_UNKNOWN_OBJECTS,
         footprint_pad_m,
@@ -3274,6 +3548,7 @@ def run(
             _remove_cache_files(_dds_cache_files)
 
         try:
+            print(f"  [{fi:3d}/{n_files}] {fname}  (starting)", flush=True)
             # ── Building placement cache ──────────────────────────────────────
             # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
             # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
@@ -3315,6 +3590,8 @@ def run(
                 _t = time.perf_counter()
                 veg_map = np.load(cache_path)
                 _record_elapsed(timings, file_timings, 'cache_load', _t)
+                if detail_timing:
+                    print(f"    [Bld stage] {fname} class-map cached", flush=True)
             else:
                 _t = time.perf_counter()
                 img = _load_source_image(fname, _source_mode, _orthophoto_dir)
@@ -3330,6 +3607,8 @@ def run(
                     _t = time.perf_counter()
                     np.save(cache_path, veg_map)
                     _record_elapsed(timings, file_timings, 'cache_save', _t)
+                if detail_timing:
+                    print(f"    [Bld stage] {fname} inference complete", flush=True)
 
             img_h, img_w = veg_map.shape[:2]
 
@@ -3559,6 +3838,9 @@ def run(
             if lat_s <= lat     + DEGREE_TOL:   static_occ_mask[-edge_px:, :]  = 1
             if lon_w <= lon     + DEGREE_TOL:   static_occ_mask[:,  :edge_px]  = 1
             if lon_e >= lon + 1 - DEGREE_TOL:   static_occ_mask[:, -edge_px:]  = 1
+            static_occ_integral = (
+                None if strict_fit else cv2.integral(static_occ_mask, sdepth=cv2.CV_32S)
+            )
             building_spacing_mask = np.zeros_like(static_occ_mask)
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
@@ -3751,6 +4033,12 @@ def run(
                 cand_cls = np.empty(0, dtype=np.uint8)
             candidate_elapsed = _record_elapsed(timings, file_timings, 'candidate_grid', _t)
             timings['placement'] += candidate_elapsed
+            if detail_timing:
+                fit_input_count = int(cand_x.size)
+                print(
+                    f"    [Bld stage] {fname} fit start  candidates={fit_input_count}",
+                    flush=True,
+                )
 
             _t = time.perf_counter()
             fit_scratch = np.zeros_like(static_occ_mask)
@@ -3805,6 +4093,9 @@ def run(
                         prefer_small=(try_cls != zone_cls),
                         residential_context=residential_context,
                         footprint_pad_m=footprint_pad_m,
+                        static_occ_integral=static_occ_integral,
+                        fit_cache_enabled=not strict_fit,
+                        retry_context=asset_retry_context.get(try_cls),
                     )
                     n_unknown_skipped += skipped
                     if asset is None:
@@ -3855,6 +4146,13 @@ def run(
                 file_counts['gap_candidates'] = int(gap_x.size + n_gap_dropped)
                 if n_gap_dropped:
                     file_counts['gap_candidate_cap'] = int(n_gap_dropped)
+                if detail_timing:
+                    print(
+                        f"    [Bld stage] {fname} gap fill start  "
+                        f"gap_candidates={int(gap_x.size)}  "
+                        f"components={int(n_gap_components)}",
+                        flush=True,
+                    )
 
                 for jx, jy, zone_cls in zip(gap_x, gap_y, gap_cls):
                     jx = int(jx)
@@ -3892,6 +4190,9 @@ def run(
                             file_counts, mark_pad_m, prefer_small=True,
                             residential_context=residential_context,
                             footprint_pad_m=footprint_pad_m,
+                            static_occ_integral=static_occ_integral,
+                            fit_cache_enabled=not strict_fit,
+                            retry_context=asset_retry_context.get(try_cls),
                         )
                         n_unknown_skipped += skipped
                         if asset is None:

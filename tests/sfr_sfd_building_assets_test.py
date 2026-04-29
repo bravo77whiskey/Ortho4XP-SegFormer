@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -358,6 +359,109 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIsNotNone(final_poly)
         self.assertIsNotNone(spacing_poly)
 
+    def test_static_integral_fit_path_matches_standard_fit_path(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "small.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-6.0, 6.0, -6.0, 6.0),
+                "mark_bounds_m": (-10.0, 10.0, -10.0, 10.0),
+            },
+        ]
+        static_occ_mask = np.zeros((50, 50), dtype=np.uint8)
+        static_occ_mask[20, 25] = 1
+        building_spacing_mask = np.zeros_like(static_occ_mask)
+
+        standard_counts = {}
+        standard = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            np.zeros_like(static_occ_mask),
+            standard_counts,
+        )
+
+        integral_counts = {}
+        integral = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            np.zeros_like(static_occ_mask),
+            integral_counts,
+            static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+        )
+
+        self.assertEqual(standard[0]["path"], integral[0]["path"])
+        self.assertEqual(standard[1], integral[1])
+        np.testing.assert_array_equal(standard[2], integral[2])
+        np.testing.assert_array_equal(standard[3], integral[3])
+        self.assertEqual(standard[4], integral[4])
+        self.assertEqual(standard_counts, integral_counts)
+
+    def test_fit_selection_reuses_repeated_same_footprint_candidates(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "too-large-a.obj",
+                "bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "fit_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "mark_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+            },
+            {
+                "kind": "object",
+                "path": "too-large-b.obj",
+                "bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "fit_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "mark_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+            },
+            {
+                "kind": "object",
+                "path": "small-enough.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "mark_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+            },
+        ]
+        occ_mask = np.zeros((40, 40), dtype=np.uint8)
+        occ_mask[20, 27] = 1
+        building_spacing_mask = np.zeros_like(occ_mask)
+        counts = {}
+
+        with mock.patch.object(
+            BLD, "_footprint_poly_with_bbox_basis", wraps=BLD._footprint_poly_with_bbox_basis
+        ) as footprint_poly:
+            asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
+                pool,
+                np.random.default_rng(11),
+                20,
+                20,
+                0.0,
+                1.0,
+                occ_mask,
+                building_spacing_mask,
+                np.zeros_like(occ_mask),
+                counts,
+            )
+
+        self.assertEqual(asset["path"], "small-enough.obj")
+        self.assertEqual(final_h, 0.0)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(counts["fit_checks"], 5)
+        self.assertIsNotNone(final_poly)
+        self.assertIsNotNone(spacing_poly)
+        self.assertEqual(footprint_poly.call_count, 7)
+
     def test_static_blockers_use_raw_footprint_not_spacing_pad(self):
         pool = [
             {
@@ -509,6 +613,79 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(asset["kind"], "facade")
         self.assertEqual(counts["residential_asset_skipped"], 1)
         self.assertEqual(skipped, 0)
+
+    def test_nonresidential_retry_context_preserves_selection_and_skip_counts(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "simheaven/houses/house_09x12x2.obj",
+                "bounds_m": (-4.5, 4.5, -6.0, 6.0),
+                "fit_bounds_m": (-4.5, 4.5, -6.0, 6.0),
+                "mark_bounds_m": (-4.5, 4.5, -6.0, 6.0),
+            },
+            {
+                "kind": "facade",
+                "path": "too-large.fac",
+                "bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "fit_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+                "mark_bounds_m": (-8.0, 8.0, -8.0, 8.0),
+            },
+            {
+                "kind": "object",
+                "path": "SFD_Global/Asia/Suburban_1.obj",
+                "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+                "fit_bounds_m": (-5.0, 5.0, -5.0, 5.0),
+                "mark_bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            },
+            {
+                "kind": "facade",
+                "path": "small.fac",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "mark_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+            },
+        ]
+        static_occ_mask = np.zeros((50, 50), dtype=np.uint8)
+        static_occ_mask[20, 27] = 1
+        building_spacing_mask = np.zeros_like(static_occ_mask)
+
+        standard_counts = {}
+        standard = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(0),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            np.zeros_like(static_occ_mask),
+            standard_counts,
+            residential_context=False,
+        )
+
+        context_counts = {}
+        context = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(0),
+            20,
+            20,
+            0.0,
+            1.0,
+            static_occ_mask,
+            building_spacing_mask,
+            np.zeros_like(static_occ_mask),
+            context_counts,
+            residential_context=False,
+            retry_context=BLD._asset_retry_context(pool),
+        )
+
+        self.assertEqual(standard[0]["path"], context[0]["path"])
+        self.assertEqual(standard[1], context[1])
+        np.testing.assert_array_equal(standard[2], context[2])
+        np.testing.assert_array_equal(standard[3], context[3])
+        self.assertEqual(standard[4], context[4])
+        self.assertEqual(standard_counts, context_counts)
 
     def test_asset_retry_order_prefers_smaller_footprints(self):
         pools = {
