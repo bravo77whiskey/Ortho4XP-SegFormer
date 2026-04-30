@@ -13,6 +13,7 @@ level — importing them at module load time would fail in the frozen exe before
 
 import math
 import os
+import re
 import subprocess
 import sys
 
@@ -207,20 +208,39 @@ def _has_orthophotos(ortho_dir):
     return False
 
 
+_DDS_STD_RE = re.compile(
+    r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
+    re.IGNORECASE,
+)
+_MASK_TEXTURE_RE = re.compile(r"^\d+_\d+_ZL\d{2}(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE)
+
+
+def _is_mask_texture_name(name):
+    return bool(_MASK_TEXTURE_RE.match(os.path.basename(name)))
+
+
+def _has_tile_dds_textures(tex_dir):
+    if not os.path.isdir(tex_dir):
+        return False
+    try:
+        return any(
+            _DDS_STD_RE.match(name) and not _is_mask_texture_name(name)
+            for name in os.listdir(tex_dir)
+        )
+    except OSError:
+        return False
+
+
 def _check_tile_imagery(tex_dir, lat, lon, step_name):
     ortho_dir = _orthophoto_tile_dir(tex_dir, lat, lon)
+    if _has_tile_dds_textures(tex_dir):
+        return True
     if _has_orthophotos(ortho_dir):
         return True
-    if os.path.isdir(tex_dir):
-        try:
-            if any(name.lower().endswith('.dds') for name in os.listdir(tex_dir)):
-                return True
-        except OSError:
-            pass
     print(
         f"{step_name} requires source imagery for tile {int(lat):+03d}{int(lon):+04d}, "
-        f"but no cached orthophotos were found at {ortho_dir!r} and no DDS textures "
-        f"were found at {tex_dir!r}. "
+        f"but no DDS textures were found at {tex_dir!r} and no cached orthophotos "
+        f"were found at {ortho_dir!r}. "
         "For clean SegFormer benchmarks, clear only the SFR_cache tile folder and "
         "keep Orthophotos or Tiles\\zOrtho4XP_*\\textures. Skipping this SFR step.",
         flush=True,
@@ -588,7 +608,7 @@ def setup_sfr_models():
         "\n"
         "from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor, AutoImageProcessor\n"
         "\n"
-        "print('[SFR Setup] Downloading vegetation model (nave1616/SegFormer-landcover-FT) …')\n"
+        "print('[SFR Setup] Downloading inference model (nave1616/SegFormer-landcover-FT) …')\n"
         "print('[SFR Setup] (One-time download ~400 MB; subsequent runs load from cache.)')\n"
         "SegformerImageProcessor(\n"
         "    do_resize=True, size={'height': 512, 'width': 512},\n"
@@ -597,7 +617,7 @@ def setup_sfr_models():
         "    image_std=[0.229, 0.224, 0.225],\n"
         ")\n"
         "SegformerForSemanticSegmentation.from_pretrained('nave1616/SegFormer-landcover-FT')\n"
-        "print('[SFR Setup] Vegetation model ready.')\n"
+        "print('[SFR Setup] Inference model ready.')\n"
         "\n"
         "print('[SFR Setup] Downloading building model (tomascanivari/segformer-b0-finetuned-buildings) …')\n"
         "AutoImageProcessor.from_pretrained('tomascanivari/segformer-b0-finetuned-buildings')\n"

@@ -50,7 +50,7 @@ except ImportError:
     _dsftool = None
 
 # ── Model repositories ───────────────────────────────────────────────────────
-# Vegetation model: 9-class landcover SegFormer (tree/rangeland/agriculture/buildings/…)
+# Inference model: 9-class landcover SegFormer (tree/rangeland/agriculture/buildings/…)
 _MODEL_VEG_REPO = "nave1616/SegFormer-landcover-FT"
 # Building model: binary SegFormer-B0 (0=background, 1=building)
 # Set segformer_building_model="landcover" to use CLASS_BUILDING from the veg model instead.
@@ -371,6 +371,68 @@ def is_mask_texture_name(name):
     return bool(_MASK_TEXTURE_RE.match(os.path.basename(name)))
 
 
+def orthophoto_tile_dir_for_tex_dir(tex_dir, lat, lon):
+    """Return the cached Orthophotos directory corresponding to a tile textures dir."""
+    o4xp_root = os.path.dirname(os.path.dirname(os.path.dirname(tex_dir)))
+    lat_i = int(lat)
+    lon_i = int(lon)
+    lat_g = int(floor(lat / 10)) * 10
+    lon_g = int(floor(lon / 10)) * 10
+    lat_s = f"{'+' if lat_i >= 0 else '-'}{abs(lat_i):02d}"
+    lon_s = f"{'+' if lon_i >= 0 else '-'}{abs(lon_i):03d}"
+    lat_gs = f"{'+' if lat_g >= 0 else '-'}{abs(lat_g):02d}"
+    lon_gs = f"{'+' if lon_g >= 0 else '-'}{abs(lon_g):03d}"
+    return os.path.join(
+        o4xp_root, "Orthophotos", f"{lat_gs}{lon_gs}", f"{lat_s}{lon_s}"
+    )
+
+
+def collect_source_texture_files(tex_dir, lat, lon):
+    """
+    Return source texture names for SFR overlay inference.
+
+    Tile-local DDS files are authoritative. Cached orthophotos are used only as
+    a fallback for workflows that cleaned the tile textures but kept downloads.
+    """
+    dds_files = []
+    if os.path.isdir(tex_dir):
+        try:
+            dds_files = [
+                name for name in os.listdir(tex_dir)
+                if _DDS_STD_RE.match(name) and not is_mask_texture_name(name)
+            ]
+        except OSError:
+            dds_files = []
+    if dds_files:
+        print(f"Using {len(dds_files)} DDS textures from {tex_dir}", flush=True)
+        return dds_files, "dds", None
+
+    ortho_dir = orthophoto_tile_dir_for_tex_dir(tex_dir, lat, lon)
+    orthophoto_files = []
+    if os.path.isdir(ortho_dir):
+        for _root, _dirs, names in os.walk(ortho_dir):
+            for name in names:
+                if not name.lower().endswith((".jpg", ".jpeg", ".png")):
+                    continue
+                if is_mask_texture_name(name):
+                    continue
+                candidate = os.path.splitext(name)[0] + ".dds"
+                if _DDS_STD_RE.match(candidate) and not is_mask_texture_name(candidate):
+                    orthophoto_files.append(candidate)
+    if orthophoto_files:
+        print(
+            "Tile DDS textures missing; using "
+            f"{len(orthophoto_files)} original cached orthophotos from {ortho_dir}",
+            flush=True,
+        )
+        return orthophoto_files, "orthophoto", ortho_dir
+
+    raise FileNotFoundError(
+        f"No DDS textures found at {tex_dir!r} and no cached orthophotos "
+        f"found at {ortho_dir!r}"
+    )
+
+
 def parse_dds_filename(fname):
     """
     Parse an Ortho4XP DDS texture filename.
@@ -513,7 +575,7 @@ def _optimize_model_for_inference(model, device):
 
 def load_vegetation_model(device=None):
     """
-    Load (once) the 9-class SegFormer-landcover vegetation model.
+    Load (once) the shared 9-class SegFormer-landcover inference model.
     Returns (model, processor, device).
     """
     global _model_veg, _processor_veg, _model, _processor
@@ -523,7 +585,7 @@ def load_vegetation_model(device=None):
     if _model_veg is not None:
         return _model_veg, _processor_veg, device
 
-    print(f"[SegFormer] Loading vegetation model ({_MODEL_VEG_REPO}) onto {device} …")
+    print(f"[SegFormer] Loading inference model ({_MODEL_VEG_REPO}) onto {device} …")
     _processor_veg = SegformerImageProcessor(
         do_resize=True,
         size={"height": segformer_patch_size, "width": segformer_patch_size},
@@ -538,7 +600,7 @@ def load_vegetation_model(device=None):
     # Keep legacy aliases in sync
     _model     = _model_veg
     _processor = _processor_veg
-    print("[SegFormer] Vegetation model ready.")
+    print("[SegFormer] Inference model ready.")
     return _model_veg, _processor_veg, device
 
 
@@ -566,7 +628,7 @@ def load_building_model(device=None):
 
 
 def load_model(device=None):
-    """Legacy entry point — loads vegetation model. Returns (model, device)."""
+    """Legacy entry point — loads shared inference model. Returns (model, device)."""
     model, _, device = load_vegetation_model(device)
     return model, device
 

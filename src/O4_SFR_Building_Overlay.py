@@ -3362,49 +3362,8 @@ def run(
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", _re.IGNORECASE)
 
-    def _orthophoto_tile_dir():
-        o4xp_root = os.path.dirname(os.path.dirname(os.path.dirname(tex_dir)))
-        lat_g = int(math.floor(lat / 10)) * 10
-        lon_g = int(math.floor(lon / 10)) * 10
-        lat_s_str = f"{'+' if int(lat) >= 0 else '-'}{abs(int(lat)):02d}"
-        lon_s_str = f"{'+' if int(lon) >= 0 else '-'}{abs(int(lon)):03d}"
-        lat_g_str = f"{'+' if lat_g >= 0 else '-'}{abs(lat_g):02d}"
-        lon_g_str = f"{'+' if lon_g >= 0 else '-'}{abs(lon_g):03d}"
-        return os.path.join(
-            o4xp_root, 'Orthophotos', f'{lat_g_str}{lon_g_str}',
-            f'{lat_s_str}{lon_s_str}')
-
     def _collect_source_files():
-        ortho_dir = _orthophoto_tile_dir()
-        jpg_files = []
-        if os.path.isdir(ortho_dir):
-            for root, _, names in os.walk(ortho_dir):
-                for name in names:
-                    if name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                        if SEGFORMER.is_mask_texture_name(name):
-                            continue
-                        candidate = os.path.splitext(name)[0] + '.dds'
-                        if STD_RE.match(candidate) and not SEGFORMER.is_mask_texture_name(candidate):
-                            jpg_files.append(candidate)
-            if jpg_files:
-                print(
-                    f"Using {len(jpg_files)} original cached orthophotos from {ortho_dir}",
-                    flush=True)
-                return jpg_files, 'orthophoto', ortho_dir
-
-        if os.path.isdir(tex_dir):
-            dds_files = [
-                f for f in os.listdir(tex_dir)
-                if STD_RE.match(f) and not SEGFORMER.is_mask_texture_name(f)
-            ]
-            if dds_files:
-                print(
-                    f"Original cached orthophotos missing; using {len(dds_files)} DDS textures from {tex_dir}",
-                    flush=True)
-                return dds_files, 'dds', None
-
-        raise FileNotFoundError(
-            f"No DDS textures found at {tex_dir!r} and no cached orthophotos found at {ortho_dir!r}")
+        return SEGFORMER.collect_source_texture_files(tex_dir, lat, lon)
 
     def _orthophoto_path(fname, ortho_dir):
         m = STD_RE.match(fname)
