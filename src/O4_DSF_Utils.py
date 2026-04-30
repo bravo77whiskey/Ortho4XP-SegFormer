@@ -28,6 +28,135 @@ quad_capacity_low = 35000
 # For Laminar test suite
 use_test_texture = False
 
+_DDS_HEADER_SIZE = 128
+_DDS_MAGIC = b"DDS "
+_DDS_FOURCC_BLOCK_BYTES = {"DXT1": 8, "DXT5": 16}
+_ORTHO_TEXTURE_SIZE = 4096
+
+################################################################################
+def _dds_payload_size(width, height, block_bytes, mipmap_count):
+    payload_size = 0
+    for _ in range(mipmap_count):
+        payload_size += max(1, (width + 3) // 4) * max(1, (height + 3) // 4) * block_bytes
+        width = max(1, width // 2)
+        height = max(1, height // 2)
+    return payload_size
+
+
+def cached_dds_info(path, expected_width=_ORTHO_TEXTURE_SIZE,
+                    expected_height=_ORTHO_TEXTURE_SIZE):
+    """Return DDS metadata and None reason when an Ortho4XP texture is reusable."""
+    if not os.path.isfile(path):
+        return None, "missing"
+    try:
+        file_size = os.path.getsize(path)
+        if file_size < _DDS_HEADER_SIZE:
+            return None, "truncated DDS header"
+        with open(path, "rb") as f:
+            header = f.read(_DDS_HEADER_SIZE)
+    except OSError as exc:
+        return None, f"could not read DDS ({exc})"
+
+    if len(header) < _DDS_HEADER_SIZE or header[:4] != _DDS_MAGIC:
+        return None, "invalid DDS magic"
+    try:
+        header_size = struct.unpack_from("<I", header, 4)[0]
+        height = struct.unpack_from("<I", header, 12)[0]
+        width = struct.unpack_from("<I", header, 16)[0]
+        mipmap_count = struct.unpack_from("<I", header, 28)[0]
+        pixel_format_size = struct.unpack_from("<I", header, 76)[0]
+        fourcc = header[84:88].decode("ascii")
+    except (struct.error, UnicodeDecodeError):
+        return None, "malformed DDS header"
+
+    if header_size != 124 or pixel_format_size != 32:
+        return None, "malformed DDS header"
+    if width != expected_width or height != expected_height:
+        return None, f"unexpected DDS size {width}x{height}"
+    if fourcc not in _DDS_FOURCC_BLOCK_BYTES:
+        return None, f"unsupported DDS format {fourcc!r}"
+
+    max_mipmaps = max(width, height).bit_length()
+    if mipmap_count > max_mipmaps:
+        return None, "invalid DDS mipmap count"
+    candidate_mipmap_counts = (
+        range(1, max_mipmaps + 1) if mipmap_count <= 1 else (mipmap_count,)
+    )
+    block_bytes = _DDS_FOURCC_BLOCK_BYTES[fourcc]
+    expected_sizes = {
+        _DDS_HEADER_SIZE + _dds_payload_size(width, height, block_bytes, count)
+        for count in candidate_mipmap_counts
+    }
+    if file_size not in expected_sizes:
+        smallest = min(expected_sizes)
+        if file_size < smallest:
+            return None, "truncated DDS payload"
+        return None, f"unexpected DDS file size {file_size}"
+
+    return {
+        "width": width,
+        "height": height,
+        "fourcc": fourcc,
+        "mipmap_count": mipmap_count,
+        "file_size": file_size,
+    }, None
+
+
+def cached_dds_validation_reason(path):
+    _info, reason = cached_dds_info(path)
+    return reason
+
+
+def _texture_rebuild_reason(target_tex, expected_dxt5=False, target_mask=None):
+    dds_info, reason = cached_dds_info(target_tex)
+    if reason:
+        return reason
+    expected_fourcc = "DXT5" if expected_dxt5 else "DXT1"
+    if dds_info["fourcc"] != expected_fourcc:
+        return f"cached DDS is {dds_info['fourcc']} but {expected_fourcc} is required"
+    if target_mask and os.path.isfile(target_mask):
+        if os.path.getmtime(target_tex) < os.path.getmtime(target_mask):
+            return "cached DDS is older than its mask"
+    return None
+
+
+def _log_texture_present(texture_file_name):
+    UI.vprint(
+        2,
+        "   Texture file "
+        + texture_file_name
+        + " already present.",
+    )
+
+
+def _queue_texture_rebuild(download_queue, texture_attributes, texture_file_name,
+                           rebuild_reason):
+    if rebuild_reason != "missing":
+        UI.vprint(
+            1,
+            "   Cached texture "
+            + texture_file_name
+            + " is not reusable ("
+            + rebuild_reason
+            + "); rebuilding.",
+        )
+    download_queue.put(texture_attributes)
+
+
+def _queue_texture_if_needed(download_queue, texture_attributes, target_tex,
+                             texture_file_name, expected_dxt5=False,
+                             target_mask=None):
+    rebuild_reason = _texture_rebuild_reason(
+        target_tex, expected_dxt5=expected_dxt5, target_mask=target_mask
+    )
+    if rebuild_reason:
+        _queue_texture_rebuild(
+            download_queue, texture_attributes, texture_file_name, rebuild_reason
+        )
+        return True
+    _log_texture_present(texture_file_name)
+    return False
+
 ################################################################################
 def float2qquad(x):
     if x >= 1:
@@ -731,29 +860,18 @@ def build_dsf(tile, download_queue):
                     target_tex = os.path.join(
                             tile.build_dir, "textures", texture_file_name
                             )
-                    rebuild = False
-                    if (not os.path.isfile(target_tex)):
-                        rebuild = True
-                    elif (tile.imprint_masks_to_dds):
-                        # Maybe target_tex was a DXT1, we need DXT5
-                        if (os.path.getsize(target_tex) < 20000000):
-                            rebuild = True
-                        # Maybe masks were updated after target_tex was created
-                        target_mask = MASK.mask_name_for_texture(tile, 
-                                          *texture_attributes)
-                        if (os.path.isfile(target_mask)):
-                            mask_last_modified = os.path.getmtime(target_mask)
-                            tex_last_modified = os.path.getmtime(target_tex)
-                            if (tex_last_modified < mask_last_modified):
-                                rebuild = True
-                    else: 
-                        # maybe target_tex was a DXT5, it should ne a DXT1
-                        if (os.path.getsize(target_tex) > 20000000):
-                            rebuild = True
-                        else:
-                            print(os.path.getsize(target_tex))
+                    target_mask = (
+                        MASK.mask_name_for_texture(tile, *texture_attributes)
+                        if tile.imprint_masks_to_dds
+                        else None
+                    )
+                    rebuild_reason = _texture_rebuild_reason(
+                        target_tex,
+                        expected_dxt5=tile.imprint_masks_to_dds,
+                        target_mask=target_mask,
+                    )
                     
-                    if (rebuild or not tile.imprint_masks_to_dds):
+                    if (rebuild_reason or not tile.imprint_masks_to_dds):
                         mask_im.save(os.path.join(
                             tile.build_dir,
                             "textures",
@@ -761,15 +879,15 @@ def build_dsf(tile, download_queue):
                         )
                     )
 
-                    if (rebuild):
-                            download_queue.put(texture_attributes)
-                    else:
-                        UI.vprint(
-                            2,
-                            "   Texture file "
-                            + texture_file_name
-                            + " already present.",
+                    if (rebuild_reason):
+                        _queue_texture_rebuild(
+                            download_queue,
+                            texture_attributes,
+                            texture_file_name,
+                            rebuild_reason,
                         )
+                    else:
+                        _log_texture_present(texture_file_name)
                     treated_textures.add(texture_attributes)
                 terrain_file_name = create_terrain_file(
                     tile,
@@ -933,18 +1051,13 @@ def build_dsf(tile, download_queue):
                 target_tex = os.path.join(
                             tile.build_dir, "textures", texture_file_name
                             )
-                rebuild = False
-                if (not os.path.isfile(target_tex)):
-                    rebuild = True
-                if (rebuild):
-                    download_queue.put(texture_attributes)
-                else:
-                    UI.vprint(
-                        2,
-                        "   Texture file "
-                        + texture_file_name
-                        + " already present.",
-                    )
+                _queue_texture_if_needed(
+                    download_queue,
+                    texture_attributes,
+                    target_tex,
+                    texture_file_name,
+                    expected_dxt5=False,
+                )
                 treated_textures.add(texture_attributes)
             terrain_file_name = create_terrain_file(
                 tile,

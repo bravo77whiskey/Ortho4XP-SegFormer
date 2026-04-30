@@ -1614,6 +1614,46 @@ def download_jpeg_ortho(
 
 
 ################################################################################
+def cached_jpeg_validation_reason(path, expected_size=(4096, 4096)):
+    if not os.path.isfile(path):
+        return "missing"
+    try:
+        with Image.open(path) as img:
+            size = img.size
+            img.verify()
+    except Exception as exc:
+        return f"invalid JPEG ({exc})"
+    if size != expected_size:
+        return f"unexpected JPEG size {size[0]}x{size[1]}"
+    return None
+
+
+def _cached_jpeg_is_reusable(path, file_name, context=""):
+    reason = cached_jpeg_validation_reason(path)
+    if reason == "missing":
+        return False
+    if reason:
+        UI.vprint(
+            1,
+            "   Cached orthophoto "
+            + file_name
+            + context
+            + " is not reusable ("
+            + reason
+            + "); redownloading.",
+        )
+        return False
+    UI.vprint(
+        2,
+        "   The orthophoto "
+        + file_name
+        + context
+        + " is already present.",
+    )
+    return True
+
+
+################################################################################
 
 ################################################################################
 def build_jpeg_ortho(
@@ -1671,31 +1711,22 @@ def build_jpeg_ortho(
                     true_zl,
                     providers_dict[rlayer["layer_code"]],
                 )
-                if not os.path.isfile(
-                    os.path.join(true_file_dir, true_file_name)
+                true_file_path = os.path.join(true_file_dir, true_file_name)
+                context = " (for combining in " + provider_code + ")"
+                if not _cached_jpeg_is_reusable(
+                    true_file_path, true_file_name, context
                 ):
-                    UI.vprint(
-                        1,
-                        "   Downloading missing orthophoto "
-                        + true_file_name
-                        + " (for combining in "
-                        + provider_code
-                        + ")",
-                    )
+                    if not os.path.isfile(true_file_path):
+                        UI.vprint(
+                            1,
+                            "   Downloading missing orthophoto "
+                            + true_file_name
+                            + context,
+                        )
                     if not download_jpeg_ortho(
                         true_file_dir, true_file_name, *true_texture_attributes
                     ):
                         return 0
-                else:
-                    UI.vprint(
-                        2,
-                        "   The orthophoto "
-                        + true_file_name
-                        + " (for combining in "
-                        + provider_code
-                        + ") "
-                        + "is already present.",
-                    )
         if not data_found:
             UI.lvprint(
                 1,
@@ -1742,16 +1773,14 @@ def build_jpeg_ortho(
         file_dir = FNAMES.jpeg_file_dir_from_attributes(
             tile.lat, tile.lon, zoomlevel, providers_dict[provider_code]
         )
-        if not os.path.isfile(os.path.join(file_dir, file_name)):
-            UI.vprint(1, "   Downloading missing orthophoto " + file_name)
+        file_path = os.path.join(file_dir, file_name)
+        if not _cached_jpeg_is_reusable(file_path, file_name):
+            if not os.path.isfile(file_path):
+                UI.vprint(1, "   Downloading missing orthophoto " + file_name)
             if not download_jpeg_ortho(
                 file_dir, file_name, *texture_attributes
             ):
                 return 0
-        else:
-            UI.vprint(
-                2, "   The orthophoto " + file_name + " is already present."
-            )
     else:
         (tlat, tlon) = GEO.gtile_to_wgs84(
             til_x_left + 8, til_y_top + 8, zoomlevel
