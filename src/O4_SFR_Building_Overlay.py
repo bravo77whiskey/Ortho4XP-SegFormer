@@ -1803,27 +1803,36 @@ def _zone_heading(img, bx, by, bw, bh, pad=80):
     return (90.0 - dominant_img_angle) % 360.0
 
 
-# ── SFD object pools by footprint size ────────────────────────────────────────
-BLD_CLASS_COMPACT_RESIDENTIAL = 1
-BLD_CLASS_MEDIUM = 2
-BLD_CLASS_SMALL_APARTMENT = 3
-BLD_CLASS_APARTMENT_BLOCK = 4
-BLD_CLASS_LARGE = 5
+# ── Building object/facade pools by footprint size ────────────────────────────
+BLD_CLASS_TINY_RESIDENTIAL = 1
+BLD_CLASS_SMALL_RESIDENTIAL = 2
+BLD_CLASS_COMPACT_RESIDENTIAL = 3
+BLD_CLASS_MEDIUM = 4
+BLD_CLASS_SMALL_APARTMENT = 5
+BLD_CLASS_APARTMENT_BLOCK = 6
+BLD_CLASS_LARGE = 7
+BLD_CLASS_EXTRA_LARGE = 8
 # Legacy internal name retained for compatibility with any existing callers.
 BLD_CLASS_STANDARD_RESIDENTIAL = BLD_CLASS_MEDIUM
 BLD_PLACEMENT_CLASSES = (
+    BLD_CLASS_TINY_RESIDENTIAL,
+    BLD_CLASS_SMALL_RESIDENTIAL,
     BLD_CLASS_COMPACT_RESIDENTIAL,
     BLD_CLASS_MEDIUM,
     BLD_CLASS_SMALL_APARTMENT,
     BLD_CLASS_APARTMENT_BLOCK,
     BLD_CLASS_LARGE,
+    BLD_CLASS_EXTRA_LARGE,
 )
 BLD_CLASS_LABELS = {
+    BLD_CLASS_TINY_RESIDENTIAL: "tiny residential",
+    BLD_CLASS_SMALL_RESIDENTIAL: "small residential",
     BLD_CLASS_COMPACT_RESIDENTIAL: "compact residential",
     BLD_CLASS_MEDIUM: "medium footprint",
     BLD_CLASS_SMALL_APARTMENT: "small apartment",
     BLD_CLASS_APARTMENT_BLOCK: "apartment block",
     BLD_CLASS_LARGE: "large footprint",
+    BLD_CLASS_EXTRA_LARGE: "extra-large footprint",
 }
 
 # Zone size thresholds (pixels²) after morphological cleanup at ZL16 native res.
@@ -1833,14 +1842,30 @@ ZONE_COMPACT_PX = 1_500
 ZONE_MEDIUM_PX = 3_000
 ZONE_SMALL_APARTMENT_PX = 10_000
 ZONE_APARTMENT_BLOCK_PX = 30_000
+ZL16_SMALL_ZONE_M2 = 7_500.0
+ZL16_COMPACT_ZONE_M2 = 18_000.0
+ZL16_MEDIUM_ZONE_M2 = 38_000.0
+ZL16_SMALL_APARTMENT_ZONE_M2 = 80_000.0
+ZL16_APARTMENT_BLOCK_ZONE_M2 = 180_000.0
+ZL16_LARGE_ROOF_M2 = 2_200.0
+ZL16_EXTRA_LARGE_ROOF_M2 = 7_000.0
+ZL16_APARTMENT_ROOF_M2 = 900.0
+ZL16_FINE_GRAIN_FRAGS_PER_HA = 14.0
+ZL16_LOCAL_HEADING_ZONE_M2 = 55_000.0
 
-# SFD footprint thresholds in square metres. Height is intentionally ignored:
+# Asset footprint thresholds in square metres. Height is intentionally ignored:
 # tall objects are acceptable when the footprint is modest.
-SFD_COMPACT_RESIDENTIAL_MAX_M2 = 180.0
-SFD_MEDIUM_MAX_M2 = 325.0
-SFD_SMALL_APARTMENT_MAX_M2 = 500.0
-SFD_APARTMENT_BLOCK_MAX_M2 = 650.0
-SFD_APARTMENT_BLOCK_MAX_SIDE_M = 50.0
+ASSET_TINY_RESIDENTIAL_MAX_M2 = 90.0
+ASSET_SMALL_RESIDENTIAL_MAX_M2 = 170.0
+ASSET_COMPACT_RESIDENTIAL_MAX_M2 = 270.0
+ASSET_MEDIUM_MAX_M2 = 450.0
+ASSET_MEDIUM_MAX_SIDE_M = 28.0
+ASSET_SMALL_APARTMENT_MAX_M2 = 850.0
+ASSET_SMALL_APARTMENT_MAX_SIDE_M = 45.0
+ASSET_APARTMENT_BLOCK_MAX_M2 = 1_650.0
+ASSET_APARTMENT_BLOCK_MAX_SIDE_M = 55.0
+ASSET_LARGE_MAX_M2 = 7_000.0
+ASSET_LARGE_MAX_SIDE_M = 100.0
 
 # Heading alignment — grid-based Hough.
 # Each DDS is divided into HEADING_GRID_N × HEADING_GRID_N cells.  Hough line
@@ -1862,11 +1887,14 @@ HOUGH_PREVIEW_PX     = 512    # resize cell to this before Hough (speed vs preci
 #   apartments: larger clearance but still footprint-fit constrained
 #   large: conservative fallback for broad warehouse/industrial objects
 OBJ_CLEARANCE_M = {
+    BLD_CLASS_TINY_RESIDENTIAL: 7.0,
+    BLD_CLASS_SMALL_RESIDENTIAL: 10.0,
     BLD_CLASS_COMPACT_RESIDENTIAL: 14.0,
     BLD_CLASS_MEDIUM: 20.0,
     BLD_CLASS_SMALL_APARTMENT: 28.0,
     BLD_CLASS_APARTMENT_BLOCK: 36.0,
     BLD_CLASS_LARGE: 55.0,
+    BLD_CLASS_EXTRA_LARGE: 80.0,
 }  # legacy fallback for unknown footprints
 PLACE_UNKNOWN_OBJECTS = False
 
@@ -2062,20 +2090,35 @@ RESIDENTIAL_FALLBACK_BUFFER_M = 45.0
 RESIDENTIAL_FALLBACK_BUFFER_PX_MIN = 16
 
 DEFAULT_FACADE_BOUNDS = {
+    BLD_CLASS_TINY_RESIDENTIAL: (-4.0, 4.0, -4.0, 4.0),
+    BLD_CLASS_SMALL_RESIDENTIAL: (-5.5, 5.5, -6.0, 6.0),
     BLD_CLASS_COMPACT_RESIDENTIAL: (-7.0, 7.0, -7.0, 7.0),
     BLD_CLASS_MEDIUM: (-10.0, 10.0, -8.0, 8.0),
     BLD_CLASS_SMALL_APARTMENT: (-14.0, 14.0, -9.0, 9.0),
     BLD_CLASS_APARTMENT_BLOCK: (-18.0, 18.0, -12.0, 12.0),
-    BLD_CLASS_LARGE: (-24.0, 24.0, -24.0, 24.0),
+    BLD_CLASS_LARGE: (-45.0, 45.0, -30.0, 30.0),
+    BLD_CLASS_EXTRA_LARGE: (-75.0, 75.0, -45.0, 45.0),
 }
 DEFAULT_FACADE_PATHS = {
+    BLD_CLASS_TINY_RESIDENTIAL: SEGFORMER._FAC_DEFS["medium"],
+    BLD_CLASS_SMALL_RESIDENTIAL: SEGFORMER._FAC_DEFS["medium"],
     BLD_CLASS_COMPACT_RESIDENTIAL: SEGFORMER._FAC_DEFS["medium"],
     BLD_CLASS_MEDIUM: SEGFORMER._FAC_DEFS["medium"],
     BLD_CLASS_SMALL_APARTMENT: SEGFORMER._FAC_DEFS["medium"],
     BLD_CLASS_APARTMENT_BLOCK: SEGFORMER._FAC_DEFS["medium"],
     BLD_CLASS_LARGE: SEGFORMER._FAC_DEFS["large"],
+    BLD_CLASS_EXTRA_LARGE: SEGFORMER._FAC_DEFS["large"],
 }
 DEFAULT_FACADE_VARIANTS_BY_CLASS = {
+    BLD_CLASS_TINY_RESIDENTIAL: (
+        "lib/buildings/facades/generic/low_modern_01.fac",
+        "lib/buildings/facades/commercial/low_commercial_01.fac",
+    ),
+    BLD_CLASS_SMALL_RESIDENTIAL: (
+        "lib/buildings/facades/generic/low_modern_01.fac",
+        "lib/buildings/facades/commercial/low_commercial_01.fac",
+        "lib/buildings/facades/commercial/low_commercial_02.fac",
+    ),
     BLD_CLASS_COMPACT_RESIDENTIAL: (
         "lib/buildings/facades/generic/low_modern_01.fac",
         "lib/buildings/facades/commercial/low_commercial_01.fac",
@@ -2117,13 +2160,23 @@ DEFAULT_FACADE_VARIANTS_BY_CLASS = {
         "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
         "lib/buildings/facades/industrial/warehouse_10_90x90.fac",
     ),
+    BLD_CLASS_EXTRA_LARGE: (
+        "lib/buildings/facades/industrial/warehouse_06_90x40.fac",
+        "lib/buildings/facades/industrial/warehouse_07_90x40.fac",
+        "lib/buildings/facades/industrial/warehouse_08_90x90.fac",
+        "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
+        "lib/buildings/facades/industrial/warehouse_10_90x90.fac",
+    ),
 }
 DEFAULT_FACADE_HEIGHT_M = {
+    BLD_CLASS_TINY_RESIDENTIAL: 3.5,
+    BLD_CLASS_SMALL_RESIDENTIAL: 4.0,
     BLD_CLASS_COMPACT_RESIDENTIAL: 4.0,
     BLD_CLASS_MEDIUM: 7.0,
     BLD_CLASS_SMALL_APARTMENT: 9.0,
     BLD_CLASS_APARTMENT_BLOCK: 12.0,
     BLD_CLASS_LARGE: 14.0,
+    BLD_CLASS_EXTRA_LARGE: 16.0,
 }
 
 DEFAULT_OBJECT_CATALOG_OLD_WORLD = (
@@ -2195,6 +2248,7 @@ EXCLUDED_BUILDING_FILLER_ASSETS = {
     "sfd_global/asia/shed_1.obj",
     "sfd_global/asia/carport_1.obj",
     "sfd_global/asia/carport_2.obj",
+    "sfd_global/australia/carport.obj",
     "simheaven/sheds/shed_02x03x1.obj",
 }
 
@@ -2274,11 +2328,14 @@ SIMHEAVEN_SPECIAL_ASSET_TOKENS = (
 
 # Viz colours per zone class (BGR→RGB in numpy overlay)
 ZONE_COLOURS = {
-    BLD_CLASS_COMPACT_RESIDENTIAL: np.array([255,  80,  80]),
-    BLD_CLASS_MEDIUM: np.array([255, 150,  50]),
-    BLD_CLASS_SMALL_APARTMENT: np.array([245, 220,  70]),
-    BLD_CLASS_APARTMENT_BLOCK: np.array([ 80, 180, 255]),
-    BLD_CLASS_LARGE: np.array([ 80, 120, 255]),
+    BLD_CLASS_TINY_RESIDENTIAL: np.array([ 80, 220,  80]),
+    BLD_CLASS_SMALL_RESIDENTIAL: np.array([150, 230,  60]),
+    BLD_CLASS_COMPACT_RESIDENTIAL: np.array([245, 220,  70]),
+    BLD_CLASS_MEDIUM: np.array([255, 165,  50]),
+    BLD_CLASS_SMALL_APARTMENT: np.array([255,  90,  70]),
+    BLD_CLASS_APARTMENT_BLOCK: np.array([ 80, 200, 255]),
+    BLD_CLASS_LARGE: np.array([ 70, 130, 255]),
+    BLD_CLASS_EXTRA_LARGE: np.array([135,  90, 255]),
 }
 
 def _asset_region(tile_lat, tile_lon):
@@ -2302,8 +2359,9 @@ def _simheaven_catalog_paths(tile_lat, tile_lon):
     if region in ("asia", "se_asia", "africa", "australia_oceania", "south_america"):
         return (
             SIMHEAVEN_SMALL_BUILDING_CATALOG +
-            SIMHEAVEN_RESIDENTIAL_CATALOG[:5] +
-            SIMHEAVEN_COMMERCIAL_CATALOG[:3]
+            SIMHEAVEN_RESIDENTIAL_CATALOG +
+            SIMHEAVEN_COMMERCIAL_CATALOG +
+            SIMHEAVEN_INDUSTRIAL_CATALOG
         )
     if region in ("scandinavia", "mediterranean", "europe", "generic"):
         return (
@@ -2325,11 +2383,17 @@ def _is_repeatable_simheaven_asset(path):
     p = (path or '').replace('\\', '/').lower()
     if not p.startswith('simheaven/'):
         return False
-    if p in EXCLUDED_BUILDING_FILLER_ASSETS:
+    if _is_excluded_building_filler_asset(p):
         return False
     if any(token in p for token in SIMHEAVEN_SPECIAL_ASSET_TOKENS):
         return False
     return any(token in p for token in SIMHEAVEN_REPEATABLE_ASSET_DIRS)
+
+
+def _is_excluded_building_filler_asset(path):
+    """Return True for auxiliary objects that should not stand in for buildings."""
+    p = (path or '').replace('\\', '/').lower()
+    return p in EXCLUDED_BUILDING_FILLER_ASSETS or 'carport' in p
 
 
 def _sfd_catalog_paths(tile_lat, tile_lon):
@@ -2484,29 +2548,54 @@ def _footprint_metrics(bounds_m):
 def _class_for_footprint(bounds_m):
     """Classify an asset by footprint only; height does not affect placement."""
     area_m2, max_side_m = _footprint_metrics(bounds_m)
-    if area_m2 <= SFD_COMPACT_RESIDENTIAL_MAX_M2:
+    if area_m2 <= ASSET_TINY_RESIDENTIAL_MAX_M2:
+        return BLD_CLASS_TINY_RESIDENTIAL
+    if area_m2 <= ASSET_SMALL_RESIDENTIAL_MAX_M2:
+        return BLD_CLASS_SMALL_RESIDENTIAL
+    if area_m2 <= ASSET_COMPACT_RESIDENTIAL_MAX_M2:
         return BLD_CLASS_COMPACT_RESIDENTIAL
-    if area_m2 <= SFD_MEDIUM_MAX_M2:
+    if area_m2 <= ASSET_MEDIUM_MAX_M2 and max_side_m <= ASSET_MEDIUM_MAX_SIDE_M:
         return BLD_CLASS_MEDIUM
-    if area_m2 <= SFD_SMALL_APARTMENT_MAX_M2:
+    if area_m2 <= ASSET_SMALL_APARTMENT_MAX_M2 and max_side_m <= ASSET_SMALL_APARTMENT_MAX_SIDE_M:
         return BLD_CLASS_SMALL_APARTMENT
     if (
-        area_m2 <= SFD_APARTMENT_BLOCK_MAX_M2 and
-        max_side_m <= SFD_APARTMENT_BLOCK_MAX_SIDE_M
+        area_m2 <= ASSET_APARTMENT_BLOCK_MAX_M2 and
+        max_side_m <= ASSET_APARTMENT_BLOCK_MAX_SIDE_M
     ):
         return BLD_CLASS_APARTMENT_BLOCK
+    if area_m2 <= ASSET_LARGE_MAX_M2 and max_side_m <= ASSET_LARGE_MAX_SIDE_M:
+        return BLD_CLASS_LARGE
+    return BLD_CLASS_EXTRA_LARGE
+
+
+def _nearest_available_class(zone_class, asset_pools):
+    """Return the nearest placement class with at least one building asset."""
+    zone_class = int(zone_class)
+    if asset_pools.get(zone_class):
+        return zone_class
+    ordered = sorted(
+        BLD_PLACEMENT_CLASSES,
+        key=lambda cls: (abs(int(cls) - zone_class), int(cls)),
+    )
+    for cls in ordered:
+        if asset_pools.get(cls):
+            return int(cls)
     return BLD_CLASS_LARGE
 
 
 def _minimum_class_for_object_path(obj_path):
     """Return the smallest placement class allowed by an asset's visual scale."""
     p = (obj_path or '').replace('\\', '/').lower()
+    if '/industry' in p or '/industrial/' in p or 'warehouse' in p:
+        return BLD_CLASS_LARGE
+    if '/apartment' in p or '/commercial/' in p:
+        return BLD_CLASS_SMALL_APARTMENT
     if '/urban_mid_' in p:
         return BLD_CLASS_MEDIUM
     floors = _simheaven_object_floor_count(p)
     if floors is not None and floors > 2.0:
         return BLD_CLASS_MEDIUM
-    return BLD_CLASS_COMPACT_RESIDENTIAL
+    return BLD_CLASS_TINY_RESIDENTIAL
 
 
 def _class_for_object_asset(obj_path, bounds_m):
@@ -2519,7 +2608,7 @@ def _class_for_object_asset(obj_path, bounds_m):
 
 def _append_object_asset(asset_pools, obj_path, bounds_m, source):
     """Append one rectangular object asset to the footprint-classed pool map."""
-    if (obj_path or '').replace('\\', '/').lower() in EXCLUDED_BUILDING_FILLER_ASSETS:
+    if _is_excluded_building_filler_asset(obj_path):
         return False
     if bounds_m is None:
         return False
@@ -2921,6 +3010,317 @@ def _build_residential_area_mask(residential_polys, residential_roads,
     return None, 'unavailable'
 
 
+def _zone_class_from_area_m2(area_m2):
+    if area_m2 < ZL16_SMALL_ZONE_M2:
+        return BLD_CLASS_SMALL_RESIDENTIAL
+    if area_m2 < ZL16_COMPACT_ZONE_M2:
+        return BLD_CLASS_COMPACT_RESIDENTIAL
+    if area_m2 < ZL16_MEDIUM_ZONE_M2:
+        return BLD_CLASS_MEDIUM
+    if area_m2 < ZL16_SMALL_APARTMENT_ZONE_M2:
+        return BLD_CLASS_SMALL_APARTMENT
+    if area_m2 < ZL16_APARTMENT_BLOCK_ZONE_M2:
+        return BLD_CLASS_APARTMENT_BLOCK
+    return BLD_CLASS_LARGE
+
+
+def _image_edge_mask_for_zone_classification(img, cc_labels):
+    if img is None:
+        return None
+    try:
+        if img.ndim == 3:
+            gray = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img.astype(np.uint8, copy=False)
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        grad = cv2.magnitude(grad_x, grad_y)
+        zone_grad = grad[cc_labels != 0]
+        if zone_grad.size == 0:
+            return None
+        threshold = max(24.0, float(np.percentile(zone_grad, 72.0)))
+        return grad >= threshold
+    except Exception:
+        return None
+
+
+def _classify_building_zones_zl16(
+    labels,
+    stats,
+    valid_labels,
+    bld_raw,
+    img,
+    residential_area_mask,
+    m_per_px,
+):
+    """Classify broad ZL16 building zones by urban fabric, not just blob area."""
+    n_labels = int(stats.shape[0])
+    label_class = np.zeros(n_labels, dtype=np.uint8)
+    feature_counts = {
+        'fine_grain_zones': 0,
+        'large_roof_zones': 0,
+        'apartment_roof_zones': 0,
+        'low_density_zones': 0,
+    }
+    if len(valid_labels) == 0:
+        return label_class, feature_counts
+
+    edge_mask = _image_edge_mask_for_zone_classification(img, labels)
+    px_area_m2 = max(float(m_per_px) * float(m_per_px), 1e-6)
+    min_fragment_px = max(2, int(round(18.0 / px_area_m2)))
+
+    for label in valid_labels:
+        label = int(label)
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area_px = int(stats[label, cv2.CC_STAT_AREA])
+        if area_px <= 0 or w <= 0 or h <= 0:
+            continue
+
+        area_m2 = float(area_px) * px_area_m2
+        component = labels[y:y + h, x:x + w] == label
+        raw_component = (bld_raw[y:y + h, x:x + w] != 0) & component
+        raw_px = int(np.count_nonzero(raw_component))
+        raw_density = raw_px / max(float(area_px), 1.0)
+        bbox_fill = area_px / max(float(w * h), 1.0)
+
+        fragment_count = 0
+        mean_fragment_m2 = 0.0
+        max_fragment_m2 = 0.0
+        if raw_px:
+            n_frag, _, frag_stats, _ = cv2.connectedComponentsWithStats(
+                raw_component.astype(np.uint8), connectivity=8
+            )
+            if n_frag > 1:
+                frag_areas = frag_stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+                frag_areas = frag_areas[frag_areas >= min_fragment_px]
+                fragment_count = int(frag_areas.size)
+                if fragment_count:
+                    mean_fragment_m2 = float(np.mean(frag_areas) * px_area_m2)
+                    max_fragment_m2 = float(np.max(frag_areas) * px_area_m2)
+
+        frag_density_ha = fragment_count * 10_000.0 / max(area_m2, 1.0)
+        edge_density = 0.0
+        if edge_mask is not None:
+            edge_density = (
+                np.count_nonzero(edge_mask[y:y + h, x:x + w] & component) /
+                max(float(area_px), 1.0)
+            )
+        residential_fraction = 0.0
+        if residential_area_mask is not None:
+            residential_fraction = (
+                np.count_nonzero((residential_area_mask[y:y + h, x:x + w] != 0) & component) /
+                max(float(area_px), 1.0)
+            )
+
+        cls = _zone_class_from_area_m2(area_m2)
+        extra_large_roof = max_fragment_m2 >= ZL16_EXTRA_LARGE_ROOF_M2
+        large_roof_candidate = (
+            extra_large_roof or
+            max_fragment_m2 >= ZL16_LARGE_ROOF_M2 or
+            mean_fragment_m2 >= ZL16_APARTMENT_ROOF_M2 * 1.4
+        )
+        large_roof = large_roof_candidate and (
+            edge_mask is None or edge_density < 0.22
+        )
+        apartment_roof = (
+            large_roof_candidate or
+            max_fragment_m2 >= ZL16_APARTMENT_ROOF_M2 or
+            mean_fragment_m2 >= 420.0
+        )
+        fine_grain = (
+            frag_density_ha >= ZL16_FINE_GRAIN_FRAGS_PER_HA and
+            max_fragment_m2 < ZL16_APARTMENT_ROOF_M2
+        )
+
+        if large_roof:
+            feature_counts['large_roof_zones'] += 1
+            if residential_fraction >= 0.45:
+                cls = BLD_CLASS_APARTMENT_BLOCK
+            elif extra_large_roof:
+                cls = BLD_CLASS_EXTRA_LARGE
+            else:
+                cls = BLD_CLASS_LARGE
+        elif apartment_roof:
+            feature_counts['apartment_roof_zones'] += 1
+            cls = max(cls, BLD_CLASS_SMALL_APARTMENT)
+        elif fine_grain:
+            feature_counts['fine_grain_zones'] += 1
+            if residential_fraction >= 0.40 or raw_density >= 0.35:
+                if mean_fragment_m2 <= 95.0:
+                    cls = BLD_CLASS_TINY_RESIDENTIAL
+                elif mean_fragment_m2 <= 180.0:
+                    cls = BLD_CLASS_SMALL_RESIDENTIAL
+                elif mean_fragment_m2 <= 300.0:
+                    cls = BLD_CLASS_COMPACT_RESIDENTIAL
+                elif mean_fragment_m2 <= 520.0:
+                    cls = BLD_CLASS_MEDIUM
+                else:
+                    cls = BLD_CLASS_SMALL_APARTMENT
+                if raw_density > 0.62 and cls < BLD_CLASS_MEDIUM:
+                    cls += 1
+            else:
+                cls = max(cls, BLD_CLASS_MEDIUM)
+
+        if raw_density < 0.28 and not large_roof and edge_density < 0.20:
+            feature_counts['low_density_zones'] += 1
+            cls = min(cls, BLD_CLASS_COMPACT_RESIDENTIAL)
+        elif raw_density > 0.62 and area_m2 >= ZL16_SMALL_APARTMENT_ZONE_M2:
+            cls = max(cls, BLD_CLASS_SMALL_APARTMENT)
+
+        if bbox_fill < 0.18 and not large_roof:
+            cls = min(cls, BLD_CLASS_MEDIUM)
+
+        label_class[label] = int(cls)
+
+    return label_class, feature_counts
+
+
+def _roof_fragment_class(area_m2, max_side_m, fill_ratio):
+    """Classify one raw roof fragment before zone cleanup merges it into a blob."""
+    area_m2 = float(area_m2)
+    max_side_m = float(max_side_m)
+    if area_m2 <= 100.0 and max_side_m <= 16.0:
+        return BLD_CLASS_TINY_RESIDENTIAL
+    if area_m2 <= 190.0 and max_side_m <= 22.0:
+        return BLD_CLASS_SMALL_RESIDENTIAL
+    if area_m2 <= 320.0 and max_side_m <= 30.0:
+        return BLD_CLASS_COMPACT_RESIDENTIAL
+    if area_m2 <= 650.0 and max_side_m <= 38.0:
+        return BLD_CLASS_MEDIUM
+    if area_m2 <= 1_100.0 and max_side_m <= 48.0:
+        return BLD_CLASS_SMALL_APARTMENT
+    if area_m2 <= 2_200.0 and max_side_m <= 65.0:
+        return BLD_CLASS_APARTMENT_BLOCK
+    if area_m2 <= 7_000.0 and max_side_m <= 115.0:
+        return BLD_CLASS_LARGE
+    return BLD_CLASS_EXTRA_LARGE
+
+
+def _pca_long_axis_heading(xs, ys):
+    """Return compass heading of a pixel cloud's long axis, or NaN if weak."""
+    if xs.size < 6:
+        return float('nan'), 1.0
+    coords = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))
+    coords -= np.mean(coords, axis=0)
+    cov = coords.T @ coords / max(float(coords.shape[0] - 1), 1.0)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)
+    major = eigvecs[:, order[-1]]
+    minor_val = max(float(eigvals[order[-2]]), 1e-6)
+    aspect = math.sqrt(max(float(eigvals[order[-1]]), 1e-6) / minor_val)
+    if aspect < 1.35:
+        return float('nan'), aspect
+    img_angle = math.degrees(math.atan2(float(major[1]), float(major[0])))
+    return (90.0 - img_angle) % 180.0, aspect
+
+
+def _build_local_roof_evidence(bld_raw, bld_zone, m_per_px):
+    """Build nearest-raw-roof class and heading evidence for candidate placement."""
+    raw_mask = ((bld_raw != 0) & (bld_zone != 0)).astype(np.uint8)
+    if not raw_mask.any():
+        return None
+
+    n_frag, frag_labels, frag_stats, _ = cv2.connectedComponentsWithStats(
+        raw_mask, connectivity=8
+    )
+    if n_frag <= 1:
+        return None
+
+    px_area_m2 = max(float(m_per_px) * float(m_per_px), 1e-6)
+    min_fragment_px = max(2, int(round(18.0 / px_area_m2)))
+    class_by_label = np.zeros(n_frag, dtype=np.uint8)
+    heading_by_label = np.full(n_frag, np.nan, dtype=np.float32)
+    aspect_by_label = np.ones(n_frag, dtype=np.float32)
+    area_by_label_m2 = np.zeros(n_frag, dtype=np.float32)
+
+    for label in range(1, n_frag):
+        area_px = int(frag_stats[label, cv2.CC_STAT_AREA])
+        if area_px < min_fragment_px:
+            continue
+        x = int(frag_stats[label, cv2.CC_STAT_LEFT])
+        y = int(frag_stats[label, cv2.CC_STAT_TOP])
+        w = int(frag_stats[label, cv2.CC_STAT_WIDTH])
+        h = int(frag_stats[label, cv2.CC_STAT_HEIGHT])
+        area_m2 = float(area_px) * px_area_m2
+        max_side_m = max(float(w), float(h)) * float(m_per_px)
+        fill_ratio = area_px / max(float(w * h), 1.0)
+        class_by_label[label] = _roof_fragment_class(area_m2, max_side_m, fill_ratio)
+        area_by_label_m2[label] = area_m2
+
+        local = frag_labels[y:y + h, x:x + w] == label
+        ys, xs = np.nonzero(local)
+        heading, aspect = _pca_long_axis_heading(xs + x, ys + y)
+        heading_by_label[label] = heading
+        aspect_by_label[label] = aspect
+
+    if not np.any(class_by_label):
+        return None
+
+    dist_src = np.where(raw_mask != 0, 0, 1).astype(np.uint8)
+    dist_px, nearest_label = cv2.distanceTransformWithLabels(
+        dist_src,
+        cv2.DIST_L2,
+        5,
+        labelType=cv2.DIST_LABEL_CCOMP,
+    )
+    return {
+        'distance_px': dist_px.astype(np.float32, copy=False),
+        'nearest_label': nearest_label.astype(np.int32, copy=False),
+        'class_by_label': class_by_label,
+        'heading_by_label': heading_by_label,
+        'aspect_by_label': aspect_by_label,
+        'area_by_label_m2': area_by_label_m2,
+    }
+
+
+def _refine_candidate_classes_from_roofs(cand_x, cand_y, cand_cls, roof_evidence,
+                                         m_per_px, max_distance_m=30.0):
+    """Use nearby raw roof fragments to fix classes inside broad cleaned zones."""
+    if roof_evidence is None or cand_x.size == 0:
+        return cand_cls, 0
+    labels = roof_evidence['nearest_label'][cand_y, cand_x]
+    dist_m = roof_evidence['distance_px'][cand_y, cand_x] * float(m_per_px)
+    class_by_label = roof_evidence['class_by_label']
+    valid = (
+        (labels > 0) &
+        (labels < class_by_label.shape[0]) &
+        (dist_m <= float(max_distance_m))
+    )
+    if not np.any(valid):
+        return cand_cls, 0
+
+    local_cls = np.zeros_like(cand_cls)
+    local_cls[valid] = class_by_label[labels[valid]]
+    # Raw SegFormer building islands can still be over-merged at ZL16, so use
+    # local evidence as a conservative correction for oversized zone classes.
+    apply = valid & (local_cls != 0) & (local_cls < cand_cls)
+    if not np.any(apply):
+        return cand_cls, 0
+    refined = cand_cls.copy()
+    refined[apply] = local_cls[apply]
+    return refined, int(np.count_nonzero(apply))
+
+
+def _roof_heading_for_candidate(roof_evidence, jx, jy, m_per_px,
+                                max_distance_m=18.0, min_area_m2=140.0):
+    """Return local raw-roof long-axis heading when the evidence is rectangular."""
+    if roof_evidence is None:
+        return float('nan')
+    label = int(roof_evidence['nearest_label'][jy, jx])
+    if label <= 0 or label >= roof_evidence['heading_by_label'].shape[0]:
+        return float('nan')
+    if float(roof_evidence['distance_px'][jy, jx]) * float(m_per_px) > max_distance_m:
+        return float('nan')
+    if float(roof_evidence['area_by_label_m2'][label]) < float(min_area_m2):
+        return float('nan')
+    if float(roof_evidence['aspect_by_label'][label]) < 1.45:
+        return float('nan')
+    return float(roof_evidence['heading_by_label'][label])
+
+
 def _spacing_for_zone_class_m(edge_spacing_m, zone_class,
                               class_min_footprint_span_m=None):
     """Return candidate centre spacing from class footprint span + edge gap."""
@@ -2951,13 +3351,25 @@ def _gap_fill_class_sequence(zone_class):
     return (zc,) if zc in BLD_PLACEMENT_CLASSES else ()
 
 
+def _residential_infill_class(zone_class):
+    """Return a smaller house-like class for residential subareas in coarse zones."""
+    zone_class = int(zone_class)
+    if zone_class <= BLD_CLASS_MEDIUM:
+        return zone_class
+    if zone_class == BLD_CLASS_SMALL_APARTMENT:
+        return BLD_CLASS_SMALL_RESIDENTIAL
+    if zone_class == BLD_CLASS_APARTMENT_BLOCK:
+        return BLD_CLASS_COMPACT_RESIDENTIAL
+    return BLD_CLASS_MEDIUM
+
+
 def _format_class_spacing(spacing_px_by_class, m_per_px):
     """Return compact spacing summary for footprint classes."""
     metres = "/".join(
         f"{spacing_px_by_class[cls] * m_per_px:.1f}" for cls in BLD_PLACEMENT_CLASSES
     )
     pixels = "/".join(str(int(spacing_px_by_class[cls])) for cls in BLD_PLACEMENT_CLASSES)
-    return f"spacing≈{metres}m ({pixels}px c/s/a/b/l)"
+    return f"spacing≈{metres}m ({pixels}px tiny/small/compact/medium/apt/block/large/xl)"
 
 
 def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_count,
@@ -3029,6 +3441,17 @@ def _footprint_poly(cx: int, cy: int, bounds_m, heading_deg: float, m_per_px: fl
     """
     pts, _ = _footprint_poly_with_bbox(cx, cy, bounds_m, heading_deg, m_per_px)
     return pts
+
+
+def _orientation_angles_for_bounds(bounds_m, desired_long_axis_heading):
+    """Return headings ordered to align an asset's longer footprint side first."""
+    xmin, xmax, zmin, zmax = bounds_m
+    width_m = abs(float(xmax) - float(xmin))
+    depth_m = abs(float(zmax) - float(zmin))
+    heading = float(desired_long_axis_heading) % 360.0
+    if width_m > depth_m * 1.10:
+        return ((heading - 90.0) % 360.0, heading)
+    return (heading, (heading - 90.0) % 360.0)
 
 
 def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray | None = None) -> bool:
@@ -3196,52 +3619,35 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
         bounds_cache_key = None
 
     final_h = footprint_poly = spacing_poly = None
+    heading_options = _orientation_angles_for_bounds(bounds_m, heading)
     if not fit_cache_enabled:
-        static_poly = _footprint_poly(jx, jy, bounds_m, heading, m_per_px)
-        dynamic_poly = _footprint_poly(jx, jy, fit_bounds, heading, m_per_px)
-        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-        if (
-            _poly_fits(static_occ_mask, static_poly, fit_scratch) and
-            _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
-        ):
-            final_h = heading
-            footprint_poly = static_poly
-            spacing_poly = _footprint_poly(jx, jy, mark_bounds, heading, m_per_px)
-        else:
-            h90 = (heading + 90.0) % 360.0
-            static_poly90 = _footprint_poly(jx, jy, bounds_m, h90, m_per_px)
-            dynamic_poly90 = _footprint_poly(jx, jy, fit_bounds, h90, m_per_px)
+        for fit_heading in heading_options:
+            static_poly = _footprint_poly(jx, jy, bounds_m, fit_heading, m_per_px)
+            dynamic_poly = _footprint_poly(jx, jy, fit_bounds, fit_heading, m_per_px)
             file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
             if (
-                _poly_fits(static_occ_mask, static_poly90, fit_scratch) and
-                _poly_fits(building_spacing_mask, dynamic_poly90, fit_scratch)
+                _poly_fits(static_occ_mask, static_poly, fit_scratch) and
+                _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
             ):
-                final_h = h90
-                footprint_poly = static_poly90
-                spacing_poly = _footprint_poly(jx, jy, mark_bounds, h90, m_per_px)
+                final_h = fit_heading
+                footprint_poly = static_poly
+                spacing_poly = _footprint_poly(jx, jy, mark_bounds, fit_heading, m_per_px)
+                break
 
         if final_h is not None:
             return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
         return None, None, None, None, unknown_skipped
 
-    file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-    fits, static_poly, mark_poly = _orientation_fit(
-        bounds_m, fit_bounds, mark_bounds, bounds_cache_key, heading
-    )
-    if fits:
-        final_h = heading
-        footprint_poly = static_poly
-        spacing_poly = mark_poly
-    else:
-        h90 = (heading + 90.0) % 360.0
+    for fit_heading in heading_options:
         file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-        fits, static_poly90, mark_poly90 = _orientation_fit(
-            bounds_m, fit_bounds, mark_bounds, bounds_cache_key, h90
+        fits, static_poly, mark_poly = _orientation_fit(
+            bounds_m, fit_bounds, mark_bounds, bounds_cache_key, fit_heading
         )
         if fits:
-            final_h = h90
-            footprint_poly = static_poly90
-            spacing_poly = mark_poly90
+            final_h = fit_heading
+            footprint_poly = static_poly
+            spacing_poly = mark_poly
+            break
 
     if final_h is not None:
         return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
@@ -3342,6 +3748,9 @@ def run(
     skip_osm_excl_download=False,
     custom_scenery_dir=None,
     smart_gap_fill=None,
+    debug_image_only=False,
+    dds_filter=None,
+    ignore_placement_cache=False,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
@@ -3451,6 +3860,10 @@ def run(
         if not _fully_covered(_y, _x, _zl)
     )
     file_filter = _env_patterns("O4_SFR_FILE_FILTER")
+    if dds_filter:
+        dds_filter = [os.path.basename(str(name)) for name in dds_filter]
+        files = [name for name in files if name in set(dds_filter)]
+        print(f"DDS debug filter: {', '.join(dds_filter)} -> {len(files)} files")
     if file_filter:
         files = [
             name for name in files
@@ -3766,7 +4179,11 @@ def run(
             rng = np.random.default_rng(rng_seed)
             _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
             _cached_bld = None
-            if not disable_cache and os.path.exists(_bld_cache_file):
+            if (
+                not ignore_placement_cache and
+                not disable_cache and
+                os.path.exists(_bld_cache_file)
+            ):
                 try:
                     with open(_bld_cache_file, 'rb') as _f:
                         _cd = _pickle.load(_f)
@@ -3928,7 +4345,7 @@ def run(
                     f"{_describe_placement_summary(class_counts, bld_pct, 0, grid_n, spacing_label)}"
                     f"  small-house areas=unavailable"
                 )
-                if not disable_cache:
+                if not disable_cache and not ignore_placement_cache:
                     try:
                         _t = time.perf_counter()
                         with open(_bld_cache_file, 'wb') as _f:
@@ -4149,29 +4566,29 @@ def run(
             min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
             n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(bld_zone, connectivity=8)
             cc_area = cc_stats[:, cv2.CC_STAT_AREA]
-            label_class = np.zeros(n_cc, dtype=np.uint8)
+            cc_area_m2 = cc_area.astype(np.float32) * float(m_per_px * m_per_px)
             valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
             if valid_labels.size:
-                valid_area = cc_area[valid_labels]
-                label_class[valid_labels[valid_area < ZONE_COMPACT_PX]] = (
-                    BLD_CLASS_COMPACT_RESIDENTIAL
+                if img is None:
+                    _img_t = time.perf_counter()
+                    img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                    if img is not None:
+                        _record_elapsed(timings, file_timings, 'dds_load', _img_t)
+                label_class, zone_feature_counts = _classify_building_zones_zl16(
+                    cc_labels,
+                    cc_stats,
+                    valid_labels,
+                    bld_raw,
+                    img,
+                    residential_area_mask,
+                    m_per_px,
                 )
-                label_class[valid_labels[
-                    (valid_area >= ZONE_COMPACT_PX) &
-                    (valid_area < ZONE_MEDIUM_PX)
-                ]] = BLD_CLASS_MEDIUM
-                label_class[valid_labels[
-                    (valid_area >= ZONE_MEDIUM_PX) &
-                    (valid_area < ZONE_SMALL_APARTMENT_PX)
-                ]] = BLD_CLASS_SMALL_APARTMENT
-                label_class[valid_labels[
-                    (valid_area >= ZONE_SMALL_APARTMENT_PX) &
-                    (valid_area < ZONE_APARTMENT_BLOCK_PX)
-                ]] = BLD_CLASS_APARTMENT_BLOCK
-                label_class[valid_labels[valid_area >= ZONE_APARTMENT_BLOCK_PX]] = (
-                    BLD_CLASS_LARGE
-                )
+                for feature_name, feature_value in zone_feature_counts.items():
+                    file_counts[feature_name] = int(feature_value)
+            else:
+                label_class = np.zeros(n_cc, dtype=np.uint8)
             zone_class = label_class[cc_labels]
+            roof_evidence = _build_local_roof_evidence(bld_raw, bld_zone, m_per_px)
 
             zone_heading = np.full(n_cc, np.nan, dtype=np.float32)
             if valid_labels.size:
@@ -4244,11 +4661,11 @@ def run(
             n_candidates_total = 0
             for target_cls in BLD_PLACEMENT_CLASSES:
                 spacing_passes = []
-                fine_sp_px = spacing_px_by_class[BLD_CLASS_COMPACT_RESIDENTIAL]
                 coarse_sp_px = spacing_px_by_class[target_cls]
                 if target_cls > BLD_CLASS_MEDIUM and residential_area_mask is not None:
-                    residential_cls = min(target_cls, BLD_CLASS_SMALL_APARTMENT)
-                    spacing_passes.append((fine_sp_px, True, residential_cls))
+                    residential_cls = _residential_infill_class(target_cls)
+                    residential_sp_px = spacing_px_by_class[residential_cls]
+                    spacing_passes.append((residential_sp_px, True, residential_cls))
                     spacing_passes.append((coarse_sp_px, False, target_cls))
                 else:
                     spacing_passes.append((coarse_sp_px, None, target_cls))
@@ -4316,6 +4733,11 @@ def run(
                 cand_y = np.concatenate(cand_y_parts)
                 cand_cls = np.concatenate(cand_cls_parts)
                 cand_labels = np.concatenate(cand_label_parts)
+                cand_cls, n_local_class_refined = _refine_candidate_classes_from_roofs(
+                    cand_x, cand_y, cand_cls, roof_evidence, m_per_px
+                )
+                if n_local_class_refined:
+                    file_counts['local_roof_class_refined'] = int(n_local_class_refined)
                 if max_candidates_per_dds and cand_x.size > max_candidates_per_dds:
                     cand_x, cand_y, cand_cls, n_dropped = _limit_candidates_by_component(
                         cand_x, cand_y, cand_cls, cand_labels, max_candidates_per_dds, rng
@@ -4343,13 +4765,23 @@ def run(
             placed_viz_polys = []
 
             def _heading_for_candidate(jx, jy, zone_label):
-                return float(zone_heading[zone_label]) if (
-                    0 <= zone_label < zone_heading.shape[0]
-                    and not np.isnan(zone_heading[zone_label])
-                ) else float(hgrid[
+                roof_h = _roof_heading_for_candidate(roof_evidence, jx, jy, m_per_px)
+                if not np.isnan(roof_h):
+                    file_counts['local_roof_heading'] = (
+                        file_counts.get('local_roof_heading', 0) + 1
+                    )
+                    return roof_h
+                local_h = float(hgrid[
                     min(grid_n - 1, jy // cell_h),
                     min(grid_n - 1, jx // cell_w),
                 ])
+                if (
+                    0 <= zone_label < zone_heading.shape[0] and
+                    not np.isnan(zone_heading[zone_label]) and
+                    cc_area_m2[zone_label] < ZL16_LOCAL_HEADING_ZONE_M2
+                ):
+                    return float(zone_heading[zone_label])
+                return local_h
 
             for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
                 jx = int(jx)
@@ -4551,7 +4983,7 @@ def run(
                 f"  small-house areas={residential_area_source}"
             )
 
-            if not disable_cache:
+            if not disable_cache and not ignore_placement_cache:
                 try:
                     _t = time.perf_counter()
                     with open(_bld_cache_file, 'wb') as _f:
@@ -4603,11 +5035,14 @@ def run(
                 _blend_viz_mask(sh_bld_mask, (255, 255, 255), 0.65)
                 pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil)
                 dot_colours = {
-                    BLD_CLASS_COMPACT_RESIDENTIAL: (0, 220, 0),
-                    BLD_CLASS_MEDIUM: (160, 220, 0),
-                    BLD_CLASS_SMALL_APARTMENT: (255, 220, 0),
-                    BLD_CLASS_APARTMENT_BLOCK: (0, 190, 255),
-                    BLD_CLASS_LARGE: (0, 120, 255),
+                    BLD_CLASS_TINY_RESIDENTIAL: (80, 220, 80),
+                    BLD_CLASS_SMALL_RESIDENTIAL: (150, 230, 60),
+                    BLD_CLASS_COMPACT_RESIDENTIAL: (245, 220, 70),
+                    BLD_CLASS_MEDIUM: (255, 165, 50),
+                    BLD_CLASS_SMALL_APARTMENT: (255, 90, 70),
+                    BLD_CLASS_APARTMENT_BLOCK: (80, 200, 255),
+                    BLD_CLASS_LARGE: (70, 130, 255),
+                    BLD_CLASS_EXTRA_LARGE: (135, 90, 255),
                 }
                 footprint_fill = (255, 255, 255)
                 for poly, cls2 in placed_viz_polys:
@@ -4671,6 +5106,22 @@ def run(
         f"({len(placed_objects):,} objects, {len(placed_facades):,} facades)  "
         f"({total_time/60:.1f}min)"
     )
+
+    if debug_image_only:
+        if make_viz and composite is not None:
+            os.makedirs(os.path.dirname(os.path.abspath(out_dsf)), exist_ok=True)
+            viz_path = out_dsf.replace('.dsf', '_overview.png')
+            Image.fromarray(composite).save(viz_path)
+            print(f"Overview  → {viz_path}  ({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)")
+            if footprint_composite is not None:
+                footprint_viz_path = out_dsf.replace('.dsf', '_footprints.png')
+                Image.fromarray(footprint_composite).save(footprint_viz_path)
+                print(
+                    f"Footprints → {footprint_viz_path}  "
+                    f"({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)"
+                )
+        print("[SFR Bld] Debug image-only mode: skipped DSF text write and compile.")
+        return total_placements
 
     # ── Write DSF text ────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(os.path.abspath(out_dsf)), exist_ok=True)

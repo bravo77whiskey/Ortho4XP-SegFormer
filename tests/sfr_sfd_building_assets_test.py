@@ -31,11 +31,14 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
     def test_building_spacing_is_edge_gap_plus_class_span(self):
         class_spans = {
+            BLD.BLD_CLASS_TINY_RESIDENTIAL: 6.0,
+            BLD.BLD_CLASS_SMALL_RESIDENTIAL: 10.0,
             BLD.BLD_CLASS_COMPACT_RESIDENTIAL: 8.0,
             BLD.BLD_CLASS_MEDIUM: 20.0,
             BLD.BLD_CLASS_SMALL_APARTMENT: 30.0,
             BLD.BLD_CLASS_APARTMENT_BLOCK: 40.0,
             BLD.BLD_CLASS_LARGE: 50.0,
+            BLD.BLD_CLASS_EXTRA_LARGE: 80.0,
         }
 
         self.assertEqual(
@@ -44,12 +47,25 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 for cls in BLD.BLD_PLACEMENT_CLASSES
             },
             {
+                BLD.BLD_CLASS_TINY_RESIDENTIAL: 26.0,
+                BLD.BLD_CLASS_SMALL_RESIDENTIAL: 30.0,
                 BLD.BLD_CLASS_COMPACT_RESIDENTIAL: 28.0,
                 BLD.BLD_CLASS_MEDIUM: 40.0,
                 BLD.BLD_CLASS_SMALL_APARTMENT: 50.0,
                 BLD.BLD_CLASS_APARTMENT_BLOCK: 60.0,
                 BLD.BLD_CLASS_LARGE: 70.0,
+                BLD.BLD_CLASS_EXTRA_LARGE: 100.0,
             },
+        )
+
+    def test_orientation_order_aligns_long_footprint_side_first(self):
+        self.assertEqual(
+            BLD._orientation_angles_for_bounds((-5.0, 5.0, -20.0, 20.0), 90.0),
+            (90.0, 0.0),
+        )
+        self.assertEqual(
+            BLD._orientation_angles_for_bounds((-20.0, 20.0, -5.0, 5.0), 90.0),
+            (0.0, 90.0),
         )
 
     def test_smart_gap_fill_is_retired(self):
@@ -320,6 +336,8 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 residential_paths = _paths_for_classes(
                     pools,
                     (
+                        BLD.BLD_CLASS_TINY_RESIDENTIAL,
+                        BLD.BLD_CLASS_SMALL_RESIDENTIAL,
                         BLD.BLD_CLASS_COMPACT_RESIDENTIAL,
                         BLD.BLD_CLASS_MEDIUM,
                         BLD.BLD_CLASS_SMALL_APARTMENT,
@@ -415,12 +433,17 @@ class SfdBuildingAssetTests(unittest.TestCase):
             pools,
             (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
         )
+        small_paths = _paths_for_classes(
+            pools,
+            (BLD.BLD_CLASS_SMALL_RESIDENTIAL,),
+        )
         medium_paths = _paths_for_classes(
             pools,
             (BLD.BLD_CLASS_MEDIUM,),
         )
 
-        self.assertIn("simheaven/houses/house_09x12x2.obj", compact_paths)
+        self.assertIn("simheaven/houses/house_09x12x2.obj", small_paths)
+        self.assertIn("simheaven/houses/house_12x15x2.obj", compact_paths)
         self.assertNotIn("simheaven/residential/residential_10x10x3.obj", compact_paths)
         self.assertIn("simheaven/residential/residential_10x10x3.obj", medium_paths)
 
@@ -678,7 +701,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
 
         self.assertEqual(asset["path"], "rotates-to-fit.obj")
-        self.assertEqual(final_h, 90.0)
+        self.assertIn(final_h, (90.0, 270.0))
         self.assertIsNotNone(final_poly)
         self.assertIsNotNone(spacing_poly)
         self.assertEqual(skipped, 0)
@@ -992,16 +1015,16 @@ class SfdBuildingAssetTests(unittest.TestCase):
     def test_small_accessory_building_classes_are_included_when_reasonable(self):
         north_america_paths = _paths_for_classes(
             BLD._build_sfd_asset_pools(45.0, -75.0),
-            (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
+            BLD.BLD_PLACEMENT_CLASSES,
         )
         australia_paths = _paths_for_classes(
             BLD._build_sfd_asset_pools(-33.0, 151.0),
-            (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,),
+            BLD.BLD_PLACEMENT_CLASSES,
         )
 
         self.assertIn("SFD_Global/New_England/Residential/Garage.obj", north_america_paths)
         self.assertIn("SFD_Global/Australia/Shed.obj", australia_paths)
-        self.assertIn("SFD_Global/Australia/Carport.obj", australia_paths)
+        self.assertNotIn("SFD_Global/Australia/Carport.obj", australia_paths)
 
     def test_default_assets_include_facade_and_rectangular_object_variety(self):
         pools = BLD._build_default_asset_pools(45.0, -75.0)
@@ -1040,6 +1063,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
     def test_simheaven_catalog_expands_all_footprint_classes(self):
         pools = BLD._build_simheaven_asset_pools([], 45.0, 7.0)
+        small_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_SMALL_RESIDENTIAL,))
         compact_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_COMPACT_RESIDENTIAL,))
         medium_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_MEDIUM,))
         apartment_paths = _paths_for_classes(
@@ -1051,7 +1075,8 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
         large_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_LARGE,))
 
-        self.assertIn("simheaven/houses/house_09x12x1.obj", compact_paths)
+        self.assertIn("simheaven/houses/house_09x12x1.obj", small_paths)
+        self.assertIn("simheaven/houses/house_12x15x2.obj", compact_paths)
         self.assertIn("simheaven/residential/residential_15x20x4.obj", medium_paths)
         self.assertIn("simheaven/residential/residential_20x30x3.obj", apartment_paths)
         self.assertIn("simheaven/industrial/industrial_30x60.obj", large_paths)
@@ -1068,7 +1093,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertIn("simheaven/houses/house_09x12x1.obj", asia_paths)
         self.assertIn("simheaven/commercial/commercial_18x42.obj", asia_paths)
-        self.assertNotIn("simheaven/industrial/industrial_30x60.obj", asia_paths)
+        self.assertIn("simheaven/industrial/industrial_30x60.obj", asia_paths)
         self.assertIn("simheaven/industrial/industrial_30x60.obj", europe_paths)
 
     def test_simheaven_special_landmarks_are_not_reused_as_assets(self):
