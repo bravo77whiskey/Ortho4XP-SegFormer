@@ -310,7 +310,17 @@ class Tile:
                 self.build_dir,
                 "Ortho4XP_" + FNAMES.short_latlon(self.lat, self.lon) + ".cfg",
             )
-            config_file_bak = config_file + ".bak"
+        config_file_bak = config_file + ".bak"
+        zone_source = getattr(self, "zone_list", globals()["zone_list"])
+        if not zone_source and os.path.isfile(config_file):
+            try:
+                with open(config_file, "r") as existing_config:
+                    for line in existing_config:
+                        if line.startswith("zone_list="):
+                            zone_source = ast.literal_eval(line.split("=", 1)[1].strip())
+                            break
+            except Exception:
+                zone_source = []
         try:
             os.replace(config_file, config_file_bak)
         except:
@@ -325,7 +335,9 @@ class Tile:
                     lat = lat + 1
                 if lon < 0:
                     lon = lon + 1
-                for zone in globals()["zone_list"]:
+                # Batch builds load each tile config into this Tile instance
+                # without mutating the GUI/module-level zone_list.
+                for zone in zone_source:
                     _zone_list = [int(coord) for coord in zone[0]]
                     _zone_list = set(_zone_list)
                     if lat in _zone_list and lon in _zone_list:
