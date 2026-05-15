@@ -140,12 +140,12 @@ def _limit_candidates_by_component(cand_x, cand_y, cand_cls, cand_labels, max_ca
     """Keep a deterministic, component-balanced sample of placement candidates."""
     n_candidates = int(cand_x.size)
     if max_candidates <= 0 or n_candidates <= max_candidates:
-        return cand_x, cand_y, cand_cls, 0
+        return cand_x, cand_y, cand_cls, cand_labels, 0
 
     labels, inverse, counts = np.unique(cand_labels, return_inverse=True, return_counts=True)
     n_labels = labels.size
     if n_labels == 0:
-        return cand_x[:0], cand_y[:0], cand_cls[:0], n_candidates
+        return cand_x[:0], cand_y[:0], cand_cls[:0], cand_labels[:0], n_candidates
 
     reserve = np.minimum(counts, 64)
     if int(reserve.sum()) > max_candidates:
@@ -185,10 +185,10 @@ def _limit_candidates_by_component(cand_x, cand_y, cand_cls, cand_labels, max_ca
             )
 
     if not selected:
-        return cand_x[:0], cand_y[:0], cand_cls[:0], n_candidates
+        return cand_x[:0], cand_y[:0], cand_cls[:0], cand_labels[:0], n_candidates
 
     keep_idx = np.sort(np.concatenate(selected))
-    return cand_x[keep_idx], cand_y[keep_idx], cand_cls[keep_idx], n_candidates - keep_idx.size
+    return cand_x[keep_idx], cand_y[keep_idx], cand_cls[keep_idx], cand_labels[keep_idx], n_candidates - keep_idx.size
 
 
 def _leftover_gap_candidates(leftover_mask, zone_class, max_candidates, rng,
@@ -253,16 +253,10 @@ def _leftover_gap_candidates(leftover_mask, zone_class, max_candidates, rng,
     gap_y = np.concatenate([row[1] for row in rows])
     gap_cls = np.concatenate([row[2] for row in rows])
     gap_labels = np.concatenate([row[3] for row in rows])
-    n_before_cap = int(gap_x.size)
     if max_candidates and gap_x.size > max_candidates:
-        gap_x, gap_y, gap_cls, n_dropped = _limit_candidates_by_component(
+        gap_x, gap_y, gap_cls, gap_labels, n_dropped = _limit_candidates_by_component(
             gap_x, gap_y, gap_cls, gap_labels, max_candidates, rng
         )
-        kept = max(0, n_before_cap - int(n_dropped))
-        if kept != gap_x.size:
-            gap_labels = gap_labels[:0]
-        else:
-            gap_labels = gap_labels[:gap_x.size]
     else:
         n_dropped = 0
 
@@ -296,6 +290,8 @@ def parse_args():
     ap.add_argument('--open-k',    type=int,   default=5,  dest='open_k')
     ap.add_argument('--min-zone', '--min-zone-m2', type=float, default=200.0, dest='min_zone_m2')
     ap.add_argument('--no-viz',    action='store_true')
+    ap.add_argument('--debug-image-only', action='store_true', dest='debug_image_only',
+                    help='Generate overview/footprint PNGs then exit — no DSF written.')
     ap.add_argument('--cache-dir', default=None)
     ap.add_argument('--grid-n',    type=int,   default=HEADING_GRID_N, dest='grid_n')
     ap.add_argument('--osm-roads', default=None,
@@ -3107,10 +3103,10 @@ def _build_residential_area_mask(residential_polys, residential_roads,
             RESIDENTIAL_FALLBACK_BUFFER_PX_MIN,
             int(round(RESIDENTIAL_FALLBACK_BUFFER_M / max(m_per_px, 1e-6))),
         )
-        road_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (road_buffer_px * 2 + 1, road_buffer_px * 2 + 1)
+        dist = cv2.distanceTransform(
+            (1 - road_mask).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
         )
-        return cv2.dilate(road_mask, road_kernel), 'OSM neighborhood roads'
+        return (dist <= road_buffer_px).astype(np.uint8), 'OSM neighborhood roads'
 
     return None, 'unavailable'
 
@@ -3793,7 +3789,7 @@ def _largest_fitting_yolo_template_poly(
     scratch_mask,
     static_occ_integral=None,
     min_scale=0.25,
-    iterations=8,
+    iterations=6,
 ):
     """Return largest-area <= original YOLO footprint that fits current blockers."""
     min_scale = float(np.clip(min_scale, 0.05, 1.0))
@@ -3898,10 +3894,20 @@ def _neighbor_yolo_templates_by_zone(cc_labels, cc_stats, valid_labels,
         return {}
 
     radius_px = max(1, int(radius_px))
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (radius_px * 2 + 1, radius_px * 2 + 1)
-    )
-    h, w = cc_labels.shape[:2]
+
+    # Pre-compute source-zone bboxes (x0, y0, x1, y1) for fast proximity test.
+    src_bboxes = {}
+    for sl in source_labels:
+        if sl < cc_stats.shape[0]:
+            sx0 = int(cc_stats[sl, cv2.CC_STAT_LEFT])
+            sy0 = int(cc_stats[sl, cv2.CC_STAT_TOP])
+            src_bboxes[sl] = (
+                sx0,
+                sy0,
+                sx0 + int(cc_stats[sl, cv2.CC_STAT_WIDTH]),
+                sy0 + int(cc_stats[sl, cv2.CC_STAT_HEIGHT]),
+            )
+
     result = {}
     for label in (int(v) for v in valid_labels):
         if label <= 0 or label in source_labels or label >= cc_stats.shape[0]:
@@ -3912,21 +3918,14 @@ def _neighbor_yolo_templates_by_zone(cc_labels, cc_stats, valid_labels,
         zone_h = int(cc_stats[label, cv2.CC_STAT_HEIGHT])
         if zone_w <= 0 or zone_h <= 0:
             continue
-        rx0 = max(0, x0 - radius_px)
-        ry0 = max(0, y0 - radius_px)
-        rx1 = min(w, x0 + zone_w + radius_px)
-        ry1 = min(h, y0 + zone_h + radius_px)
-        roi_labels = cc_labels[ry0:ry1, rx0:rx1]
-        zone_mask = (roi_labels == label).astype(np.uint8)
-        if not np.any(zone_mask):
-            continue
-        near_mask = cv2.dilate(zone_mask, kernel) != 0
-        near_labels = np.unique(roi_labels[near_mask])
+        ex0 = x0 - radius_px
+        ey0 = y0 - radius_px
+        ex1 = x0 + zone_w + radius_px
+        ey1 = y0 + zone_h + radius_px
         neighbor_templates = []
-        for neighbor_label in near_labels:
-            neighbor_label = int(neighbor_label)
-            if neighbor_label in source_labels:
-                neighbor_templates.extend(yolo_templates_by_zone.get(neighbor_label, ()))
+        for sl, (sx0, sy0, sx1, sy1) in src_bboxes.items():
+            if sx1 >= ex0 and sx0 <= ex1 and sy1 >= ey0 and sy0 <= ey1:
+                neighbor_templates.extend(yolo_templates_by_zone.get(sl, ()))
         if neighbor_templates:
             result[label] = neighbor_templates
     return result
@@ -5497,16 +5496,7 @@ def run(
                     img_h, img_w, grid_n, cell_mask=heading_cell_mask,
                 )
                 if np.any(np.isnan(hgrid) & heading_cell_mask):
-                    if img is None:
-                        _img_t = time.perf_counter()
-                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-                        if img is None:
-                            continue
-                        _record_elapsed(timings, file_timings, 'dds_load', _img_t)
-                    image_hgrid = _image_heading_grid(
-                        img, img_h, img_w, grid_n, cell_mask=heading_cell_mask
-                    )
-                    hgrid = np.where(np.isnan(hgrid), image_hgrid, hgrid)
+                    hgrid = np.where(heading_cell_mask & np.isnan(hgrid), 0.0, hgrid)
                 residential_area_mask, residential_area_source = _build_residential_area_mask(
                     local_residential_polys,
                     local_residential_roads,
@@ -5924,7 +5914,7 @@ def run(
                 if n_local_class_refined:
                     file_counts['local_roof_class_refined'] = int(n_local_class_refined)
                 if max_candidates_per_dds and cand_x.size > max_candidates_per_dds:
-                    cand_x, cand_y, cand_cls, n_dropped = _limit_candidates_by_component(
+                    cand_x, cand_y, cand_cls, cand_labels, n_dropped = _limit_candidates_by_component(
                         cand_x, cand_y, cand_cls, cand_labels, max_candidates_per_dds, rng
                     )
                     file_counts['candidate_cap'] = int(n_dropped)
@@ -5983,9 +5973,15 @@ def run(
                     ])
                 return 0.0
 
+            _neighbor_tpl_cache: dict = {}
+
             def _dominant_neighbor_yolo_template(zone_label):
-                zone_templates = neighbor_yolo_templates_by_zone.get(int(zone_label), ())
+                zone_int = int(zone_label)
+                if zone_int in _neighbor_tpl_cache:
+                    return _neighbor_tpl_cache[zone_int]
+                zone_templates = neighbor_yolo_templates_by_zone.get(zone_int, ())
                 if not zone_templates:
+                    _neighbor_tpl_cache[zone_int] = None
                     return None
                 consensus = _consensus_yolo_template(
                     zone_templates,
@@ -5993,9 +5989,9 @@ def run(
                     shape_rel_tol=yolo_template_shape_rel_tol,
                     shape_abs_tol_px=yolo_template_shape_abs_tol_px,
                 )
-                if consensus is None:
-                    return None
-                consensus['template_source'] = 'neighbor_zone'
+                if consensus is not None:
+                    consensus['template_source'] = 'neighbor_zone'
+                _neighbor_tpl_cache[zone_int] = consensus
                 return consensus
 
             def _old_heading_for_candidate(jx, jy, zone_label):
@@ -6017,8 +6013,9 @@ def run(
                     return float(zone_heading[zone_label])
                 return local_h
 
-            def _heading_for_candidate(jx, jy, zone_label):
-                zone_template = _zone_yolo_template(jx, jy, zone_label)
+            def _heading_for_candidate(jx, jy, zone_label, zone_template=None):
+                if zone_template is None:
+                    zone_template = _zone_yolo_template(jx, jy, zone_label)
                 if zone_template is not None:
                     file_counts['yolo_heading'] = (
                         file_counts.get('yolo_heading', 0) + 1
@@ -6340,7 +6337,8 @@ def run(
                     continue
 
                 zone_label = int(cc_labels[jy, jx])
-                dom_h = _heading_for_candidate(jx, jy, zone_label)
+                zone_tpl   = _zone_yolo_template(jx, jy, zone_label)
+                dom_h = _heading_for_candidate(jx, jy, zone_label, zone_template=zone_tpl)
                 jitter  = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
                 heading = (dom_h + jitter) % 360.0
 
@@ -6348,7 +6346,7 @@ def run(
                     residential_area_mask is None or
                     bool(residential_area_mask[jy, jx])
                 )
-                if _try_place_yolo_template(jx, jy, zone_label, 'yolo_template_placed'):
+                if _try_place_yolo_template(jx, jy, zone_label, 'yolo_template_placed', template=zone_tpl):
                     continue
                 for try_cls in (zone_cls,):
                     pool = asset_pools[try_cls]
@@ -6435,7 +6433,8 @@ def run(
                         continue
 
                     zone_label = int(cc_labels[jy, jx])
-                    dom_h = _heading_for_candidate(jx, jy, zone_label)
+                    zone_tpl   = _zone_yolo_template(jx, jy, zone_label)
+                    dom_h = _heading_for_candidate(jx, jy, zone_label, zone_template=zone_tpl)
                     jitter_h = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
                     heading = (dom_h + jitter_h) % 360.0
 
@@ -6445,7 +6444,7 @@ def run(
                         residential_area_mask is None or
                         bool(residential_area_mask[jy, jx])
                     )
-                    if _try_place_yolo_template(jx, jy, zone_label, 'gap_yolo_template_placed'):
+                    if _try_place_yolo_template(jx, jy, zone_label, 'gap_yolo_template_placed', template=zone_tpl):
                         placed_gap = True
                         continue
                     for try_cls in _gap_fill_class_sequence(zone_cls):
@@ -6854,6 +6853,7 @@ def main():
         open_k     = args.open_k,
         min_zone_m2= args.min_zone_m2,
         make_viz   = not args.no_viz,
+        debug_image_only = args.debug_image_only,
         cache_dir  = cache_dir,
         grid_n          = args.grid_n,
         osm_roads_path  = args.osm_roads,

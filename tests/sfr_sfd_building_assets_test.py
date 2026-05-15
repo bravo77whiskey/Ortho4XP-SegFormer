@@ -304,6 +304,45 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIn(2, neighbors)
         self.assertIs(neighbors[2][0], yolo_template)
 
+    def test_neighbor_yolo_templates_choose_closest_obb_zone(self):
+        labels = np.zeros((20, 50), dtype=np.int32)
+        labels[3:17, 2:10] = 1
+        labels[3:17, 20:28] = 2
+        labels[3:17, 34:42] = 3
+        stats = np.zeros((4, 5), dtype=np.int32)
+        for label, left in ((1, 2), (2, 20), (3, 34)):
+            stats[label, BLD.cv2.CC_STAT_LEFT] = left
+            stats[label, BLD.cv2.CC_STAT_TOP] = 3
+            stats[label, BLD.cv2.CC_STAT_WIDTH] = 8
+            stats[label, BLD.cv2.CC_STAT_HEIGHT] = 14
+            stats[label, BLD.cv2.CC_STAT_AREA] = 112
+        west_template = {
+            "center": np.asarray([6.0, 10.0], dtype=np.float32),
+            "points": BLD._points_from_yolo_heading((6.0, 10.0), 8.0, 4.0, 0.0),
+            "class": BLD.BLD_CLASS_SMALL_RESIDENTIAL,
+            "heading": 0.0,
+            "confidence": 0.8,
+        }
+        east_template = {
+            "center": np.asarray([38.0, 10.0], dtype=np.float32),
+            "points": BLD._points_from_yolo_heading((38.0, 10.0), 8.0, 4.0, 90.0),
+            "class": BLD.BLD_CLASS_EXTRA_LARGE,
+            "heading": 90.0,
+            "confidence": 0.8,
+        }
+
+        neighbors = BLD._neighbor_yolo_templates_by_zone(
+            labels,
+            stats,
+            np.array([1, 2, 3], dtype=np.int32),
+            {1: [west_template], 3: [east_template]},
+            radius_px=100,
+        )
+
+        self.assertNotIn(1, neighbors)
+        self.assertNotIn(3, neighbors)
+        self.assertEqual(neighbors[2], [east_template])
+
     def test_nearest_obb_zone_heading_ignores_class(self):
         stats = np.zeros((4, 5), dtype=np.int32)
         centroids = np.zeros((4, 2), dtype=np.float32)
