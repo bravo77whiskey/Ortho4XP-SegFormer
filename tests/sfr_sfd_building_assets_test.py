@@ -304,6 +304,49 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIn(2, neighbors)
         self.assertIs(neighbors[2][0], yolo_template)
 
+    def test_nearest_obb_zone_heading_ignores_class(self):
+        stats = np.zeros((4, 5), dtype=np.int32)
+        centroids = np.zeros((4, 2), dtype=np.float32)
+        # Source OBB zone, intentionally a different placement class.
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 0
+        stats[1, BLD.cv2.CC_STAT_TOP] = 0
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 10
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 10
+        centroids[1] = (5.0, 5.0)
+        # Non-OBB target zone next to source.
+        stats[2, BLD.cv2.CC_STAT_LEFT] = 15
+        stats[2, BLD.cv2.CC_STAT_TOP] = 0
+        stats[2, BLD.cv2.CC_STAT_WIDTH] = 8
+        stats[2, BLD.cv2.CC_STAT_HEIGHT] = 8
+        centroids[2] = (19.0, 4.0)
+        # Farther non-OBB target zone also receives the same nearest source.
+        stats[3, BLD.cv2.CC_STAT_LEFT] = 80
+        stats[3, BLD.cv2.CC_STAT_TOP] = 0
+        stats[3, BLD.cv2.CC_STAT_WIDTH] = 8
+        stats[3, BLD.cv2.CC_STAT_HEIGHT] = 8
+        centroids[3] = (84.0, 4.0)
+        template = {
+            "center": np.asarray([5.0, 5.0], dtype=np.float32),
+            "points": BLD._points_from_yolo_heading((5.0, 5.0), 12.0, 4.0, 37.0),
+            "class": BLD.BLD_CLASS_EXTRA_LARGE,
+            "heading": 37.0,
+            "confidence": 0.9,
+        }
+
+        headings, counts, source_labels, distances = BLD._nearest_obb_zone_headings(
+            stats,
+            centroids,
+            np.array([1, 2, 3], dtype=np.int32),
+            {1: [template]},
+        )
+
+        self.assertTrue(np.isnan(headings[1]))
+        self.assertAlmostEqual(float(headings[2]), 37.0)
+        self.assertEqual(int(counts[2]), 1)
+        self.assertEqual(int(source_labels[2]), 1)
+        self.assertAlmostEqual(float(distances[2]), 6.0)
+        self.assertAlmostEqual(float(headings[3]), 37.0)
+
     def test_retarget_yolo_template_heading_preserves_shape(self):
         template = {
             "center": np.asarray([20.0, 20.0], dtype=np.float32),

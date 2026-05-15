@@ -2154,7 +2154,7 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 50
+BLD_PLACEMENT_CACHE_VERSION = 51
 BLD_PLACEMENT_FAST_CACHE_VERSION = 53
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 BLD_SMART_GAP_FILL_ENABLED = False
@@ -3930,6 +3930,93 @@ def _neighbor_yolo_templates_by_zone(cc_labels, cc_stats, valid_labels,
         if neighbor_templates:
             result[label] = neighbor_templates
     return result
+
+
+def _nearest_obb_zone_headings(cc_stats, cc_centroids, valid_labels,
+                               yolo_templates_by_zone,
+                               heading_tol_deg=YOLO_TEMPLATE_HEADING_TOL_DEG,
+                               shape_rel_tol=YOLO_TEMPLATE_SHAPE_REL_TOL,
+                               shape_abs_tol_px=YOLO_TEMPLATE_SHAPE_ABS_TOL_PX):
+    """Return heading evidence from the nearest zone with same-zone OBBs.
+
+    This intentionally ignores placement class.  The OBB-neighbor path is only
+    about borrowing local orientation, while spacing/class fit remains on the
+    normal candidate-placement path.
+    """
+    n_labels = cc_stats.shape[0] if cc_stats is not None else 0
+    headings = np.full(n_labels, np.nan, dtype=np.float32)
+    counts = np.zeros(n_labels, dtype=np.uint16)
+    source_labels = np.zeros(n_labels, dtype=np.int32)
+    distances = np.full(n_labels, np.nan, dtype=np.float32)
+    if n_labels == 0 or not yolo_templates_by_zone:
+        return headings, counts, source_labels, distances
+
+    sources = []
+    for source_label, templates in yolo_templates_by_zone.items():
+        source_label = int(source_label)
+        if source_label <= 0 or source_label >= n_labels:
+            continue
+        consensus = _consensus_yolo_template(
+            templates,
+            heading_tol_deg=heading_tol_deg,
+            shape_rel_tol=shape_rel_tol,
+            shape_abs_tol_px=shape_abs_tol_px,
+        )
+        if consensus is None:
+            continue
+        left = float(cc_stats[source_label, cv2.CC_STAT_LEFT])
+        top = float(cc_stats[source_label, cv2.CC_STAT_TOP])
+        width = float(cc_stats[source_label, cv2.CC_STAT_WIDTH])
+        height = float(cc_stats[source_label, cv2.CC_STAT_HEIGHT])
+        if width <= 0.0 or height <= 0.0:
+            continue
+        sources.append({
+            'label': source_label,
+            'heading': float(consensus['heading']) % 360.0,
+            'votes': int(consensus.get('consensus_heading_votes', len(templates))),
+            'left': left,
+            'top': top,
+            'right': left + width - 1.0,
+            'bottom': top + height - 1.0,
+            'cx': float(cc_centroids[source_label, 0]),
+            'cy': float(cc_centroids[source_label, 1]),
+        })
+    if not sources:
+        return headings, counts, source_labels, distances
+
+    source_label_set = {item['label'] for item in sources}
+    for zone_label in valid_labels:
+        zone_label = int(zone_label)
+        if zone_label <= 0 or zone_label >= n_labels or zone_label in source_label_set:
+            continue
+        left = float(cc_stats[zone_label, cv2.CC_STAT_LEFT])
+        top = float(cc_stats[zone_label, cv2.CC_STAT_TOP])
+        width = float(cc_stats[zone_label, cv2.CC_STAT_WIDTH])
+        height = float(cc_stats[zone_label, cv2.CC_STAT_HEIGHT])
+        if width <= 0.0 or height <= 0.0:
+            continue
+        right = left + width - 1.0
+        bottom = top + height - 1.0
+        cx = float(cc_centroids[zone_label, 0])
+        cy = float(cc_centroids[zone_label, 1])
+        best = None
+        best_key = None
+        for source in sources:
+            dx = max(source['left'] - right, left - source['right'], 0.0)
+            dy = max(source['top'] - bottom, top - source['bottom'], 0.0)
+            bbox_dist = math.hypot(dx, dy)
+            center_dist = math.hypot(cx - source['cx'], cy - source['cy'])
+            key = (bbox_dist, center_dist, -source['votes'])
+            if best_key is None or key < best_key:
+                best_key = key
+                best = source
+        if best is None:
+            continue
+        headings[zone_label] = best['heading']
+        counts[zone_label] = min(best['votes'], 65535)
+        source_labels[zone_label] = best['label']
+        distances[zone_label] = float(best_key[0])
+    return headings, counts, source_labels, distances
 
 
 def _refine_candidate_classes_from_yolo(cand_x, cand_y, cand_cls, yolo_guidance):
@@ -5726,6 +5813,23 @@ def run(
             )
             if neighbor_yolo_templates_by_zone:
                 file_counts['neighbor_yolo_template_zones'] = len(neighbor_yolo_templates_by_zone)
+            (
+                nearest_obb_heading,
+                nearest_obb_counts,
+                nearest_obb_source_labels,
+                nearest_obb_distances,
+            ) = _nearest_obb_zone_headings(
+                cc_stats,
+                cc_centroids,
+                valid_labels,
+                yolo_templates_by_zone,
+                heading_tol_deg=yolo_template_heading_tol_deg,
+                shape_rel_tol=yolo_template_shape_rel_tol,
+                shape_abs_tol_px=yolo_template_shape_abs_tol_px,
+            )
+            nearest_obb_valid = ~np.isnan(nearest_obb_heading[valid_labels])
+            if np.any(nearest_obb_valid):
+                file_counts['nearest_obb_heading_zones'] = int(nearest_obb_valid.sum())
             cc_elapsed = _record_elapsed(timings, file_timings, 'connected_components', _t)
             timings['placement'] += cc_elapsed
 
@@ -5891,12 +5995,8 @@ def run(
                 )
                 if consensus is None:
                     return None
-                retargeted = _retarget_yolo_template_heading(
-                    consensus, _zone_road_heading(zone_label)
-                )
-                if retargeted is not None:
-                    retargeted['template_source'] = 'neighbor_zone'
-                return retargeted
+                consensus['template_source'] = 'neighbor_zone'
+                return consensus
 
             def _old_heading_for_candidate(jx, jy, zone_label):
                 roof_h = _roof_heading_for_candidate(roof_evidence, jx, jy, m_per_px)
@@ -5925,10 +6025,18 @@ def run(
                     )
                     return float(zone_template['heading'])
                 if int(zone_label) not in yolo_templates_by_zone:
-                    file_counts['non_obb_zone_road_heading'] = (
-                        file_counts.get('non_obb_zone_road_heading', 0) + 1
+                    if (
+                        0 <= int(zone_label) < nearest_obb_heading.shape[0] and
+                        not np.isnan(nearest_obb_heading[int(zone_label)])
+                    ):
+                        file_counts['non_obb_zone_nearest_obb_heading'] = (
+                            file_counts.get('non_obb_zone_nearest_obb_heading', 0) + 1
+                        )
+                        return float(nearest_obb_heading[int(zone_label)])
+                    file_counts['non_obb_zone_heading_fallback'] = (
+                        file_counts.get('non_obb_zone_heading_fallback', 0) + 1
                     )
-                    return _zone_road_heading(zone_label)
+                    return _old_heading_for_candidate(jx, jy, zone_label)
                 return _old_heading_for_candidate(jx, jy, zone_label)
 
             def _try_place_yolo_template(
