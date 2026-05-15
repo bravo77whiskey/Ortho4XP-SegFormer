@@ -3854,23 +3854,34 @@ def _largest_fitting_yolo_template_poly(
                 best_poly = mid_poly
         return best_poly, float(long_scale), float(best_short)
 
-    scale_samples = sorted({
-        min_scale,
-        0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0,
-    })
+    # Three targeted binary searches replace the 10-sample grid:
+    # (a) shrink long only  (b) shrink short only  (c) uniform shrink.
+    # Worst case: 3 × (1 + iterations) = 21 poly fits vs 140 in the grid.
+    def _best_uniform():
+        low_poly = _fits(min_scale, min_scale)
+        if low_poly is None:
+            return None, 0.0, 0.0
+        lo, hi = min_scale, 1.0
+        best_p, best_s = low_poly, lo
+        for _ in range(max(1, int(iterations))):
+            mid = (lo + hi) * 0.5
+            mid_poly = _fits(mid, mid)
+            if mid_poly is None:
+                hi = mid
+            else:
+                lo = mid
+                best_s = mid
+                best_p = mid_poly
+        return best_p, float(best_s), float(best_s)
+
     best_poly = None
     best_scales = (0.0, 0.0)
     best_key = (-1.0, -1.0, -1.0)
-    for fixed_short in scale_samples:
-        poly, long_scale, short_scale = _best_long_for_short(fixed_short)
-        if poly is not None:
-            key = (long_scale * short_scale, max(long_scale, short_scale), min(long_scale, short_scale))
-            if key > best_key:
-                best_key = key
-                best_poly = poly
-                best_scales = (long_scale, short_scale)
-    for fixed_long in scale_samples:
-        poly, long_scale, short_scale = _best_short_for_long(fixed_long)
+    for poly, long_scale, short_scale in (
+        _best_long_for_short(1.0),
+        _best_short_for_long(1.0),
+        _best_uniform(),
+    ):
         if poly is not None:
             key = (long_scale * short_scale, max(long_scale, short_scale), min(long_scale, short_scale))
             if key > best_key:
