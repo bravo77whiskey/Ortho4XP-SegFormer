@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import bz2
 from unittest import mock
 from pathlib import Path
 
@@ -24,6 +25,43 @@ def _paths_for_classes(pools, classes):
 
 
 class SfdBuildingAssetTests(unittest.TestCase):
+    def test_osm_tile_peer_path_handles_all_road_sources(self):
+        base = r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_big_roads.osm.bz2"
+
+        self.assertEqual(
+            BLD._osm_tile_peer_path(base, "_all_roads.osm.bz2"),
+            r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_all_roads.osm.bz2",
+        )
+        self.assertEqual(
+            BLD._osm_tile_peer_path(
+                r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_all_roads.osm.bz2",
+                "_small_roads.osm.bz2",
+            ),
+            r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_small_roads.osm.bz2",
+        )
+
+    def test_load_osm_roads_parses_generic_highway_extract(self):
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<osm>
+  <node id="1" lat="36.0" lon="117.0" />
+  <node id="2" lat="36.1" lon="117.1" />
+  <way id="10">
+    <nd ref="1" />
+    <nd ref="2" />
+    <tag k="highway" v="residential" />
+  </way>
+</osm>"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            osm_path = Path(tmpdir) / "+36+117_all_roads.osm.bz2"
+            with bz2.open(osm_path, "wb") as handle:
+                handle.write(xml)
+
+            roads = BLD._load_osm_roads(str(osm_path))
+
+        self.assertEqual(len(roads), 1)
+        self.assertEqual(roads[0]["type"], "residential")
+        self.assertEqual(roads[0]["pts"], [(36.0, 117.0), (36.1, 117.1)])
+
     def test_medium_is_an_explicit_placement_class(self):
         self.assertIn(BLD.BLD_CLASS_MEDIUM, BLD.BLD_PLACEMENT_CLASSES)
         self.assertEqual(BLD.BLD_CLASS_LABELS[BLD.BLD_CLASS_MEDIUM], "medium footprint")
@@ -67,6 +105,254 @@ class SfdBuildingAssetTests(unittest.TestCase):
             BLD._orientation_angles_for_bounds((-20.0, 20.0, -5.0, 5.0), 90.0),
             (0.0, 90.0),
         )
+
+    def test_yolo_obb_detection_conversion_extracts_heading_and_class(self):
+        detection = BLD._yolo_obb_detection_from_points(
+            np.array([
+                [10.0, 10.0],
+                [30.0, 10.0],
+                [30.0, 20.0],
+                [10.0, 20.0],
+            ]),
+            confidence=0.8,
+            cls=0,
+            img_w=64,
+            img_h=64,
+            m_per_px=1.0,
+        )
+
+        self.assertIsNotNone(detection)
+        self.assertAlmostEqual(detection["center"][0], 20.0)
+        self.assertAlmostEqual(detection["center"][1], 15.0)
+        self.assertAlmostEqual(detection["heading"], 90.0)
+        self.assertEqual(detection["placement_class"], BLD.BLD_CLASS_COMPACT_RESIDENTIAL)
+
+    def test_yolo_obb_detection_clips_bounds(self):
+        detection = BLD._yolo_obb_detection_from_points(
+            np.array([
+                [-5.0, -5.0],
+                [20.0, -5.0],
+                [20.0, 10.0],
+                [-5.0, 10.0],
+            ]),
+            confidence=0.9,
+            cls=0,
+            img_w=16,
+            img_h=16,
+            m_per_px=1.0,
+        )
+
+        self.assertIsNotNone(detection)
+        points = np.asarray(detection["points"])
+        self.assertGreaterEqual(points.min(), 0.0)
+        self.assertLessEqual(points[:, 0].max(), 15.0)
+        self.assertLessEqual(points[:, 1].max(), 15.0)
+
+    def test_yolo_guidance_prefers_nearby_detection_heading_and_class(self):
+        guidance = BLD._build_yolo_guidance(
+            [
+                {
+                    "center": [8.0, 8.0],
+                    "heading": 45.0,
+                    "confidence": 0.7,
+                    "area_m2": 220.0,
+                    "placement_class": BLD.BLD_CLASS_COMPACT_RESIDENTIAL,
+                    "points": [
+                        [4.0, 6.0],
+                        [12.0, 6.0],
+                        [12.0, 10.0],
+                        [4.0, 10.0],
+                    ],
+                }
+            ],
+            img_h=32,
+            img_w=32,
+            m_per_px=1.0,
+        )
+        cand_cls = np.array([BLD.BLD_CLASS_MEDIUM], dtype=np.uint8)
+
+        refined, changed = BLD._refine_candidate_classes_from_yolo(
+            np.array([10], dtype=np.int32),
+            np.array([8], dtype=np.int32),
+            cand_cls,
+            guidance,
+        )
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(int(refined[0]), BLD.BLD_CLASS_COMPACT_RESIDENTIAL)
+        self.assertAlmostEqual(BLD._yolo_heading_for_candidate(guidance, 10, 8), 45.0)
+
+    def test_yolo_template_translates_nearest_obb_shape(self):
+        guidance = BLD._build_yolo_guidance(
+            [
+                {
+                    "center": [8.0, 8.0],
+                    "heading": 45.0,
+                    "confidence": 0.7,
+                    "area_m2": 220.0,
+                    "placement_class": BLD.BLD_CLASS_COMPACT_RESIDENTIAL,
+                    "points": [
+                        [4.0, 6.0],
+                        [12.0, 6.0],
+                        [12.0, 10.0],
+                        [4.0, 10.0],
+                    ],
+                }
+            ],
+            img_h=32,
+            img_w=32,
+            m_per_px=1.0,
+        )
+
+        template = BLD._yolo_template_for_candidate(guidance, 18, 18)
+
+        self.assertIsNotNone(template)
+        points, cls, heading = template
+        np.testing.assert_array_equal(
+            points,
+            np.array([[14, 16], [22, 16], [22, 20], [14, 20]], dtype=np.int32),
+        )
+        self.assertEqual(cls, BLD.BLD_CLASS_COMPACT_RESIDENTIAL)
+        self.assertAlmostEqual(heading, 45.0)
+
+    def test_yolo_consensus_template_uses_fuzzy_majority_heading_and_shape(self):
+        def tpl(center, heading, long_len, short_len, confidence=0.8):
+            return {
+                "center": np.asarray(center, dtype=np.float32),
+                "points": BLD._points_from_yolo_heading(center, long_len, short_len, heading),
+                "class": BLD.BLD_CLASS_COMPACT_RESIDENTIAL,
+                "heading": heading,
+                "confidence": confidence,
+            }
+
+        consensus = BLD._consensus_yolo_template(
+            [
+                tpl((10, 10), 88.0, 20.0, 10.0),
+                tpl((30, 10), 91.0, 21.0, 9.5),
+                tpl((50, 10), 94.0, 19.0, 10.5),
+                tpl((70, 10), 25.0, 48.0, 12.0),
+                tpl((90, 10), 27.0, 50.0, 12.0),
+            ],
+            heading_tol_deg=8.0,
+            shape_rel_tol=0.15,
+            shape_abs_tol_px=3.0,
+        )
+
+        self.assertIsNotNone(consensus)
+        self.assertLessEqual(BLD._angle_delta_180(consensus["heading"], 91.0), 3.0)
+        metrics = BLD._yolo_template_metrics(consensus)
+        self.assertIsNotNone(metrics)
+        self.assertLessEqual(abs(metrics["long_len"] - 20.0), 1.0)
+        self.assertLessEqual(abs(metrics["short_len"] - 10.0), 1.0)
+        self.assertEqual(consensus["consensus_heading_votes"], 3)
+        self.assertEqual(consensus["consensus_shape_votes"], 3)
+
+    def test_yolo_consensus_heading_wraps_at_180_degrees(self):
+        templates = []
+        for center, heading in [((10, 10), 178.0), ((30, 10), 1.0), ((50, 10), 3.0)]:
+            templates.append({
+                "center": np.asarray(center, dtype=np.float32),
+                "points": BLD._points_from_yolo_heading(center, 18.0, 8.0, heading),
+                "class": BLD.BLD_CLASS_SMALL_RESIDENTIAL,
+                "heading": heading,
+                "confidence": 0.8,
+            })
+
+        consensus = BLD._consensus_yolo_template(templates, heading_tol_deg=6.0)
+
+        self.assertIsNotNone(consensus)
+        self.assertLessEqual(
+            min(
+                BLD._angle_delta_180(consensus["heading"], 0.0),
+                BLD._angle_delta_180(consensus["heading"], 180.0),
+            ),
+            2.0,
+        )
+
+    def test_neighbor_yolo_templates_only_supply_zones_without_obb(self):
+        labels = np.zeros((20, 30), dtype=np.int32)
+        labels[3:17, 2:12] = 1
+        labels[3:17, 15:27] = 2
+        stats = np.zeros((3, 5), dtype=np.int32)
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 2
+        stats[1, BLD.cv2.CC_STAT_TOP] = 3
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 10
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 14
+        stats[1, BLD.cv2.CC_STAT_AREA] = 140
+        stats[2, BLD.cv2.CC_STAT_LEFT] = 15
+        stats[2, BLD.cv2.CC_STAT_TOP] = 3
+        stats[2, BLD.cv2.CC_STAT_WIDTH] = 12
+        stats[2, BLD.cv2.CC_STAT_HEIGHT] = 14
+        stats[2, BLD.cv2.CC_STAT_AREA] = 168
+        yolo_template = {
+            "center": np.asarray([7.0, 10.0], dtype=np.float32),
+            "points": BLD._points_from_yolo_heading((7.0, 10.0), 8.0, 4.0, 90.0),
+            "class": BLD.BLD_CLASS_COMPACT_RESIDENTIAL,
+            "heading": 90.0,
+            "confidence": 0.9,
+        }
+
+        neighbors = BLD._neighbor_yolo_templates_by_zone(
+            labels,
+            stats,
+            np.array([1, 2], dtype=np.int32),
+            {1: [yolo_template]},
+            radius_px=4,
+        )
+
+        self.assertNotIn(1, neighbors)
+        self.assertIn(2, neighbors)
+        self.assertIs(neighbors[2][0], yolo_template)
+
+    def test_retarget_yolo_template_heading_preserves_shape(self):
+        template = {
+            "center": np.asarray([20.0, 20.0], dtype=np.float32),
+            "points": BLD._points_from_yolo_heading((20.0, 20.0), 12.0, 6.0, 10.0),
+            "class": BLD.BLD_CLASS_MEDIUM,
+            "heading": 10.0,
+            "confidence": 0.7,
+        }
+
+        retargeted = BLD._retarget_yolo_template_heading(template, 85.0)
+
+        self.assertIsNotNone(retargeted)
+        self.assertAlmostEqual(retargeted["heading"], 85.0)
+        old_metrics = BLD._yolo_template_metrics(template)
+        new_metrics = BLD._yolo_template_metrics(retargeted)
+        self.assertAlmostEqual(old_metrics["long_len"], new_metrics["long_len"], places=4)
+        self.assertAlmostEqual(old_metrics["short_len"], new_metrics["short_len"], places=4)
+        self.assertEqual(retargeted["class"], BLD.BLD_CLASS_MEDIUM)
+
+    def test_largest_fitting_yolo_template_shrinks_only_too_large_dimension(self):
+        template = {
+            "center": np.asarray([15.0, 30.0], dtype=np.float32),
+            "points": BLD._points_from_yolo_heading((15.0, 30.0), 30.0, 12.0, 90.0),
+            "class": BLD.BLD_CLASS_MEDIUM,
+            "heading": 90.0,
+            "confidence": 0.8,
+        }
+        static_occ_mask = np.zeros((60, 24), dtype=np.uint8)
+        spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+
+        poly, scales = BLD._largest_fitting_yolo_template_poly(
+            template,
+            15,
+            30,
+            img_w=24,
+            img_h=60,
+            static_occ_mask=static_occ_mask,
+            building_spacing_mask=spacing_mask,
+            scratch_mask=scratch,
+        )
+
+        self.assertIsNotNone(poly)
+        long_scale, short_scale = scales
+        self.assertLess(long_scale, 1.0)
+        self.assertAlmostEqual(short_scale, 1.0)
+        metrics = BLD._yolo_template_metrics({"points": poly})
+        self.assertLess(metrics["long_len"], 30.0)
+        self.assertGreaterEqual(metrics["short_len"], 11.0)
 
     def test_smart_gap_fill_is_retired(self):
         self.assertFalse(BLD.BLD_SMART_GAP_FILL_ENABLED)
@@ -248,6 +534,81 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(int(contact_counts[1]), 1)
+        self.assertLessEqual(min(abs(float(headings[1])), abs(float(headings[1]) - 360.0)), 5.0)
+
+    def test_touching_local_road_beats_nearby_large_road_for_zone_heading(self):
+        labels = np.zeros((100, 100), dtype=np.int32)
+        labels[30:70, 30:70] = 1
+        stats = np.zeros((2, 5), dtype=np.int32)
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 30
+        stats[1, BLD.cv2.CC_STAT_TOP] = 30
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 40
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 40
+        stats[1, BLD.cv2.CC_STAT_AREA] = 1600
+
+        def ll(px, py):
+            return (1.0 - py / 100.0, px / 100.0)
+
+        roads = [
+            {"pts": [ll(28, 20), ll(28, 80)]},
+            {"pts": [ll(0, 22), ll(99, 22)]},
+        ]
+
+        headings, contact_counts = BLD._component_side_touch_headings(
+            labels,
+            stats,
+            np.array([1], dtype=np.int32),
+            roads,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            band_px=12,
+        )
+
+        self.assertEqual(int(contact_counts[1]), 1)
+        self.assertLessEqual(min(abs(float(headings[1])), abs(float(headings[1]) - 360.0)), 5.0)
+
+    def test_road_mask_contact_ignores_non_touching_road_in_heading_band(self):
+        labels = np.zeros((100, 100), dtype=np.int32)
+        labels[30:70, 30:70] = 1
+        stats = np.zeros((2, 5), dtype=np.int32)
+        stats[1, BLD.cv2.CC_STAT_LEFT] = 30
+        stats[1, BLD.cv2.CC_STAT_TOP] = 30
+        stats[1, BLD.cv2.CC_STAT_WIDTH] = 40
+        stats[1, BLD.cv2.CC_STAT_HEIGHT] = 40
+        stats[1, BLD.cv2.CC_STAT_AREA] = 1600
+        road_mask = np.zeros((100, 100), dtype=np.uint8)
+        road_mask[20:24, :] = 1
+        road_mask[:, 24:31] = 1
+
+        def ll(px, py):
+            return (1.0 - py / 100.0, px / 100.0)
+
+        roads = [
+            {"pts": [ll(24, 20), ll(24, 80)]},
+            {"pts": [ll(0, 22), ll(99, 22)]},
+        ]
+
+        headings, contact_counts = BLD._component_side_touch_headings(
+            labels,
+            stats,
+            np.array([1], dtype=np.int32),
+            roads,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            band_px=12,
+            contact_px=5,
+            road_mask=road_mask,
+        )
+
+        self.assertEqual(int(contact_counts[1]), 1)
         self.assertLessEqual(min(abs(float(headings[1])), abs(float(headings[1]) - 360.0)), 5.0)
 
     def test_straight_contact_patches_are_preferred_over_noisy_fragments(self):
@@ -490,6 +851,52 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(counts["fit_checks"], 2)
         self.assertIsNone(final_poly)
         self.assertIsNone(spacing_poly)
+
+    def test_largest_fit_mode_selects_largest_asset_that_fits(self):
+        pool = [
+            {
+                "kind": "object",
+                "path": "small.obj",
+                "bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "fit_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "mark_bounds_m": (-2.0, 2.0, -2.0, 2.0),
+                "footprint_area_m2": 16.0,
+                "footprint_max_side_m": 4.0,
+            },
+            {
+                "kind": "object",
+                "path": "large.obj",
+                "bounds_m": (-6.0, 6.0, -4.0, 4.0),
+                "fit_bounds_m": (-6.0, 6.0, -4.0, 4.0),
+                "mark_bounds_m": (-6.0, 6.0, -4.0, 4.0),
+                "footprint_area_m2": 96.0,
+                "footprint_max_side_m": 12.0,
+            },
+        ]
+        occ_mask = np.zeros((40, 40), dtype=np.uint8)
+        spacing_mask = np.zeros_like(occ_mask)
+        counts = {}
+
+        asset, final_h, final_poly, spacing_poly, skipped = BLD._find_fitting_asset(
+            pool,
+            np.random.default_rng(1),
+            20,
+            20,
+            0.0,
+            1.0,
+            occ_mask,
+            spacing_mask,
+            np.zeros_like(occ_mask),
+            counts,
+            prefer_largest_fit=True,
+        )
+
+        self.assertEqual(asset["path"], "large.obj")
+        self.assertIsNotNone(final_h)
+        self.assertIsNotNone(final_poly)
+        self.assertIsNotNone(spacing_poly)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(counts["largest_fit_asset_selected"], 1)
 
     def test_static_integral_fit_path_matches_standard_fit_path(self):
         pool = [

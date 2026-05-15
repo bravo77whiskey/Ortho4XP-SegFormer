@@ -76,6 +76,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
     ordered = (
         ("load", "dds_load"),
         ("cache", "cache_load"),
+        ("yolo", "yolo_inference"),
         ("infer", "inference"),
         ("zone", "zone_cleanup"),
         ("lookup", "lookup"),
@@ -102,6 +103,12 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
             f"{label}={int(file_counts.get(key, 0))}"
             for label, key in (
                 ("cand", "candidates"),
+                ("yolo_det", "yolo_detections"),
+                ("yolo_placed", "yolo_placed"),
+                ("yolo_blocked", "yolo_blocked"),
+                ("yolo_tpl", "yolo_template_placed"),
+                ("zone_yolo_tpl", "same_zone_yolo_template_placed"),
+                ("gap_yolo_tpl", "gap_yolo_template_placed"),
                 ("initial_blocked", "initial_center_blocked"),
                 ("static_clearance_blocked", "static_clearance_blocked"),
                 ("dynamic_blocked", "dynamic_center_blocked"),
@@ -295,6 +302,18 @@ def parse_args():
                     help='Path to *_big_roads.osm.bz2 (auto-discovered if omitted)')
     ap.add_argument('--custom-scenery-dir', default=None,
                     help='Configured X-Plane root or Custom Scenery directory used to locate building libraries.')
+    ap.add_argument('--no-yolo', action='store_true',
+                    help='Disable YOLO OBB direct building placements.')
+    ap.add_argument('--yolo-checkpoint', default=None,
+                    help='YOLO OBB checkpoint used for direct building placements.')
+    ap.add_argument('--yolo-conf', type=float, default=None,
+                    help='YOLO OBB confidence threshold.')
+    ap.add_argument('--yolo-iou', type=float, default=None,
+                    help='YOLO OBB NMS IoU threshold.')
+    ap.add_argument('--yolo-stride', type=int, default=None,
+                    help='YOLO OBB crop stride in pixels.')
+    ap.add_argument('--yolo-max-det', type=int, default=None,
+                    help='YOLO OBB max detections per crop.')
     return ap.parse_args()
 
 
@@ -324,7 +343,7 @@ def px_to_latlon(px, py, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
 
 # ── OSM road helpers ─────────────────────────────────────────────────────────
 def _load_osm_roads(osm_bz2_path, cache_dir=None):
-    """Parse an Ortho4XP *_big_roads.osm.bz2 file.
+    """Parse an OSM highway extract, such as Ortho4XP *_roads.osm.bz2.
 
     Returns a list of road records, each a dict with:
       'pts'  — list of (lat, lon) tuples
@@ -367,6 +386,23 @@ def _load_osm_roads(osm_bz2_path, cache_dir=None):
         _parse,
         version="roads-v1",
     )
+
+
+def _osm_tile_peer_path(osm_roads_path, suffix):
+    """Return a sibling OSM cache path for the same tile and a new suffix."""
+    if not osm_roads_path:
+        return None
+    folder = os.path.dirname(os.path.abspath(osm_roads_path))
+    base = os.path.basename(osm_roads_path)
+    for old_suffix in (
+        "_big_roads.osm.bz2",
+        "_small_roads.osm.bz2",
+        "_all_roads.osm.bz2",
+        "_excl_bld_rail_res.osm.bz2",
+    ):
+        if base.endswith(old_suffix):
+            return os.path.join(folder, base[:-len(old_suffix)] + suffix)
+    return None
 
 
 def _rasterize_roads(roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
@@ -518,7 +554,7 @@ def _dds_road_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
                         residential_poly_sig, excl_poly_sig,
                         existing_bld_poly_sig, sh_bld_sig):
     return {
-        'version': 5,
+        'version': 6,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -628,14 +664,17 @@ def _contact_patch_straightness(xs, ys, band_px):
 
 def _component_side_touch_headings(labels, stats, valid_labels, roads,
                                    lat_n, lat_s, lon_w, lon_e, img_h, img_w,
-                                   band_px=8, img=None, bin_deg=5.0):
+                                   band_px=8, img=None, bin_deg=5.0,
+                                   contact_px=None, road_mask=None):
     """Estimate component headings from distinct road contacts on its outline.
 
     The contact search follows the actual component boundary rather than an
     axis-aligned bounding box, so rotated or irregular blocks are handled the
-    same way as rectangular blocks. Each connected contact patch contributes
-    one vote, so short local streets framing a block are not overwhelmed by a
-    longer nearby segment.
+    same way as rectangular blocks. When a road mask is available, only road
+    mask pixels touching the component boundary can vote; the wider band is kept
+    for grouping and straightness checks.
+    Each connected contact patch contributes one vote, so short local streets
+    framing a block are not overwhelmed by a longer nearby segment.
     """
     headings = np.full(labels.max() + 1 if labels.size else 0, np.nan, dtype=np.float32)
     contact_counts = np.zeros(headings.shape, dtype=np.uint8)
@@ -647,9 +686,13 @@ def _component_side_touch_headings(labels, stats, valid_labels, roads,
     n_bins90 = int(90 / bin_deg)
     n_bins180 = int(180 / bin_deg)
     band_px = max(2, int(band_px))
+    contact_px = max(
+        1,
+        min(band_px, 6 if contact_px is None else int(contact_px)),
+    )
     ring_labels = np.zeros(labels.shape, dtype=np.int32)
-    ring_kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (band_px * 2 + 1, band_px * 2 + 1)
+    contact_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (contact_px * 2 + 1, contact_px * 2 + 1)
     )
     erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     for label in valid_labels:
@@ -667,9 +710,22 @@ def _component_side_touch_headings(labels, stats, valid_labels, roads,
         local_component = (labels[y0:y1, x0:x1] == label).astype(np.uint8)
         if not local_component.any():
             continue
-        dilated = cv2.dilate(local_component, ring_kernel)
         eroded = cv2.erode(local_component, erode_kernel)
-        boundary_ring = (dilated != 0) & (eroded == 0)
+        contact_dilated = cv2.dilate(local_component, contact_kernel)
+        if road_mask is not None:
+            local_roads = road_mask[y0:y1, x0:x1] != 0
+            touch_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            touch_seed = (
+                (cv2.dilate(local_component, touch_kernel) != 0) &
+                (local_component == 0) &
+                local_roads
+            )
+            boundary_ring = (
+                (cv2.dilate(touch_seed.astype(np.uint8), contact_kernel) != 0) &
+                local_roads
+            )
+        else:
+            boundary_ring = (contact_dilated != 0) & (eroded == 0)
         target = ring_labels[y0:y1, x0:x1]
         target[(target == 0) & boundary_ring] = label
 
@@ -1379,6 +1435,40 @@ def _download_and_cache_osm(lat, lon, cache_path, timeout=45):
     return False
 
 
+def _download_and_cache_osm_roads(lat, lon, cache_path, timeout=60):
+    """Download all OSM highway ways for zone splitting and road context."""
+    if os.path.exists(cache_path):
+        return True
+
+    import bz2 as _bz2
+    bbox = f"{int(lat)},{int(lon)},{int(lat)+1},{int(lon)+1}"
+    query = (
+        f'[out:xml][timeout:{timeout}];'
+        f'('
+        f'  way["highway"]({bbox});'
+        f');'
+        f'(._;>;);out body;'
+    )
+    servers = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass.osm.jp/api/interpreter",
+    ]
+    for server in servers:
+        try:
+            url = server + '?data=' + urllib.parse.quote(query)
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                data = resp.read()
+            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+            with _bz2.open(cache_path, 'wb') as f:
+                f.write(data)
+            print(f"  [OSM roads] Downloaded {len(data)//1024} KB -> {os.path.basename(cache_path)}")
+            return True
+        except Exception as e:
+            print(f"  [OSM roads] {server} failed: {e}")
+    return False
+
+
 def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
     """Parse simHeaven X-World network DSFs into road-style dicts."""
     road_ways = []
@@ -2064,10 +2154,25 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-BLD_PLACEMENT_CACHE_VERSION = 38
-BLD_PLACEMENT_FAST_CACHE_VERSION = 41
+BLD_PLACEMENT_CACHE_VERSION = 50
+BLD_PLACEMENT_FAST_CACHE_VERSION = 53
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 BLD_SMART_GAP_FILL_ENABLED = False
+
+YOLO_OBB_CACHE_VERSION = 1
+DEFAULT_YOLO_OBB_CHECKPOINT = (
+    r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
+)
+DEFAULT_YOLO_OBB_IMGSZ = 512
+DEFAULT_YOLO_OBB_STRIDE = 512
+DEFAULT_YOLO_OBB_CONF = 0.18
+DEFAULT_YOLO_OBB_IOU = 0.5
+DEFAULT_YOLO_OBB_MAX_DET = 1000
+YOLO_GUIDANCE_MAX_DISTANCE_M = 70.0
+YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
+YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
+YOLO_TEMPLATE_SHAPE_REL_TOL = 0.20
+YOLO_TEMPLATE_SHAPE_ABS_TOL_PX = 4.0
 
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
@@ -3199,6 +3304,658 @@ def _roof_fragment_class(area_m2, max_side_m, fill_ratio):
     return BLD_CLASS_EXTRA_LARGE
 
 
+def _checkpoint_signature(path):
+    """Return a small cache signature for a checkpoint file."""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return {
+        'path': os.path.abspath(path),
+        'size': int(st.st_size),
+        'mtime_ns': int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
+    }
+
+
+def _yolo_obb_cache_key(fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det):
+    return {
+        'version': YOLO_OBB_CACHE_VERSION,
+        'fname': str(fname),
+        'image_size': (int(img_w), int(img_h)),
+        'checkpoint': _checkpoint_signature(checkpoint),
+        'imgsz': int(imgsz),
+        'stride': int(stride),
+        'conf': round(float(conf), 6),
+        'iou': round(float(iou), 6),
+        'max_det': int(max_det),
+    }
+
+
+def _load_yolo_obb_cache(cache_path, key):
+    if not cache_path or not os.path.exists(cache_path):
+        return None
+    try:
+        import pickle
+        with open(cache_path, 'rb') as handle:
+            data = pickle.load(handle)
+        if data.get('key') == key:
+            return data.get('detections')
+    except Exception:
+        return None
+    return None
+
+
+def _save_yolo_obb_cache(cache_path, key, detections):
+    if not cache_path:
+        return
+    try:
+        import pickle
+        os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+        with open(cache_path, 'wb') as handle:
+            pickle.dump({'key': key, 'detections': detections}, handle)
+    except Exception:
+        pass
+
+
+def _load_yolo_obb_model(checkpoint):
+    from ultralytics import YOLO
+    return YOLO(str(checkpoint))
+
+
+def _iter_yolo_crops(image, stride):
+    img_h, img_w = image.shape[:2]
+    for y in range(0, img_h, stride):
+        for x in range(0, img_w, stride):
+            crop = image[y:min(y + stride, img_h), x:min(x + stride, img_w)]
+            if crop.shape[0] != stride or crop.shape[1] != stride:
+                padded = np.zeros((stride, stride, 3), dtype=image.dtype)
+                padded[:crop.shape[0], :crop.shape[1]] = crop
+                crop = padded
+            yield x, y, crop
+
+
+def _yolo_obb_detection_from_points(points, confidence, cls, img_w, img_h, m_per_px):
+    """Convert one YOLO OBB polygon into overlay placement evidence."""
+    pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    valid = (
+        (pts[:, 0] >= 0) & (pts[:, 0] < img_w) &
+        (pts[:, 1] >= 0) & (pts[:, 1] < img_h)
+    )
+    center = pts.mean(axis=0)
+    if not np.any(valid) and not (0 <= center[0] < img_w and 0 <= center[1] < img_h):
+        return None
+
+    clipped = pts.copy()
+    clipped[:, 0] = np.clip(clipped[:, 0], 0, max(0, img_w - 1))
+    clipped[:, 1] = np.clip(clipped[:, 1], 0, max(0, img_h - 1))
+    area_px = abs(float(cv2.contourArea(clipped.astype(np.float32))))
+    if area_px <= 1.0:
+        return None
+
+    edges = np.roll(clipped, -1, axis=0) - clipped
+    edge_lengths = np.linalg.norm(edges, axis=1)
+    long_edge_index = int(np.argmax(edge_lengths))
+    long_vec = edges[long_edge_index]
+    img_angle = math.degrees(math.atan2(float(long_vec[1]), float(long_vec[0])))
+    heading = (90.0 - img_angle) % 180.0
+    max_side_m = float(edge_lengths[long_edge_index]) * float(m_per_px)
+    area_m2 = area_px * float(m_per_px) * float(m_per_px)
+    placement_cls = _roof_fragment_class(area_m2, max_side_m, 1.0)
+
+    return {
+        'points': clipped.tolist(),
+        'center': [
+            float(np.clip(center[0], 0, max(0, img_w - 1))),
+            float(np.clip(center[1], 0, max(0, img_h - 1))),
+        ],
+        'heading': float(heading),
+        'confidence': float(confidence),
+        'model_class': int(cls),
+        'area_m2': float(area_m2),
+        'max_side_m': float(max_side_m),
+        'placement_class': int(placement_cls),
+    }
+
+
+def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
+                            device=None, m_per_px=1.0):
+    img_h, img_w = image.shape[:2]
+    detections = []
+    for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+        result = model.predict(
+            source=crop,
+            imgsz=int(imgsz),
+            conf=float(conf),
+            iou=float(iou),
+            max_det=int(max_det),
+            device=device,
+            verbose=False,
+        )[0]
+        obb = getattr(result, 'obb', None)
+        if obb is None or obb.xyxyxyxy is None:
+            continue
+        corners = obb.xyxyxyxy.detach().cpu().numpy()
+        confs = (
+            obb.conf.detach().cpu().numpy()
+            if obb.conf is not None else np.ones((len(corners),), dtype=float)
+        )
+        classes = (
+            obb.cls.detach().cpu().numpy()
+            if obb.cls is not None else np.zeros((len(corners),), dtype=float)
+        )
+        for points, score, cls in zip(corners, confs, classes):
+            shifted = np.asarray(points, dtype=np.float32).reshape(4, 2)
+            shifted[:, 0] += float(ox)
+            shifted[:, 1] += float(oy)
+            detection = _yolo_obb_detection_from_points(
+                shifted, score, cls, img_w, img_h, m_per_px
+            )
+            if detection is not None:
+                detections.append(detection)
+
+    detections.sort(key=lambda item: (-float(item['confidence']), -float(item['area_m2'])))
+    return detections
+
+
+def _build_yolo_guidance(detections, img_h, img_w, m_per_px):
+    """Build nearest-YOLO-center guidance for fallback class and heading."""
+    if not detections:
+        return None
+
+    center_mask = np.ones((img_h, img_w), dtype=np.uint8)
+    center_to_det = {}
+    for det_idx, det in enumerate(detections, 1):
+        cx = int(round(float(det['center'][0])))
+        cy = int(round(float(det['center'][1])))
+        if 0 <= cx < img_w and 0 <= cy < img_h:
+            center_mask[cy, cx] = 0
+            center_to_det[(cx, cy)] = det_idx
+
+    if not center_to_det:
+        return None
+
+    n_centers, center_components = cv2.connectedComponents(
+        (center_mask == 0).astype(np.uint8), connectivity=8
+    )
+    class_by_label = np.zeros(n_centers, dtype=np.uint8)
+    heading_by_label = np.full(n_centers, np.nan, dtype=np.float32)
+    confidence_by_label = np.zeros(n_centers, dtype=np.float32)
+    area_by_label_m2 = np.zeros(n_centers, dtype=np.float32)
+    center_by_label = np.full((n_centers, 2), np.nan, dtype=np.float32)
+    points_by_label = [None] * n_centers
+    for (cx, cy), det_idx in center_to_det.items():
+        label = int(center_components[cy, cx])
+        if label <= 0:
+            continue
+        det = detections[det_idx - 1]
+        if float(det['confidence']) < float(confidence_by_label[label]):
+            continue
+        class_by_label[label] = int(det['placement_class'])
+        heading_by_label[label] = float(det['heading'])
+        confidence_by_label[label] = float(det['confidence'])
+        area_by_label_m2[label] = float(det['area_m2'])
+        center_by_label[label] = np.asarray(det['center'], dtype=np.float32)
+        points_by_label[label] = np.asarray(det['points'], dtype=np.float32)
+
+    dist_px, nearest_label = cv2.distanceTransformWithLabels(
+        center_mask,
+        cv2.DIST_L2,
+        5,
+        labelType=cv2.DIST_LABEL_CCOMP,
+    )
+    return {
+        'distance_px': dist_px.astype(np.float32, copy=False),
+        'nearest_label': nearest_label.astype(np.int32, copy=False),
+        'class_by_label': class_by_label,
+        'heading_by_label': heading_by_label,
+        'confidence_by_label': confidence_by_label,
+        'area_by_label_m2': area_by_label_m2,
+        'center_by_label': center_by_label,
+        'points_by_label': points_by_label,
+        'max_distance_m': float(YOLO_GUIDANCE_MAX_DISTANCE_M),
+        'm_per_px': float(m_per_px),
+        'image_size': (int(img_h), int(img_w)),
+    }
+
+
+def _yolo_guidance_label(yolo_guidance, jx, jy, max_distance_m=None):
+    if yolo_guidance is None:
+        return 0
+    label = int(yolo_guidance['nearest_label'][jy, jx])
+    class_by_label = yolo_guidance['class_by_label']
+    if label <= 0 or label >= class_by_label.shape[0]:
+        return 0
+    max_dist = (
+        float(yolo_guidance.get('max_distance_m', YOLO_GUIDANCE_MAX_DISTANCE_M))
+        if max_distance_m is None else float(max_distance_m)
+    )
+    dist_m = (
+        float(yolo_guidance['distance_px'][jy, jx]) *
+        float(yolo_guidance.get('m_per_px', 1.0))
+    )
+    if dist_m > max_dist:
+        return 0
+    return label
+
+
+def _yolo_heading_for_candidate(yolo_guidance, jx, jy, max_distance_m=None):
+    label = _yolo_guidance_label(yolo_guidance, jx, jy, max_distance_m)
+    if label <= 0:
+        return float('nan')
+    heading = float(yolo_guidance['heading_by_label'][label])
+    return heading if not np.isnan(heading) else float('nan')
+
+
+def _yolo_template_for_candidate(yolo_guidance, jx, jy, max_distance_m=None):
+    """Return nearest YOLO OBB footprint translated to a candidate center."""
+    label = _yolo_guidance_label(yolo_guidance, jx, jy, max_distance_m)
+    if label <= 0:
+        return None
+    points = yolo_guidance.get('points_by_label', ())
+    centers = yolo_guidance.get('center_by_label')
+    class_by_label = yolo_guidance.get('class_by_label')
+    heading_by_label = yolo_guidance.get('heading_by_label')
+    if (
+        label >= len(points) or points[label] is None or
+        centers is None or label >= centers.shape[0] or
+        class_by_label is None or label >= class_by_label.shape[0] or
+        heading_by_label is None or label >= heading_by_label.shape[0]
+    ):
+        return None
+    source_center = centers[label]
+    if np.any(np.isnan(source_center)):
+        return None
+    translated = np.asarray(points[label], dtype=np.float32).copy()
+    translated[:, 0] += float(jx) - float(source_center[0])
+    translated[:, 1] += float(jy) - float(source_center[1])
+    img_h, img_w = yolo_guidance.get('image_size', (0, 0))
+    if (
+        translated[:, 0].min() < 0 or translated[:, 0].max() >= int(img_w) or
+        translated[:, 1].min() < 0 or translated[:, 1].max() >= int(img_h)
+    ):
+        return None
+    placement_cls = int(class_by_label[label])
+    if placement_cls not in BLD_PLACEMENT_CLASSES:
+        return None
+    heading = float(heading_by_label[label])
+    if np.isnan(heading):
+        heading = 0.0
+    return np.rint(translated).astype(np.int32), placement_cls, heading
+
+
+def _angle_delta_180(a_deg, b_deg):
+    """Return the unsigned difference between 180-periodic headings."""
+    return abs(((float(a_deg) - float(b_deg) + 90.0) % 180.0) - 90.0)
+
+
+def _yolo_template_metrics(template):
+    """Return long/short side lengths and edge direction for a YOLO template."""
+    pts = np.asarray(template.get('points', ()), dtype=np.float32)
+    if pts.shape != (4, 2):
+        return None
+    edges = np.roll(pts, -1, axis=0) - pts
+    edge_lengths = np.linalg.norm(edges, axis=1)
+    long_idx = int(np.argmax(edge_lengths))
+    long_len = float(edge_lengths[long_idx])
+    short_len = float(edge_lengths[(long_idx + 1) % 4])
+    if long_len < 1.0 or short_len < 1.0:
+        return None
+    if short_len > long_len:
+        long_len, short_len = short_len, long_len
+    return {
+        'long_len': long_len,
+        'short_len': short_len,
+        'area_px': long_len * short_len,
+    }
+
+
+def _points_from_yolo_heading(center, long_len, short_len, heading):
+    """Build an image-space rotated rectangle from YOLO heading and dimensions."""
+    cx, cy = np.asarray(center, dtype=np.float32)
+    img_angle = math.radians(90.0 - float(heading))
+    u_axis = np.asarray([math.cos(img_angle), math.sin(img_angle)], dtype=np.float32)
+    v_axis = np.asarray([-u_axis[1], u_axis[0]], dtype=np.float32)
+    hu = u_axis * (float(long_len) * 0.5)
+    hv = v_axis * (float(short_len) * 0.5)
+    return np.asarray(
+        (
+            (cx - hu[0] - hv[0], cy - hu[1] - hv[1]),
+            (cx + hu[0] - hv[0], cy + hu[1] - hv[1]),
+            (cx + hu[0] + hv[0], cy + hu[1] + hv[1]),
+            (cx - hu[0] + hv[0], cy - hu[1] + hv[1]),
+        ),
+        dtype=np.float32,
+    )
+
+
+def _weighted_heading_mean_180(headings, weights):
+    headings = np.asarray(headings, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if headings.size == 0:
+        return float('nan')
+    if not np.any(weights > 0):
+        weights = np.ones_like(headings, dtype=np.float64)
+    angles = np.deg2rad(headings * 2.0)
+    mean = math.atan2(
+        float(np.sum(np.sin(angles) * weights)),
+        float(np.sum(np.cos(angles) * weights)),
+    )
+    return (math.degrees(mean) * 0.5) % 180.0
+
+
+def _consensus_yolo_template(
+    zone_templates,
+    heading_tol_deg=YOLO_TEMPLATE_HEADING_TOL_DEG,
+    shape_rel_tol=YOLO_TEMPLATE_SHAPE_REL_TOL,
+    shape_abs_tol_px=YOLO_TEMPLATE_SHAPE_ABS_TOL_PX,
+):
+    """Return a synthetic zone template from fuzzy heading and shape majorities."""
+    records = []
+    for template in zone_templates or ():
+        metrics = _yolo_template_metrics(template)
+        if metrics is None:
+            continue
+        records.append({
+            'template': template,
+            'heading': float(template.get('heading', 0.0)) % 180.0,
+            'class': int(template.get('class', BLD_CLASS_MEDIUM)),
+            'confidence': max(0.0, float(template.get('confidence', 0.0))),
+            **metrics,
+        })
+    if not records:
+        return None
+
+    headings = np.asarray([rec['heading'] for rec in records], dtype=np.float32)
+    weights = np.asarray(
+        [max(0.01, rec['confidence']) for rec in records], dtype=np.float32
+    )
+    best_heading_idx = []
+    best_heading_key = (-1, -1.0, -1.0)
+    for idx, heading in enumerate(headings):
+        cluster = [
+            cand_idx for cand_idx, cand_heading in enumerate(headings)
+            if _angle_delta_180(cand_heading, heading) <= float(heading_tol_deg)
+        ]
+        key = (
+            len(cluster),
+            float(np.sum(weights[cluster])),
+            float(np.sum([records[cand_idx]['area_px'] for cand_idx in cluster])),
+        )
+        if key > best_heading_key:
+            best_heading_key = key
+            best_heading_idx = cluster
+    consensus_heading = _weighted_heading_mean_180(
+        headings[best_heading_idx], weights[best_heading_idx]
+    )
+
+    best_shape_idx = []
+    best_shape_key = (-1, -1.0, -1.0)
+    for idx, rec in enumerate(records):
+        long_tol = max(float(shape_abs_tol_px), float(shape_rel_tol) * rec['long_len'])
+        short_tol = max(float(shape_abs_tol_px), float(shape_rel_tol) * rec['short_len'])
+        cluster = [
+            cand_idx for cand_idx, cand in enumerate(records)
+            if (
+                cand['class'] == rec['class'] and
+                abs(cand['long_len'] - rec['long_len']) <= long_tol and
+                abs(cand['short_len'] - rec['short_len']) <= short_tol
+            )
+        ]
+        key = (
+            len(cluster),
+            float(np.sum(weights[cluster])),
+            float(np.sum([records[cand_idx]['area_px'] for cand_idx in cluster])),
+        )
+        if key > best_shape_key:
+            best_shape_key = key
+            best_shape_idx = cluster
+
+    shape_records = [records[idx] for idx in best_shape_idx]
+    long_len = float(np.median([rec['long_len'] for rec in shape_records]))
+    short_len = float(np.median([rec['short_len'] for rec in shape_records]))
+    placement_cls = int(shape_records[0]['class'])
+    centers = np.asarray(
+        [records[idx]['template']['center'] for idx in best_shape_idx],
+        dtype=np.float32,
+    )
+    center = np.mean(centers, axis=0)
+    points = _points_from_yolo_heading(center, long_len, short_len, consensus_heading)
+    return {
+        'center': center.astype(np.float32),
+        'points': points,
+        'class': placement_cls,
+        'heading': float(consensus_heading),
+        'confidence': float(np.mean([rec['confidence'] for rec in shape_records])),
+        'area_px': float(long_len * short_len),
+        'consensus_heading_votes': int(len(best_heading_idx)),
+        'consensus_shape_votes': int(len(best_shape_idx)),
+    }
+
+
+def _retarget_yolo_template_heading(template, heading):
+    """Return the same YOLO shape/class centered at template center with a new heading."""
+    metrics = _yolo_template_metrics(template)
+    if metrics is None:
+        return None
+    center = np.asarray(template.get('center', ()), dtype=np.float32)
+    if center.shape != (2,) or np.any(np.isnan(center)):
+        return None
+    retargeted = dict(template)
+    retargeted['center'] = center.copy()
+    retargeted['heading'] = float(heading) % 180.0
+    retargeted['points'] = _points_from_yolo_heading(
+        center,
+        float(metrics['long_len']),
+        float(metrics['short_len']),
+        retargeted['heading'],
+    )
+    return retargeted
+
+
+def _scaled_template_points(template, jx, jy, long_scale=1.0, short_scale=1.0):
+    """Translate a YOLO template and scale long/short axes independently."""
+    metrics = _yolo_template_metrics(template)
+    center = np.asarray(template.get('center', ()), dtype=np.float32)
+    if metrics is None or center.shape != (2,):
+        return None
+    long_scale = float(np.clip(long_scale, 0.0, 1.0))
+    short_scale = float(np.clip(short_scale, 0.0, 1.0))
+    target = np.asarray([float(jx), float(jy)], dtype=np.float32)
+    return _points_from_yolo_heading(
+        target,
+        float(metrics['long_len']) * long_scale,
+        float(metrics['short_len']) * short_scale,
+        float(template.get('heading', 0.0)),
+    )
+
+
+def _template_poly_in_bounds(poly, img_w, img_h):
+    return (
+        poly is not None and
+        poly.shape == (4, 2) and
+        float(poly[:, 0].min()) >= 0.0 and
+        float(poly[:, 0].max()) < float(img_w) and
+        float(poly[:, 1].min()) >= 0.0 and
+        float(poly[:, 1].max()) < float(img_h)
+    )
+
+
+def _largest_fitting_yolo_template_poly(
+    template,
+    jx,
+    jy,
+    img_w,
+    img_h,
+    static_occ_mask,
+    building_spacing_mask,
+    scratch_mask,
+    static_occ_integral=None,
+    min_scale=0.25,
+    iterations=8,
+):
+    """Return largest-area <= original YOLO footprint that fits current blockers."""
+    min_scale = float(np.clip(min_scale, 0.05, 1.0))
+
+    def _fits(long_scale, short_scale):
+        poly_f = _scaled_template_points(template, jx, jy, long_scale, short_scale)
+        if not _template_poly_in_bounds(poly_f, img_w, img_h):
+            return None
+        poly_i = np.rint(poly_f).astype(np.int32)
+        if abs(float(cv2.contourArea(poly_i.astype(np.float32)))) <= 1.0:
+            return None
+        if not _poly_fits_with_integral(
+            static_occ_mask,
+            poly_i,
+            scratch_mask=scratch_mask,
+            occ_integral=static_occ_integral,
+        ):
+            return None
+        if not _poly_fits(building_spacing_mask, poly_i, scratch_mask):
+            return None
+        return poly_i
+
+    full = _fits(1.0, 1.0)
+    if full is not None:
+        return full, (1.0, 1.0)
+
+    def _best_long_for_short(short_scale):
+        low_poly = _fits(min_scale, short_scale)
+        if low_poly is None:
+            return None, 0.0, short_scale
+        lo = min_scale
+        hi = 1.0
+        best_poly = low_poly
+        best_long = lo
+        for _ in range(max(1, int(iterations))):
+            mid = (lo + hi) * 0.5
+            mid_poly = _fits(mid, short_scale)
+            if mid_poly is None:
+                hi = mid
+            else:
+                lo = mid
+                best_long = mid
+                best_poly = mid_poly
+        return best_poly, float(best_long), float(short_scale)
+
+    def _best_short_for_long(long_scale):
+        low_poly = _fits(long_scale, min_scale)
+        if low_poly is None:
+            return None, long_scale, 0.0
+        lo = min_scale
+        hi = 1.0
+        best_poly = low_poly
+        best_short = lo
+        for _ in range(max(1, int(iterations))):
+            mid = (lo + hi) * 0.5
+            mid_poly = _fits(long_scale, mid)
+            if mid_poly is None:
+                hi = mid
+            else:
+                lo = mid
+                best_short = mid
+                best_poly = mid_poly
+        return best_poly, float(long_scale), float(best_short)
+
+    scale_samples = sorted({
+        min_scale,
+        0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0,
+    })
+    best_poly = None
+    best_scales = (0.0, 0.0)
+    best_key = (-1.0, -1.0, -1.0)
+    for fixed_short in scale_samples:
+        poly, long_scale, short_scale = _best_long_for_short(fixed_short)
+        if poly is not None:
+            key = (long_scale * short_scale, max(long_scale, short_scale), min(long_scale, short_scale))
+            if key > best_key:
+                best_key = key
+                best_poly = poly
+                best_scales = (long_scale, short_scale)
+    for fixed_long in scale_samples:
+        poly, long_scale, short_scale = _best_short_for_long(fixed_long)
+        if poly is not None:
+            key = (long_scale * short_scale, max(long_scale, short_scale), min(long_scale, short_scale))
+            if key > best_key:
+                best_key = key
+                best_poly = poly
+                best_scales = (long_scale, short_scale)
+    return best_poly, best_scales
+
+
+def _neighbor_yolo_templates_by_zone(cc_labels, cc_stats, valid_labels,
+                                     yolo_templates_by_zone, radius_px):
+    """Collect original OBB-zone templates for neighboring labels without OBBs.
+
+    This is intentionally one-hop only: zones filled from a neighbor template do
+    not become template sources for further zones.
+    """
+    if not yolo_templates_by_zone or cc_labels is None or cc_labels.size == 0:
+        return {}
+    source_labels = {int(label) for label in yolo_templates_by_zone if int(label) > 0}
+    if not source_labels:
+        return {}
+
+    radius_px = max(1, int(radius_px))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (radius_px * 2 + 1, radius_px * 2 + 1)
+    )
+    h, w = cc_labels.shape[:2]
+    result = {}
+    for label in (int(v) for v in valid_labels):
+        if label <= 0 or label in source_labels or label >= cc_stats.shape[0]:
+            continue
+        x0 = int(cc_stats[label, cv2.CC_STAT_LEFT])
+        y0 = int(cc_stats[label, cv2.CC_STAT_TOP])
+        zone_w = int(cc_stats[label, cv2.CC_STAT_WIDTH])
+        zone_h = int(cc_stats[label, cv2.CC_STAT_HEIGHT])
+        if zone_w <= 0 or zone_h <= 0:
+            continue
+        rx0 = max(0, x0 - radius_px)
+        ry0 = max(0, y0 - radius_px)
+        rx1 = min(w, x0 + zone_w + radius_px)
+        ry1 = min(h, y0 + zone_h + radius_px)
+        roi_labels = cc_labels[ry0:ry1, rx0:rx1]
+        zone_mask = (roi_labels == label).astype(np.uint8)
+        if not np.any(zone_mask):
+            continue
+        near_mask = cv2.dilate(zone_mask, kernel) != 0
+        near_labels = np.unique(roi_labels[near_mask])
+        neighbor_templates = []
+        for neighbor_label in near_labels:
+            neighbor_label = int(neighbor_label)
+            if neighbor_label in source_labels:
+                neighbor_templates.extend(yolo_templates_by_zone.get(neighbor_label, ()))
+        if neighbor_templates:
+            result[label] = neighbor_templates
+    return result
+
+
+def _refine_candidate_classes_from_yolo(cand_x, cand_y, cand_cls, yolo_guidance):
+    if yolo_guidance is None or cand_x.size == 0:
+        return cand_cls, 0
+    labels = yolo_guidance['nearest_label'][cand_y, cand_x]
+    dist_m = (
+        yolo_guidance['distance_px'][cand_y, cand_x] *
+        float(yolo_guidance.get('m_per_px', 1.0))
+    )
+    class_by_label = yolo_guidance['class_by_label']
+    valid = (
+        (labels > 0) &
+        (labels < class_by_label.shape[0]) &
+        (dist_m <= float(yolo_guidance.get('max_distance_m', YOLO_GUIDANCE_MAX_DISTANCE_M)))
+    )
+    if not np.any(valid):
+        return cand_cls, 0
+    refined = cand_cls.copy()
+    local_cls = np.zeros_like(cand_cls)
+    local_cls[valid] = class_by_label[labels[valid]]
+    apply = valid & (local_cls != 0)
+    refined[apply] = local_cls[apply]
+    return refined, int(np.count_nonzero(apply))
+
+
 def _pca_long_axis_heading(xs, ys):
     """Return compass heading of a pixel cloud's long axis, or NaN if weak."""
     if xs.size < 6:
@@ -3349,6 +4106,17 @@ def _gap_fill_class_sequence(zone_class):
     """Return the only placement class allowed for this gap-fill center."""
     zc = int(zone_class)
     return (zc,) if zc in BLD_PLACEMENT_CLASSES else ()
+
+
+def _yolo_direct_class_sequence(zone_class):
+    """Try YOLO's inferred class first, then smaller compatible classes."""
+    zc = int(zone_class)
+    if zc not in BLD_PLACEMENT_CLASSES:
+        return ()
+    return tuple(
+        cls for cls in reversed(BLD_PLACEMENT_CLASSES)
+        if cls <= zc
+    )
 
 
 def _residential_infill_class(zone_class):
@@ -3510,7 +4278,7 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                         file_counts, mark_pad_m=None, prefer_small=False,
                         residential_context=True, footprint_pad_m=FOOTPRINT_PAD_M,
                         static_occ_integral=None, fit_cache_enabled=True,
-                        retry_context=None):
+                        retry_context=None, prefer_largest_fit=False):
     """Return the selected asset when it fits this candidate."""
     unknown_skipped = 0
     candidate_fit_cache = {}
@@ -3573,6 +4341,74 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
         candidate_fit_cache[cache_key] = result
         return result
 
+    def _fit_asset(asset):
+        bounds_m = asset.get('bounds_m')
+        if bounds_m is None:
+            return None, None, None, None, 1
+
+        fit_bounds = asset.get('fit_bounds_m')
+        mark_bounds = asset.get('mark_bounds_m')
+        bounds_cache_key = asset.get('fit_cache_key')
+        if fit_bounds is None or mark_bounds is None:
+            fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
+            mark_pad = (
+                footprint_pad_m + PLACEMENT_MARGIN_M
+                if mark_pad_m is None else float(mark_pad_m)
+            )
+            mark_bounds = _expand_bounds(bounds_m, mark_pad)
+            bounds_cache_key = None
+
+        heading_options = _orientation_angles_for_bounds(bounds_m, heading)
+        if not fit_cache_enabled:
+            for fit_heading in heading_options:
+                static_poly = _footprint_poly(jx, jy, bounds_m, fit_heading, m_per_px)
+                dynamic_poly = _footprint_poly(jx, jy, fit_bounds, fit_heading, m_per_px)
+                file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+                if (
+                    _poly_fits(static_occ_mask, static_poly, fit_scratch) and
+                    _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
+                ):
+                    return (
+                        asset,
+                        fit_heading,
+                        static_poly,
+                        _footprint_poly(jx, jy, mark_bounds, fit_heading, m_per_px),
+                        0,
+                    )
+            return None, None, None, None, 0
+
+        for fit_heading in heading_options:
+            file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
+            fits, static_poly, mark_poly = _orientation_fit(
+                bounds_m, fit_bounds, mark_bounds, bounds_cache_key, fit_heading
+            )
+            if fits:
+                return asset, fit_heading, static_poly, mark_poly, 0
+        return None, None, None, None, 0
+
+    if prefer_largest_fit:
+        skipped_residential = 0
+        for asset in sorted(pool, key=_asset_retry_sort_key, reverse=True):
+            if not residential_context and _asset_requires_residential_context(asset):
+                skipped_residential += 1
+                continue
+            fitted_asset, final_h, footprint_poly, spacing_poly, skipped_unknown = _fit_asset(asset)
+            unknown_skipped += skipped_unknown
+            if fitted_asset is not None:
+                if skipped_residential:
+                    file_counts['residential_asset_skipped'] = (
+                        file_counts.get('residential_asset_skipped', 0) + skipped_residential
+                    )
+                file_counts['largest_fit_asset_selected'] = (
+                    file_counts.get('largest_fit_asset_selected', 0) + 1
+                )
+                return fitted_asset, final_h, footprint_poly, spacing_poly, unknown_skipped
+        if skipped_residential:
+            file_counts['residential_asset_skipped'] = (
+                file_counts.get('residential_asset_skipped', 0) + skipped_residential
+            )
+        return None, None, None, None, unknown_skipped
+
     selected_asset = None
     for asset, skipped_before in _asset_retry_sequence_for_context(
         pool,
@@ -3598,60 +4434,10 @@ def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
     if selected_asset is None:
         return None, None, None, None, unknown_skipped
 
-    asset = selected_asset
-    bounds_m = asset.get('bounds_m')
-    if bounds_m is None:
-        unknown_skipped += 1
-        return None, None, None, None, unknown_skipped
-
-    fit_bounds = asset.get('fit_bounds_m')
-    mark_bounds = asset.get('mark_bounds_m')
-    bounds_cache_key = asset.get('fit_cache_key')
-    if fit_bounds is None or mark_bounds is None:
-        fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
-        mark_pad = (
-            footprint_pad_m + PLACEMENT_MARGIN_M
-            if mark_pad_m is None else float(mark_pad_m)
-        )
-        mark_bounds = _expand_bounds(
-            bounds_m, mark_pad
-        )
-        bounds_cache_key = None
-
-    final_h = footprint_poly = spacing_poly = None
-    heading_options = _orientation_angles_for_bounds(bounds_m, heading)
-    if not fit_cache_enabled:
-        for fit_heading in heading_options:
-            static_poly = _footprint_poly(jx, jy, bounds_m, fit_heading, m_per_px)
-            dynamic_poly = _footprint_poly(jx, jy, fit_bounds, fit_heading, m_per_px)
-            file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-            if (
-                _poly_fits(static_occ_mask, static_poly, fit_scratch) and
-                _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
-            ):
-                final_h = fit_heading
-                footprint_poly = static_poly
-                spacing_poly = _footprint_poly(jx, jy, mark_bounds, fit_heading, m_per_px)
-                break
-
-        if final_h is not None:
-            return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
-        return None, None, None, None, unknown_skipped
-
-    for fit_heading in heading_options:
-        file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-        fits, static_poly, mark_poly = _orientation_fit(
-            bounds_m, fit_bounds, mark_bounds, bounds_cache_key, fit_heading
-        )
-        if fits:
-            final_h = fit_heading
-            footprint_poly = static_poly
-            spacing_poly = mark_poly
-            break
-
-    if final_h is not None:
-        return asset, final_h, footprint_poly, spacing_poly, unknown_skipped
-
+    fitted_asset, final_h, footprint_poly, spacing_poly, skipped_unknown = _fit_asset(selected_asset)
+    unknown_skipped += skipped_unknown
+    if fitted_asset is not None:
+        return fitted_asset, final_h, footprint_poly, spacing_poly, unknown_skipped
     return None, None, None, None, unknown_skipped
 
 
@@ -3751,6 +4537,13 @@ def run(
     debug_image_only=False,
     dds_filter=None,
     ignore_placement_cache=False,
+    yolo_enabled=True,
+    yolo_checkpoint=None,
+    yolo_conf=None,
+    yolo_iou=None,
+    yolo_stride=None,
+    yolo_max_det=None,
+    yolo_imgsz=DEFAULT_YOLO_OBB_IMGSZ,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
@@ -3813,6 +4606,7 @@ def run(
                 '_veg.npy',
                 '_road.pkl',
                 '_bld.pkl',
+                '_yolo_obb.pkl',
                 '_vegaux.pkl',
                 '_vegpoly.pkl',
             )
@@ -3905,8 +4699,28 @@ def run(
             f'{lat_g_str}{lon_g_str}',
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
-    osm_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
-    print(f"OSM roads: {len(osm_roads)} ways from {osm_roads_path}")
+    osm_big_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
+    osm_small_roads_path = _osm_tile_peer_path(osm_roads_path, "_small_roads.osm.bz2")
+    osm_all_roads_path = _osm_tile_peer_path(osm_roads_path, "_all_roads.osm.bz2")
+    osm_small_roads = (
+        _load_osm_roads(osm_small_roads_path, cache_dir=cache_dir)
+        if osm_small_roads_path else []
+    )
+    osm_all_roads = []
+    if osm_all_roads_path:
+        if not os.path.exists(osm_all_roads_path) and not skip_osm_excl_download:
+            _download_and_cache_osm_roads(lat, lon, osm_all_roads_path)
+        osm_all_roads = _load_osm_roads(osm_all_roads_path, cache_dir=cache_dir)
+
+    if osm_all_roads:
+        osm_roads = osm_all_roads
+        print(f"OSM all roads: {len(osm_roads)} ways from {osm_all_roads_path}")
+    else:
+        osm_roads = (osm_big_roads or []) + (osm_small_roads or [])
+        print(
+            f"OSM roads: {len(osm_roads)} ways "
+            f"(big={len(osm_big_roads)} small={len(osm_small_roads)})"
+        )
 
     # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
     # OSM building polygons are parsed for diagnostics only. They describe where
@@ -3916,11 +4730,15 @@ def run(
     excl_rails = []           # road-style dicts for railways
 
     for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
-        p = osm_roads_path.replace('_big_roads.osm.bz2', suffix)
+        p = _osm_tile_peer_path(osm_roads_path, suffix) or osm_roads_path.replace(
+            '_big_roads.osm.bz2', suffix
+        )
         excl_polys.extend(_load_osm_closed_ways(p, cache_dir=cache_dir))
     print(f"Exclusion polygons (water+airports): {len(excl_polys)}")
 
-    excl_cache = osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2')
+    excl_cache = _osm_tile_peer_path(
+        osm_roads_path, '_excl_bld_rail_res.osm.bz2'
+    ) or osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2')
     if skip_osm_excl_download:
         ok = os.path.exists(excl_cache)
     else:
@@ -3943,6 +4761,7 @@ def run(
         'simheaven_parse': 0.0,
         'cache_load': 0.0,
         'dds_load': 0.0,
+        'yolo_inference': 0.0,
         'inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
@@ -3981,12 +4800,80 @@ def run(
     max_gap_candidates_per_component = max(
         1, int(_env_float("O4_SFR_BLD_GAP_MAX_PER_COMPONENT", 24))
     )
+    yolo_template_gap_m = max(
+        0.0, _env_float("O4_SFR_BLD_YOLO_TEMPLATE_GAP_M", spacing_m)
+    )
+    yolo_template_max_candidates_per_zone = max(
+        1,
+        int(_env_float(
+            "O4_SFR_BLD_YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE",
+            YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE,
+        )),
+    )
+    yolo_template_heading_tol_deg = max(
+        0.0,
+        _env_float(
+            "O4_SFR_BLD_YOLO_TEMPLATE_HEADING_TOL_DEG",
+            YOLO_TEMPLATE_HEADING_TOL_DEG,
+        ),
+    )
+    yolo_template_shape_rel_tol = max(
+        0.0,
+        _env_float(
+            "O4_SFR_BLD_YOLO_TEMPLATE_SHAPE_REL_TOL",
+            YOLO_TEMPLATE_SHAPE_REL_TOL,
+        ),
+    )
+    yolo_template_shape_abs_tol_px = max(
+        0.0,
+        _env_float(
+            "O4_SFR_BLD_YOLO_TEMPLATE_SHAPE_ABS_TOL_PX",
+            YOLO_TEMPLATE_SHAPE_ABS_TOL_PX,
+        ),
+    )
     strict_fit = _env_flag("O4_SFR_BLD_STRICT_FIT")
     n_unknown_skipped = 0
     _t = time.perf_counter()
 
-    # simHeaven network roads — used for heading grid only (not zone separation).
-    # Provides much better heading coverage than OSM major roads alone.
+    if yolo_checkpoint is None:
+        yolo_checkpoint = os.environ.get(
+            "O4_SFR_BLD_YOLO_CHECKPOINT",
+            DEFAULT_YOLO_OBB_CHECKPOINT,
+        )
+    yolo_conf = float(
+        DEFAULT_YOLO_OBB_CONF if yolo_conf is None
+        else yolo_conf
+    )
+    yolo_iou = float(
+        DEFAULT_YOLO_OBB_IOU if yolo_iou is None
+        else yolo_iou
+    )
+    yolo_stride = int(
+        DEFAULT_YOLO_OBB_STRIDE if yolo_stride is None
+        else yolo_stride
+    )
+    yolo_max_det = int(
+        DEFAULT_YOLO_OBB_MAX_DET if yolo_max_det is None
+        else yolo_max_det
+    )
+    yolo_imgsz = int(yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
+    if "O4_SFR_BLD_YOLO_ENABLED" in os.environ:
+        yolo_enabled = _env_flag("O4_SFR_BLD_YOLO_ENABLED", bool(yolo_enabled))
+    else:
+        yolo_enabled = bool(yolo_enabled)
+    yolo_model = None
+    yolo_available = False
+    yolo_signature = _checkpoint_signature(yolo_checkpoint) if yolo_enabled else None
+    if yolo_enabled and yolo_signature is None:
+        print(f"YOLO OBB placement: checkpoint unavailable ({yolo_checkpoint}); using SegFormer-only fallback")
+        yolo_enabled = False
+    elif yolo_enabled:
+        print(
+            f"YOLO OBB placement: enabled checkpoint={yolo_checkpoint} "
+            f"conf={yolo_conf} iou={yolo_iou} stride={yolo_stride}"
+        )
+
+    # simHeaven network roads provide the local street grid when available.
     if dsftool_path is None:
         dsftool_path = SEGFORMER._dsftool
 
@@ -4097,12 +4984,13 @@ def run(
     else:
         print(f"Mesh water: unavailable from {mesh_water_path}")
 
-    # Heading grid uses simHeaven network only — it represents the full local
-    # street grid (minor roads, blocks) which defines actual building alignment.
-    # OSM major roads (motorways, primaries) are long segments that dominate the
-    # length-weighted mean and misalign buildings with the local block grid.
-    all_roads       = sh_network                          # heading grid source (local street grid)
-    separator_roads = (osm_roads or []) + (sh_network or [])  # zone separator: major roads + local streets
+    # Split zones with every road source we have: cached OSM all-highway ways
+    # (or Ortho4XP big+small extracts) plus simHeaven network roads.
+    separator_roads = (osm_roads or []) + (sh_network or [])
+    # For heading, prefer simHeaven because it is the local street grid. If it
+    # is unavailable, fall back to the all-road OSM source instead of leaving
+    # the road heading grid empty.
+    all_roads = sh_network if sh_network else osm_roads
     separator_roads_index = BBOX.build_bounds_index(separator_roads)
     heading_seg_index = _prepare_segment_arrays(all_roads)
     separator_sig = _roads_signature(separator_roads)
@@ -4143,14 +5031,23 @@ def run(
         disable_center_blockers,
         max_gap_candidates_per_dds,
         max_gap_candidates_per_component,
+        yolo_template_gap_m,
+        yolo_template_max_candidates_per_zone,
+        yolo_template_heading_tol_deg,
+        yolo_template_shape_rel_tol,
+        yolo_template_shape_abs_tol_px,
         tuple(sorted(class_min_footprint_span_m.items())),
         ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
         ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
+        separator_sig, heading_sig,
         excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
         mesh_water_sig,
         residential_poly_sig,
         default_assets_available, sfd_assets_available, simheaven_assets_available,
         _asset_region(asset_lat, asset_lon),
+        bool(yolo_enabled), yolo_signature,
+        yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
+        round(float(yolo_iou), 6), yolo_max_det,
     )
 
     t_start = time.time()
@@ -4311,6 +5208,62 @@ def run(
             k_road = cv2.getStructuringElement(
                 cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
 
+            yolo_detections = []
+            yolo_guidance = None
+            if yolo_enabled:
+                _yolo_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_yolo_obb.pkl'))
+                _yolo_key = _yolo_obb_cache_key(
+                    fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
+                    yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
+                )
+                if not disable_cache:
+                    _t = time.perf_counter()
+                    cached_yolo = _load_yolo_obb_cache(_yolo_cache_file, _yolo_key)
+                    _record_elapsed(timings, file_timings, 'cache_load', _t)
+                else:
+                    cached_yolo = None
+                if cached_yolo is not None:
+                    yolo_detections = cached_yolo
+                else:
+                    if img is None:
+                        _img_t = time.perf_counter()
+                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                        if img is not None:
+                            _record_elapsed(timings, file_timings, 'dds_load', _img_t)
+                    if img is not None:
+                        try:
+                            if yolo_model is None:
+                                yolo_model = _load_yolo_obb_model(yolo_checkpoint)
+                                yolo_available = True
+                            _t = time.perf_counter()
+                            yolo_detections = _run_yolo_obb_inference(
+                                yolo_model,
+                                img,
+                                imgsz=yolo_imgsz,
+                                stride=yolo_stride,
+                                conf=yolo_conf,
+                                iou=yolo_iou,
+                                max_det=yolo_max_det,
+                                device=("0" if torch.cuda.is_available() else "cpu"),
+                                m_per_px=m_per_px,
+                            )
+                            _record_elapsed(timings, file_timings, 'yolo_inference', _t)
+                            if not disable_cache:
+                                _save_yolo_obb_cache(_yolo_cache_file, _yolo_key, yolo_detections)
+                        except Exception as exc:
+                            if not yolo_available:
+                                print(
+                                    f"YOLO OBB placement unavailable ({exc}); "
+                                    "using SegFormer-only fallback"
+                                )
+                                yolo_enabled = False
+                            else:
+                                print(f"    [Bld stage] {fname} YOLO OBB failed: {exc}")
+                            yolo_detections = []
+            file_counts['yolo_detections'] = len(yolo_detections)
+            if yolo_detections:
+                yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
+
             # Zone cleanup
             _t = time.perf_counter()
             bld_raw  = (veg_map == SEGFORMER.CLASS_BUILDING).astype(np.uint8)
@@ -4334,7 +5287,7 @@ def run(
                 bld_zone = bld_zone & (~mesh_water_mask)
             _record_elapsed(timings, file_timings, 'zone_cleanup', _t)
 
-            if not bld_zone.any():
+            if not bld_zone.any() and not yolo_detections:
                 file_counts['candidates'] = 0
                 file_counts['placed'] = 0
                 bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
@@ -4553,7 +5506,118 @@ def run(
                 None if strict_fit else cv2.integral(static_occ_mask, sdepth=cv2.CV_32S)
             )
             building_spacing_mask = np.zeros_like(static_occ_mask)
+            placed_yolo_mask = np.zeros_like(static_occ_mask)
+            fit_scratch = np.zeros_like(static_occ_mask)
+            pts_this = []
+            dynamic_center_block_masks = {
+                cls: np.zeros_like(static_occ_mask)
+                for cls in BLD_PLACEMENT_CLASSES
+            }
+            placed_viz_polys = []
+            yolo_viz_polys = []
+            road_divided_zone = (
+                (bld_zone != 0) &
+                (static_occ_mask == 0)
+            ).astype(np.uint8)
+            min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
+            n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(
+                road_divided_zone, connectivity=8
+            )
+            cc_area = cc_stats[:, cv2.CC_STAT_AREA]
+            cc_area_m2 = cc_area.astype(np.float32) * float(m_per_px * m_per_px)
+            valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
+            yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
+
+            if yolo_detections:
+                _t_yolo_place = time.perf_counter()
+                for detection in yolo_detections:
+                    yolo_poly = np.rint(
+                        np.asarray(detection.get('points', ()), dtype=np.float32)
+                    ).astype(np.int32)
+                    if yolo_poly.shape != (4, 2):
+                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        continue
+                    yolo_viz_polys.append((yolo_poly.copy(), False))
+                    jx = int(round(float(detection['center'][0])))
+                    jy = int(round(float(detection['center'][1])))
+                    if not (0 <= jx < img_w and 0 <= jy < img_h):
+                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        continue
+                    zone_label = int(cc_labels[jy, jx]) if cc_labels.size else 0
+                    if zone_label > 0:
+                        yolo_templates_by_zone.setdefault(zone_label, []).append(
+                            {
+                                'center': np.asarray([jx, jy], dtype=np.float32),
+                                'points': yolo_poly.copy(),
+                                'class': int(detection['placement_class']),
+                                'heading': float(detection['heading']),
+                                'confidence': float(detection.get('confidence', 0.0)),
+                                'area_px': abs(float(cv2.contourArea(yolo_poly.astype(np.float32)))),
+                            }
+                        )
+                    if static_occ_mask[jy, jx]:
+                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        continue
+                    if not _poly_fits_with_integral(
+                        static_occ_mask,
+                        yolo_poly,
+                        scratch_mask=fit_scratch,
+                        occ_integral=static_occ_integral,
+                    ):
+                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        continue
+                    if not _poly_fits(building_spacing_mask, yolo_poly, fit_scratch):
+                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        continue
+
+                    heading = float(detection['heading'])
+                    placed_direct = False
+                    try_cls = int(detection['placement_class'])
+                    if (
+                        try_cls in BLD_PLACEMENT_CLASSES and
+                        not dynamic_center_block_masks[try_cls][jy, jx]
+                    ):
+                        final_h = heading
+                        o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
+                                                    lat_n, lat_s, lon_w, lon_e)
+                        if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
+                            file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                            continue
+                        pts_this.append((jx, jy, final_h, try_cls))
+                        variants = DEFAULT_FACADE_VARIANTS_BY_CLASS.get(
+                            try_cls, (DEFAULT_FACADE_PATHS[try_cls],)
+                        )
+                        facade_path = variants[0]
+                        footprint_poly = yolo_poly
+                        placed_facades.append((
+                            _pixel_ring_to_latlon(
+                                footprint_poly, img_w, img_h,
+                                lat_n, lat_s, lon_w, lon_e,
+                            ),
+                            facade_path,
+                            float(DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0)),
+                        ))
+                        placed_viz_polys.append((footprint_poly.copy(), try_cls))
+                        yolo_viz_polys[-1] = (yolo_poly.copy(), True)
+                        cv2.fillPoly(placed_yolo_mask, [np.int32(footprint_poly)], 1)
+                        _mark_poly(building_spacing_mask, footprint_poly)
+                        _mark_dynamic_center_blockers(
+                            dynamic_center_block_masks,
+                            jx,
+                            jy,
+                            heading,
+                            DEFAULT_FACADE_BOUNDS.get(try_cls),
+                            m_per_px,
+                            class_min_fit_inradius_m,
+                        )
+                        file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
+                        placed_direct = True
+                    if not placed_direct:
+                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                yolo_place_elapsed = time.perf_counter() - _t_yolo_place
+                timings['placement'] += yolo_place_elapsed
+                file_timings['fit_loop'] = file_timings.get('fit_loop', 0.0) + yolo_place_elapsed
 
             cell_h = img_h // grid_n
             cell_w = img_w // grid_n
@@ -4563,11 +5627,11 @@ def run(
                 hgrid = np.where(np.isnan(hgrid), fallback_heading, hgrid)
 
             _t = time.perf_counter()
-            min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
-            n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(bld_zone, connectivity=8)
-            cc_area = cc_stats[:, cv2.CC_STAT_AREA]
-            cc_area_m2 = cc_area.astype(np.float32) * float(m_per_px * m_per_px)
-            valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
+            fallback_zone = (
+                (road_divided_zone != 0) &
+                (building_spacing_mask == 0) &
+                (placed_yolo_mask == 0)
+            ).astype(np.uint8)
             if valid_labels.size:
                 if img is None:
                     _img_t = time.perf_counter()
@@ -4588,9 +5652,14 @@ def run(
             else:
                 label_class = np.zeros(n_cc, dtype=np.uint8)
             zone_class = label_class[cc_labels]
-            roof_evidence = _build_local_roof_evidence(bld_raw, bld_zone, m_per_px)
+            roof_evidence = _build_local_roof_evidence(bld_raw, fallback_zone, m_per_px)
 
             zone_heading = np.full(n_cc, np.nan, dtype=np.float32)
+            side_band_px = max(
+                8,
+                road_width_px + road_dilate_px + 2,
+                int(round(14.0 / max(m_per_px, 1e-6))),
+            )
             if valid_labels.size:
                 centroid_x = np.clip(
                     np.rint(cc_centroids[valid_labels, 0]).astype(np.int32), 0, img_w - 1
@@ -4602,11 +5671,6 @@ def run(
                     np.minimum(grid_n - 1, centroid_y // cell_h),
                     np.minimum(grid_n - 1, centroid_x // cell_w),
                 ]
-                side_band_px = max(
-                    8,
-                    road_width_px + road_dilate_px + 2,
-                    int(round(14.0 / max(m_per_px, 1e-6))),
-                )
                 side_heading, side_heading_counts = _component_side_touch_headings(
                     cc_labels,
                     cc_stats,
@@ -4620,6 +5684,8 @@ def run(
                     img_w,
                     band_px=side_band_px,
                     img=img,
+                    contact_px=road_width_px + road_dilate_px + 2,
+                    road_mask=road_mask,
                 )
                 side_valid = ~np.isnan(side_heading[valid_labels])
                 if np.any(side_valid):
@@ -4640,7 +5706,10 @@ def run(
                     img_h,
                     img_w,
                 )
-                sh_valid = ~np.isnan(sh_heading[valid_labels])
+                sh_valid = (
+                    ~np.isnan(sh_heading[valid_labels]) &
+                    np.isnan(side_heading[valid_labels])
+                )
                 if np.any(sh_valid):
                     sh_labels = valid_labels[sh_valid]
                     zone_heading[sh_labels] = sh_heading[sh_labels]
@@ -4648,17 +5717,26 @@ def run(
                     file_counts['simheaven_heading_objects'] = int(
                         np.sum(sh_heading_counts[sh_labels])
                     )
+            neighbor_yolo_templates_by_zone = _neighbor_yolo_templates_by_zone(
+                cc_labels,
+                cc_stats,
+                valid_labels,
+                yolo_templates_by_zone,
+                radius_px=max(side_band_px, int(round(spacing_m / max(m_per_px, 1e-6)))),
+            )
+            if neighbor_yolo_templates_by_zone:
+                file_counts['neighbor_yolo_template_zones'] = len(neighbor_yolo_templates_by_zone)
             cc_elapsed = _record_elapsed(timings, file_timings, 'connected_components', _t)
             timings['placement'] += cc_elapsed
 
             _t = time.perf_counter()
-            pts_this = []
             cand_x_parts = []
             cand_y_parts = []
             cand_cls_parts = []
             cand_label_parts = []
             n_initial_blocked = 0
             n_candidates_total = 0
+            candidate_available = fallback_zone != 0
             for target_cls in BLD_PLACEMENT_CLASSES:
                 spacing_passes = []
                 coarse_sp_px = spacing_px_by_class[target_cls]
@@ -4697,7 +5775,10 @@ def run(
                     )
                     cls_cand_x = np.clip(base_x + jitter[:, 0], 0, img_w - 1)
                     cls_cand_y = np.clip(base_y + jitter[:, 1], 0, img_h - 1)
-                    keep = zone_class[cls_cand_y, cls_cand_x] == target_cls
+                    keep = (
+                        candidate_available[cls_cand_y, cls_cand_x] &
+                        (zone_class[cls_cand_y, cls_cand_x] == target_cls)
+                    )
                     if residential_only is True:
                         keep &= residential_area_mask[cls_cand_y, cls_cand_x] != 0
                     elif residential_only is False:
@@ -4757,14 +5838,67 @@ def run(
                 )
 
             _t = time.perf_counter()
-            fit_scratch = np.zeros_like(static_occ_mask)
-            dynamic_center_block_masks = {
-                cls: np.zeros_like(static_occ_mask)
-                for cls in BLD_PLACEMENT_CLASSES
-            }
-            placed_viz_polys = []
 
-            def _heading_for_candidate(jx, jy, zone_label):
+            def _zone_yolo_template(jx, jy, zone_label):
+                zone_templates = yolo_templates_by_zone.get(int(zone_label), ())
+                if not zone_templates:
+                    return None
+                return min(
+                    zone_templates,
+                    key=lambda item: (
+                        float(item['center'][0] - jx) ** 2 +
+                        float(item['center'][1] - jy) ** 2,
+                        -float(item.get('confidence', 0.0)),
+                    ),
+                )
+
+            def _dominant_zone_yolo_template(zone_label):
+                zone_templates = yolo_templates_by_zone.get(int(zone_label), ())
+                if not zone_templates:
+                    return None
+                return _consensus_yolo_template(
+                    zone_templates,
+                    heading_tol_deg=yolo_template_heading_tol_deg,
+                    shape_rel_tol=yolo_template_shape_rel_tol,
+                    shape_abs_tol_px=yolo_template_shape_abs_tol_px,
+                )
+
+            def _zone_road_heading(zone_label):
+                zone_label = int(zone_label)
+                if (
+                    0 <= zone_label < zone_heading.shape[0] and
+                    not np.isnan(zone_heading[zone_label])
+                ):
+                    return float(zone_heading[zone_label])
+                if 0 <= zone_label < cc_centroids.shape[0]:
+                    cx = int(np.clip(round(float(cc_centroids[zone_label, 0])), 0, img_w - 1))
+                    cy = int(np.clip(round(float(cc_centroids[zone_label, 1])), 0, img_h - 1))
+                    return float(hgrid[
+                        min(grid_n - 1, cy // cell_h),
+                        min(grid_n - 1, cx // cell_w),
+                    ])
+                return 0.0
+
+            def _dominant_neighbor_yolo_template(zone_label):
+                zone_templates = neighbor_yolo_templates_by_zone.get(int(zone_label), ())
+                if not zone_templates:
+                    return None
+                consensus = _consensus_yolo_template(
+                    zone_templates,
+                    heading_tol_deg=yolo_template_heading_tol_deg,
+                    shape_rel_tol=yolo_template_shape_rel_tol,
+                    shape_abs_tol_px=yolo_template_shape_abs_tol_px,
+                )
+                if consensus is None:
+                    return None
+                retargeted = _retarget_yolo_template_heading(
+                    consensus, _zone_road_heading(zone_label)
+                )
+                if retargeted is not None:
+                    retargeted['template_source'] = 'neighbor_zone'
+                return retargeted
+
+            def _old_heading_for_candidate(jx, jy, zone_label):
                 roof_h = _roof_heading_for_candidate(roof_evidence, jx, jy, m_per_px)
                 if not np.isnan(roof_h):
                     file_counts['local_roof_heading'] = (
@@ -4782,6 +5916,305 @@ def run(
                 ):
                     return float(zone_heading[zone_label])
                 return local_h
+
+            def _heading_for_candidate(jx, jy, zone_label):
+                zone_template = _zone_yolo_template(jx, jy, zone_label)
+                if zone_template is not None:
+                    file_counts['yolo_heading'] = (
+                        file_counts.get('yolo_heading', 0) + 1
+                    )
+                    return float(zone_template['heading'])
+                if int(zone_label) not in yolo_templates_by_zone:
+                    file_counts['non_obb_zone_road_heading'] = (
+                        file_counts.get('non_obb_zone_road_heading', 0) + 1
+                    )
+                    return _zone_road_heading(zone_label)
+                return _old_heading_for_candidate(jx, jy, zone_label)
+
+            def _try_place_yolo_template(
+                jx, jy, zone_label, count_key, template=None, use_center_blockers=True
+            ):
+                best = template if template is not None else _zone_yolo_template(jx, jy, zone_label)
+                if best is None:
+                    best = _dominant_neighbor_yolo_template(zone_label)
+                if best is None:
+                    return False
+                try_cls = int(best['class'])
+                final_h = float(best['heading'])
+                if try_cls not in BLD_PLACEMENT_CLASSES:
+                    return False
+                if use_center_blockers and dynamic_center_block_masks[try_cls][jy, jx]:
+                    return False
+                footprint_poly, footprint_scales = _largest_fitting_yolo_template_poly(
+                    best,
+                    jx,
+                    jy,
+                    img_w,
+                    img_h,
+                    static_occ_mask,
+                    building_spacing_mask,
+                    fit_scratch,
+                    static_occ_integral=static_occ_integral,
+                )
+                if footprint_poly is None:
+                    file_counts['yolo_template_blocked'] = (
+                        file_counts.get('yolo_template_blocked', 0) + 1
+                    )
+                    return False
+                long_scale, short_scale = footprint_scales
+                if long_scale < 0.999 or short_scale < 0.999:
+                    file_counts['yolo_template_shrunk'] = (
+                        file_counts.get('yolo_template_shrunk', 0) + 1
+                    )
+                    file_counts['yolo_template_long_scale_sum_x1000'] = (
+                        file_counts.get('yolo_template_long_scale_sum_x1000', 0) +
+                        int(round(float(long_scale) * 1000))
+                    )
+                    file_counts['yolo_template_short_scale_sum_x1000'] = (
+                        file_counts.get('yolo_template_short_scale_sum_x1000', 0) +
+                        int(round(float(short_scale) * 1000))
+                    )
+
+                o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
+                                            lat_n, lat_s, lon_w, lon_e)
+                if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
+                    return False
+
+                variants = DEFAULT_FACADE_VARIANTS_BY_CLASS.get(
+                    try_cls, (DEFAULT_FACADE_PATHS[try_cls],)
+                )
+                facade_path = variants[0]
+                pts_this.append((jx, jy, final_h, try_cls))
+                placed_facades.append((
+                    _pixel_ring_to_latlon(
+                        footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+                    ),
+                    facade_path,
+                    float(DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0)),
+                ))
+                placed_viz_polys.append((footprint_poly.copy(), try_cls))
+                _mark_poly(building_spacing_mask, footprint_poly)
+                if use_center_blockers:
+                    _mark_dynamic_center_blockers(
+                        dynamic_center_block_masks,
+                        jx,
+                        jy,
+                        final_h,
+                        DEFAULT_FACADE_BOUNDS.get(try_cls),
+                        m_per_px,
+                        class_min_fit_inradius_m,
+                    )
+                actual_count_key = count_key
+                if (
+                    count_key == 'yolo_template_placed' and
+                    best.get('template_source') == 'neighbor_zone'
+                ):
+                    actual_count_key = 'neighbor_yolo_template_placed'
+                file_counts[actual_count_key] = file_counts.get(actual_count_key, 0) + 1
+                return True
+
+            def _tile_same_zone_yolo_templates():
+                if not yolo_templates_by_zone:
+                    return set()
+                tiled_labels = set()
+                gap_px = int(round(yolo_template_gap_m / max(m_per_px, 1e-6)))
+                gap_px = max(0, gap_px)
+                for zone_label in sorted(int(label) for label in yolo_templates_by_zone):
+                    if zone_label <= 0 or zone_label >= cc_stats.shape[0]:
+                        continue
+                    template = _dominant_zone_yolo_template(zone_label)
+                    if template is None:
+                        continue
+                    pts = np.asarray(template['points'], dtype=np.float32)
+                    if pts.shape != (4, 2):
+                        continue
+                    metrics = _yolo_template_metrics(template)
+                    if metrics is None:
+                        continue
+                    long_len = float(metrics['long_len'])
+                    short_len = float(metrics['short_len'])
+                    img_angle = math.radians(90.0 - float(template['heading']))
+                    u_axis = np.asarray(
+                        [math.cos(img_angle), math.sin(img_angle)], dtype=np.float32
+                    )
+                    v_axis = np.asarray([-u_axis[1], u_axis[0]], dtype=np.float32)
+                    step_u = max(3.0, long_len + float(gap_px))
+                    step_v = max(3.0, short_len + float(gap_px))
+                    x0 = int(cc_stats[zone_label, cv2.CC_STAT_LEFT])
+                    y0 = int(cc_stats[zone_label, cv2.CC_STAT_TOP])
+                    zone_w = int(cc_stats[zone_label, cv2.CC_STAT_WIDTH])
+                    zone_h = int(cc_stats[zone_label, cv2.CC_STAT_HEIGHT])
+                    if zone_w <= 0 or zone_h <= 0:
+                        continue
+                    x1 = min(img_w, x0 + zone_w)
+                    y1 = min(img_h, y0 + zone_h)
+                    anchor = np.asarray(template['center'], dtype=np.float32)
+                    bbox_corners = np.asarray(
+                        ((x0, y0), (x1 - 1, y0), (x1 - 1, y1 - 1), (x0, y1 - 1)),
+                        dtype=np.float32,
+                    )
+                    rel_corners = bbox_corners - anchor
+                    proj_u = rel_corners @ u_axis
+                    proj_v = rel_corners @ v_axis
+                    iu0 = int(math.floor(float(proj_u.min()) / step_u)) - 1
+                    iu1 = int(math.ceil(float(proj_u.max()) / step_u)) + 1
+                    iv0 = int(math.floor(float(proj_v.min()) / step_v)) - 1
+                    iv1 = int(math.ceil(float(proj_v.max()) / step_v)) + 1
+
+                    attempted = 0
+                    placed = 0
+                    stop_zone = False
+                    for iv in range(iv0, iv1 + 1):
+                        if stop_zone:
+                            break
+                        for iu in range(iu0, iu1 + 1):
+                            if attempted >= yolo_template_max_candidates_per_zone:
+                                stop_zone = True
+                                break
+                            center = anchor + u_axis * (iu * step_u) + v_axis * (iv * step_v)
+                            jx_t = int(round(float(center[0])))
+                            jy_t = int(round(float(center[1])))
+                            if not (0 <= jx_t < img_w and 0 <= jy_t < img_h):
+                                continue
+                            if cc_labels[jy_t, jx_t] != zone_label:
+                                continue
+                            if fallback_zone[jy_t, jx_t] == 0:
+                                continue
+                            attempted += 1
+                            if _try_place_yolo_template(
+                                int(jx_t),
+                                int(jy_t),
+                                zone_label,
+                                'same_zone_yolo_template_placed',
+                                template=template,
+                                use_center_blockers=False,
+                            ):
+                                placed += 1
+                    if attempted:
+                        file_counts['same_zone_yolo_template_candidates'] = (
+                            file_counts.get('same_zone_yolo_template_candidates', 0) + attempted
+                        )
+                        file_counts['same_zone_yolo_heading_votes'] = (
+                            file_counts.get('same_zone_yolo_heading_votes', 0) +
+                            int(template.get('consensus_heading_votes', 1))
+                        )
+                        file_counts['same_zone_yolo_shape_votes'] = (
+                            file_counts.get('same_zone_yolo_shape_votes', 0) +
+                            int(template.get('consensus_shape_votes', 1))
+                        )
+                    if placed:
+                        tiled_labels.add(zone_label)
+                return tiled_labels
+
+            def _tile_neighbor_zone_yolo_templates():
+                if not neighbor_yolo_templates_by_zone:
+                    return set()
+                tiled_labels = set()
+                gap_px = int(round(yolo_template_gap_m / max(m_per_px, 1e-6)))
+                gap_px = max(0, gap_px)
+                for zone_label in sorted(int(label) for label in neighbor_yolo_templates_by_zone):
+                    if zone_label <= 0 or zone_label >= cc_stats.shape[0]:
+                        continue
+                    if zone_label in yolo_templates_by_zone:
+                        continue
+                    template = _dominant_neighbor_yolo_template(zone_label)
+                    if template is None:
+                        continue
+                    pts = np.asarray(template['points'], dtype=np.float32)
+                    if pts.shape != (4, 2):
+                        continue
+                    metrics = _yolo_template_metrics(template)
+                    if metrics is None:
+                        continue
+                    long_len = float(metrics['long_len'])
+                    short_len = float(metrics['short_len'])
+                    img_angle = math.radians(90.0 - float(template['heading']))
+                    u_axis = np.asarray(
+                        [math.cos(img_angle), math.sin(img_angle)], dtype=np.float32
+                    )
+                    v_axis = np.asarray([-u_axis[1], u_axis[0]], dtype=np.float32)
+                    step_u = max(3.0, long_len + float(gap_px))
+                    step_v = max(3.0, short_len + float(gap_px))
+                    x0 = int(cc_stats[zone_label, cv2.CC_STAT_LEFT])
+                    y0 = int(cc_stats[zone_label, cv2.CC_STAT_TOP])
+                    zone_w = int(cc_stats[zone_label, cv2.CC_STAT_WIDTH])
+                    zone_h = int(cc_stats[zone_label, cv2.CC_STAT_HEIGHT])
+                    if zone_w <= 0 or zone_h <= 0:
+                        continue
+                    x1 = min(img_w, x0 + zone_w)
+                    y1 = min(img_h, y0 + zone_h)
+                    anchor = np.asarray(template['center'], dtype=np.float32)
+                    bbox_corners = np.asarray(
+                        ((x0, y0), (x1 - 1, y0), (x1 - 1, y1 - 1), (x0, y1 - 1)),
+                        dtype=np.float32,
+                    )
+                    rel_corners = bbox_corners - anchor
+                    proj_u = rel_corners @ u_axis
+                    proj_v = rel_corners @ v_axis
+                    iu0 = int(math.floor(float(proj_u.min()) / step_u)) - 1
+                    iu1 = int(math.ceil(float(proj_u.max()) / step_u)) + 1
+                    iv0 = int(math.floor(float(proj_v.min()) / step_v)) - 1
+                    iv1 = int(math.ceil(float(proj_v.max()) / step_v)) + 1
+
+                    attempted = 0
+                    placed = 0
+                    stop_zone = False
+                    for iv in range(iv0, iv1 + 1):
+                        if stop_zone:
+                            break
+                        for iu in range(iu0, iu1 + 1):
+                            if attempted >= yolo_template_max_candidates_per_zone:
+                                stop_zone = True
+                                break
+                            center = anchor + u_axis * (iu * step_u) + v_axis * (iv * step_v)
+                            jx_t = int(round(float(center[0])))
+                            jy_t = int(round(float(center[1])))
+                            if not (0 <= jx_t < img_w and 0 <= jy_t < img_h):
+                                continue
+                            if cc_labels[jy_t, jx_t] != zone_label:
+                                continue
+                            if fallback_zone[jy_t, jx_t] == 0:
+                                continue
+                            attempted += 1
+                            if _try_place_yolo_template(
+                                int(jx_t),
+                                int(jy_t),
+                                zone_label,
+                                'neighbor_zone_yolo_template_placed',
+                                template=template,
+                                use_center_blockers=False,
+                            ):
+                                placed += 1
+                    if attempted:
+                        file_counts['neighbor_yolo_template_candidates'] = (
+                            file_counts.get('neighbor_yolo_template_candidates', 0) + attempted
+                        )
+                        file_counts['neighbor_yolo_heading_votes'] = (
+                            file_counts.get('neighbor_yolo_heading_votes', 0) +
+                            int(template.get('consensus_heading_votes', 1))
+                        )
+                        file_counts['neighbor_yolo_shape_votes'] = (
+                            file_counts.get('neighbor_yolo_shape_votes', 0) +
+                            int(template.get('consensus_shape_votes', 1))
+                        )
+                    if placed:
+                        tiled_labels.add(zone_label)
+                return tiled_labels
+
+            tiled_yolo_zone_labels = _tile_same_zone_yolo_templates()
+            tiled_yolo_zone_labels.update(_tile_neighbor_zone_yolo_templates())
+            if cand_x.size and tiled_yolo_zone_labels:
+                keep_non_templated = ~np.isin(
+                    cand_labels,
+                    np.fromiter(tiled_yolo_zone_labels, dtype=cand_labels.dtype),
+                )
+                file_counts['procedural_yolo_zone_skipped'] = int(
+                    cand_x.size - np.count_nonzero(keep_non_templated)
+                )
+                cand_x = cand_x[keep_non_templated]
+                cand_y = cand_y[keep_non_templated]
+                cand_cls = cand_cls[keep_non_templated]
+                cand_labels = cand_labels[keep_non_templated]
 
             for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
                 jx = int(jx)
@@ -4807,6 +6240,8 @@ def run(
                     residential_area_mask is None or
                     bool(residential_area_mask[jy, jx])
                 )
+                if _try_place_yolo_template(jx, jy, zone_label, 'yolo_template_placed'):
+                    continue
                 for try_cls in (zone_cls,):
                     pool = asset_pools[try_cls]
                     if not pool:
@@ -4822,6 +6257,7 @@ def run(
                         static_occ_integral=static_occ_integral,
                         fit_cache_enabled=not strict_fit,
                         retry_context=asset_retry_context.get(try_cls),
+                        prefer_largest_fit=(zone_label not in yolo_templates_by_zone),
                     )
                     n_unknown_skipped += skipped
                     if asset is None:
@@ -4855,7 +6291,7 @@ def run(
 
             if smart_gap_fill:
                 leftover_mask = (
-                    (bld_zone != 0) &
+                    (road_divided_zone != 0) &
                     (static_occ_mask == 0) &
                     (building_spacing_mask == 0)
                 ).astype(np.uint8)
@@ -4901,6 +6337,9 @@ def run(
                         residential_area_mask is None or
                         bool(residential_area_mask[jy, jx])
                     )
+                    if _try_place_yolo_template(jx, jy, zone_label, 'gap_yolo_template_placed'):
+                        placed_gap = True
+                        continue
                     for try_cls in _gap_fill_class_sequence(zone_cls):
                         if dynamic_center_block_masks[try_cls][jy, jx]:
                             dynamic_blocked = True
@@ -4919,6 +6358,7 @@ def run(
                             static_occ_integral=static_occ_integral,
                             fit_cache_enabled=not strict_fit,
                             retry_context=asset_retry_context.get(try_cls),
+                            prefer_largest_fit=(zone_label not in yolo_templates_by_zone),
                         )
                         n_unknown_skipped += skipped
                         if asset is None:
@@ -5033,7 +6473,7 @@ def run(
                 _blend_viz_mask(poly_mask, (120, 0, 255), 0.75)
                 _blend_viz_mask(existing_bld_mask, (0, 0, 0), 0.70)
                 _blend_viz_mask(sh_bld_mask, (255, 255, 255), 0.65)
-                pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil)
+                pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil, "RGBA")
                 dot_colours = {
                     BLD_CLASS_TINY_RESIDENTIAL: (80, 220, 80),
                     BLD_CLASS_SMALL_RESIDENTIAL: (150, 230, 60),
@@ -5045,6 +6485,16 @@ def run(
                     BLD_CLASS_EXTRA_LARGE: (135, 90, 255),
                 }
                 footprint_fill = (255, 255, 255)
+                yolo_line_w = max(1, int(round(TILE_VIZ / 2048)))
+                for poly, placed in yolo_viz_polys:
+                    pts = [
+                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        fill_alpha = 34 if placed else 18
+                        draw.polygon(pts, fill=(40, 180, 255, fill_alpha), outline=(40, 180, 255, 230))
+                        draw.line(pts + [pts[0]], fill=(255, 245, 80, 235), width=yolo_line_w)
                 for poly, cls2 in placed_viz_polys:
                     pts = [
                         (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
@@ -5065,6 +6515,17 @@ def run(
                 for px2, py2, _, cls2 in pts_this:
                     sx, sy = int(px2*scale), int(py2*scale)
                     draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
+                for poly, placed in yolo_viz_polys:
+                    pts = [
+                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        draw.line(
+                            pts + [pts[0]],
+                            fill=(255, 245, 80, 255 if placed else 190),
+                            width=yolo_line_w,
+                        )
                 composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
 
                 if footprint_composite is not None:
@@ -5075,6 +6536,19 @@ def run(
                     ).convert('RGBA')
                     fp_layer = Image.new('RGBA', (TILE_VIZ, TILE_VIZ), (0, 0, 0, 0))
                     fp_draw = ImageDraw.Draw(fp_layer)
+                    yolo_line_w = max(1, int(round(TILE_VIZ / 2048)))
+                    for poly, placed in yolo_viz_polys:
+                        pts = [
+                            (
+                                int(round(float(px2) * scale)),
+                                int(round(float(py2) * scale)),
+                            )
+                            for px2, py2 in poly
+                        ]
+                        if len(pts) >= 3:
+                            alpha = 44 if placed else 24
+                            fp_draw.polygon(pts, fill=(40, 180, 255, alpha), outline=(40, 180, 255, 230))
+                            fp_draw.line(pts + [pts[0]], fill=(255, 245, 80, 240), width=yolo_line_w)
                     for poly, cls2 in placed_viz_polys:
                         pts = [
                             (
@@ -5086,6 +6560,20 @@ def run(
                         if len(pts) >= 3:
                             outline = dot_colours.get(cls2, (0, 220, 0))
                             fp_draw.polygon(pts, fill=(245, 242, 232, 170), outline=outline + (255,))
+                    for poly, placed in yolo_viz_polys:
+                        pts = [
+                            (
+                                int(round(float(px2) * scale)),
+                                int(round(float(py2) * scale)),
+                            )
+                            for px2, py2 in poly
+                        ]
+                        if len(pts) >= 3:
+                            fp_draw.line(
+                                pts + [pts[0]],
+                                fill=(255, 245, 80, 255 if placed else 190),
+                                width=yolo_line_w,
+                            )
                     fp_img = Image.alpha_composite(fp_base, fp_layer).convert('RGB')
                     footprint_composite[
                         row*TILE_VIZ:(row+1)*TILE_VIZ,
@@ -5187,6 +6675,7 @@ def run(
         f"simHeaven={timings['simheaven_parse']:.1f}s  "
         f"cache_load={timings['cache_load']:.1f}s  "
         f"dds_load={timings['dds_load']:.1f}s  "
+        f"yolo={timings['yolo_inference']:.1f}s  "
         f"inference={timings['inference']:.1f}s  "
         f"road_cache={timings['road_cache']:.1f}s  "
         f"road_raster={timings['road_raster']:.1f}s  "
@@ -5261,6 +6750,12 @@ def main():
         grid_n          = args.grid_n,
         osm_roads_path  = args.osm_roads,
         custom_scenery_dir = args.custom_scenery_dir,
+        yolo_enabled = not args.no_yolo,
+        yolo_checkpoint = args.yolo_checkpoint,
+        yolo_conf = args.yolo_conf,
+        yolo_iou = args.yolo_iou,
+        yolo_stride = args.yolo_stride,
+        yolo_max_det = args.yolo_max_det,
     )
 
 

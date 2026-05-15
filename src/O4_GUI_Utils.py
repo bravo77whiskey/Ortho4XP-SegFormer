@@ -739,6 +739,12 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
         SFR.sfr_bld_smart_gap_fill = tile.sfr_bld_smart_gap_fill
         SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
+        SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
+        SFR.sfr_bld_yolo_checkpoint = tile.sfr_bld_yolo_checkpoint
+        SFR.sfr_bld_yolo_conf = tile.sfr_bld_yolo_conf
+        SFR.sfr_bld_yolo_iou = tile.sfr_bld_yolo_iou
+        SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
+        SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
         SFR.sfr_patch_size      = tile.sfr_patch_size
         SFR.sfr_overlap         = tile.sfr_overlap
         SFR.sfr_batch_size      = tile.sfr_batch_size

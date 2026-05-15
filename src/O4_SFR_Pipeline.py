@@ -118,6 +118,12 @@ sfr_bld_min_zone_m2   = 200.0
 sfr_bld_grid_n        = 16
 sfr_bld_smart_gap_fill = True
 sfr_bld_disable_cache = False
+sfr_bld_yolo_enabled = True
+sfr_bld_yolo_checkpoint = r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
+sfr_bld_yolo_conf = 0.18
+sfr_bld_yolo_iou = 0.5
+sfr_bld_yolo_stride = 512
+sfr_bld_yolo_max_det = 1000
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -273,7 +279,7 @@ def _deps_ready():
         return False
     try:
         ret = subprocess.call(
-            [_venv_python(), '-c', 'import torch, cv2, numpy, PIL, shapely, transformers'],
+            [_venv_python(), '-c', 'import torch, cv2, numpy, PIL, shapely, transformers, ultralytics'],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             **_no_window(),
@@ -412,6 +418,12 @@ def process_bld_tile(lat, lon, build_dir):
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
         f"    dsftool_path             = {dsftool!r},\n"
         f"    skip_osm_excl_download   = False,\n"
+        f"    yolo_enabled             = {sfr_bld_yolo_enabled!r},\n"
+        f"    yolo_checkpoint          = {sfr_bld_yolo_checkpoint!r},\n"
+        f"    yolo_conf                = {sfr_bld_yolo_conf!r},\n"
+        f"    yolo_iou                 = {sfr_bld_yolo_iou!r},\n"
+        f"    yolo_stride              = {sfr_bld_yolo_stride!r},\n"
+        f"    yolo_max_det             = {sfr_bld_yolo_max_det!r},\n"
         f")\n"
     )
     ret = _run_venv(code)
@@ -589,6 +601,7 @@ def setup_sfr_models():
         ("shapely",                "shapely"),
         ("transformers>=4.30.0",   "transformers"),
         ("huggingface-hub>=1.0.0", "huggingface-hub"),
+        ("ultralytics>=8.0.0",     "ultralytics"),
     ]:
         print(f"[SFR Setup] Installing {label} into .venv …")
         try:

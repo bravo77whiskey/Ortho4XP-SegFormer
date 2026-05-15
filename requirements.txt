@@ -20,4 +20,5 @@ torchvision>=0.15.0
 transformers>=4.30.0
 segmentation-models-pytorch>=0.3.0
 huggingface-hub>=1.0.0
+ultralytics>=8.0.0
 Wand>=0.6.0

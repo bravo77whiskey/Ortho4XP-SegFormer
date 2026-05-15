@@ -506,6 +506,42 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_no_cache",
         "hint": "Disable persistent per-DDS building cache files for this tile. When enabled, building cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
+    "sfr_bld_yolo_enabled": {
+        "type": bool,
+        "default": True,
+        "short_name": "bld_yolo",
+        "hint": "Use the YOLO OBB building-placement model as the primary source of building object placements before filling remaining SegFormer building-zone gaps.",
+    },
+    "sfr_bld_yolo_checkpoint": {
+        "type": str,
+        "default": r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt",
+        "short_name": "bld_yolo_ckpt",
+        "hint": "YOLO OBB checkpoint used for primary building placements.",
+    },
+    "sfr_bld_yolo_conf": {
+        "type": float,
+        "default": 0.18,
+        "short_name": "bld_yolo_conf",
+        "hint": "YOLO OBB confidence threshold for direct building placements.",
+    },
+    "sfr_bld_yolo_iou": {
+        "type": float,
+        "default": 0.5,
+        "short_name": "bld_yolo_iou",
+        "hint": "YOLO OBB NMS IoU threshold for direct building placements.",
+    },
+    "sfr_bld_yolo_stride": {
+        "type": int,
+        "default": 512,
+        "short_name": "bld_yolo_stride",
+        "hint": "YOLO OBB inference crop stride in pixels.",
+    },
+    "sfr_bld_yolo_max_det": {
+        "type": int,
+        "default": 1000,
+        "short_name": "bld_yolo_max",
+        "hint": "YOLO OBB maximum detections per inference crop.",
+    },
     # Other
     "custom_dem": {
         "type": str,
@@ -637,6 +673,12 @@ list_sfr_bld_vars = [
     "sfr_bld_grid_n",
     "sfr_bld_smart_gap_fill",
     "sfr_bld_disable_cache",
+    "sfr_bld_yolo_enabled",
+    "sfr_bld_yolo_checkpoint",
+    "sfr_bld_yolo_conf",
+    "sfr_bld_yolo_iou",
+    "sfr_bld_yolo_stride",
+    "sfr_bld_yolo_max_det",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars
