@@ -498,7 +498,7 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "bld_gap_fill",
-        "hint": "Run a second randomized building pass that fills leftover narrow spaces with same-class assets while preserving building-to-building spacing.",
+        "hint": "Allow inferred building fill beyond direct YOLO OBB detections, including YOLO-template clones and SegFormer/procedural gap placements. When disabled, only direct YOLO footprints are placed.",
     },
     "sfr_bld_disable_cache": {
         "type": bool,

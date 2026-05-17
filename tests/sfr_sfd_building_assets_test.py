@@ -341,7 +341,8 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertNotIn(1, neighbors)
         self.assertNotIn(3, neighbors)
-        self.assertEqual(neighbors[2], [east_template])
+        self.assertEqual(len(neighbors[2]), 1)
+        self.assertIs(neighbors[2][0], east_template)
 
     def test_nearest_obb_zone_heading_ignores_class(self):
         stats = np.zeros((4, 5), dtype=np.int32)
@@ -438,6 +439,73 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
     def test_smart_gap_fill_is_retired(self):
         self.assertFalse(BLD.BLD_SMART_GAP_FILL_ENABLED)
+
+    def test_bld_gap_fill_false_disables_inferred_fill_only(self):
+        allow_inferred_fill, run_legacy_gap_fill = BLD._building_fill_modes(False)
+
+        self.assertFalse(allow_inferred_fill)
+        self.assertFalse(run_legacy_gap_fill)
+
+        static_occ_mask = np.zeros((32, 32), dtype=np.uint8)
+        spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+        yolo_poly = np.array(
+            [[10, 10], [20, 10], [20, 20], [10, 20]],
+            dtype=np.int32,
+        )
+
+        self.assertTrue(
+            BLD._direct_yolo_poly_fits(
+                static_occ_mask,
+                spacing_mask,
+                yolo_poly,
+                scratch_mask=scratch,
+                static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+            )
+        )
+
+    def test_bld_gap_fill_true_allows_inferred_fill_but_not_legacy_gap_pass(self):
+        allow_inferred_fill, run_legacy_gap_fill = BLD._building_fill_modes(True)
+
+        self.assertTrue(allow_inferred_fill)
+        self.assertEqual(run_legacy_gap_fill, BLD.BLD_SMART_GAP_FILL_ENABLED)
+        self.assertFalse(run_legacy_gap_fill)
+
+    def test_direct_yolo_footprint_rejects_simheaven_object_overlap(self):
+        simheaven_objects = {
+            "lat": np.array([0.5], dtype=np.float32),
+            "lon": np.array([0.5], dtype=np.float32),
+            "heading": np.array([0.0], dtype=np.float32),
+            "w_m": np.array([80.0], dtype=np.float32),
+            "h_m": np.array([80.0], dtype=np.float32),
+        }
+        static_occ_mask = BLD._rasterize_simheaven_objects(
+            simheaven_objects,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            m_per_px=2.0,
+            margin_m=0.0,
+        )
+        spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+        yolo_poly = np.array(
+            [[40, 40], [60, 40], [60, 60], [40, 60]],
+            dtype=np.int32,
+        )
+
+        self.assertFalse(
+            BLD._direct_yolo_poly_fits(
+                static_occ_mask,
+                spacing_mask,
+                yolo_poly,
+                scratch_mask=scratch,
+                static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+            )
+        )
 
     def test_building_zone_cell_mask_tracks_only_occupied_grid_cells(self):
         bld_zone = np.zeros((8, 8), dtype=np.uint8)

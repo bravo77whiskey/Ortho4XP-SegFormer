@@ -2170,6 +2170,13 @@ YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
 YOLO_TEMPLATE_SHAPE_REL_TOL = 0.20
 YOLO_TEMPLATE_SHAPE_ABS_TOL_PX = 4.0
 
+
+def _building_fill_modes(smart_gap_fill):
+    allow_inferred_fill = bool(smart_gap_fill)
+    run_legacy_gap_fill = bool(allow_inferred_fill and BLD_SMART_GAP_FILL_ENABLED)
+    return allow_inferred_fill, run_legacy_gap_fill
+
+
 # Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
 # don't get an overly aggressive street buffer.
 ROAD_CENTERLINE_WIDTH_M = 3.0
@@ -3933,12 +3940,21 @@ def _neighbor_yolo_templates_by_zone(cc_labels, cc_stats, valid_labels,
         ey0 = y0 - radius_px
         ex1 = x0 + zone_w + radius_px
         ey1 = y0 + zone_h + radius_px
-        neighbor_templates = []
+        zone_cx = x0 + zone_w * 0.5
+        zone_cy = y0 + zone_h * 0.5
+        best_key = None
+        best_templates = ()
         for sl, (sx0, sy0, sx1, sy1) in src_bboxes.items():
             if sx1 >= ex0 and sx0 <= ex1 and sy1 >= ey0 and sy0 <= ey1:
-                neighbor_templates.extend(yolo_templates_by_zone.get(sl, ()))
-        if neighbor_templates:
-            result[label] = neighbor_templates
+                src_cx = (sx0 + sx1) * 0.5
+                src_cy = (sy0 + sy1) * 0.5
+                dist2 = (src_cx - zone_cx) ** 2 + (src_cy - zone_cy) ** 2
+                key = (float(dist2), int(sl))
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_templates = yolo_templates_by_zone.get(sl, ())
+        if best_templates:
+            result[label] = list(best_templates)
     return result
 
 
@@ -4322,6 +4338,25 @@ def _orientation_angles_for_bounds(bounds_m, desired_long_axis_heading):
 def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray | None = None) -> bool:
     """Return True if polygon pts have no overlap with any set pixel in occ_mask."""
     return _poly_fits_with_integral(occ_mask, pts, scratch_mask=scratch_mask)
+
+
+def _direct_yolo_poly_fits(
+    static_occ_mask: np.ndarray,
+    building_spacing_mask: np.ndarray,
+    yolo_poly: np.ndarray,
+    scratch_mask: np.ndarray | None = None,
+    static_occ_integral: np.ndarray | None = None,
+) -> bool:
+    """Return True when a direct YOLO footprint clears static and dynamic blockers."""
+    return (
+        _poly_fits_with_integral(
+            static_occ_mask,
+            yolo_poly,
+            scratch_mask=scratch_mask,
+            occ_integral=static_occ_integral,
+        ) and
+        _poly_fits(building_spacing_mask, yolo_poly, scratch_mask)
+    )
 
 
 def _integral_bbox_sum(integral: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> int:
@@ -4886,9 +4921,7 @@ def run(
         smart_gap_fill = _env_flag("O4_SFR_BLD_SMART_GAP_FILL")
     else:
         smart_gap_fill = bool(smart_gap_fill)
-    # Keep the public/config knob accepted for compatibility, but do not run
-    # the retired second placement pass anymore.
-    smart_gap_fill = bool(smart_gap_fill and BLD_SMART_GAP_FILL_ENABLED)
+    allow_inferred_fill, run_legacy_gap_fill = _building_fill_modes(smart_gap_fill)
     footprint_pad_m = max(0.0, _env_float("O4_SFR_BLD_FOOTPRINT_PAD_M", FOOTPRINT_PAD_M))
     disable_center_blockers = _env_flag("O4_SFR_BLD_DISABLE_CENTER_BLOCKERS")
     max_gap_candidates_per_dds = max(
@@ -5124,7 +5157,8 @@ def run(
         footprint_pad_m,
         mark_pad_m,
         smallest_asset_only,
-        smart_gap_fill,
+        allow_inferred_fill,
+        run_legacy_gap_fill,
         disable_center_blockers,
         max_gap_candidates_per_dds,
         max_gap_candidates_per_component,
@@ -5647,15 +5681,13 @@ def run(
                     if static_occ_mask[jy, jx]:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
-                    if not _poly_fits_with_integral(
+                    if not _direct_yolo_poly_fits(
                         static_occ_mask,
+                        building_spacing_mask,
                         yolo_poly,
                         scratch_mask=fit_scratch,
-                        occ_integral=static_occ_integral,
+                        static_occ_integral=static_occ_integral,
                     ):
-                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
-                        continue
-                    if not _poly_fits(building_spacing_mask, yolo_poly, fit_scratch):
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
 
@@ -5933,6 +5965,13 @@ def run(
                 cand_x = np.empty(0, dtype=np.int32)
                 cand_y = np.empty(0, dtype=np.int32)
                 cand_cls = np.empty(0, dtype=np.uint8)
+            if not allow_inferred_fill:
+                if cand_x.size:
+                    file_counts['inferred_fill_disabled_candidates'] = int(cand_x.size)
+                cand_x = np.empty(0, dtype=np.int32)
+                cand_y = np.empty(0, dtype=np.int32)
+                cand_cls = np.empty(0, dtype=np.uint8)
+                cand_labels = np.empty(0, dtype=np.int32)
             candidate_elapsed = _record_elapsed(timings, file_timings, 'candidate_grid', _t)
             timings['placement'] += candidate_elapsed
             if detail_timing:
@@ -6317,9 +6356,11 @@ def run(
                         tiled_labels.add(zone_label)
                 return tiled_labels
 
-            tiled_yolo_zone_labels = _tile_same_zone_yolo_templates()
-            tiled_yolo_zone_labels.update(_tile_neighbor_zone_yolo_templates())
-            if cand_x.size and tiled_yolo_zone_labels:
+            tiled_yolo_zone_labels = set()
+            if allow_inferred_fill:
+                tiled_yolo_zone_labels = _tile_same_zone_yolo_templates()
+                tiled_yolo_zone_labels.update(_tile_neighbor_zone_yolo_templates())
+            if allow_inferred_fill and cand_x.size and tiled_yolo_zone_labels:
                 keep_non_templated = ~np.isin(
                     cand_labels,
                     np.fromiter(tiled_yolo_zone_labels, dtype=cand_labels.dtype),
@@ -6406,7 +6447,7 @@ def run(
                     )
                     break
 
-            if smart_gap_fill:
+            if run_legacy_gap_fill:
                 leftover_mask = (
                     (road_divided_zone != 0) &
                     (static_occ_mask == 0) &
