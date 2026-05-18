@@ -605,6 +605,13 @@ def generate_production_building_debug_images(
     skip_osm_excl_download: bool = False,
     smart_gap_fill: bool = True,
     viz_size: int = 1600,
+    yolo_checkpoint: str | os.PathLike[str] | None = None,
+    yolo_conf: float | None = None,
+    yolo_iou: float | None = None,
+    yolo_stride: int | None = None,
+    yolo_max_det: int | None = None,
+    yolo_suppress_coverage: float = 0.0,
+    yolo_suppress_min_overlap_m2: float = 25.0,
 ) -> list[dict]:
     """Run the real building placement pipeline and stop after debug images."""
     output_dir = Path(output_dir)
@@ -643,6 +650,13 @@ def generate_production_building_debug_images(
                 debug_image_only=True,
                 dds_filter=names,
                 ignore_placement_cache=True,
+                yolo_checkpoint=str(yolo_checkpoint) if yolo_checkpoint else None,
+                yolo_conf=yolo_conf,
+                yolo_iou=yolo_iou,
+                yolo_stride=yolo_stride,
+                yolo_max_det=yolo_max_det,
+                yolo_suppress_coverage=yolo_suppress_coverage,
+                yolo_suppress_min_overlap_m2=yolo_suppress_min_overlap_m2,
             )
             results.append({
                 "tile": tile_label,
@@ -707,6 +721,13 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--custom-scenery-dir", default=None)
     parser.add_argument("--skip-osm-excl-download", action="store_true")
     parser.add_argument("--no-smart-gap-fill", action="store_true")
+    parser.add_argument("--yolo-checkpoint", default=None)
+    parser.add_argument("--yolo-conf", type=float, default=None)
+    parser.add_argument("--yolo-iou", type=float, default=None)
+    parser.add_argument("--yolo-stride", type=int, default=None)
+    parser.add_argument("--yolo-max-det", type=int, default=None)
+    parser.add_argument("--yolo-suppress-coverage", type=float, default=0.0)
+    parser.add_argument("--yolo-suppress-min-overlap-m2", type=float, default=25.0)
     parser.add_argument(
         "--production-viz-size",
         type=int,
@@ -751,6 +772,13 @@ def main(argv: list[str] | None = None) -> int:
             skip_osm_excl_download=args.skip_osm_excl_download,
             smart_gap_fill=not args.no_smart_gap_fill,
             viz_size=args.production_viz_size,
+            yolo_checkpoint=args.yolo_checkpoint,
+            yolo_conf=args.yolo_conf,
+            yolo_iou=args.yolo_iou,
+            yolo_stride=args.yolo_stride,
+            yolo_max_det=args.yolo_max_det,
+            yolo_suppress_coverage=args.yolo_suppress_coverage,
+            yolo_suppress_min_overlap_m2=args.yolo_suppress_min_overlap_m2,
         )
         summary_name = "summary.json"
     summary_path = Path(args.output_dir) / summary_name

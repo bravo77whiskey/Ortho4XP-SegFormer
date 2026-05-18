@@ -25,6 +25,19 @@ def _paths_for_classes(pools, classes):
 
 
 class SfdBuildingAssetTests(unittest.TestCase):
+    def test_pipeline_yolo_defaults_match_config_defaults(self):
+        import O4_Cfg_Vars as CFG
+        import O4_SFR_Pipeline as PIPE
+
+        self.assertEqual(
+            PIPE.sfr_bld_yolo_conf,
+            CFG.cfg_tile_vars["sfr_bld_yolo_conf"]["default"],
+        )
+        self.assertEqual(
+            PIPE.sfr_bld_yolo_max_det,
+            CFG.cfg_tile_vars["sfr_bld_yolo_max_det"]["default"],
+        )
+
     def test_osm_tile_peer_path_handles_all_road_sources(self):
         base = r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_big_roads.osm.bz2"
 
@@ -107,6 +120,10 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
 
     def test_yolo_obb_detection_conversion_extracts_heading_and_class(self):
+        # Trained YOLO emits classes 0..7 which map to BLD_PLACEMENT_CLASSES
+        # 1..8 via the `+1` shift in `_yolo_obb_detection_from_points`. cls=0
+        # therefore lands in BLD_CLASS_TINY_RESIDENTIAL regardless of the
+        # detection geometry.
         detection = BLD._yolo_obb_detection_from_points(
             np.array([
                 [10.0, 10.0],
@@ -125,7 +142,87 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertAlmostEqual(detection["center"][0], 20.0)
         self.assertAlmostEqual(detection["center"][1], 15.0)
         self.assertAlmostEqual(detection["heading"], 90.0)
-        self.assertEqual(detection["placement_class"], BLD.BLD_CLASS_COMPACT_RESIDENTIAL)
+        self.assertEqual(detection["placement_class"], BLD.BLD_CLASS_TINY_RESIDENTIAL)
+        self.assertEqual(detection["model_class"], 0)
+
+    def test_yolo_obb_inference_streams_crop_results(self):
+        class FakeObb:
+            def __init__(self):
+                self.xyxyxyxy = BLD.torch.tensor(
+                    [[[10.0, 10.0], [30.0, 10.0], [30.0, 20.0], [10.0, 20.0]]]
+                )
+                self.conf = BLD.torch.tensor([0.8])
+                self.cls = BLD.torch.tensor([0.0])
+
+        class FakeResult:
+            def __init__(self):
+                self.obb = FakeObb()
+
+        class FakeYolo:
+            def __init__(self):
+                self.calls = []
+                self.results_consumed = 0
+
+            def predict(self, **kwargs):
+                self.calls.append(kwargs)
+                self.assert_stream = kwargs.get("stream")
+
+                def _results():
+                    yield FakeResult()
+                    self.results_consumed += 1
+
+                return _results()
+
+        model = FakeYolo()
+        image = np.zeros((512, 1024, 3), dtype=np.uint8)
+
+        detections = BLD._run_yolo_obb_inference(
+            model,
+            image,
+            imgsz=512,
+            stride=512,
+            conf=0.18,
+            iou=0.5,
+            max_det=1000,
+            device="cpu",
+            m_per_px=1.0,
+        )
+
+        self.assertEqual(len(model.calls), 2)
+        self.assertTrue(all(call["stream"] for call in model.calls))
+        self.assertEqual(model.results_consumed, 2)
+        self.assertEqual(len(detections), 2)
+        self.assertAlmostEqual(detections[0]["center"][0], 20.0)
+        self.assertAlmostEqual(detections[1]["center"][0], 532.0)
+
+    def test_yolo_overlap_suppression_removes_lower_confidence_duplicates(self):
+        detections = [
+            {
+                "confidence": 0.90,
+                "area_m2": 400.0,
+                "points": [[10, 10], [30, 10], [30, 30], [10, 30]],
+            },
+            {
+                "confidence": 0.60,
+                "area_m2": 400.0,
+                "points": [[12, 12], [32, 12], [32, 32], [12, 32]],
+            },
+            {
+                "confidence": 0.50,
+                "area_m2": 400.0,
+                "points": [[60, 60], [80, 60], [80, 80], [60, 80]],
+            },
+        ]
+
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            detections,
+            coverage_threshold=0.35,
+            min_overlap_m2=25.0,
+            m_per_px=1.0,
+        )
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual([det["confidence"] for det in kept], [0.90, 0.50])
 
     def test_yolo_obb_detection_clips_bounds(self):
         detection = BLD._yolo_obb_detection_from_points(
@@ -494,6 +591,26 @@ class SfdBuildingAssetTests(unittest.TestCase):
         scratch = np.zeros_like(static_occ_mask)
         yolo_poly = np.array(
             [[40, 40], [60, 40], [60, 60], [40, 60]],
+            dtype=np.int32,
+        )
+
+        self.assertFalse(
+            BLD._direct_yolo_poly_fits(
+                static_occ_mask,
+                spacing_mask,
+                yolo_poly,
+                scratch_mask=scratch,
+                static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+            )
+        )
+
+    def test_direct_yolo_footprint_rejects_skinny_road_crossing(self):
+        static_occ_mask = np.zeros((64, 64), dtype=np.uint8)
+        static_occ_mask[30:34, :] = 1
+        spacing_mask = np.zeros_like(static_occ_mask)
+        scratch = np.zeros_like(static_occ_mask)
+        yolo_poly = np.array(
+            [[20, 20], [44, 20], [44, 44], [20, 44]],
             dtype=np.int32,
         )
 
@@ -1535,7 +1652,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertGreaterEqual(n_dropped, 1)
         self.assertTrue(np.all(gap_cls == BLD.BLD_CLASS_MEDIUM))
 
-    def test_tall_apartments_are_allowed_when_their_footprint_fits(self):
+    def test_very_tall_apartments_are_excluded_from_generated_assets(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         apartment_paths = _paths_for_classes(
             pools,
@@ -1545,13 +1662,13 @@ class SfdBuildingAssetTests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("SFD_Global/Buildings/Apartment_30m_1.obj", apartment_paths)
-        self.assertIn("SFD_Global/Buildings/Apartment_30m_2.obj", apartment_paths)
-        self.assertEqual(
-            BLD._class_for_footprint(
-                BLD._bounds_for_object_path("SFD_Global/Buildings/Apartment_30m_2.obj")
-            ),
-            BLD.BLD_CLASS_SMALL_APARTMENT,
+        self.assertNotIn("SFD_Global/Buildings/Apartment_30m_1.obj", apartment_paths)
+        self.assertNotIn("SFD_Global/Buildings/Apartment_30m_2.obj", apartment_paths)
+        self.assertTrue(
+            BLD._is_very_tall_building_asset(
+                "SFD_Global/Buildings/Apartment_30m_2.obj",
+                BLD._object_estimated_height_m("SFD_Global/Buildings/Apartment_30m_2.obj"),
+            )
         )
 
     def test_tiny_fillers_are_excluded_from_building_pools(self):
@@ -1593,7 +1710,8 @@ class SfdBuildingAssetTests(unittest.TestCase):
             "lib/buildings/facades/industrial/warehouse_07_90x40.fac",
             large_paths,
         )
-        self.assertIn("/lib/global8/us/feat_Building_50_40_600r40.obj", large_paths)
+        self.assertNotIn("/lib/global8/us/feat_Building_50_40_600r40.obj", large_paths)
+        self.assertGreater(BLD._default_object_height_m("/lib/global8/us/feat_Building_50_40_600r40.obj"), 24.0)
         self.assertEqual(
             BLD._class_for_footprint(BLD._bounds_from_dimensions(50.0, 40.0)),
             BLD.BLD_CLASS_LARGE,
@@ -1613,7 +1731,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
             BLD.BLD_PLACEMENT_CLASSES,
         )
 
-        self.assertIn("/lib/global8/us/feat_Building_50_40_600r40.obj", north_america)
+        self.assertNotIn("/lib/global8/us/feat_Building_50_40_600r40.obj", north_america)
         self.assertNotIn("/lib/global8/us/feat_Building_50_40_600r40.obj", europe)
         self.assertIn("/lib/global8/us/hill_sq_30_30r.obj", europe)
         self.assertNotIn("/lib/global8/us/hill_sq_30_30r.obj", asia)

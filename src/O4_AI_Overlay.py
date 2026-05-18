@@ -1013,7 +1013,7 @@ def write_text_dsf(lat, lon, txt_path, veg_polys_by_class, bld_polys):
             lat_c   = poly.centroid.y
             height  = _building_height(_area_m2(poly, lat_c))
             def_idx = poly_index[_FAC_DEFS[bucket]]
-            f.write(f"BEGIN_POLYGON {def_idx} {height:.1f} 2\n")
+            f.write(f"BEGIN_POLYGON {def_idx} {int(round(height))} 2\n")
             _write_ring(f, poly.exterior.coords)
             holes = sorted(poly.interiors,
                            key=lambda r: abs(geometry.LinearRing(r.coords).length),

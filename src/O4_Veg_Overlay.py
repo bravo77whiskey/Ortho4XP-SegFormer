@@ -615,7 +615,7 @@ def _write_combined_dsf(
         # Building facade polygons
         for ring, fac_path, height in bld_polygons:
             idx = fac_index[fac_path]
-            f.write(f"BEGIN_POLYGON {idx} {height:.1f} 2\n")
+            f.write(f"BEGIN_POLYGON {idx} {int(round(height))} 2\n")
             f.write("BEGIN_WINDING\n")
             for lon_pt, lat_pt in ring:
                 f.write(f"POLYGON_POINT {lon_pt:.7f} {lat_pt:.7f}\n")

@@ -124,6 +124,8 @@ sfr_bld_yolo_conf = 0.18
 sfr_bld_yolo_iou = 0.5
 sfr_bld_yolo_stride = 512
 sfr_bld_yolo_max_det = 1000
+sfr_bld_yolo_suppress_coverage = 0.35
+sfr_bld_yolo_suppress_min_overlap_m2 = 25.0
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -174,9 +176,22 @@ def _run_venv(code):
     Returns the process exit code.
     """
     env = os.environ.copy()
-    prev = env.get('PYTHONPATH', '')
-    py_paths = os.pathsep.join((_root_dir, _src_dir))
-    env['PYTHONPATH'] = f"{py_paths}{os.pathsep}{prev}" if prev else py_paths
+    prev_paths = [
+        path for path in env.get('PYTHONPATH', '').split(os.pathsep)
+        if path
+    ]
+    stale_markers = (
+        os.path.normcase(os.path.join('Ortho4XP_Data', 'sfr_scripts')),
+        os.path.normcase(os.path.join('_internal', '_internal', 'sfr_scripts')),
+    )
+    filtered_prev = []
+    for path in prev_paths:
+        norm_path = os.path.normcase(os.path.normpath(path))
+        if any(marker in norm_path for marker in stale_markers):
+            continue
+        filtered_prev.append(path)
+    py_paths = [_root_dir, _src_dir]
+    env['PYTHONPATH'] = os.pathsep.join(py_paths + filtered_prev)
 
     proc = subprocess.Popen(
         [_venv_python(), '-u', '-c', code],
@@ -393,14 +408,35 @@ def process_bld_tile(lat, lon, build_dir):
     dsftool     = _dsftool_path()
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Bld_Overlays')
     custom_scenery_dir, _, _ = _scenery_paths()
+    print(
+        "[SFR Bld] Effective settings: "
+        f"yolo_enabled={sfr_bld_yolo_enabled!r} "
+        f"checkpoint={sfr_bld_yolo_checkpoint!r} "
+        f"conf={sfr_bld_yolo_conf!r} iou={sfr_bld_yolo_iou!r} "
+        f"stride={sfr_bld_yolo_stride!r} max_det={sfr_bld_yolo_max_det!r} "
+        f"smart_gap_fill={sfr_bld_smart_gap_fill!r} "
+        f"disable_cache={sfr_bld_disable_cache!r} "
+        f"out_dsf={out_dsf!r}",
+        flush=True,
+    )
 
     code = (
+        f"import os\n"
         f"import O4_SFR_Inference as SEG\n"
         f"SEG.segformer_patch_size = {sfr_patch_size!r}\n"
         f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
         f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"
         f"SEG._dsftool     = {dsftool!r}\n"
         f"import O4_SFR_Building_Overlay as bld_overlay\n"
+        f"_bld_path = os.path.abspath(getattr(bld_overlay, '__file__', ''))\n"
+        f"print(f'[SFR Bld] bld_overlay.__file__={{_bld_path}}', flush=True)\n"
+        f"_bld_norm = os.path.normcase(os.path.normpath(_bld_path))\n"
+        f"_stale_markers = (\n"
+        f"    os.path.normcase(os.path.join('Ortho4XP_Data', 'sfr_scripts')),\n"
+        f"    os.path.normcase(os.path.join('_internal', '_internal', 'sfr_scripts')),\n"
+        f")\n"
+        f"if any(marker in _bld_norm for marker in _stale_markers):\n"
+        f"    raise RuntimeError(f'Stale SFR building overlay module imported: {{_bld_path}}')\n"
         f"bld_overlay.run(\n"
         f"    tex_dir                  = {tex_dir!r},\n"
         f"    lat                      = {lat!r},\n"
@@ -424,6 +460,8 @@ def process_bld_tile(lat, lon, build_dir):
         f"    yolo_iou                 = {sfr_bld_yolo_iou!r},\n"
         f"    yolo_stride              = {sfr_bld_yolo_stride!r},\n"
         f"    yolo_max_det             = {sfr_bld_yolo_max_det!r},\n"
+        f"    yolo_suppress_coverage   = {sfr_bld_yolo_suppress_coverage!r},\n"
+        f"    yolo_suppress_min_overlap_m2 = {sfr_bld_yolo_suppress_min_overlap_m2!r},\n"
         f")\n"
     )
     ret = _run_venv(code)
