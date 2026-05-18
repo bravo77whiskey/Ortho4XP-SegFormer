@@ -190,6 +190,54 @@ class ForestAssetPolicyTests(unittest.TestCase):
             )
             self.assertTrue(path.startswith("forests/"), msg=path)
 
+    def test_gfv2_path_parser_rejects_palm_coconut_and_shrub_type_sources(self):
+        self.assertEqual(
+            FOREST_ASSETS.parse_gfv2_path(
+                "forests/tropical/woodland/tropical_woodland_75_y1.for"
+            )["family"],
+            "woodland",
+        )
+        for path in (
+            "forests/tropical/palm/tropical_palm_75_y1.for",
+            "forests/tropical/coconut/tropical_coconut_75_y1.for",
+            "forests/subtropical/shrub/subtropical_shrub_50_y1.for",
+            "forests/northmiddle/scrub/northmiddle_scrub_50_y1.for",
+        ):
+            self.assertFalse(FOREST_ASSETS.is_acceptable_gfv2_type_source(path))
+
+    def test_sfr_for_entry_uses_nearest_gfv2_type_hint_when_available(self):
+        for rng_index in range(8):
+            path, _density = SFR_VEG._for_entry(
+                SEGFORMER.CLASS_TREE,
+                0.72,
+                "area",
+                "northnorth",
+                _IndexRng(rng_index),
+                density_override=None,
+                veg_type="natural_forest_closed",
+                gfv2_type_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
+            )
+            self.assertTrue(path.startswith("forests/tropical/woodland/"), msg=path)
+
+    def test_nearest_gfv2_type_hint_skips_rejected_sources(self):
+        records = [
+            {
+                "pts": [(0.0, 0.0), (0.0001, 0.0), (0.0001, 0.0001)],
+                "path": "forests/tropical/palm/tropical_palm_75_y1.for",
+                "_centroid": (0.00002, 0.00002),
+            },
+            {
+                "pts": [(0.0, 0.0), (0.0002, 0.0), (0.0002, 0.0002)],
+                "path": "forests/tropical/woodland/tropical_woodland_75_y1.for",
+                "_centroid": (0.00008, 0.00008),
+            },
+        ]
+
+        self.assertEqual(
+            SFR_VEG._nearest_acceptable_gfv2_path((0.0, 0.0), records, max_distance_m=50.0),
+            "forests/tropical/woodland/tropical_woodland_75_y1.for",
+        )
+
     def test_managed_tree_context_can_still_use_defaults(self):
         default_seen = False
         for rng_index in range(80):

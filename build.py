@@ -136,4 +136,16 @@ print(f"\nUpdated  ({len(copied)} items): {', '.join(sorted(copied))}")
 if skipped:
     print(f"Skipped  ({len(skipped)} items — user data): {', '.join(sorted(skipped))}")
 
+stale_script_dirs = [
+    os.path.join(DIST_DIR, "_internal", "Ortho4XP_Data", "sfr_scripts"),
+    os.path.join(DIST_DIR, "_internal", "_internal", "sfr_scripts"),
+]
+removed_stale = []
+for stale_dir in stale_script_dirs:
+    if os.path.isdir(stale_dir):
+        shutil.rmtree(stale_dir)
+        removed_stale.append(os.path.relpath(stale_dir, DIST_DIR))
+if removed_stale:
+    print(f"Removed stale bundled SFR scripts: {', '.join(removed_stale)}")
+
 print(f"\nDone.  Exe ready at:  {os.path.join(DIST_DIR, 'Ortho4XP.exe')}")

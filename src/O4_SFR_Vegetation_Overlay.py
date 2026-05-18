@@ -474,9 +474,18 @@ def _poly_bounds(poly):
 def _prepare_polygons(polys):
     prepared = []
     for poly in polys or []:
-        if len(poly) < 3:
+        if isinstance(poly, dict):
+            pts = poly.get('pts', ())
+            source_path = poly.get('path')
+        else:
+            pts = poly
+            source_path = None
+        if len(pts) < 3:
             continue
-        prepared.append({'pts': poly, '_bounds': _poly_bounds(poly)})
+        record = {'pts': pts, '_bounds': _poly_bounds(pts)}
+        if source_path:
+            record['path'] = source_path
+        prepared.append(record)
     return prepared
 
 
@@ -485,13 +494,16 @@ def _polys_signature(polys):
     n_polys = 0
     n_pts = 0
     checksum = 0.0
+    path_checksum = 0
     for poly in polys or []:
         if isinstance(poly, dict):
             pts = poly.get('pts', ())
             bounds = poly.get('_bounds')
+            path = poly.get('path')
         else:
             pts = poly
             bounds = None
+            path = None
         if not pts:
             continue
         n_polys += 1
@@ -504,7 +516,10 @@ def _polys_signature(polys):
             west * 7.0 + east * 11.0 +
             len(pts)
         )
-    return (n_polys, n_pts, round(checksum, 6))
+        if path:
+            for char in str(path):
+                path_checksum = ((path_checksum * 33) + ord(char)) & 0xFFFFFFFF
+    return (n_polys, n_pts, round(checksum, 6), path_checksum)
 
 
 def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
@@ -521,6 +536,23 @@ def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
         p_s, p_n, p_w, p_e = poly.get('_bounds') or _poly_bounds(poly.get('pts', ()))
         if p_n >= s and p_s <= n and p_e >= w and p_w <= e:
             result.append(poly.get('pts', poly))
+    return result
+
+
+def _poly_records_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
+    if not polys:
+        return []
+    s = lat_s - pad_deg
+    n = lat_n + pad_deg
+    w = lon_w - pad_deg
+    e = lon_e + pad_deg
+    if isinstance(polys, dict) and {'items', 'south', 'north', 'west', 'east'} <= set(polys):
+        return BBOX.query_bounds(polys, s, n, w, e)
+    result = []
+    for poly in polys:
+        p_s, p_n, p_w, p_e = poly.get('_bounds') or _poly_bounds(poly.get('pts', ()))
+        if p_n >= s and p_s <= n and p_e >= w and p_w <= e:
+            result.append(poly)
     return result
 
 
@@ -747,6 +779,7 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
                 polygon_defs = []
                 current_polygon_is_forest = False
                 current_winding = None
+                current_polygon_path = None
 
                 with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
                     for raw_line in text_file:
@@ -757,11 +790,11 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
                             parts = line.split()
                             current_polygon_is_forest = False
                             current_winding = None
+                            current_polygon_path = None
                             try:
                                 polygon_index = int(parts[1])
-                                current_polygon_is_forest = _is_forest_polygon_path(
-                                    polygon_defs[polygon_index]
-                                )
+                                current_polygon_path = polygon_defs[polygon_index]
+                                current_polygon_is_forest = _is_forest_polygon_path(current_polygon_path)
                             except (IndexError, ValueError):
                                 current_polygon_is_forest = False
                         elif line == "BEGIN_WINDING" and current_polygon_is_forest:
@@ -774,11 +807,15 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
                                 pass
                         elif line == "END_WINDING" and current_winding is not None:
                             if len(current_winding) >= 3:
-                                parsed_polys.append(current_winding)
+                                parsed_polys.append({
+                                    'pts': current_winding,
+                                    'path': current_polygon_path,
+                                })
                             current_winding = None
                         elif line == "END_POLYGON":
                             current_polygon_is_forest = False
                             current_winding = None
+                            current_polygon_path = None
                 return parsed_polys
 
             polys.extend(
@@ -787,7 +824,7 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
                     cache_dir,
                     "dsf_parse",
                     _parse,
-                    version="forest-polygons-v1",
+                    version="forest-polygons-v2",
                 )
             )
 
@@ -822,7 +859,7 @@ def _short_tree_candidates(region, dlevel):
 
 
 def _for_entry(veg_cls, frac, shape, region, rng,
-               density_override=None, veg_type=None):
+               density_override=None, veg_type=None, gfv2_type_path=None):
     """Return (for_path, dsf_density) for a polygon."""
     dlevel  = _for_density_level(density_override) if density_override is not None \
               else _density_level(frac)
@@ -869,12 +906,20 @@ def _for_entry(veg_cls, frac, shape, region, rng,
             tree_context = 'treeline'
         elif veg_type in {'settlement_trees', 'park_or_managed_green'}:
             tree_context = 'managed'
-        path = FOREST_ASSETS.choose_tree_path(
-            region,
-            dlevel,
-            rng,
-            context=tree_context,
-        )
+        if gfv2_type_path:
+            candidates = FOREST_ASSETS.gfv2_type_hint_candidates(
+                gfv2_type_path,
+                region,
+                dlevel,
+            )
+            path = FOREST_ASSETS.choose_path(candidates, rng)
+        else:
+            path = FOREST_ASSETS.choose_tree_path(
+                region,
+                dlevel,
+                rng,
+                context=tree_context,
+            )
     else:
         candidates = FOREST_ASSETS.short_gfv2_candidates(region, ftype, dlevel)
         path = FOREST_ASSETS.choose_path(candidates, rng)
@@ -1035,6 +1080,60 @@ def _contour_to_latlon(cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
     return result
 
 
+def _contour_centroid_lonlat(cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
+    moments = cv2.moments(cnt)
+    if moments.get("m00", 0.0):
+        px = float(moments["m10"] / moments["m00"])
+        py = float(moments["m01"] / moments["m00"])
+    else:
+        pts = cnt[:, 0, :].astype(np.float64, copy=False)
+        px = float(np.mean(pts[:, 0]))
+        py = float(np.mean(pts[:, 1]))
+    return px_to_latlon(px, py, img_w, img_h, lat_n, lat_s, lon_w, lon_e)
+
+
+def _poly_centroid_lonlat(poly):
+    pts = poly.get('pts', poly) if isinstance(poly, dict) else poly
+    if not pts:
+        return None
+    lons = [pt[0] for pt in pts]
+    lats = [pt[1] for pt in pts]
+    return (sum(lons) / len(lons), sum(lats) / len(lats))
+
+
+def _lonlat_distance_m(a, b):
+    lon_a, lat_a = a
+    lon_b, lat_b = b
+    mid_lat = math.radians((lat_a + lat_b) * 0.5)
+    dx = (lon_a - lon_b) * 111320.0 * math.cos(mid_lat)
+    dy = (lat_a - lat_b) * 110540.0
+    return math.hypot(dx, dy)
+
+
+def _nearest_acceptable_gfv2_path(
+    centroid_lonlat,
+    gfv2_records,
+    max_distance_m=350.0,
+):
+    best_path = None
+    best_dist = float(max_distance_m)
+    for record in gfv2_records or ():
+        path = record.get('path')
+        if not FOREST_ASSETS.is_acceptable_gfv2_type_source(path):
+            continue
+        record_centroid = record.get('_centroid')
+        if record_centroid is None:
+            record_centroid = _poly_centroid_lonlat(record)
+            record['_centroid'] = record_centroid
+        if record_centroid is None:
+            continue
+        dist = _lonlat_distance_m(centroid_lonlat, record_centroid)
+        if dist < best_dist:
+            best_dist = dist
+            best_path = path
+    return best_path
+
+
 def _write_winding(f, ring_pts):
     pts = ring_pts
     if len(pts) > MAX_RING_PTS + 1:
@@ -1053,7 +1152,8 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       lat_n, lat_s, lon_w, lon_e, tile_lat, tile_lon,
                       m_per_px, min_area_px, simplify_px,
                       region, rng, density_override,
-                      context_masks=None, type_counts=None):
+                      context_masks=None, type_counts=None,
+                      gfv2_type_records=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring)."""
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
@@ -1082,6 +1182,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         prepared_stats = None
         frac = 0.0
         veg_type = None
+        gfv2_type_path = None
         if veg_cls == SEGFORMER.CLASS_TREE:
             prepared_fill = _contour_fill_stats(cnt, m_per_px, include_ring=True)
             frac = _polygon_fill_frac(mask, cnt, prepared=prepared_fill)
@@ -1093,11 +1194,21 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             )
             if type_counts is not None:
                 type_counts[veg_type] = type_counts.get(veg_type, 0) + 1
+            if gfv2_type_records:
+                centroid_lonlat = _contour_centroid_lonlat(
+                    cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+                )
+                gfv2_type_path = _nearest_acceptable_gfv2_path(
+                    centroid_lonlat,
+                    gfv2_type_records,
+                )
         else:
             frac = _polygon_fill_frac(mask, cnt)
 
         fpath, dsf_den = _for_entry(
-            veg_cls, frac, shape, region, rng, density_override, veg_type=veg_type
+            veg_cls, frac, shape, region, rng, density_override,
+            veg_type=veg_type,
+            gfv2_type_path=gfv2_type_path,
         )
         if not fpath:
             continue
@@ -1347,6 +1458,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     tree_row_sig = _roads_signature(veg_context_tree_rows)
 
     forest_layers = []
+    gfv2_type_index = None
     if dsftool_path and os.path.exists(dsftool_path):
         layer_specs = [
             (
@@ -1378,6 +1490,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             polys = _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir)
             timings['scenery_parse'] += time.perf_counter() - _t
             prepared = _prepare_polygons(polys)
+            if layer_name == "Global Forests v2":
+                typed_prepared = [
+                    poly for poly in prepared
+                    if FOREST_ASSETS.is_acceptable_gfv2_type_source(poly.get('path'))
+                ]
+                gfv2_type_index = BBOX.build_bounds_index(typed_prepared)
+                print(f"{layer_name} type sources: {len(typed_prepared)} accepted polygons")
             forest_layers.append(
                 {
                     'name': layer_name,
@@ -1870,6 +1989,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       density_override=density_override,
                       context_masks=local_context_masks,
                       type_counts=None)
+        if gfv2_type_index:
+            kwargs['gfv2_type_records'] = _poly_records_for_bounds(
+                gfv2_type_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.004
+            )
 
         dds_seed = int.from_bytes(
             hashlib.sha1(f"veg-poly:{fname}".encode("utf-8")).digest()[:8],
