@@ -238,6 +238,75 @@ class ForestAssetPolicyTests(unittest.TestCase):
             "forests/tropical/woodland/tropical_woodland_75_y1.for",
         )
 
+    def test_optimized_nearest_gfv2_lookup_skips_rejected_sources(self):
+        records = [
+            {
+                "pts": [(0.0, 0.0), (0.0001, 0.0), (0.0001, 0.0001)],
+                "path": "forests/tropical/shrub/tropical_shrub_75_y1.for",
+                "_centroid": (0.00002, 0.00002),
+            },
+            {
+                "pts": [(0.0, 0.0), (0.0002, 0.0), (0.0002, 0.0002)],
+                "path": "forests/tropical/woodland/tropical_woodland_75_y1.for",
+                "_centroid": (0.00008, 0.00008),
+            },
+        ]
+
+        lookup = SFR_VEG._build_gfv2_type_lookup(records, origin_lat=0.0)
+
+        self.assertEqual(
+            SFR_VEG._nearest_acceptable_gfv2_path((0.0, 0.0), lookup, max_distance_m=50.0),
+            "forests/tropical/woodland/tropical_woodland_75_y1.for",
+        )
+
+    def test_climate_mode_does_not_call_gfv2_proximity_lookup(self):
+        mask = np.zeros((20, 20), dtype=np.uint8)
+        mask[2:18, 2:18] = 255
+
+        with mock.patch.object(
+            SFR_VEG,
+            "_nearest_acceptable_gfv2_path",
+            side_effect=AssertionError("proximity lookup should be disabled"),
+        ):
+            polygons = SFR_VEG._process_dds_mask(
+                mask,
+                SEGFORMER.CLASS_TREE,
+                img_w=20,
+                img_h=20,
+                lat_n=1.0,
+                lat_s=0.99,
+                lon_w=2.0,
+                lon_e=2.01,
+                tile_lat=0.0,
+                tile_lon=2.0,
+                m_per_px=2.0,
+                min_area_px=1.0,
+                simplify_px=1.0,
+                region="northsouth",
+                rng=_IndexRng(0),
+                density_override=None,
+                context_masks={},
+                type_counts={},
+                gfv2_type_records=None,
+            )
+
+        self.assertTrue(polygons)
+        self.assertTrue(polygons[0][0].startswith("forests/northsouth/"))
+
+    def test_cli_accepts_gfv2_asset_proximity_flag(self):
+        argv = [
+            "generate_veg_overlay.py",
+            "textures",
+            "1",
+            "2",
+            "--gfv2-asset-proximity",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            args = SFR_VEG.parse_args()
+
+        self.assertTrue(args.gfv2_asset_proximity)
+
     def test_managed_tree_context_can_still_use_defaults(self):
         default_seen = False
         for rng_index in range(80):
@@ -298,6 +367,41 @@ class ForestAssetPolicyTests(unittest.TestCase):
 
         self.assertNotEqual(key_a, key_b)
         self.assertEqual(key_a["version"], 2)
+
+    def test_vegetation_polygon_cache_key_tracks_asset_selection_mode(self):
+        base_args = (
+            "34336_26384_BI16.dds",
+            1.0,
+            0.9,
+            2.0,
+            2.1,
+            64,
+            64,
+            ("veg-cache",),
+            {"mask": "cache-key"},
+            5,
+            2,
+            10.0,
+            1.5,
+            None,
+            10.0,
+            "northsouth",
+            "Csa",
+        )
+
+        climate_key = SFR_VEG._dds_polygon_cache_key(
+            *base_args,
+            asset_selection_mode="climate",
+            gfv2_type_source_sig=None,
+        )
+        proximity_key = SFR_VEG._dds_polygon_cache_key(
+            *base_args,
+            asset_selection_mode="gfv2_proximity",
+            gfv2_type_source_sig=(2, 7, 0.123, 456),
+        )
+
+        self.assertNotEqual(climate_key, proximity_key)
+        self.assertEqual(climate_key["version"], 3)
 
     def test_vegetation_optional_mask_or_handles_missing_masks(self):
         lhs = None

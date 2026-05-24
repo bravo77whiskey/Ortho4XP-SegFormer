@@ -104,6 +104,7 @@ sfr_veg_avoid_simheaven_buildings = True
 sfr_veg_simheaven_building_buffer_m = 10.0
 sfr_veg_avoid_gfv2    = True
 sfr_veg_gfv2_buffer_m = 0.0
+sfr_veg_use_gfv2_asset_proximity = False
 sfr_veg_avoid_simheaven_forests = True
 sfr_veg_simheaven_buffer_m = 0.0
 sfr_veg_avoid_default_forests = True
@@ -370,6 +371,7 @@ def process_veg_tile(lat, lon, build_dir):
         f"    simheaven_building_buffer_m = {sfr_veg_simheaven_building_buffer_m!r},\n"
         f"    avoid_gfv2       = {sfr_veg_avoid_gfv2!r},\n"
         f"    gfv2_buffer_m    = {sfr_veg_gfv2_buffer_m!r},\n"
+        f"    use_gfv2_asset_proximity = {sfr_veg_use_gfv2_asset_proximity!r},\n"
         f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"
         f"    simheaven_buffer_m = {sfr_veg_simheaven_buffer_m!r},\n"
         f"    avoid_default_forests = {sfr_veg_avoid_default_forests!r},\n"

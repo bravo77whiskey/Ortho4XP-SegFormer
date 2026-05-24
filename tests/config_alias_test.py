@@ -55,6 +55,14 @@ class ConfigAliasTests(unittest.TestCase):
             CFG.global_sfr_bld_disable_cache = old_bld
             CFG.global_sfr_veg_disable_cache = old_veg
 
+    def test_gfv2_asset_proximity_defaults_to_climate_selection(self):
+        self.assertFalse(
+            CFG.cfg_tile_vars["sfr_veg_use_gfv2_asset_proximity"]["default"]
+        )
+        self.assertFalse(CFG.global_sfr_veg_use_gfv2_asset_proximity)
+        tile = CFG.Tile(12, 34, "")
+        self.assertFalse(tile.sfr_veg_use_gfv2_asset_proximity)
+
 
 if __name__ == "__main__":
     unittest.main()

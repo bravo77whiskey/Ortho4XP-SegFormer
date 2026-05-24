@@ -397,6 +397,12 @@ cfg_tile_vars = {
         "short_name": "sfr_veg_gfv2_b",
         "hint": "Extra exclusion buffer in metres around Global Forests v2 polygons. Raise this slightly if generated trees still crowd GFv2 forest edges.",
     },
+    "sfr_veg_use_gfv2_asset_proximity": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_veg_gfv2_typ",
+        "hint": "Use nearby Global Forests v2 polygons to choose generated vegetation asset types. Disabled by default for faster climate-based asset selection.",
+    },
     "sfr_veg_avoid_simheaven_forests": {
         "type": bool,
         "default": True,
@@ -654,6 +660,7 @@ list_sfr_veg_vars = [
     "sfr_veg_simheaven_building_buffer_m",
     "sfr_veg_avoid_gfv2",
     "sfr_veg_gfv2_buffer_m",
+    "sfr_veg_use_gfv2_asset_proximity",
     "sfr_veg_avoid_simheaven_forests",
     "sfr_veg_simheaven_buffer_m",
     "sfr_veg_avoid_default_forests",

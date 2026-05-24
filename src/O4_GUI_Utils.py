@@ -708,6 +708,7 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_veg_simheaven_building_buffer_m = tile.sfr_veg_simheaven_building_buffer_m
         SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
         SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
+        SFR.sfr_veg_use_gfv2_asset_proximity = tile.sfr_veg_use_gfv2_asset_proximity
         SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
         SFR.sfr_veg_simheaven_buffer_m = tile.sfr_veg_simheaven_buffer_m
         SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests

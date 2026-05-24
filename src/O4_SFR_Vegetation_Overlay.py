@@ -700,9 +700,11 @@ def _dds_polygon_cache_key(
     excl_buffer_m,
     region,
     climate_code=None,
+    asset_selection_mode="climate",
+    gfv2_type_source_sig=None,
 ):
     return {
-        'version': 2,
+        'version': 3,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -716,6 +718,8 @@ def _dds_polygon_cache_key(
         'excl_buffer_m': round(float(excl_buffer_m), 4),
         'region': region,
         'climate_code': climate_code,
+        'asset_selection_mode': asset_selection_mode,
+        'gfv2_type_source_sig': gfv2_type_source_sig,
     }
 
 
@@ -1110,11 +1114,78 @@ def _lonlat_distance_m(a, b):
     return math.hypot(dx, dy)
 
 
+def _project_lonlat_m(lonlat, origin_lat):
+    lon, lat = lonlat
+    return (
+        lon * 111320.0 * math.cos(math.radians(origin_lat)),
+        lat * 110540.0,
+    )
+
+
+def _build_gfv2_type_lookup(gfv2_records, origin_lat):
+    """Build a nearest-neighbour lookup for acceptable GFv2 type sources."""
+    accepted = []
+    for record in gfv2_records or ():
+        path = record.get('path')
+        if not FOREST_ASSETS.is_acceptable_gfv2_type_source(path):
+            continue
+        centroid = record.get('_centroid')
+        if centroid is None:
+            centroid = _poly_centroid_lonlat(record)
+            record['_centroid'] = centroid
+        if centroid is None:
+            continue
+        x_m, y_m = _project_lonlat_m(centroid, origin_lat)
+        accepted.append(
+            {
+                'path': path,
+                '_centroid': centroid,
+                '_xy_m': (x_m, y_m),
+            }
+        )
+    if not accepted:
+        return None
+
+    try:
+        from rtree import index as _rtree_index
+
+        rtree_index = _rtree_index.Index()
+        for idx, record in enumerate(accepted):
+            x_m, y_m = record['_xy_m']
+            rtree_index.insert(idx, (x_m, y_m, x_m, y_m))
+    except Exception:
+        rtree_index = None
+
+    return {
+        'records': accepted,
+        'index': rtree_index,
+        'origin_lat': origin_lat,
+    }
+
+
 def _nearest_acceptable_gfv2_path(
     centroid_lonlat,
     gfv2_records,
     max_distance_m=350.0,
 ):
+    if isinstance(gfv2_records, dict):
+        records = gfv2_records.get('records') or ()
+        rtree_index = gfv2_records.get('index')
+        origin_lat = gfv2_records.get('origin_lat', centroid_lonlat[1])
+        if rtree_index is not None:
+            x_m, y_m = _project_lonlat_m(centroid_lonlat, origin_lat)
+            best_path = None
+            best_dist = float(max_distance_m)
+            candidate_count = min(8, len(records))
+            for idx in rtree_index.nearest((x_m, y_m, x_m, y_m), candidate_count):
+                record = records[int(idx)]
+                dist = _lonlat_distance_m(centroid_lonlat, record['_centroid'])
+                if dist < best_dist:
+                    best_dist = dist
+                    best_path = record['path']
+            return best_path
+        gfv2_records = records
+
     best_path = None
     best_dist = float(max_distance_m)
     for record in gfv2_records or ():
@@ -1228,6 +1299,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         custom_overlay_src_alternate=None,
         avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
         avoid_gfv2=True, gfv2_buffer_m=0.0,
+        use_gfv2_asset_proximity=False,
         avoid_simheaven_forests=True, simheaven_buffer_m=0.0,
         avoid_default_forests=True, default_buffer_m=0.0):
 
@@ -1337,6 +1409,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f" GFv2={'on' if avoid_gfv2 else 'off'} ({gfv2_buffer_m}m),"
         f" simHeaven={'on' if avoid_simheaven_forests else 'off'} ({simheaven_buffer_m}m),"
         f" default={'on' if avoid_default_forests else 'off'} ({default_buffer_m}m)"
+    )
+    print(
+        "vegetation asset selection:"
+        f" {'GFv2 proximity' if use_gfv2_asset_proximity else 'climate default'}"
     )
     print(
         f"building overlap avoid: SFR cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
@@ -1491,12 +1567,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             timings['scenery_parse'] += time.perf_counter() - _t
             prepared = _prepare_polygons(polys)
             if layer_name == "Global Forests v2":
-                typed_prepared = [
-                    poly for poly in prepared
-                    if FOREST_ASSETS.is_acceptable_gfv2_type_source(poly.get('path'))
-                ]
-                gfv2_type_index = BBOX.build_bounds_index(typed_prepared)
-                print(f"{layer_name} type sources: {len(typed_prepared)} accepted polygons")
+                if use_gfv2_asset_proximity:
+                    typed_prepared = [
+                        poly for poly in prepared
+                        if FOREST_ASSETS.is_acceptable_gfv2_type_source(poly.get('path'))
+                    ]
+                    gfv2_type_index = BBOX.build_bounds_index(typed_prepared)
+                    print(f"{layer_name} type sources: {len(typed_prepared)} accepted polygons")
+                else:
+                    print(f"{layer_name} type sources: disabled (climate asset selection)")
             forest_layers.append(
                 {
                     'name': layer_name,
@@ -1513,6 +1592,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         (layer['name'], round(float(layer['buffer_m']), 4), _polys_signature(layer['polys']))
         for layer in forest_layers
     )
+    gfv2_type_source_sig = None
+    if use_gfv2_asset_proximity and gfv2_type_index:
+        gfv2_type_source_sig = _polys_signature(gfv2_type_index['items'].tolist())
 
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
@@ -1957,6 +2039,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             excl_buffer_m,
             region,
             koppen_code,
+            'gfv2_proximity' if use_gfv2_asset_proximity else 'climate',
+            gfv2_type_source_sig if use_gfv2_asset_proximity else None,
         )
         _poly_cached = None
         if not disable_cache:
@@ -1989,9 +2073,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       density_override=density_override,
                       context_masks=local_context_masks,
                       type_counts=None)
-        if gfv2_type_index:
-            kwargs['gfv2_type_records'] = _poly_records_for_bounds(
+        if use_gfv2_asset_proximity and gfv2_type_index:
+            gfv2_type_records = _poly_records_for_bounds(
                 gfv2_type_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.004
+            )
+            kwargs['gfv2_type_records'] = _build_gfv2_type_lookup(
+                gfv2_type_records,
+                origin_lat=(lat_n + lat_s) * 0.5,
             )
 
         dds_seed = int.from_bytes(
@@ -2128,6 +2216,9 @@ def parse_args():
                     help='Do not exclude Global Forests v2 polygons from generated vegetation.')
     ap.add_argument('--gfv2-buffer-m', type=float, default=0.0, dest='gfv2_buffer_m',
                     help='Extra exclusion buffer in metres around Global Forests v2 polygons.')
+    ap.add_argument('--gfv2-asset-proximity', action='store_true',
+                    dest='gfv2_asset_proximity',
+                    help='Use nearby Global Forests v2 polygons to choose generated vegetation asset types.')
     ap.add_argument('--no-avoid-simheaven-forests', action='store_true',
                     dest='no_avoid_simheaven_forests',
                     help='Do not exclude simHeaven forest polygons from generated vegetation.')
@@ -2194,6 +2285,7 @@ def main():
         simheaven_building_buffer_m = args.simheaven_building_buffer_m,
         avoid_gfv2       = not args.no_avoid_gfv2,
         gfv2_buffer_m    = args.gfv2_buffer_m,
+        use_gfv2_asset_proximity = args.gfv2_asset_proximity,
         avoid_simheaven_forests = not args.no_avoid_simheaven_forests,
         simheaven_buffer_m = args.simheaven_buffer_m,
         avoid_default_forests = not args.no_avoid_default_forests,
