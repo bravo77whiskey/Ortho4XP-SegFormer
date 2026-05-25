@@ -1786,9 +1786,15 @@ class SfdBuildingAssetTests(unittest.TestCase):
     def test_default_assets_include_facade_and_rectangular_object_variety(self):
         pools = BLD._build_default_asset_pools(45.0, -75.0)
         medium_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_MEDIUM,))
+        apartment_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_APARTMENT_BLOCK,))
         large_paths = _paths_for_classes(pools, (BLD.BLD_CLASS_LARGE,))
 
         self.assertIn("lib/buildings/facades/generic/mid_modern_05.fac", medium_paths)
+        self.assertIn("lib/buildings/facades/commercial/low_commercial_08.fac", medium_paths)
+        self.assertIn("lib/buildings/facades/generic/high_glass_03.fac", apartment_paths)
+        self.assertIn("lib/buildings/facades/generic/high_metallic_01.fac", apartment_paths)
+        self.assertIn("lib/buildings/facades/generic/high_modern_07.fac", apartment_paths)
+        self.assertIn("lib/buildings/facades/generic/high_universal_02.fac", apartment_paths)
         self.assertIn(
             "lib/buildings/facades/industrial/warehouse_07_90x40.fac",
             large_paths,
@@ -1798,6 +1804,91 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(
             BLD._class_for_footprint(BLD._bounds_from_dimensions(50.0, 40.0)),
             BLD.BLD_CLASS_LARGE,
+        )
+
+    def test_context_facade_pools_are_non_empty_facades(self):
+        for key, variants in BLD.CONTEXT_FACADE_VARIANTS.items():
+            self.assertIn(key[0], BLD.BLD_PLACEMENT_CLASSES)
+            self.assertIn(key[1], {
+                BLD._SF_BARELAND,
+                BLD._SF_RANGELAND,
+                BLD._SF_DEVELOPED,
+                BLD._SF_ROAD,
+                BLD._SF_TREE,
+                BLD._SF_WATER,
+                BLD._SF_AGRICULTURE,
+            })
+            self.assertTrue(variants, f"{key} must have at least one variant")
+            self.assertTrue(
+                all(path.endswith(".fac") for path in variants),
+                f"{key} contains a non-facade path",
+            )
+
+    def test_facade_picker_filters_simheaven_when_unavailable(self):
+        veg_map = np.full((64, 64), BLD._SF_DEVELOPED, dtype=np.uint8)
+
+        paths = {
+            BLD._facade_for_detection(
+                BLD.BLD_CLASS_APARTMENT_BLOCK,
+                veg_map,
+                jx,
+                32,
+                1.0,
+                lat=45.0,
+                lon=7.0,
+                include_simheaven_assets=False,
+            )
+            for jx in range(8, 56)
+        }
+
+        self.assertTrue(paths)
+        self.assertFalse(any(path.startswith("simheaven/") for path in paths))
+
+    def test_facade_picker_can_use_expanded_simheaven_groups(self):
+        veg_map = np.full((64, 64), BLD._SF_DEVELOPED, dtype=np.uint8)
+        expanded_groups = {
+            "simheaven/facades/bld-high-res.fac",
+            "simheaven/facades/bld-high-com.fac",
+            "simheaven/facades/retail.fac",
+            "simheaven/facades/hotel.fac",
+            "simheaven/facades/school.fac",
+            "simheaven/facades/college.fac",
+            "simheaven/facades/university.fac",
+        }
+
+        paths = {
+            BLD._facade_for_detection(
+                BLD.BLD_CLASS_APARTMENT_BLOCK,
+                veg_map,
+                jx,
+                jy,
+                1.0,
+                lat=45.0,
+                lon=7.0,
+                include_simheaven_assets=True,
+            )
+            for jy in range(8, 56)
+            for jx in range(8, 56)
+        }
+
+        self.assertTrue(paths & expanded_groups)
+
+    def test_facade_picker_is_deterministic_for_same_detection(self):
+        veg_map = np.full((64, 64), BLD._SF_ROAD, dtype=np.uint8)
+        kwargs = dict(
+            facade_cls=BLD.BLD_CLASS_MEDIUM,
+            veg_map=veg_map,
+            jx=23,
+            jy=41,
+            m_per_px=1.0,
+            lat=45.123456,
+            lon=7.654321,
+            include_simheaven_assets=True,
+        )
+
+        self.assertEqual(
+            BLD._facade_for_detection(**kwargs),
+            BLD._facade_for_detection(**kwargs),
         )
 
     def test_default_object_catalog_keeps_regional_context(self):

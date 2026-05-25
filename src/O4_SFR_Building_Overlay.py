@@ -2561,17 +2561,21 @@ DEFAULT_FACADE_VARIANTS_BY_CLASS = {
     BLD_CLASS_TINY_RESIDENTIAL: (
         "lib/buildings/facades/generic/low_modern_01.fac",
         "lib/buildings/facades/commercial/low_commercial_01.fac",
+        "lib/buildings/facades/commercial/low_commercial_02.fac",
     ),
     BLD_CLASS_SMALL_RESIDENTIAL: (
         "lib/buildings/facades/generic/low_modern_01.fac",
         "lib/buildings/facades/commercial/low_commercial_01.fac",
         "lib/buildings/facades/commercial/low_commercial_02.fac",
+        "lib/buildings/facades/commercial/low_commercial_04.fac",
     ),
     BLD_CLASS_COMPACT_RESIDENTIAL: (
         "lib/buildings/facades/generic/low_modern_01.fac",
         "lib/buildings/facades/commercial/low_commercial_01.fac",
         "lib/buildings/facades/commercial/low_commercial_02.fac",
         "lib/buildings/facades/commercial/low_commercial_03.fac",
+        "lib/buildings/facades/commercial/low_commercial_04.fac",
+        "lib/buildings/facades/commercial/low_commercial_05.fac",
     ),
     BLD_CLASS_MEDIUM: (
         "lib/buildings/facades/generic/mid_classic_01.fac",
@@ -2581,22 +2585,50 @@ DEFAULT_FACADE_VARIANTS_BY_CLASS = {
         "lib/buildings/facades/generic/mid_modern_03.fac",
         "lib/buildings/facades/generic/mid_modern_04.fac",
         "lib/buildings/facades/generic/mid_modern_05.fac",
+        "lib/buildings/facades/commercial/low_commercial_03.fac",
+        "lib/buildings/facades/commercial/low_commercial_04.fac",
+        "lib/buildings/facades/commercial/low_commercial_05.fac",
+        "lib/buildings/facades/commercial/low_commercial_06.fac",
+        "lib/buildings/facades/commercial/low_commercial_07.fac",
+        "lib/buildings/facades/commercial/low_commercial_08.fac",
     ),
     BLD_CLASS_SMALL_APARTMENT: (
         "lib/buildings/facades/generic/mid_classic_01.fac",
         "lib/buildings/facades/generic/mid_classic_02.fac",
+        "lib/buildings/facades/generic/mid_modern_01.fac",
+        "lib/buildings/facades/generic/mid_modern_02.fac",
+        "lib/buildings/facades/generic/mid_modern_03.fac",
+        "lib/buildings/facades/generic/mid_modern_04.fac",
+        "lib/buildings/facades/generic/mid_modern_05.fac",
         "lib/buildings/facades/generic/high_classic_01.fac",
+        "lib/buildings/facades/generic/high_classic_02.fac",
         "lib/buildings/facades/generic/high_glass_01.fac",
+        "lib/buildings/facades/generic/high_glass_02.fac",
+        "lib/buildings/facades/generic/high_modern_01.fac",
         "lib/buildings/facades/generic/high_modern_02.fac",
+        "lib/buildings/facades/generic/high_modern_03.fac",
     ),
     BLD_CLASS_APARTMENT_BLOCK: (
         "lib/buildings/facades/generic/high_classic_01.fac",
+        "lib/buildings/facades/generic/high_classic_02.fac",
         "lib/buildings/facades/generic/high_glass_01.fac",
+        "lib/buildings/facades/generic/high_glass_02.fac",
+        "lib/buildings/facades/generic/high_glass_03.fac",
+        "lib/buildings/facades/generic/high_metallic_01.fac",
         "lib/buildings/facades/generic/high_modern_01.fac",
         "lib/buildings/facades/generic/high_modern_02.fac",
+        "lib/buildings/facades/generic/high_modern_03.fac",
+        "lib/buildings/facades/generic/high_modern_04.fac",
+        "lib/buildings/facades/generic/high_modern_05.fac",
+        "lib/buildings/facades/generic/high_modern_06.fac",
+        "lib/buildings/facades/generic/high_modern_07.fac",
         "lib/buildings/facades/generic/high_universal_01.fac",
+        "lib/buildings/facades/generic/high_universal_02.fac",
     ),
     BLD_CLASS_LARGE: (
+        "lib/buildings/facades/commercial/low_commercial_06.fac",
+        "lib/buildings/facades/commercial/low_commercial_07.fac",
+        "lib/buildings/facades/commercial/low_commercial_08.fac",
         "lib/buildings/facades/industrial/warehouse_01_45x45.fac",
         "lib/buildings/facades/industrial/warehouse_02_45x45.fac",
         "lib/buildings/facades/industrial/warehouse_03_60x60.fac",
@@ -2654,170 +2686,137 @@ _SH_RESIDENTIAL = "simheaven/facades/residential.fac"
 _SH_BUILDING    = "simheaven/facades/building.fac"
 _SH_COMMERCIAL  = "simheaven/facades/commercial.fac"
 _SH_INDUSTRIAL  = "simheaven/facades/industrial.fac"
+_SH_HIGH_RES    = "simheaven/facades/bld-high-res.fac"
+_SH_HIGH_COM    = "simheaven/facades/bld-high-com.fac"
+_SH_RETAIL      = "simheaven/facades/retail.fac"
+_SH_FARM        = "simheaven/facades/farm.fac"
+_SH_GARAGE      = "simheaven/facades/garage.fac"
+_SH_HOTEL       = "simheaven/facades/hotel.fac"
+_SH_SCHOOL      = "simheaven/facades/school.fac"
+_SH_COLLEGE     = "simheaven/facades/college.fac"
+_SH_UNIVERSITY  = "simheaven/facades/university.fac"
+
+_XP12_LOW_FACADES = (
+    "lib/buildings/facades/generic/low_modern_01.fac",
+    "lib/buildings/facades/commercial/low_commercial_01.fac",
+    "lib/buildings/facades/commercial/low_commercial_02.fac",
+    "lib/buildings/facades/commercial/low_commercial_03.fac",
+    "lib/buildings/facades/commercial/low_commercial_04.fac",
+    "lib/buildings/facades/commercial/low_commercial_05.fac",
+)
+_XP12_STRIP_COMMERCIAL_FACADES = (
+    "lib/buildings/facades/commercial/low_commercial_01.fac",
+    "lib/buildings/facades/commercial/low_commercial_02.fac",
+    "lib/buildings/facades/commercial/low_commercial_03.fac",
+    "lib/buildings/facades/commercial/low_commercial_04.fac",
+    "lib/buildings/facades/commercial/low_commercial_05.fac",
+    "lib/buildings/facades/commercial/low_commercial_06.fac",
+    "lib/buildings/facades/commercial/low_commercial_07.fac",
+    "lib/buildings/facades/commercial/low_commercial_08.fac",
+)
+_XP12_MID_FACADES = (
+    "lib/buildings/facades/generic/mid_classic_01.fac",
+    "lib/buildings/facades/generic/mid_classic_02.fac",
+    "lib/buildings/facades/generic/mid_modern_01.fac",
+    "lib/buildings/facades/generic/mid_modern_02.fac",
+    "lib/buildings/facades/generic/mid_modern_03.fac",
+    "lib/buildings/facades/generic/mid_modern_04.fac",
+    "lib/buildings/facades/generic/mid_modern_05.fac",
+)
+_XP12_HIGH_FACADES = (
+    "lib/buildings/facades/generic/high_classic_01.fac",
+    "lib/buildings/facades/generic/high_classic_02.fac",
+    "lib/buildings/facades/generic/high_glass_01.fac",
+    "lib/buildings/facades/generic/high_glass_02.fac",
+    "lib/buildings/facades/generic/high_glass_03.fac",
+    "lib/buildings/facades/generic/high_metallic_01.fac",
+    "lib/buildings/facades/generic/high_modern_01.fac",
+    "lib/buildings/facades/generic/high_modern_02.fac",
+    "lib/buildings/facades/generic/high_modern_03.fac",
+    "lib/buildings/facades/generic/high_modern_04.fac",
+    "lib/buildings/facades/generic/high_modern_05.fac",
+    "lib/buildings/facades/generic/high_modern_06.fac",
+    "lib/buildings/facades/generic/high_modern_07.fac",
+    "lib/buildings/facades/generic/high_universal_01.fac",
+    "lib/buildings/facades/generic/high_universal_02.fac",
+)
+_XP12_WAREHOUSE_FACADES = (
+    "lib/buildings/facades/industrial/warehouse_01_45x45.fac",
+    "lib/buildings/facades/industrial/warehouse_02_45x45.fac",
+    "lib/buildings/facades/industrial/warehouse_03_60x60.fac",
+    "lib/buildings/facades/industrial/warehouse_04_60x60.fac",
+    "lib/buildings/facades/industrial/warehouse_05_60x60.fac",
+    "lib/buildings/facades/industrial/warehouse_06_90x40.fac",
+    "lib/buildings/facades/industrial/warehouse_07_90x40.fac",
+    "lib/buildings/facades/industrial/warehouse_08_90x90.fac",
+    "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
+    "lib/buildings/facades/industrial/warehouse_10_90x90.fac",
+)
+_SH_URBAN_FACADES = (
+    _SH_BUILDING, _SH_COMMERCIAL, _SH_RETAIL, _SH_HOTEL,
+    _SH_HIGH_RES, _SH_HIGH_COM, _SH_SCHOOL, _SH_COLLEGE, _SH_UNIVERSITY,
+)
+_SH_ROAD_FACADES = (_SH_COMMERCIAL, _SH_RETAIL, _SH_GARAGE, _SH_HOTEL)
+_SH_RURAL_FACADES = (_SH_RESIDENTIAL, _SH_BUILDING, _SH_FARM, _SH_GARAGE)
+_SH_INDUSTRIAL_FACADES = (_SH_INDUSTRIAL, _SH_COMMERCIAL, _SH_GARAGE)
+_SH_WATERFRONT_FACADES = (_SH_BUILDING, _SH_HOTEL)
 
 # CONTEXT_FACADE_VARIANTS[(placement_class, dominant_landcover_class)] = tuple of facade lib paths.
 # Picker uses the dominant non-building landcover class around the detection to pick a variant pool;
 # falls back to DEFAULT_FACADE_VARIANTS_BY_CLASS if no entry matches.
 CONTEXT_FACADE_VARIANTS = {
-    # Dominant = DEVELOPED → dense urban: stock XP12 mid/high + simHeaven building/commercial
-    (BLD_CLASS_TINY_RESIDENTIAL, _SF_DEVELOPED): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL, _SH_BUILDING,
-    ),
-    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_DEVELOPED): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        "lib/buildings/facades/commercial/low_commercial_01.fac",
-        _SH_RESIDENTIAL, _SH_BUILDING,
-    ),
-    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_DEVELOPED): (
-        "lib/buildings/facades/commercial/low_commercial_01.fac",
-        "lib/buildings/facades/commercial/low_commercial_02.fac",
-        _SH_RESIDENTIAL, _SH_BUILDING, _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_MEDIUM, _SF_DEVELOPED): (
-        "lib/buildings/facades/generic/mid_classic_01.fac",
-        "lib/buildings/facades/generic/mid_classic_02.fac",
-        "lib/buildings/facades/generic/mid_modern_01.fac",
-        "lib/buildings/facades/generic/mid_modern_03.fac",
-        _SH_BUILDING, _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_SMALL_APARTMENT, _SF_DEVELOPED): (
-        "lib/buildings/facades/generic/mid_classic_01.fac",
-        "lib/buildings/facades/generic/mid_modern_02.fac",
-        "lib/buildings/facades/generic/mid_modern_04.fac",
-        _SH_BUILDING, _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_APARTMENT_BLOCK, _SF_DEVELOPED): (
-        "lib/buildings/facades/generic/high_classic_01.fac",
-        "lib/buildings/facades/generic/high_glass_01.fac",
-        "lib/buildings/facades/generic/high_modern_01.fac",
-        "lib/buildings/facades/generic/high_modern_02.fac",
-        "lib/buildings/facades/generic/high_universal_01.fac",
-        _SH_BUILDING, _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_LARGE, _SF_DEVELOPED): (
-        "lib/buildings/facades/industrial/warehouse_03_60x60.fac",
-        "lib/buildings/facades/industrial/warehouse_04_60x60.fac",
-        _SH_COMMERCIAL, _SH_BUILDING,
-    ),
-    (BLD_CLASS_EXTRA_LARGE, _SF_DEVELOPED): (
-        "lib/buildings/facades/industrial/warehouse_08_90x90.fac",
-        "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
-        _SH_COMMERCIAL,
-    ),
+    # Dense or mixed developed areas: XP12 mid/high plus broad urban simHeaven groups.
+    (BLD_CLASS_TINY_RESIDENTIAL, _SF_DEVELOPED): _XP12_LOW_FACADES[:4] + (_SH_RESIDENTIAL, _SH_BUILDING),
+    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_DEVELOPED): _XP12_LOW_FACADES + (_SH_RESIDENTIAL, _SH_BUILDING, _SH_RETAIL),
+    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_DEVELOPED): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + (_SH_RESIDENTIAL, _SH_BUILDING, _SH_COMMERCIAL, _SH_RETAIL),
+    (BLD_CLASS_MEDIUM, _SF_DEVELOPED): _XP12_MID_FACADES + _XP12_STRIP_COMMERCIAL_FACADES[3:] + _SH_URBAN_FACADES,
+    (BLD_CLASS_SMALL_APARTMENT, _SF_DEVELOPED): _XP12_MID_FACADES + _XP12_HIGH_FACADES[:8] + _SH_URBAN_FACADES,
+    (BLD_CLASS_APARTMENT_BLOCK, _SF_DEVELOPED): _XP12_HIGH_FACADES + _SH_URBAN_FACADES,
+    (BLD_CLASS_LARGE, _SF_DEVELOPED): _XP12_STRIP_COMMERCIAL_FACADES[5:] + _XP12_WAREHOUSE_FACADES[2:] + (_SH_COMMERCIAL, _SH_RETAIL, _SH_BUILDING, _SH_HIGH_COM),
+    (BLD_CLASS_EXTRA_LARGE, _SF_DEVELOPED): _XP12_WAREHOUSE_FACADES[5:] + (_SH_COMMERCIAL, _SH_HIGH_COM),
 
-    # Dominant = ROAD → arterial/commercial strip
-    (BLD_CLASS_TINY_RESIDENTIAL, _SF_ROAD): (
-        "lib/buildings/facades/commercial/low_commercial_01.fac",
-        _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_ROAD): (
-        "lib/buildings/facades/commercial/low_commercial_01.fac",
-        "lib/buildings/facades/commercial/low_commercial_02.fac",
-        _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_ROAD): (
-        "lib/buildings/facades/commercial/low_commercial_02.fac",
-        "lib/buildings/facades/commercial/low_commercial_03.fac",
-        _SH_COMMERCIAL,
-    ),
-    (BLD_CLASS_MEDIUM, _SF_ROAD): (
-        "lib/buildings/facades/generic/mid_modern_03.fac",
-        "lib/buildings/facades/generic/mid_modern_04.fac",
-        _SH_COMMERCIAL,
-    ),
+    # Road-adjacent commercial strips.
+    (BLD_CLASS_TINY_RESIDENTIAL, _SF_ROAD): _XP12_STRIP_COMMERCIAL_FACADES[:5] + _SH_ROAD_FACADES,
+    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_ROAD): _XP12_STRIP_COMMERCIAL_FACADES[:6] + _SH_ROAD_FACADES,
+    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_ROAD): _XP12_STRIP_COMMERCIAL_FACADES + _SH_ROAD_FACADES,
+    (BLD_CLASS_MEDIUM, _SF_ROAD): _XP12_STRIP_COMMERCIAL_FACADES + _XP12_MID_FACADES[2:] + _SH_ROAD_FACADES,
+    (BLD_CLASS_SMALL_APARTMENT, _SF_ROAD): _XP12_MID_FACADES + _XP12_STRIP_COMMERCIAL_FACADES[5:] + _SH_ROAD_FACADES,
+    (BLD_CLASS_APARTMENT_BLOCK, _SF_ROAD): _XP12_HIGH_FACADES[:10] + _SH_ROAD_FACADES + (_SH_HIGH_COM,),
+    (BLD_CLASS_LARGE, _SF_ROAD): _XP12_STRIP_COMMERCIAL_FACADES[5:] + _XP12_WAREHOUSE_FACADES[:5] + _SH_ROAD_FACADES,
+    (BLD_CLASS_EXTRA_LARGE, _SF_ROAD): _XP12_WAREHOUSE_FACADES[5:] + (_SH_COMMERCIAL, _SH_RETAIL),
 
-    # Dominant = AGRICULTURE → rural / farmstead
-    (BLD_CLASS_TINY_RESIDENTIAL, _SF_AGRICULTURE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_AGRICULTURE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_AGRICULTURE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-    (BLD_CLASS_MEDIUM, _SF_AGRICULTURE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        "lib/buildings/facades/generic/mid_classic_01.fac",
-        _SH_RESIDENTIAL,
-    ),
+    # Rural and green contexts.
+    (BLD_CLASS_TINY_RESIDENTIAL, _SF_AGRICULTURE): _XP12_LOW_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_AGRICULTURE): _XP12_LOW_FACADES[:4] + _SH_RURAL_FACADES,
+    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_AGRICULTURE): _XP12_LOW_FACADES[:5] + _XP12_MID_FACADES[:2] + _SH_RURAL_FACADES,
+    (BLD_CLASS_MEDIUM, _SF_AGRICULTURE): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_LARGE, _SF_AGRICULTURE): _XP12_WAREHOUSE_FACADES[:5] + (_SH_FARM, _SH_INDUSTRIAL),
+    (BLD_CLASS_EXTRA_LARGE, _SF_AGRICULTURE): _XP12_WAREHOUSE_FACADES[5:] + (_SH_FARM, _SH_INDUSTRIAL),
+    (BLD_CLASS_TINY_RESIDENTIAL, _SF_TREE): _XP12_LOW_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_TREE): _XP12_LOW_FACADES[:4] + _SH_RURAL_FACADES,
+    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_TREE): _XP12_LOW_FACADES + _SH_RURAL_FACADES,
+    (BLD_CLASS_MEDIUM, _SF_TREE): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_TINY_RESIDENTIAL, _SF_RANGELAND): _XP12_LOW_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_RANGELAND): _XP12_LOW_FACADES[:4] + _SH_RURAL_FACADES,
+    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_RANGELAND): _XP12_LOW_FACADES + _SH_RURAL_FACADES,
+    (BLD_CLASS_MEDIUM, _SF_RANGELAND): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES,
 
-    # Dominant = BARELAND → industrial / warehouse / lot
-    (BLD_CLASS_MEDIUM, _SF_BARELAND): (
-        "lib/buildings/facades/industrial/warehouse_01_45x45.fac",
-        "lib/buildings/facades/industrial/warehouse_02_45x45.fac",
-        _SH_INDUSTRIAL,
-    ),
-    (BLD_CLASS_SMALL_APARTMENT, _SF_BARELAND): (
-        "lib/buildings/facades/industrial/warehouse_02_45x45.fac",
-        _SH_INDUSTRIAL,
-    ),
-    (BLD_CLASS_APARTMENT_BLOCK, _SF_BARELAND): (
-        "lib/buildings/facades/industrial/warehouse_03_60x60.fac",
-        _SH_INDUSTRIAL,
-    ),
-    (BLD_CLASS_LARGE, _SF_BARELAND): (
-        "lib/buildings/facades/industrial/warehouse_01_45x45.fac",
-        "lib/buildings/facades/industrial/warehouse_03_60x60.fac",
-        "lib/buildings/facades/industrial/warehouse_06_90x40.fac",
-        _SH_INDUSTRIAL,
-    ),
-    (BLD_CLASS_EXTRA_LARGE, _SF_BARELAND): (
-        "lib/buildings/facades/industrial/warehouse_08_90x90.fac",
-        "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
-        "lib/buildings/facades/industrial/warehouse_10_90x90.fac",
-        _SH_INDUSTRIAL,
-    ),
+    # Bareland reads best as industrial, warehouse, or big-lot commercial.
+    (BLD_CLASS_MEDIUM, _SF_BARELAND): _XP12_WAREHOUSE_FACADES[:5] + _XP12_STRIP_COMMERCIAL_FACADES[5:] + _SH_INDUSTRIAL_FACADES,
+    (BLD_CLASS_SMALL_APARTMENT, _SF_BARELAND): _XP12_WAREHOUSE_FACADES[:6] + _SH_INDUSTRIAL_FACADES,
+    (BLD_CLASS_APARTMENT_BLOCK, _SF_BARELAND): _XP12_WAREHOUSE_FACADES[2:8] + _SH_INDUSTRIAL_FACADES,
+    (BLD_CLASS_LARGE, _SF_BARELAND): _XP12_WAREHOUSE_FACADES + _SH_INDUSTRIAL_FACADES,
+    (BLD_CLASS_EXTRA_LARGE, _SF_BARELAND): _XP12_WAREHOUSE_FACADES[5:] + _SH_INDUSTRIAL_FACADES,
 
-    # Dominant = TREE → low-density residential in greenery
-    (BLD_CLASS_TINY_RESIDENTIAL, _SF_TREE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_TREE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-    (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_TREE): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-
-    # Dominant = WATER → waterfront mid-rise
-    (BLD_CLASS_MEDIUM, _SF_WATER): (
-        "lib/buildings/facades/generic/mid_classic_01.fac",
-        "lib/buildings/facades/generic/mid_classic_02.fac",
-        _SH_BUILDING,
-    ),
-    (BLD_CLASS_SMALL_APARTMENT, _SF_WATER): (
-        "lib/buildings/facades/generic/mid_classic_01.fac",
-        "lib/buildings/facades/generic/mid_classic_02.fac",
-        _SH_BUILDING,
-    ),
-    (BLD_CLASS_APARTMENT_BLOCK, _SF_WATER): (
-        "lib/buildings/facades/generic/high_classic_01.fac",
-        "lib/buildings/facades/generic/high_glass_01.fac",
-        _SH_BUILDING,
-    ),
-
-    # Dominant = RANGELAND → sparse rural
-    (BLD_CLASS_TINY_RESIDENTIAL, _SF_RANGELAND): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
-    (BLD_CLASS_SMALL_RESIDENTIAL, _SF_RANGELAND): (
-        "lib/buildings/facades/generic/low_modern_01.fac",
-        _SH_RESIDENTIAL,
-    ),
+    # Waterfront: keep it conservative, avoiding rural or industrial-only groups.
+    (BLD_CLASS_MEDIUM, _SF_WATER): _XP12_MID_FACADES[:3] + ("lib/buildings/facades/generic/high_glass_01.fac",) + _SH_WATERFRONT_FACADES,
+    (BLD_CLASS_SMALL_APARTMENT, _SF_WATER): _XP12_MID_FACADES[:4] + _XP12_HIGH_FACADES[:4] + _SH_WATERFRONT_FACADES,
+    (BLD_CLASS_APARTMENT_BLOCK, _SF_WATER): _XP12_HIGH_FACADES[:8] + _SH_WATERFRONT_FACADES,
 }
 
 
 def _facade_for_detection(facade_cls, veg_map, jx, jy, m_per_px,
-                          lat=0.0, lon=0.0):
+                          lat=0.0, lon=0.0, include_simheaven_assets=True):
     """Pick a facade lib path for a YOLO detection using SegFormer landcover context.
 
     Samples a ~50 m radius window around the detection center, takes the
@@ -2846,13 +2845,22 @@ def _facade_for_detection(facade_cls, veg_map, jx, jy, m_per_px,
                     if counts.sum() > 0:
                         dominant = int(counts.argmax())
                         variants = CONTEXT_FACADE_VARIANTS.get((facade_cls, dominant))
+    if variants and not include_simheaven_assets:
+        variants = tuple(
+            path for path in variants
+            if not str(path).lower().startswith("simheaven/")
+        )
     if not variants:
         variants = DEFAULT_FACADE_VARIANTS_BY_CLASS.get(
             facade_cls, (DEFAULT_FACADE_PATHS[facade_cls],)
         )
-    # Stable hash → deterministic variant pick per (lat, lon, jx, jy)
+    # Deterministic variant pick per (lat, lon, jx, jy), independent of
+    # Python's process-randomized hash seed.
     key = (int(round(lat * 1e6)), int(round(lon * 1e6)), int(jx), int(jy))
-    idx = (hash(key) & 0x7fffffff) % len(variants)
+    digest = hashlib.sha1(
+        f"{key[0]}:{key[1]}:{key[2]}:{key[3]}".encode("ascii")
+    ).digest()
+    idx = int.from_bytes(digest[:8], "big") % len(variants)
     return variants[idx]
 
 
@@ -6191,8 +6199,8 @@ def run(
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v4: stock-YOLO storage tanks use circular facade footprints.
-        "schema=v4-stock-yolo-tank-cylinders",
+        # v5: broader facade pools and deterministic simHeaven-gated picks.
+        "schema=v5-broader-facade-variety",
     )
 
     t_start = time.time()
@@ -6722,6 +6730,7 @@ def run(
                         facade_path = _facade_for_detection(
                             facade_cls, veg_map, jx, jy, m_per_px,
                             lat=float(o_lat), lon=float(o_lon),
+                            include_simheaven_assets=simheaven_assets_available,
                         )
                         footprint_poly = yolo_poly
                         placed_facades.append((
@@ -7060,6 +7069,7 @@ def run(
                 facade_path = _facade_for_detection(
                     try_cls, veg_map, jx, jy, m_per_px,
                     lat=float(o_lat), lon=float(o_lon),
+                    include_simheaven_assets=simheaven_assets_available,
                 )
                 pts_this.append((jx, jy, final_h, try_cls))
                 placed_facades.append((
