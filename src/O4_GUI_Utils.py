@@ -336,7 +336,7 @@ class Ortho4XP_GUI(tk.Tk):
         self.pgrb3.grid(row=0, column=2, padx=5, pady=0)
 
         # Console
-        self.console = tk.Text(self.frame_console, bd=0)
+        self.console = tk.Text(self.frame_console, bd=0, **THEME.text_options())
         self.console.grid(row=0, column=0, sticky=N + S + E + W)
         self.frame_console.rowconfigure(0, weight=1)
         self.frame_console.columnconfigure(0, weight=1)

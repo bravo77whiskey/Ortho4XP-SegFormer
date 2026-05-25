@@ -59,6 +59,17 @@ def entry_options():
     }
 
 
+def text_options():
+    colors = palette()
+    return {
+        "bg": colors["entry_background"],
+        "fg": colors["foreground"],
+        "insertbackground": colors["foreground"],
+        "selectbackground": colors["select_background"],
+        "selectforeground": colors["select_foreground"],
+    }
+
+
 def checkbutton_options():
     colors = palette()
     return {
