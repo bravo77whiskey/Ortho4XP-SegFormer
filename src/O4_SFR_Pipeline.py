@@ -119,6 +119,7 @@ sfr_bld_min_zone_m2   = 200.0
 sfr_bld_grid_n        = 16
 sfr_bld_smart_gap_fill = True
 sfr_bld_disable_cache = False
+sfr_bld_avoid_custom_scenery = True
 sfr_bld_yolo_enabled = True
 sfr_bld_yolo_checkpoint = r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
 sfr_bld_yolo_conf = 0.18
@@ -451,6 +452,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    make_viz                 = False,\n"
         f"    smart_gap_fill           = {sfr_bld_smart_gap_fill!r},\n"
         f"    disable_cache            = {sfr_bld_disable_cache!r},\n"
+        f"    avoid_custom_scenery     = {sfr_bld_avoid_custom_scenery!r},\n"
         f"    cache_dir                = {cache_dir!r},\n"
         f"    grid_n                   = {sfr_bld_grid_n!r},\n"
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"

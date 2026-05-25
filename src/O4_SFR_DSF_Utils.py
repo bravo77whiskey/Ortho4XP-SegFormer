@@ -31,6 +31,62 @@ def _tile_dsf_relpath(lat, lon):
     return os.path.join("Earth nav data", f"{lat_block}{lon_block}", f"{lat_tile}{lon_tile}.dsf")
 
 
+def _scenery_pack_path(custom_scenery_dir, pack_path):
+    """Resolve one scenery_packs.ini path to an absolute scenery package path."""
+    custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
+    if not custom_scenery_dir:
+        return None
+    pack_path = (pack_path or "").strip().strip('"')
+    if not pack_path:
+        return None
+    pack_path = pack_path.replace("/", os.sep).replace("\\", os.sep)
+    if os.path.isabs(pack_path):
+        return os.path.abspath(pack_path)
+
+    custom_scenery_name = "Custom Scenery"
+    parts = pack_path.split(os.sep)
+    if parts and parts[0].lower() == custom_scenery_name.lower():
+        xplane_root = os.path.dirname(custom_scenery_dir)
+        return os.path.abspath(os.path.join(xplane_root, pack_path))
+    return os.path.abspath(os.path.join(custom_scenery_dir, pack_path))
+
+
+def active_scenery_pack_dirs(custom_scenery_dir):
+    """Return enabled scenery package dirs in scenery_packs.ini order."""
+    custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
+    if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
+        return []
+
+    ini_path = os.path.join(custom_scenery_dir, "scenery_packs.ini")
+    if not os.path.isfile(ini_path):
+        return []
+
+    packs = []
+    seen = set()
+    with open(ini_path, "r", encoding="utf-8", errors="ignore") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            keyword, pack_path = parts[0].upper(), parts[1]
+            if keyword == "SCENERY_PACK_DISABLED":
+                continue
+            if keyword != "SCENERY_PACK":
+                continue
+            resolved = _scenery_pack_path(custom_scenery_dir, pack_path)
+            if not resolved or not os.path.isdir(resolved):
+                continue
+            real_path = os.path.realpath(resolved)
+            if real_path in seen:
+                continue
+            seen.add(real_path)
+            packs.append((os.path.basename(resolved.rstrip("\\/")) or resolved, resolved))
+    return packs
+
+
 def _scan_custom_scenery(custom_scenery_dir, tile_dsf_relpath, folder_filter):
     """Yield matching DSF files from a configured Custom Scenery directory."""
     custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
@@ -52,6 +108,39 @@ def _scan_custom_scenery(custom_scenery_dir, tile_dsf_relpath, folder_filter):
             continue
         seen_paths.add(resolved_path)
         matches.append((entry.name, dsf_path))
+    return matches
+
+
+def find_active_custom_scenery_dsfs(custom_scenery_dir, tile_dsf_name, skip_dsf_path=None):
+    """Return active scenery DSFs with a matching tile basename."""
+    custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
+    if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
+        return []
+
+    tile_dsf_name = os.path.basename(tile_dsf_name or "")
+    if not tile_dsf_name:
+        return []
+    tile_dsf_name_lower = tile_dsf_name.lower()
+    skip_real = os.path.realpath(skip_dsf_path) if skip_dsf_path else None
+
+    matches = []
+    seen_paths = set()
+    for folder_name, package_dir in active_scenery_pack_dirs(custom_scenery_dir):
+        earth_nav_data = os.path.join(package_dir, "Earth nav data")
+        if not os.path.isdir(earth_nav_data):
+            continue
+        for root, _, files in os.walk(earth_nav_data):
+            match_name = next((name for name in files if name.lower() == tile_dsf_name_lower), None)
+            if match_name is None:
+                continue
+            dsf_path = os.path.join(root, match_name)
+            resolved_path = os.path.realpath(dsf_path)
+            if skip_real and resolved_path == skip_real:
+                continue
+            if resolved_path in seen_paths:
+                continue
+            seen_paths.add(resolved_path)
+            matches.append((folder_name, dsf_path, package_dir))
     return matches
 
 

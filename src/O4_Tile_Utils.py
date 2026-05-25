@@ -402,6 +402,7 @@ def build_tile_list(
             SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
             SFR.sfr_bld_smart_gap_fill = tile.sfr_bld_smart_gap_fill
             SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
+            SFR.sfr_bld_avoid_custom_scenery = tile.sfr_bld_avoid_custom_scenery
             SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
             SFR.sfr_bld_yolo_checkpoint = tile.sfr_bld_yolo_checkpoint
             SFR.sfr_bld_yolo_conf = tile.sfr_bld_yolo_conf

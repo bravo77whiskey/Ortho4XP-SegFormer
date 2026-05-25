@@ -11,6 +11,8 @@ outside the current regeneration set remain untouched on disk.
 
 from __future__ import annotations
 
+import re
+
 import O4_SFR_Climate_Regions as CLIMATE
 
 HEIGHT_CUTOFF_METERS = 24.0
@@ -101,6 +103,22 @@ MESH_DEFS_BY_PATH = {
 
 GFV2_MESH_DEFS_DEFAULT = 12
 TREE_LOW_IMPACT_CONTEXTS = frozenset({"managed", "treeline"})
+GFV2_PATH_RE = re.compile(
+    r"^forests/(?P<region>[^/]+)/(?P<family>[^/]+)/"
+    r"(?P=region)_(?P=family)_(?P<dlevel>\d+)_y(?P<variant>\d+)\.for$",
+    re.IGNORECASE,
+)
+GFV2_TYPE_EXCLUDE_TOKENS = frozenset(
+    {
+        "palm",
+        "coconut",
+        "shrub",
+        "shrubs",
+        "scrub",
+        "brush",
+        "bush",
+    }
+)
 
 
 def climate_region(lat: float, lon: float | None = None) -> str:
@@ -188,6 +206,63 @@ def choose_tree_path(region: str, dlevel: int, rng=None, context: str = "bulk") 
         candidates = gfv2_tree_candidates(region, dlevel)
         weights = None
     return choose_path(candidates, rng, weights=weights)
+
+
+def parse_gfv2_path(path: str) -> dict | None:
+    """Return GFv2 path metadata, or None when the path is not a GFv2 asset."""
+    normalized = (path or "").replace("\\", "/").lower().lstrip("/")
+    match = GFV2_PATH_RE.match(normalized)
+    if not match:
+        return None
+    try:
+        dlevel = int(match.group("dlevel"))
+        variant = int(match.group("variant"))
+    except ValueError:
+        return None
+    return {
+        "region": match.group("region"),
+        "family": match.group("family"),
+        "dlevel": dlevel,
+        "variant": variant,
+        "path": normalized,
+    }
+
+
+def is_acceptable_gfv2_type_source(path: str) -> bool:
+    """Return True when a GFv2 polygon may influence generated tree type."""
+    metadata = parse_gfv2_path(path)
+    if metadata is None:
+        return False
+    searchable = f"{metadata['family']} {metadata['path']}"
+    return not any(token in searchable for token in GFV2_TYPE_EXCLUDE_TOKENS)
+
+
+def _role_for_gfv2_family(family: str) -> str:
+    family = (family or "").lower()
+    if family == "cropland":
+        return "cropland"
+    if family == "woodland":
+        return "woodland"
+    return "tree"
+
+
+def gfv2_type_hint_candidates(
+    source_path: str,
+    fallback_region: str,
+    fallback_dlevel: int,
+) -> tuple[str, ...]:
+    """Map a nearby acceptable GFv2 source path to approved generated assets."""
+    metadata = parse_gfv2_path(source_path)
+    if metadata is None or not is_acceptable_gfv2_type_source(source_path):
+        return gfv2_tree_candidates(fallback_region, fallback_dlevel)
+
+    region = metadata["region"]
+    role = _role_for_gfv2_family(metadata["family"])
+    dlevel = metadata["dlevel"]
+    try:
+        return short_gfv2_candidates(region, role, dlevel)
+    except (KeyError, ValueError):
+        return gfv2_tree_candidates(fallback_region, fallback_dlevel)
 
 
 def all_approved_generated_forest_paths() -> tuple[str, ...]:

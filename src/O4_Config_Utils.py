@@ -17,6 +17,7 @@ import O4_OSM_Utils as OSM
 import O4_Overlay_Utils as OVL
 import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
+import O4_GUI_Theme as THEME
 import O4_Vector_Map as VMAP
 from O4_Cfg_Vars import (
     cfg_app_vars,
@@ -367,6 +368,7 @@ class Ortho4XP_Config(tk.Toplevel):
     def __init__(self, parent):
 
         tk.Toplevel.__init__(self)
+        THEME.apply_ttk_style(ttk.Style())
         self.option_add("*Font", "TkFixedFont")
         self.title("Ortho4XP Config")
         self.columnconfigure(0, weight=1)
@@ -392,9 +394,9 @@ class Ortho4XP_Config(tk.Toplevel):
         self.notebook.bind('<<NotebookTabChanged>>', lambda event: self.update_idletasks())
 
         # Create frames for each tab
-        self.tile_config_frame = tk.Frame(self.notebook, bg="light green")
-        self.global_config_frame = tk.Frame(self.notebook, bg="light green")
-        self.app_config_frame = tk.Frame(self.notebook, bg="light green")
+        self.tile_config_frame = tk.Frame(self.notebook, **THEME.frame_options())
+        self.global_config_frame = tk.Frame(self.notebook, **THEME.frame_options())
+        self.app_config_frame = tk.Frame(self.notebook, **THEME.frame_options())
 
         # Add frames to the notebook
         self.notebook.add(self.tile_config_frame, text="Tile Config")
@@ -457,11 +459,11 @@ class Ortho4XP_Config(tk.Toplevel):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        main_frame = tk.Frame(frame, border=4, bg="light green")
-        frame_status = tk.Frame(main_frame, border=0, padx=5, pady=0, bg="light green")
-        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=0, bg="light green")
-        frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, bg="light green")
-        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, bg="light green")
+        main_frame = tk.Frame(frame, border=4, **THEME.frame_options())
+        frame_status = tk.Frame(main_frame, border=0, padx=5, pady=0, **THEME.frame_options())
+        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=0, **THEME.frame_options())
+        frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, **THEME.frame_options())
+        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
         # Allow widgets to shrink and expand with window resize
         frame_status.columnconfigure(0, weight=0)
         frame_status.rowconfigure(0, weight=0)
@@ -492,8 +494,7 @@ class Ortho4XP_Config(tk.Toplevel):
         tk.Label(
             frame_status,
             textvariable=self.tile_cfg_msg,
-            bg="light green",
-            fg="black",
+            **THEME.label_options(),
             font="TKFixedFont 15",
         ).grid(row=0, column=0, pady=0, sticky=N + S + W + E)
 
@@ -508,7 +509,7 @@ class Ortho4XP_Config(tk.Toplevel):
             tk.Label(
                 frame_cfg,
                 text=title,
-                bg="light green",
+                **THEME.label_options(),
                 anchor=W,
                 font="TKFixedFont 15",
             ).grid(
@@ -671,10 +672,10 @@ class Ortho4XP_Config(tk.Toplevel):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        main_frame = tk.Frame(frame, border=4, bg="light green")
-        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, bg="light green")
-        frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, bg="light green")
-        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, bg="light green")
+        main_frame = tk.Frame(frame, border=4, **THEME.frame_options())
+        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
+        frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, **THEME.frame_options())
+        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
 
         for j in range(12):
             frame_cfg.columnconfigure(j, weight=1)
@@ -710,7 +711,7 @@ class Ortho4XP_Config(tk.Toplevel):
             tk.Label(
                 frame_cfg,
                 text=title,
-                bg="light green",
+                **THEME.label_options(),
                 anchor=W,
                 font="TKFixedFont 15",
             ).grid(
@@ -867,9 +868,9 @@ class Ortho4XP_Config(tk.Toplevel):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        main_frame = tk.Frame(frame, border=4, bg="light green")
-        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, bg="light green")
-        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, bg="light green")
+        main_frame = tk.Frame(frame, border=4, **THEME.frame_options())
+        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
+        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
 
         for j in range(8):
             frame_cfg.columnconfigure(j, weight=1)
@@ -933,8 +934,7 @@ class Ortho4XP_Config(tk.Toplevel):
                     frame_cfg,
                     textvariable=self.v_[item],
                     width=7,
-                    bg="white",
-                    fg="blue",
+                    **THEME.entry_options(),
                 )
             self.app_entry_[item].grid(
                 row=row, column=col + 1, padx=(0, 20), pady=2, sticky=N + S + W
@@ -956,8 +956,7 @@ class Ortho4XP_Config(tk.Toplevel):
             self.app_entry_[item] = tk.Entry(
                 frame_cfg,
                 textvariable=self.v_[item],
-                bg="white",
-                fg="blue",
+                **THEME.entry_options(),
             )
             self.app_entry_[item].grid(
                 row=row,
@@ -1737,13 +1736,23 @@ class Ortho4XP_Config(tk.Toplevel):
         """
         self.popupwindow = tk.Toplevel()
         self.popupwindow.wm_title("Hint!")
-        self.popupwindow.configure(background="light gray")
+        self.popupwindow.configure(background=THEME.palette()["popup_background"])
 
         ttk.Label(
-            self.popupwindow, text=header, anchor=W, font=("TkBoldFont", 14), background="light gray"
+            self.popupwindow,
+            text=header,
+            anchor=W,
+            font=("TkBoldFont", 14),
+            background=THEME.palette()["popup_background"],
+            foreground=THEME.palette()["foreground"],
         ).pack(side="top", fill="x", padx=5, pady=3)
         ttk.Label(
-            self.popupwindow, text=input_text, wraplength=600, anchor=W, background="light gray"
+            self.popupwindow,
+            text=input_text,
+            wraplength=600,
+            anchor=W,
+            background=THEME.palette()["popup_background"],
+            foreground=THEME.palette()["foreground"],
         ).pack(side="top", fill="x", padx=5, pady=0)
         ttk.Button(
             self.popupwindow, text="Ok", command=self.popupwindow.destroy

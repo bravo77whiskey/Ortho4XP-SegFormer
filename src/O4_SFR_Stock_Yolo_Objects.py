@@ -66,6 +66,9 @@ DEFAULT_STOCK_YOLO_CHECKPOINT = os.environ.get(
         "yolo26x-obb.pt",
     ),
 )
+DEFAULT_STOCK_YOLO_BATCH = 1
+STORAGE_TANK_DOTA_CLASS = 2
+STORAGE_TANK_CIRCLE_SEGMENTS = 24
 
 # ── DOTAv1 class taxonomy and static-class filter ────────────────────────────
 DOTA_CLASS_NAMES = {
@@ -278,6 +281,17 @@ def _iter_yolo_crops(image: np.ndarray, stride: int):
             yield x, y, crop
 
 
+def _iter_yolo_crop_batches(image: np.ndarray, stride: int, batch_size: int):
+    batch = []
+    for item in _iter_yolo_crops(image, stride):
+        batch.append(item)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def _pixel_quad_to_lonlat(quad_px: np.ndarray, img_w: int, img_h: int,
                           lat_n: float, lat_s: float,
                           lon_w: float, lon_e: float) -> list[tuple[float, float]]:
@@ -290,6 +304,19 @@ def _pixel_quad_to_lonlat(quad_px: np.ndarray, img_w: int, img_h: int,
     if ring and ring[0] != ring[-1]:
         ring.append(ring[0])
     return ring
+
+
+def _pixel_circle_polygon(cx: float, cy: float, radius_px: float,
+                          segments: int = STORAGE_TANK_CIRCLE_SEGMENTS) -> np.ndarray:
+    """Return a regular closed polygon approximating a circle in image pixels."""
+    radius_px = max(0.5, float(radius_px))
+    segments = max(8, int(segments))
+    angles = np.linspace(0.0, 2.0 * math.pi, segments, endpoint=False, dtype=np.float32)
+    pts = np.column_stack((
+        float(cx) + np.cos(angles) * radius_px,
+        float(cy) + np.sin(angles) * radius_px,
+    )).astype(np.float32)
+    return np.vstack((pts, pts[:1]))
 
 
 def _quad_geometry(quad_px: np.ndarray, m_per_px: float) -> tuple[float, float, float, float, float]:
@@ -323,6 +350,7 @@ def run_stock_yolo_pass(
     imgsz: int = 1024,
     max_det: int = 500,
     device: Optional[str] = None,
+    batch_size: int = 1,
 ) -> StockYoloResults:
     """Run the stock DOTAv1 YOLO-OBB on `image`, map detections to assets, and
     return placements + occupancy polygons.
@@ -336,86 +364,119 @@ def run_stock_yolo_pass(
     t0 = time.perf_counter()
     res = StockYoloResults()
 
-    for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
-        with torch.inference_mode():
-            results = model.predict(
-                source=crop,
-                imgsz=int(imgsz),
-                conf=float(conf),
-                iou=float(iou),
-                max_det=int(max_det),
-                device=device,
-                verbose=False,
-                stream=True,
-            )
-            for r in results:
-                obb = getattr(r, 'obb', None)
-                if obb is None:
+    def _consume_result(r, ox, oy):
+        obb = getattr(r, 'obb', None)
+        if obb is None:
+            return
+        corners_t = getattr(obb, 'xyxyxyxy', None)
+        if corners_t is None:
+            return
+        corners = corners_t.detach().cpu().numpy()
+        confs = (
+            obb.conf.detach().cpu().numpy()
+            if obb.conf is not None else np.ones((len(corners),), dtype=float)
+        )
+        classes = (
+            obb.cls.detach().cpu().numpy().astype(int)
+            if obb.cls is not None else np.zeros((len(corners),), dtype=int)
+        )
+        for points, score, cls in zip(corners, confs, classes):
+            cls_i = int(cls)
+            if cls_i not in STATIC_DOTA_CLASSES:
+                continue
+            if cls_i not in STOCK_YOLO_ASSET_MAP:
+                continue
+            quad = np.asarray(points, dtype=np.float32).reshape(4, 2)
+            quad[:, 0] += float(ox)
+            quad[:, 1] += float(oy)
+            # Clip to image bounds
+            quad[:, 0] = np.clip(quad[:, 0], 0, max(0, img_w - 1))
+            quad[:, 1] = np.clip(quad[:, 1], 0, max(0, img_h - 1))
+            cx, cy, long_m, short_m, heading_deg = _quad_geometry(quad, m_per_px)
+            if not (0 <= cx < img_w and 0 <= cy < img_h):
+                continue
+            # Class-specific size filter
+            if long_m < _MIN_LONG_SIDE_M.get(cls_i, 0.0):
+                continue
+            if long_m > _MAX_LONG_SIDE_M.get(cls_i, float('inf')):
+                continue
+            # Optional static-occupancy fast reject
+            if static_occ_mask is not None:
+                ix = int(round(cx)); iy = int(round(cy))
+                if (0 <= iy < static_occ_mask.shape[0]
+                        and 0 <= ix < static_occ_mask.shape[1]
+                        and static_occ_mask[iy, ix]):
                     continue
-                corners_t = getattr(obb, 'xyxyxyxy', None)
-                if corners_t is None:
-                    continue
-                corners = corners_t.detach().cpu().numpy()
-                confs = (
-                    obb.conf.detach().cpu().numpy()
-                    if obb.conf is not None else np.ones((len(corners),), dtype=float)
+            placement_type, asset_paths, default_height_m = STOCK_YOLO_ASSET_MAP[cls_i]
+            o_lon = lon_w + cx / float(img_w) * (lon_e - lon_w)
+            o_lat = lat_n - cy / float(img_h) * (lat_n - lat_s)
+            # Bounds check
+            if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
+                continue
+            asset_path = _pick_variant(asset_paths, o_lat, o_lon, cx, cy)
+            use_heading = _USE_OBB_HEADING_PER_CLASS.get(cls_i, True)
+            placement_heading = float(heading_deg) if use_heading else 0.0
+            occupied_poly = quad
+            if placement_type == 'object':
+                res.placed_objects.append(
+                    (float(o_lon), float(o_lat), placement_heading, asset_path)
                 )
-                classes = (
-                    obb.cls.detach().cpu().numpy().astype(int)
-                    if obb.cls is not None else np.zeros((len(corners),), dtype=int)
+            elif placement_type == 'facade':
+                facade_poly = quad
+                if cls_i == STORAGE_TANK_DOTA_CLASS:
+                    radius_px = 0.5 * min(long_m, short_m) / max(float(m_per_px), 1e-6)
+                    facade_poly = _pixel_circle_polygon(cx, cy, radius_px)
+                    facade_poly[:, 0] = np.clip(facade_poly[:, 0], 0, max(0, img_w - 1))
+                    facade_poly[:, 1] = np.clip(facade_poly[:, 1], 0, max(0, img_h - 1))
+                    occupied_poly = facade_poly
+                ring = _pixel_quad_to_lonlat(facade_poly, img_w, img_h,
+                                             lat_n, lat_s, lon_w, lon_e)
+                h_m = float(default_height_m if default_height_m else 6.0)
+                res.placed_facades.append((ring, asset_path, h_m))
+            else:
+                # Draped .pol polygons are not supported by design.
+                raise ValueError(
+                    f"Unsupported placement_type {placement_type!r} for DOTA class {cls_i}"
                 )
-                for points, score, cls in zip(corners, confs, classes):
-                    cls_i = int(cls)
-                    if cls_i not in STATIC_DOTA_CLASSES:
-                        continue
-                    if cls_i not in STOCK_YOLO_ASSET_MAP:
-                        continue
-                    quad = np.asarray(points, dtype=np.float32).reshape(4, 2)
-                    quad[:, 0] += float(ox)
-                    quad[:, 1] += float(oy)
-                    # Clip to image bounds
-                    quad[:, 0] = np.clip(quad[:, 0], 0, max(0, img_w - 1))
-                    quad[:, 1] = np.clip(quad[:, 1], 0, max(0, img_h - 1))
-                    cx, cy, long_m, short_m, heading_deg = _quad_geometry(quad, m_per_px)
-                    if not (0 <= cx < img_w and 0 <= cy < img_h):
-                        continue
-                    # Class-specific size filter
-                    if long_m < _MIN_LONG_SIDE_M.get(cls_i, 0.0):
-                        continue
-                    if long_m > _MAX_LONG_SIDE_M.get(cls_i, float('inf')):
-                        continue
-                    # Optional static-occupancy fast reject
-                    if static_occ_mask is not None:
-                        ix = int(round(cx)); iy = int(round(cy))
-                        if (0 <= iy < static_occ_mask.shape[0]
-                                and 0 <= ix < static_occ_mask.shape[1]
-                                and static_occ_mask[iy, ix]):
-                            continue
-                    placement_type, asset_paths, default_height_m = STOCK_YOLO_ASSET_MAP[cls_i]
-                    o_lon = lon_w + cx / float(img_w) * (lon_e - lon_w)
-                    o_lat = lat_n - cy / float(img_h) * (lat_n - lat_s)
-                    # Bounds check
-                    if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
-                        continue
-                    asset_path = _pick_variant(asset_paths, o_lat, o_lon, cx, cy)
-                    use_heading = _USE_OBB_HEADING_PER_CLASS.get(cls_i, True)
-                    placement_heading = float(heading_deg) if use_heading else 0.0
-                    if placement_type == 'object':
-                        res.placed_objects.append(
-                            (float(o_lon), float(o_lat), placement_heading, asset_path)
-                        )
-                    elif placement_type == 'facade':
-                        ring = _pixel_quad_to_lonlat(quad, img_w, img_h,
-                                                     lat_n, lat_s, lon_w, lon_e)
-                        h_m = float(default_height_m if default_height_m else 6.0)
-                        res.placed_facades.append((ring, asset_path, h_m))
-                    else:
-                        # Draped .pol polygons are not supported by design.
-                        raise ValueError(
-                            f"Unsupported placement_type {placement_type!r} for DOTA class {cls_i}"
-                        )
-                    res.occupied_px_polys.append(quad.astype(np.int32))
-                    res.counts_by_class[cls_i] = res.counts_by_class.get(cls_i, 0) + 1
+            res.occupied_px_polys.append(occupied_poly.astype(np.int32))
+            res.counts_by_class[cls_i] = res.counts_by_class.get(cls_i, 0) + 1
+
+    batch_size = max(1, int(batch_size or 1))
+    if batch_size <= 1:
+        for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+            with torch.inference_mode():
+                results = model.predict(
+                    source=crop,
+                    imgsz=int(imgsz),
+                    conf=float(conf),
+                    iou=float(iou),
+                    max_det=int(max_det),
+                    device=device,
+                    verbose=False,
+                    stream=True,
+                )
+                for r in results:
+                    _consume_result(r, ox, oy)
+                del results
+    else:
+        for batch in _iter_yolo_crop_batches(image, int(stride), batch_size):
+            offsets = [(ox, oy) for ox, oy, _ in batch]
+            crops = [crop for _, _, crop in batch]
+            with torch.inference_mode():
+                results = model.predict(
+                    source=crops,
+                    imgsz=int(imgsz),
+                    conf=float(conf),
+                    iou=float(iou),
+                    max_det=int(max_det),
+                    device=device,
+                    verbose=False,
+                    stream=True,
+                    batch=batch_size,
+                )
+                for (ox, oy), r in zip(offsets, results):
+                    _consume_result(r, ox, oy)
+                del results, crops, offsets
 
     res.inference_time_s = time.perf_counter() - t0
     return res
@@ -514,6 +575,7 @@ if __name__ == "__main__":
     ap.add_argument("--checkpoint", default=DEFAULT_STOCK_YOLO_CHECKPOINT)
     ap.add_argument("--device", default=None)
     ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--batch", type=int, default=DEFAULT_STOCK_YOLO_BATCH)
     ap.add_argument("--out-dsf", default=None, help="Optional path; if given, write a "
                                                      "self-contained .txt DSF.")
     args = ap.parse_args()
@@ -538,6 +600,7 @@ if __name__ == "__main__":
         m_per_px=args.m_per_px,
         conf=args.conf,
         device=args.device,
+        batch_size=args.batch,
     )
     print(_summarize(res))
 

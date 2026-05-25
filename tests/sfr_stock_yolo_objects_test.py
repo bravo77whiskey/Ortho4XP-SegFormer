@@ -4,15 +4,25 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - exercised only in minimal envs
+    torch = None
+
 import O4_SFR_Stock_Yolo_Objects as STOCK
 
 
 class StockYoloAssetMapTests(unittest.TestCase):
+    def test_default_batch_constant_is_positive(self):
+        self.assertGreaterEqual(STOCK.DEFAULT_STOCK_YOLO_BATCH, 1)
+
     def test_static_dota_classes_excludes_moving_and_already_rendered(self):
         # Moving (plane, ship, vehicles, helicopter) and already-rendered
         # (bridge, roundabout) must never appear in the placement map.
@@ -184,6 +194,148 @@ class EnsureStockYoloCheckpointTests(unittest.TestCase):
             ):
                 with self.assertRaises(FileNotFoundError):
                     STOCK.ensure_stock_yolo_checkpoint(str(target))
+
+
+@unittest.skipIf(torch is None, "torch is not installed")
+class StockYoloFacadeGeometryTests(unittest.TestCase):
+    def _run_fake_detection(self, cls):
+        class FakeObb:
+            def __init__(self, cls):
+                self.xyxyxyxy = torch.tensor(
+                    [[[100.0, 100.0], [140.0, 100.0], [140.0, 120.0], [100.0, 120.0]]]
+                )
+                self.conf = torch.tensor([0.9])
+                self.cls = torch.tensor([float(cls)])
+
+        class FakeResult:
+            def __init__(self, cls):
+                self.obb = FakeObb(cls)
+
+        class FakeYolo:
+            def __init__(self, cls):
+                self.cls = cls
+
+            def predict(self, **_kwargs):
+                return iter((FakeResult(self.cls),))
+
+        return STOCK.run_stock_yolo_pass(
+            np.zeros((256, 256, 3), dtype=np.uint8),
+            model=FakeYolo(cls),
+            img_w=256,
+            img_h=256,
+            lat=0,
+            lon=0,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            m_per_px=1.0,
+            stride=256,
+            imgsz=256,
+            device="cpu",
+        )
+
+    def test_storage_tank_facade_uses_closed_circular_ring(self):
+        result = self._run_fake_detection(2)
+
+        self.assertEqual(len(result.placed_facades), 1)
+        ring, path, _height_m = result.placed_facades[0]
+        self.assertEqual(path, "simheaven/facades/tank.fac")
+        self.assertEqual(len(ring), STOCK.STORAGE_TANK_CIRCLE_SEGMENTS + 1)
+        self.assertEqual(ring[0], ring[-1])
+
+        center_lon = 120.0 / 256.0
+        center_lat = 1.0 - 110.0 / 256.0
+        distances = [
+            ((lon - center_lon) ** 2 + (lat - center_lat) ** 2) ** 0.5
+            for lon, lat in ring[:-1]
+        ]
+        self.assertAlmostEqual(max(distances), min(distances), places=6)
+
+    def test_storage_tank_occupancy_uses_same_circular_polygon(self):
+        result = self._run_fake_detection(2)
+
+        self.assertEqual(len(result.occupied_px_polys), 1)
+        occupied = result.occupied_px_polys[0]
+        self.assertEqual(occupied.shape[0], STOCK.STORAGE_TANK_CIRCLE_SEGMENTS + 1)
+        self.assertTrue(np.array_equal(occupied[0], occupied[-1]))
+
+    def test_non_tank_facade_keeps_obb_ring(self):
+        result = self._run_fake_detection(3)
+
+        self.assertEqual(len(result.placed_facades), 1)
+        ring, path, _height_m = result.placed_facades[0]
+        self.assertIn(path, STOCK.STOCK_YOLO_ASSET_MAP[3][1])
+        self.assertEqual(len(ring), 5)
+        self.assertEqual(ring[0], ring[-1])
+        self.assertEqual(result.occupied_px_polys[0].shape[0], 4)
+
+
+@unittest.skipIf(torch is None, "torch is not installed")
+class StockYoloBatchingTests(unittest.TestCase):
+    def test_batched_pass_matches_legacy_offsets_and_placements(self):
+        class FakeObb:
+            def __init__(self):
+                self.xyxyxyxy = torch.tensor(
+                    [[[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]]]
+                )
+                self.conf = torch.tensor([0.9])
+                self.cls = torch.tensor([2.0])
+
+        class FakeResult:
+            def __init__(self):
+                self.obb = FakeObb()
+
+        class FakeYolo:
+            def __init__(self):
+                self.calls = []
+
+            def predict(self, **kwargs):
+                self.calls.append(kwargs)
+                source = kwargs["source"]
+                n_results = len(source) if isinstance(source, list) else 1
+
+                def _results():
+                    for _ in range(n_results):
+                        yield FakeResult()
+
+                return _results()
+
+        image = np.zeros((1024, 2048, 3), dtype=np.uint8)
+        common = dict(
+            img_w=2048,
+            img_h=1024,
+            lat=22,
+            lon=120,
+            lat_n=23.0,
+            lat_s=22.0,
+            lon_w=120.0,
+            lon_e=121.0,
+            m_per_px=1.0,
+            stride=1024,
+            imgsz=1024,
+            device="cpu",
+        )
+
+        legacy_model = FakeYolo()
+        batched_model = FakeYolo()
+        legacy = STOCK.run_stock_yolo_pass(
+            image, model=legacy_model, batch_size=1, **common
+        )
+        batched = STOCK.run_stock_yolo_pass(
+            image, model=batched_model, batch_size=2, **common
+        )
+
+        self.assertEqual(legacy.placed_objects, batched.placed_objects)
+        self.assertEqual(legacy.placed_facades, batched.placed_facades)
+        self.assertEqual(legacy.counts_by_class, batched.counts_by_class)
+        self.assertEqual(
+            [poly.tolist() for poly in legacy.occupied_px_polys],
+            [poly.tolist() for poly in batched.occupied_px_polys],
+        )
+        self.assertEqual(len(legacy_model.calls), 2)
+        self.assertEqual(len(batched_model.calls), 1)
+        self.assertEqual(batched_model.calls[0]["batch"], 2)
 
 
 if __name__ == "__main__":

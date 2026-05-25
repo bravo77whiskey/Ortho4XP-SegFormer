@@ -40,6 +40,7 @@ import O4_Mesh_Utils as MESH
 import O4_Mask_Utils as MASK
 import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
+import O4_GUI_Theme as THEME
 import O4_Config_Utils as CFG
 import O4_SFR_Pipeline as SFR
 
@@ -60,37 +61,7 @@ class Ortho4XP_GUI(tk.Tk):
 
     def __init__(self):
         tk.Tk.__init__(self)
-        O4 = ttk.Style()
-        O4.theme_use("alt")
-        O4.configure(
-            "Flat.TButton",
-            background="light green",
-            highlightbackground="light green",
-            selectbackground="light green",
-            highlightcolor="light green",
-            highlightthickness=0,
-            relief="flat",
-        )
-        O4.map(
-            "Flat.TButton",
-            background=[
-                ("disabled", "pressed", "!focus", "active", "light green")
-            ],
-        )
-        O4.configure(
-            "O4.TCombobox",
-            selectbackground="white",
-            selectforeground="blue",
-            fieldbackground="white",
-            foreground="blue",
-            background="white",
-        )
-        O4.map(
-            "O4.TCombobox",
-            fieldbackground=[
-                ("disabled", "!focus", "focus", "active", "white")
-            ],
-        )
+        THEME.apply_ttk_style(ttk.Style())
         self.option_add("*Font", "TkFixedFont")
 
         # Let UI know ourself
@@ -145,26 +116,26 @@ class Ortho4XP_GUI(tk.Tk):
 
         # Frame instances and placement
         # Level 0
-        self.frame_top = tk.Frame(self, border=4, bg="light green")
+        self.frame_top = tk.Frame(self, border=4, **THEME.frame_options())
         self.frame_top.grid(row=0, column=0, sticky=N + S + W + E)
-        self.frame_console = tk.Frame(self, border=5, bg="light green")
+        self.frame_console = tk.Frame(self, border=5, **THEME.frame_options())
         self.frame_console.grid(row=1, column=0, sticky=N + S + W + E)
         # Level 1
         self.frame_tile = tk.Frame(
-            self.frame_top, border=0, padx=5, pady=5, bg="light green"
+            self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
         )
         self.frame_tile.grid(row=0, column=0, sticky=N + S + W + E)
         self.frame_steps = tk.Frame(
-            self.frame_top, border=0, padx=5, pady=5, bg="light green"
+            self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
         )
         self.frame_steps.grid(row=2, column=0, sticky=N + S + W + E)
         self.frame_bars = tk.Frame(
-            self.frame_top, border=0, padx=5, pady=5, bg="light green"
+            self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
         )
         self.frame_bars.grid(row=3, column=0, sticky=N + S + W + E)
         # Level 2
         self.frame_folder = tk.Frame(
-            self.frame_tile, border=0, padx=0, pady=0, bg="light green"
+            self.frame_tile, border=0, padx=0, pady=0, **THEME.frame_options()
         )
         self.frame_folder.grid(
             row=1, column=0, columnspan=8, sticky=N + S + W + E
@@ -178,14 +149,13 @@ class Ortho4XP_GUI(tk.Tk):
         # First row (Tile data)
         self.lat = tk.StringVar()
         self.lat.trace_add("write", self.tile_change)
-        tk.Label(self.frame_tile, text="Latitude:", bg="light green").grid(
+        tk.Label(self.frame_tile, text="Latitude:", **THEME.label_options()).grid(
             row=0, column=0, padx=5, pady=5, sticky=E + W
         )
         self.lat_entry = tk.Entry(
             self.frame_tile,
             width=4,
-            bg="white",
-            fg="blue",
+            **THEME.entry_options(),
             textvariable=self.lat,
         )
         self.lat_entry.grid(row=0, column=1, padx=5, pady=5, sticky=W)
@@ -193,13 +163,12 @@ class Ortho4XP_GUI(tk.Tk):
         self.lon = tk.StringVar()
         self.lat.trace_add("write", self.tile_change)
         tk.Label(
-            self.frame_tile, anchor=W, text="Longitude:", bg="light green"
+            self.frame_tile, anchor=W, text="Longitude:", **THEME.label_options()
         ).grid(row=0, column=2, padx=5, pady=5, sticky=E + W)
         self.lon_entry = tk.Entry(
             self.frame_tile,
             width=4,
-            bg="white",
-            fg="blue",
+            **THEME.entry_options(),
             textvariable=self.lon,
         )
         self.lon_entry.grid(row=0, column=3, padx=5, pady=5, sticky=W)
@@ -207,7 +176,7 @@ class Ortho4XP_GUI(tk.Tk):
         self.default_website = tk.StringVar()
         self.default_website.trace_add("write", self.update_website)
         tk.Label(
-            self.frame_tile, anchor=W, text="Imagery:", bg="light green"
+            self.frame_tile, anchor=W, text="Imagery:", **THEME.label_options()
         ).grid(row=0, column=4, padx=5, pady=5, sticky=E + W)
         self.img_combo = ttk.Combobox(
             self.frame_tile,
@@ -222,7 +191,7 @@ class Ortho4XP_GUI(tk.Tk):
         self.default_zl = tk.StringVar()
         self.default_zl.trace_add("write", self.update_zl)
         tk.Label(
-            self.frame_tile, anchor=W, text="Zoom Level:", bg="light green"
+            self.frame_tile, anchor=W, text="Zoom Level:", **THEME.label_options()
         ).grid(row=0, column=6, padx=5, pady=5, sticky=E + W)
         self.zl_combo = ttk.Combobox(
             self.frame_tile,
@@ -237,13 +206,12 @@ class Ortho4XP_GUI(tk.Tk):
         # Second row (Base Folder)
         self.frame_folder.columnconfigure(1, weight=1)
         tk.Label(
-            self.frame_folder, anchor=W, text="Base Folder:", bg="light green"
+            self.frame_folder, anchor=W, text="Base Folder:", **THEME.label_options()
         ).grid(row=0, column=0, padx=5, pady=5, sticky=E + W)
         self.custom_build_dir = tk.StringVar()
         self.custom_build_dir_entry = tk.Entry(
             self.frame_folder,
-            bg="white",
-            fg="blue",
+            **THEME.entry_options(),
             textvariable=self.custom_build_dir,
         )
         self.custom_build_dir_entry.grid(
@@ -340,7 +308,7 @@ class Ortho4XP_GUI(tk.Tk):
 
         # Fourth row (Progress bars and controls)
         # Label(self.frame_left,anchor=W,text="DSF/Masks progress",
-        # bg="light green")
+        # Uses themed ttk styling.
         self.pgrb1v = tk.IntVar()
         self.pgrb2v = tk.IntVar()
         self.pgrb3v = tk.IntVar()
@@ -932,12 +900,12 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
 
         # Frames
         self.frame_left = tk.Frame(
-            self, border=4, bg="light green"
+            self, border=4, **THEME.frame_options()
         )
         self.frame_left.grid(row=0, column=0, sticky=N + S + W + E)
 
         self.frame_right = tk.Frame(
-            self, border=1, relief="solid", bg="light green"
+            self, border=1, relief="solid", **THEME.frame_options()
         )
         self.frame_right.grid(row=0, column=1, sticky=N + S + W + E)
         self.frame_right.rowconfigure(0, weight=1)
@@ -949,14 +917,13 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             self.frame_left,
             anchor=W,
             text="Preview params ",
-            fg="light green",
-            bg="dark green",
+            **THEME.header_options(),
             font="Helvetica 16 bold italic",
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
 
         tk.Label(
-            self.frame_left, anchor=W, text="Source : ", bg="light green"
+            self.frame_left, anchor=W, text="Source : ", **THEME.label_options()
         ).grid(row=row, column=0, padx=5, pady=3, sticky=W)
         self.map_combo = ttk.Combobox(
             self.frame_left,
@@ -970,7 +937,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
         row += 1
 
         tk.Label(
-            self.frame_left, anchor=W, text="Zoom Level : ", bg="light green"
+            self.frame_left, anchor=W, text="Zoom Level : ", **THEME.label_options()
         ).grid(row=row, column=0, padx=5, pady=3, sticky=W)
         self.zl_combo = ttk.Combobox(
             self.frame_left,
@@ -993,14 +960,13 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             self.frame_left,
             anchor=W,
             text="Zone params ",
-            fg="light green",
-            bg="dark green",
+            **THEME.header_options(),
             font="Helvetica 16 bold italic",
         ).grid(row=row, column=0, pady=10, sticky=W + E)
         row += 1
 
         tk.Label(
-            self.frame_left, anchor=W, text="Source : ", bg="light green"
+            self.frame_left, anchor=W, text="Source : ", **THEME.label_options()
         ).grid(row=row, column=0, sticky=W, padx=5, pady=10)
         self.zmap_combo = ttk.Combobox(
             self.frame_left,
@@ -1013,7 +979,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
         self.zmap_combo.grid(row=row, column=0, padx=5, pady=10, sticky=E)
         row += 1
 
-        self.frame_zlbtn = tk.Frame(self.frame_left, border=0, bg="light green")
+        self.frame_zlbtn = tk.Frame(self.frame_left, border=0, **THEME.frame_options())
         for i in range(5):
             self.frame_zlbtn.columnconfigure(i, weight=1)
         self.frame_zlbtn.grid(
@@ -1040,14 +1006,13 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             self.frame_left,
             anchor=W,
             text="Approx. Add. Size : ",
-            bg="light green",
+            **THEME.label_options(),
         ).grid(row=row, column=0, padx=5, pady=10, sticky=W)
         tk.Entry(
             self.frame_left,
             width=7,
             justify=RIGHT,
-            bg="white",
-            fg="blue",
+            **THEME.entry_options(),
             textvariable=self.gb,
         ).grid(row=row, column=0, padx=5, pady=10, sticky=E)
         row += 1
@@ -1074,7 +1039,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             self.frame_left,
             text="Ctrl+B1 : Add texture\nShift+B1: Add zone point\n" + \
                  "Ctrl+B2 : Delete zone",
-            bg="light green",
+            **THEME.label_options(),
             justify=LEFT,
         ).grid(row=row, column=0, padx=5, pady=20, sticky=N + S + E + W)
         row += 1
@@ -1090,7 +1055,13 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             self.frame_left, text="    Exit     ", command=self.destroy
         ).grid(row=row, column=0, padx=5, pady=3, sticky=N + S + E + W)
         row += 1
-        self.canvas = tk.Canvas(self.frame_right, bd=0, height=750, width=750)
+        self.canvas = tk.Canvas(
+            self.frame_right,
+            bd=0,
+            height=750,
+            width=750,
+            bg=THEME.palette()["canvas_background"],
+        )
         self.canvas.grid(row=0, column=0, sticky=N + S + E + W)
 
     def preview_tile(self, lat, lon):
@@ -1508,11 +1479,11 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
 
         # Frames
         self.frame_left = tk.Frame(
-            self, border=4, bg="light green"
+            self, border=4, **THEME.frame_options()
         )
         self.frame_left.grid(row=0, column=0, sticky=N + S + W + E)
         self.frame_right = tk.Frame(
-            self, border=1, bg="light green"
+            self, border=1, **THEME.frame_options()
         )
         self.frame_right.grid(row=0, rowspan=60, column=1, sticky=N + S + W + E)
         self.frame_right.rowconfigure(0, weight=1, minsize=self.canvas_min_y)
@@ -1524,16 +1495,14 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.frame_left,
             anchor=W,
             text="Active tile",
-            fg="light green",
-            bg="dark green",
+            **THEME.header_options(),
             font="Helvetica 16 bold italic",
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
         self.latlon_entry = tk.Entry(
             self.frame_left,
             width=8,
-            bg="white",
-            fg="blue",
+            **THEME.entry_options(),
             textvariable=self.latlon,
         )
         self.latlon_entry.grid(row=row, column=0, padx=5, pady=5, sticky=N + S)
@@ -1543,8 +1512,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.frame_left,
             anchor=W,
             text="Erase cached data",
-            fg="light green",
-            bg="dark green",
+            **THEME.header_options(),
             font="Helvetica 16 bold italic",
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
@@ -1554,9 +1522,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 text=item,
                 anchor=W,
                 variable=self.v_[item],
-                bg="light green",
-                activebackground="light green",
-                highlightthickness=0,
+                **THEME.checkbutton_options(),
             ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
             row += 1
         ttk.Button(
@@ -1568,8 +1534,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.frame_left,
             anchor=W,
             text="Batch build tiles",
-            fg="light green",
-            bg="dark green",
+            **THEME.header_options(),
             font="Helvetica 16 bold italic",
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
@@ -1579,9 +1544,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 text=item,
                 anchor=W,
                 variable=self.v_[item],
-                bg="light green",
-                activebackground="light green",
-                highlightthickness=0,
+                **THEME.checkbutton_options(),
             ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
             row += 1
         ttk.Button(
@@ -1596,7 +1559,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                  "B1-double-click: Select active\n" + \
                  "Shift+B1: Select multiple tiles\nCtrl+B1: Link in Custom Scenery\n" + \
                  "O: Link overlays in Custom Scenery",
-            bg="light green",
+            **THEME.label_options(),
             justify=LEFT
         ).grid(row=row, column=0, padx=0, pady=5, sticky=N + S + E + W)
         row += 1
@@ -1611,7 +1574,9 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row += 1
 
-        self.canvas = tk.Canvas(self.frame_right, bd=0)
+        self.canvas = tk.Canvas(
+            self.frame_right, bd=0, bg=THEME.palette()["canvas_background"]
+        )
         self.canvas.grid(row=0, column=0, sticky=N + S + E + W)
 
         self.canvas.config(

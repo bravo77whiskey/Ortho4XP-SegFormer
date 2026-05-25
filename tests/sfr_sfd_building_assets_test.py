@@ -25,6 +25,35 @@ def _paths_for_classes(pools, classes):
 
 
 class SfdBuildingAssetTests(unittest.TestCase):
+    def test_stock_yolo_batch_default_tolerates_legacy_module(self):
+        legacy_stock = type("LegacyStockYolo", (), {})()
+
+        with mock.patch.object(BLD, "STOCKYOLO", legacy_stock):
+            self.assertEqual(BLD._stock_yolo_batch_default(), 1)
+
+    def test_yolo_obb_height_class_decode_uses_model_class_count(self):
+        model_class = (
+            (BLD.BLD_CLASS_APARTMENT_BLOCK - 1) * BLD.YOLO_HEIGHT_BIN_COUNT
+            + BLD.YOLO_HEIGHT_BINS_M.index(60.0)
+        )
+
+        placement, height_m = BLD._decode_yolo_obb_detection_class(
+            model_class,
+            model_class_count=len(BLD.BLD_PLACEMENT_CLASSES) * BLD.YOLO_HEIGHT_BIN_COUNT,
+        )
+
+        self.assertEqual(placement, BLD.BLD_CLASS_APARTMENT_BLOCK)
+        self.assertEqual(height_m, 60.0)
+
+    def test_legacy_yolo_class_decode_uses_default_facade_height(self):
+        placement, height_m = BLD._decode_yolo_obb_detection_class(
+            BLD.BLD_CLASS_MEDIUM - 1,
+            model_class_count=len(BLD.BLD_PLACEMENT_CLASSES),
+        )
+
+        self.assertEqual(placement, BLD.BLD_CLASS_MEDIUM)
+        self.assertEqual(height_m, BLD.DEFAULT_FACADE_HEIGHT_M[BLD.BLD_CLASS_MEDIUM])
+
     def test_pipeline_yolo_defaults_match_config_defaults(self):
         import O4_Cfg_Vars as CFG
         import O4_SFR_Pipeline as PIPE
@@ -194,6 +223,60 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(len(detections), 2)
         self.assertAlmostEqual(detections[0]["center"][0], 20.0)
         self.assertAlmostEqual(detections[1]["center"][0], 532.0)
+
+    def test_yolo_obb_batched_inference_matches_legacy_offsets(self):
+        class FakeObb:
+            def __init__(self):
+                self.xyxyxyxy = BLD.torch.tensor(
+                    [[[10.0, 10.0], [30.0, 10.0], [30.0, 20.0], [10.0, 20.0]]]
+                )
+                self.conf = BLD.torch.tensor([0.8])
+                self.cls = BLD.torch.tensor([0.0])
+
+        class FakeResult:
+            def __init__(self):
+                self.obb = FakeObb()
+
+        class FakeYolo:
+            def __init__(self):
+                self.calls = []
+
+            def predict(self, **kwargs):
+                self.calls.append(kwargs)
+                source = kwargs["source"]
+                n_results = len(source) if isinstance(source, list) else 1
+
+                def _results():
+                    for _ in range(n_results):
+                        yield FakeResult()
+
+                return _results()
+
+        image = np.zeros((512, 1536, 3), dtype=np.uint8)
+        common = dict(
+            imgsz=512,
+            stride=512,
+            conf=0.18,
+            iou=0.5,
+            max_det=1000,
+            device="cpu",
+            m_per_px=1.0,
+        )
+
+        legacy_model = FakeYolo()
+        batched_model = FakeYolo()
+        legacy = BLD._run_yolo_obb_inference(
+            legacy_model, image, batch_size=1, **common
+        )
+        batched = BLD._run_yolo_obb_inference(
+            batched_model, image, batch_size=2, **common
+        )
+
+        self.assertEqual(legacy, batched)
+        self.assertEqual(len(legacy_model.calls), 3)
+        self.assertEqual(len(batched_model.calls), 2)
+        self.assertTrue(all(call["stream"] for call in batched_model.calls))
+        self.assertEqual(batched_model.calls[0]["batch"], 2)
 
     def test_yolo_overlap_suppression_removes_lower_confidence_duplicates(self):
         detections = [

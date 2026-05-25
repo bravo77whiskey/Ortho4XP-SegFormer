@@ -12,6 +12,7 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+DEFAULT_DEPLOYED_PYTHON = Path(os.environ.get(
+    "O4_SFR_BENCH_PYTHON",
+    r"G:\Dev\Ortho4XP\.venv\Scripts\python.exe",
+))
 
 
 TILE_RE = re.compile(r"zOrtho4XP_([+-]\d{2})([+-]\d{3})", re.IGNORECASE)
@@ -81,12 +86,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-n", type=int, default=16)
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
+    parser.add_argument(
+        "--cold-cache",
+        action="store_true",
+        help="Clear the benchmark cache and run with cache disabled.",
+    )
     parser.add_argument("--skip-osm-download", action="store_true")
+    parser.add_argument(
+        "--allow-current-python",
+        action="store_true",
+        help="Do not re-exec through the deployed CUDA runtime.",
+    )
+    parser.add_argument(
+        "--deployed-python",
+        default=str(DEFAULT_DEPLOYED_PYTHON),
+        help="Python used for deployed-runtime benchmarks.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    deployed_python = Path(args.deployed_python).resolve()
+    current_python = Path(sys.executable).resolve()
+    if (
+        not args.allow_current_python
+        and deployed_python.exists()
+        and current_python != deployed_python
+    ):
+        cmd = [
+            str(deployed_python),
+            str(Path(__file__).resolve()),
+            *sys.argv[1:],
+            "--allow-current-python",
+        ]
+        print(f"[bench] re-exec deployed CUDA runtime: {deployed_python}", flush=True)
+        return subprocess.call(cmd)
+
+    if args.cold_cache:
+        args.use_cache = False
+        args.clear_cache = True
+
     input_path = Path(args.dds_or_tex_dir).resolve()
 
     selected_file = None
@@ -136,6 +176,19 @@ def main() -> int:
         import O4_SFR_Building_Overlay as bld
 
         print("[bench] real building pipeline")
+        print(f"[bench] python={sys.executable}")
+        try:
+            import torch
+            cuda_state = (
+                f"cuda={torch.cuda.is_available()}"
+                + (
+                    f" device={torch.cuda.get_device_name(0)}"
+                    if torch.cuda.is_available() else ""
+                )
+            )
+        except Exception as exc:
+            cuda_state = f"cuda_check_failed={exc}"
+        print(f"[bench] {cuda_state}")
         print(f"[bench] tex_dir={tex_dir}")
         if selected_file and not args.full_tile:
             print(f"[bench] dds={selected_file}")

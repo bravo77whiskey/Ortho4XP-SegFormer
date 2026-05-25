@@ -21,6 +21,13 @@ cfg_app_vars = {
         "values": (0, 1, 2, 3),
         "hint": "Determines which temporary files are removed. Level 3 erases everything except the config and what is needed for X-Plane; Level 2 erases everything except what is needed to redo the current step only; Level 1 allows you to redo any prior step; Level 0 keeps every single file.",
     },
+    "ui_theme": {
+        "module": "THEME",
+        "type": str,
+        "default": "light",
+        "values": ["light", "dark"],
+        "hint": "Application color theme. Dark mode is applied when Ortho4XP is restarted or when configuration windows are reopened.",
+    },
     "overpass_server_choice": {
         "module": "OSM",
         "type": str,
@@ -512,6 +519,12 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_no_cache",
         "hint": "Disable persistent per-DDS building cache files for this tile. When enabled, building cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
+    "sfr_bld_avoid_custom_scenery": {
+        "type": bool,
+        "default": True,
+        "short_name": "bld_avoid_custom",
+        "hint": "Avoid overlapping enabled Custom Scenery objects and facade polygons from scenery_packs.ini when generating SegFormer building overlays.",
+    },
     "sfr_bld_yolo_enabled": {
         "type": bool,
         "default": True,
@@ -573,6 +586,7 @@ cfg_vars = {**cfg_app_vars, **cfg_tile_vars, **cfg_global_tile_vars}
 list_app_vars = [
     "verbosity",
     "cleaning_level",
+    "ui_theme",
     "overpass_server_choice",
     "skip_downloads",
     "skip_converts",
@@ -680,6 +694,7 @@ list_sfr_bld_vars = [
     "sfr_bld_grid_n",
     "sfr_bld_smart_gap_fill",
     "sfr_bld_disable_cache",
+    "sfr_bld_avoid_custom_scenery",
     "sfr_bld_yolo_enabled",
     "sfr_bld_yolo_checkpoint",
     "sfr_bld_yolo_conf",

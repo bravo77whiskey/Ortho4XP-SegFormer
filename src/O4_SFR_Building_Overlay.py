@@ -40,7 +40,9 @@ import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 from O4_SFR_DSF_Utils import (
+    active_scenery_pack_dirs,
     ensure_cached_dsf_text,
+    find_active_custom_scenery_dsfs,
     find_simheaven_building_dsfs,
     find_simheaven_network_dsfs,
     resolve_custom_scenery_dir,
@@ -63,6 +65,23 @@ def _env_float(name, default):
         return float(value)
     except ValueError:
         return default
+
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _stock_yolo_batch_default():
+    try:
+        return max(1, int(getattr(STOCKYOLO, "DEFAULT_STOCK_YOLO_BATCH", 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _cuda_memory_counts_mb():
@@ -89,8 +108,9 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
     ordered = (
         ("load", "dds_load"),
         ("cache", "cache_load"),
-        ("yolo", "yolo_inference"),
-        ("infer", "inference"),
+        ("segformer", "segformer_inference"),
+        ("trained_yolo", "trained_yolo_inference"),
+        ("stock_yolo", "stock_yolo_inference"),
         ("zone", "zone_cleanup"),
         ("lookup", "lookup"),
         ("road", "road_raster"),
@@ -320,6 +340,8 @@ def parse_args():
                     help='Path to *_big_roads.osm.bz2 (auto-discovered if omitted)')
     ap.add_argument('--custom-scenery-dir', default=None,
                     help='Configured X-Plane root or Custom Scenery directory used to locate building libraries.')
+    ap.add_argument('--no-custom-scenery-avoidance', action='store_true',
+                    help='Disable active custom scenery object/facade overlap avoidance.')
     ap.add_argument('--no-yolo', action='store_true',
                     help='Disable YOLO OBB direct building placements.')
     ap.add_argument('--yolo-checkpoint', default=None,
@@ -574,9 +596,10 @@ def _dds_road_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
                         grid_n, road_width_px, road_dilate_px,
                         separator_sig, rail_sig, heading_sig,
                         residential_poly_sig, excl_poly_sig,
-                        existing_bld_poly_sig, sh_bld_sig):
+                        existing_bld_poly_sig, sh_bld_sig,
+                        custom_bld_sig=None):
     return {
-        'version': 6,
+        'version': 7,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -590,6 +613,7 @@ def _dds_road_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
         'excl_poly_sig': excl_poly_sig,
         'existing_bld_poly_sig': existing_bld_poly_sig,
         'sh_bld_sig': sh_bld_sig,
+        'custom_bld_sig': custom_bld_sig,
         'residential_road_types': tuple(sorted(RESIDENTIAL_HIGHWAY_TYPES)),
         'residential_buffer_m': float(RESIDENTIAL_FALLBACK_BUFFER_M),
         'residential_buffer_px_min': int(RESIDENTIAL_FALLBACK_BUFFER_PX_MIN),
@@ -612,7 +636,8 @@ def _load_dds_road_cache(cache_path, key):
 
 def _save_dds_road_cache(cache_path, key, road_mask, rail_mask, hgrid, n_osm_cells,
                          residential_area_mask, residential_area_source,
-                         poly_mask, existing_bld_mask, sh_bld_mask):
+                         poly_mask, existing_bld_mask, sh_bld_mask,
+                         custom_bld_mask=None):
     import pickle as _pickle
     try:
         with open(cache_path, 'wb') as f:
@@ -627,6 +652,7 @@ def _save_dds_road_cache(cache_path, key, road_mask, rail_mask, hgrid, n_osm_cel
                 'poly_mask': poly_mask,
                 'existing_bld_mask': existing_bld_mask,
                 'sh_bld_mask': sh_bld_mask,
+                'custom_bld_mask': custom_bld_mask,
             }, f, protocol=_pickle.HIGHEST_PROTOCOL)
     except Exception:
         pass
@@ -1660,6 +1686,120 @@ def _is_very_tall_building_asset(path=None, height_m=None):
     return any(token in p for token in VERY_TALL_BUILDING_TOKENS)
 
 
+def _norm_library_path(path):
+    return (path or '').replace('\\', '/').strip().lower().lstrip('/')
+
+
+def _read_obj8_bounds(obj_path, cache_dir=None):
+    """Return OBJ8 X/Z footprint bounds as ``(xmin, xmax, zmin, zmax)``."""
+    if not obj_path or not os.path.isfile(obj_path):
+        return None
+
+    def _parse():
+        min_x = min_z = float('inf')
+        max_x = max_z = float('-inf')
+        n_vertices = 0
+        with open(obj_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            for raw_line in handle:
+                line = raw_line.lstrip()
+                if not line.startswith('VT'):
+                    continue
+                parts = line.split()
+                if len(parts) < 4 or parts[0] != 'VT':
+                    continue
+                try:
+                    x = float(parts[1])
+                    z = float(parts[3])
+                except ValueError:
+                    continue
+                min_x = min(min_x, x)
+                max_x = max(max_x, x)
+                min_z = min(min_z, z)
+                max_z = max(max_z, z)
+                n_vertices += 1
+        if n_vertices <= 0 or max_x <= min_x or max_z <= min_z:
+            return None
+        return (float(min_x), float(max_x), float(min_z), float(max_z))
+
+    return PCACHE.load_or_build(
+        obj_path,
+        cache_dir,
+        "obj8_bounds",
+        _parse,
+        version="obj8-xz-bounds-v1",
+    )
+
+
+def _active_custom_library_index(custom_scenery_dir):
+    """Build a best-effort active library virtual-path to physical OBJ map."""
+    index = {}
+    for _, package_dir in active_scenery_pack_dirs(custom_scenery_dir):
+        library_txt = os.path.join(package_dir, 'library.txt')
+        if not os.path.isfile(library_txt):
+            continue
+        try:
+            with open(library_txt, 'r', encoding='utf-8', errors='ignore') as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line or line.startswith(('#', '//')):
+                        continue
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    command = parts[0].upper()
+                    virtual_path = physical_path = None
+                    if command in {'EXPORT', 'EXPORT_EXCLUDE', 'EXPORT_BACKUP'} and len(parts) >= 3:
+                        virtual_path, physical_path = parts[1], parts[2]
+                    elif command == 'EXPORT_RATIO' and len(parts) >= 4:
+                        virtual_path, physical_path = parts[2], parts[3]
+                    if not virtual_path or not physical_path:
+                        continue
+                    if not physical_path.lower().replace('\\', '/').endswith('.obj'):
+                        continue
+                    resolved = os.path.abspath(os.path.join(package_dir, physical_path))
+                    if not os.path.isfile(resolved):
+                        continue
+                    index.setdefault(_norm_library_path(virtual_path), resolved)
+        except Exception:
+            continue
+    return index
+
+
+def _resolve_custom_object_path(object_path, package_dir, library_index):
+    """Resolve a DSF object definition to a readable local OBJ8 path when possible."""
+    if not object_path:
+        return None
+    object_path = object_path.replace('\\', '/')
+    if os.path.isabs(object_path) and os.path.isfile(object_path):
+        return os.path.abspath(object_path)
+    if package_dir:
+        local_path = os.path.abspath(os.path.join(package_dir, object_path))
+        if os.path.isfile(local_path):
+            return local_path
+    return library_index.get(_norm_library_path(object_path))
+
+
+def _custom_object_dims(object_path, package_dir, library_index, cache_dir):
+    """Return existing custom object footprint dimensions in metres, or None."""
+    p = (object_path or '').replace('\\', '/')
+    p_lower = p.lower()
+    if p_lower.startswith('simheaven/') and _is_simheaven_building_object(p):
+        return _simheaven_object_dims(p)
+    bounds_m = _bounds_for_object_path(p)
+    if bounds_m is not None:
+        xmin, xmax, zmin, zmax = bounds_m
+        return float(xmax) - float(xmin), float(zmax) - float(zmin)
+    dims = _default_object_dims(p)
+    if dims is not None:
+        return dims
+    resolved_obj = _resolve_custom_object_path(p, package_dir, library_index)
+    bounds_m = _read_obj8_bounds(resolved_obj, cache_dir)
+    if bounds_m is None:
+        return None
+    xmin, xmax, zmin, zmax = bounds_m
+    return float(xmax) - float(xmin), float(zmax) - float(zmin)
+
+
 def _load_simheaven_building_exclusions(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
     """Parse simHeaven building objects/facades into exclusion geometry."""
     objects = []
@@ -1765,6 +1905,128 @@ def _load_simheaven_building_exclusions(custom_scenery_dir, tile_lat, tile_lon, 
             print(f"  [simHeaven bld] failed {dsf_path}: {exc}")
 
     return polys, objects
+
+
+def _load_custom_scenery_building_exclusions(
+    custom_scenery_dir,
+    tile_lat,
+    tile_lon,
+    out_dsf,
+    dsftool_path,
+    cache_dir,
+):
+    """Parse active custom scenery objects/facades into exclusion geometry."""
+    objects = []
+    polys = []
+    skipped_objects = 0
+    dsf_name = os.path.basename(out_dsf or _tile_name_for_latlon(tile_lat, tile_lon))
+    library_index = _active_custom_library_index(custom_scenery_dir)
+    dsf_matches = find_active_custom_scenery_dsfs(
+        custom_scenery_dir,
+        dsf_name,
+        skip_dsf_path=out_dsf,
+    )
+
+    for folder_name, dsf_path, package_dir in dsf_matches:
+        n_obj0 = len(objects)
+        n_poly0 = len(polys)
+        skipped0 = skipped_objects
+        try:
+            cached_text_path = ensure_cached_dsf_text(
+                dsf_path,
+                dsftool_path,
+                cache_dir,
+                create_no_window=SEGFORMER._CREATE_NO_WINDOW,
+            )
+            object_defs = []
+            polygon_defs = []
+            current_polygon_is_facade = False
+            current_winding = None
+
+            with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+                for raw_line in text_file:
+                    line = raw_line.strip()
+                    if line.startswith("OBJECT_DEF "):
+                        object_defs.append(line.split(" ", 1)[1])
+                    elif line.startswith("POLYGON_DEF "):
+                        polygon_defs.append(line.split(" ", 1)[1])
+                    elif line.startswith("OBJECT "):
+                        parts = line.split()
+                        try:
+                            object_index = int(parts[1])
+                            object_path = object_defs[object_index]
+                            object_lon = float(parts[2])
+                            object_lat = float(parts[3])
+                            object_heading = float(parts[4]) if len(parts) > 4 else 0.0
+                        except (IndexError, ValueError):
+                            skipped_objects += 1
+                            continue
+                        dims = _custom_object_dims(
+                            object_path,
+                            package_dir,
+                            library_index,
+                            cache_dir,
+                        )
+                        if dims is None:
+                            skipped_objects += 1
+                            continue
+                        object_width_m, object_height_m = dims
+                        objects.append(
+                            {
+                                'lat': object_lat,
+                                'lon': object_lon,
+                                'heading': object_heading,
+                                'w_m': object_width_m,
+                                'h_m': object_height_m,
+                                'path': object_path,
+                            }
+                        )
+                    elif line.startswith("BEGIN_POLYGON "):
+                        parts = line.split()
+                        current_polygon_is_facade = False
+                        current_winding = None
+                        try:
+                            polygon_index = int(parts[1])
+                            polygon_path = polygon_defs[polygon_index]
+                            current_polygon_is_facade = (
+                                polygon_path.replace('\\', '/').lower().endswith('.fac')
+                            )
+                        except (IndexError, ValueError):
+                            current_polygon_is_facade = False
+                    elif line == "BEGIN_WINDING" and current_polygon_is_facade:
+                        current_winding = []
+                    elif line.startswith("POLYGON_POINT ") and current_winding is not None:
+                        parts = line.split()
+                        try:
+                            current_winding.append((float(parts[2]), float(parts[1])))
+                        except (IndexError, ValueError):
+                            pass
+                    elif line == "END_WINDING" and current_winding is not None:
+                        if len(current_winding) >= 3:
+                            polys.append(current_winding)
+                        current_winding = None
+                    elif line == "END_POLYGON":
+                        current_polygon_is_facade = False
+                        current_winding = None
+
+            print(
+                f"  [custom scenery bld] {folder_name}: "
+                f"+{len(objects) - n_obj0} objects  "
+                f"+{len(polys) - n_poly0} facade polys  "
+                f"skipped_objects={skipped_objects - skipped0}"
+            )
+        except Exception as exc:
+            print(f"  [custom scenery bld] failed {dsf_path}: {exc}")
+
+    return polys, objects, skipped_objects, len(dsf_matches)
+
+
+def _tile_name_for_latlon(lat, lon):
+    lat_i = int(lat)
+    lon_i = int(lon)
+    lat_s = f"{'+' if lat_i >= 0 else '-'}{abs(lat_i):02d}"
+    lon_s = f"{'+' if lon_i >= 0 else '-'}{abs(lon_i):03d}"
+    return f"{lat_s}{lon_s}.dsf"
 
 
 def _prepare_simheaven_objects(objects):
@@ -2241,6 +2503,7 @@ DEFAULT_YOLO_OBB_STRIDE = 512
 DEFAULT_YOLO_OBB_CONF = 0.18
 DEFAULT_YOLO_OBB_IOU = 0.5
 DEFAULT_YOLO_OBB_MAX_DET = 1000
+DEFAULT_YOLO_OBB_BATCH = 1
 YOLO_GUIDANCE_MAX_DISTANCE_M = 70.0
 YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
 YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
@@ -2366,6 +2629,13 @@ DEFAULT_FACADE_HEIGHT_M = {
     BLD_CLASS_LARGE: 8.0,
     BLD_CLASS_EXTRA_LARGE: 10.0,
 }
+YOLO_HEIGHT_BINS_M = (
+    1.0, 2.0, 3.0, 4.0, 5.0,
+    6.0, 7.0, 8.0, 9.0, 10.0,
+    12.0, 15.0, 18.0, 21.0, 24.0,
+    30.0, 40.0, 60.0, 90.0, 120.0,
+)
+YOLO_HEIGHT_BIN_COUNT = len(YOLO_HEIGHT_BINS_M)
 
 # SegFormer landcover class IDs used by the variant picker (must match SEGFORMER constants):
 #   0=background, 1=bareland, 2=rangeland, 3=developed, 4=road,
@@ -3628,7 +3898,10 @@ def _checkpoint_signature(path):
     }
 
 
-def _yolo_obb_cache_key(fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det):
+def _yolo_obb_cache_key(
+    fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det,
+    batch_size=1, fused=False,
+):
     return {
         'version': YOLO_OBB_CACHE_VERSION,
         'fname': str(fname),
@@ -3639,6 +3912,8 @@ def _yolo_obb_cache_key(fname, img_w, img_h, checkpoint, imgsz, stride, conf, io
         'conf': round(float(conf), 6),
         'iou': round(float(iou), 6),
         'max_det': int(max_det),
+        'batch_size': int(batch_size),
+        'fused': bool(fused),
     }
 
 
@@ -3668,9 +3943,12 @@ def _save_yolo_obb_cache(cache_path, key, detections):
         pass
 
 
-def _load_yolo_obb_model(checkpoint):
+def _load_yolo_obb_model(checkpoint, *, fuse=False):
     from ultralytics import YOLO
-    return YOLO(str(checkpoint))
+    model = YOLO(str(checkpoint))
+    if fuse and hasattr(model, 'fuse'):
+        model.fuse()
+    return model
 
 
 def _iter_yolo_crops(image, stride):
@@ -3685,7 +3963,55 @@ def _iter_yolo_crops(image, stride):
             yield x, y, crop
 
 
-def _yolo_obb_detection_from_points(points, confidence, cls, img_w, img_h, m_per_px, xywhr=None):
+def _iter_yolo_crop_batches(image, stride, batch_size):
+    batch = []
+    for item in _iter_yolo_crops(image, stride):
+        batch.append(item)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _yolo_model_class_count(model):
+    names = getattr(model, 'names', None)
+    if names is None and getattr(model, 'model', None) is not None:
+        names = getattr(model.model, 'names', None)
+    if isinstance(names, dict):
+        return len(names)
+    if isinstance(names, (list, tuple)):
+        return len(names)
+    return None
+
+
+def _decode_yolo_obb_detection_class(model_cls_int, model_class_count=None):
+    """Decode legacy 8-class or height-expanded YOLO OBB classes."""
+    height_model_class_count = len(BLD_PLACEMENT_CLASSES) * YOLO_HEIGHT_BIN_COUNT
+    if int(model_class_count or 0) == height_model_class_count:
+        placement_index, height_bin = divmod(int(model_cls_int), YOLO_HEIGHT_BIN_COUNT)
+        if 0 <= placement_index < len(BLD_PLACEMENT_CLASSES):
+            return (
+                int(BLD_PLACEMENT_CLASSES[placement_index]),
+                float(YOLO_HEIGHT_BINS_M[height_bin]),
+            )
+
+    mapped_cls = int(model_cls_int) + 1
+    if mapped_cls in BLD_PLACEMENT_CLASSES:
+        return mapped_cls, float(DEFAULT_FACADE_HEIGHT_M.get(mapped_cls, 8.0))
+    return None, None
+
+
+def _yolo_obb_detection_from_points(
+    points,
+    confidence,
+    cls,
+    img_w,
+    img_h,
+    m_per_px,
+    xywhr=None,
+    model_class_count=None,
+):
     """Convert one YOLO OBB polygon into overlay placement evidence."""
     pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
     valid = (
@@ -3727,17 +4053,16 @@ def _yolo_obb_detection_from_points(points, confidence, cls, img_w, img_h, m_per
     heading = (90.0 - img_angle) % 180.0
     max_side_m = float(max_side_px) * float(m_per_px)
     area_m2 = area_px * float(m_per_px) * float(m_per_px)
-    # Trained YOLO-OBB model emits one class per BLD_PLACEMENT_CLASS (0..7),
-    # whereas BLD_PLACEMENT_CLASSES enum values are (1..8). Shift by +1 to align.
-    # Trust the model's predicted class — that's what carries the height tier
-    # (DEFAULT_FACADE_HEIGHT_M is keyed by placement class). Fall back to the
-    # area-based heuristic only if the model class is out of range.
     model_cls_int = int(cls)
-    mapped_cls = model_cls_int + 1
-    if mapped_cls in BLD_PLACEMENT_CLASSES:
-        placement_cls = mapped_cls
+    placement_cls, height_m = _decode_yolo_obb_detection_class(
+        model_cls_int,
+        model_class_count=model_class_count,
+    )
+    if placement_cls is not None:
+        placement_cls = int(placement_cls)
     else:
         placement_cls = _roof_fragment_class(area_m2, max_side_m, 1.0)
+        height_m = float(DEFAULT_FACADE_HEIGHT_M.get(placement_cls, 8.0))
 
     return {
         'points': clipped.tolist(),
@@ -3751,66 +4076,113 @@ def _yolo_obb_detection_from_points(points, confidence, cls, img_w, img_h, m_per
         'area_m2': float(area_m2),
         'max_side_m': float(max_side_m),
         'placement_class': int(placement_cls),
+        'height_m': float(height_m),
     }
 
 
+def _append_yolo_result_detections(
+    detections,
+    result,
+    ox,
+    oy,
+    *,
+    img_w,
+    img_h,
+    m_per_px,
+    model_class_count,
+):
+    obb = corners_tensor = corners = xywhr_tensor = xywhr = confs = classes = None
+    try:
+        obb = getattr(result, 'obb', None)
+        corners_tensor = None if obb is None else getattr(obb, 'xyxyxyxy', None)
+        if corners_tensor is None:
+            return
+        corners = corners_tensor.detach().cpu().numpy()
+        xywhr_tensor = getattr(obb, 'xywhr', None)
+        xywhr = (
+            None if xywhr_tensor is None
+            else xywhr_tensor.detach().cpu().numpy()
+        )
+        confs = (
+            obb.conf.detach().cpu().numpy()
+            if obb.conf is not None else np.ones((len(corners),), dtype=float)
+        )
+        classes = (
+            obb.cls.detach().cpu().numpy()
+            if obb.cls is not None else np.zeros((len(corners),), dtype=float)
+        )
+        if xywhr is not None and len(xywhr) != len(corners):
+            xywhr = None
+        for det_idx, (points, score, cls) in enumerate(zip(corners, confs, classes)):
+            shifted = np.asarray(points, dtype=np.float32).reshape(4, 2)
+            shifted[:, 0] += float(ox)
+            shifted[:, 1] += float(oy)
+            shifted_xywhr = None
+            if xywhr is not None:
+                shifted_xywhr = np.asarray(xywhr[det_idx], dtype=np.float32).copy()
+                shifted_xywhr[0] += float(ox)
+                shifted_xywhr[1] += float(oy)
+            detection = _yolo_obb_detection_from_points(
+                shifted, score, cls, img_w, img_h, m_per_px,
+                xywhr=shifted_xywhr,
+                model_class_count=model_class_count,
+            )
+            if detection is not None:
+                detections.append(detection)
+    finally:
+        del corners, xywhr, confs, classes, corners_tensor, xywhr_tensor, obb, result
+
+
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
-                            device=None, m_per_px=1.0):
+                            device=None, m_per_px=1.0, batch_size=1):
     img_h, img_w = image.shape[:2]
     detections = []
-    for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
-        with torch.inference_mode():
-            results = model.predict(
-                source=crop,
-                imgsz=int(imgsz),
-                conf=float(conf),
-                iou=float(iou),
-                max_det=int(max_det),
-                device=device,
-                verbose=False,
-                stream=True,
-            )
-            for result in results:
-                obb = corners_tensor = corners = xywhr_tensor = xywhr = confs = classes = None
-                try:
-                    obb = getattr(result, 'obb', None)
-                    corners_tensor = None if obb is None else getattr(obb, 'xyxyxyxy', None)
-                    if corners_tensor is None:
-                        continue
-                    corners = corners_tensor.detach().cpu().numpy()
-                    xywhr_tensor = getattr(obb, 'xywhr', None)
-                    xywhr = (
-                        None if xywhr_tensor is None
-                        else xywhr_tensor.detach().cpu().numpy()
+    model_class_count = _yolo_model_class_count(model)
+
+    batch_size = max(1, int(batch_size or 1))
+    if batch_size <= 1:
+        for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+            with torch.inference_mode():
+                results = model.predict(
+                    source=crop,
+                    imgsz=int(imgsz),
+                    conf=float(conf),
+                    iou=float(iou),
+                    max_det=int(max_det),
+                    device=device,
+                    verbose=False,
+                    stream=True,
+                )
+                for result in results:
+                    _append_yolo_result_detections(
+                        detections, result, ox, oy,
+                        img_w=img_w, img_h=img_h, m_per_px=m_per_px,
+                        model_class_count=model_class_count,
                     )
-                    confs = (
-                        obb.conf.detach().cpu().numpy()
-                        if obb.conf is not None else np.ones((len(corners),), dtype=float)
+                del results
+    else:
+        for batch in _iter_yolo_crop_batches(image, int(stride), batch_size):
+            offsets = [(ox, oy) for ox, oy, _ in batch]
+            crops = [crop for _, _, crop in batch]
+            with torch.inference_mode():
+                results = model.predict(
+                    source=crops,
+                    imgsz=int(imgsz),
+                    conf=float(conf),
+                    iou=float(iou),
+                    max_det=int(max_det),
+                    device=device,
+                    verbose=False,
+                    stream=True,
+                    batch=batch_size,
+                )
+                for (ox, oy), result in zip(offsets, results):
+                    _append_yolo_result_detections(
+                        detections, result, ox, oy,
+                        img_w=img_w, img_h=img_h, m_per_px=m_per_px,
+                        model_class_count=model_class_count,
                     )
-                    classes = (
-                        obb.cls.detach().cpu().numpy()
-                        if obb.cls is not None else np.zeros((len(corners),), dtype=float)
-                    )
-                    if xywhr is not None and len(xywhr) != len(corners):
-                        xywhr = None
-                    for det_idx, (points, score, cls) in enumerate(zip(corners, confs, classes)):
-                        shifted = np.asarray(points, dtype=np.float32).reshape(4, 2)
-                        shifted[:, 0] += float(ox)
-                        shifted[:, 1] += float(oy)
-                        shifted_xywhr = None
-                        if xywhr is not None:
-                            shifted_xywhr = np.asarray(xywhr[det_idx], dtype=np.float32).copy()
-                            shifted_xywhr[0] += float(ox)
-                            shifted_xywhr[1] += float(oy)
-                        detection = _yolo_obb_detection_from_points(
-                            shifted, score, cls, img_w, img_h, m_per_px,
-                            xywhr=shifted_xywhr,
-                        )
-                        if detection is not None:
-                            detections.append(detection)
-                finally:
-                    del corners, xywhr, confs, classes, corners_tensor, xywhr_tensor, obb, result
-            del results
+                del results, crops, offsets
 
     detections.sort(key=lambda item: (float(item['area_m2']), -float(item['confidence'])))
     return detections
@@ -3838,6 +4210,7 @@ def _build_yolo_guidance(detections, img_h, img_w, m_per_px):
     )
     class_by_label = np.zeros(n_centers, dtype=np.uint8)
     heading_by_label = np.full(n_centers, np.nan, dtype=np.float32)
+    height_by_label = np.full(n_centers, np.nan, dtype=np.float32)
     confidence_by_label = np.zeros(n_centers, dtype=np.float32)
     area_by_label_m2 = np.zeros(n_centers, dtype=np.float32)
     center_by_label = np.full((n_centers, 2), np.nan, dtype=np.float32)
@@ -3851,6 +4224,10 @@ def _build_yolo_guidance(detections, img_h, img_w, m_per_px):
             continue
         class_by_label[label] = int(det['placement_class'])
         heading_by_label[label] = float(det['heading'])
+        height_by_label[label] = float(det.get(
+            'height_m',
+            DEFAULT_FACADE_HEIGHT_M.get(int(det['placement_class']), 8.0),
+        ))
         confidence_by_label[label] = float(det['confidence'])
         area_by_label_m2[label] = float(det['area_m2'])
         center_by_label[label] = np.asarray(det['center'], dtype=np.float32)
@@ -3867,6 +4244,7 @@ def _build_yolo_guidance(detections, img_h, img_w, m_per_px):
         'nearest_label': nearest_label.astype(np.int32, copy=False),
         'class_by_label': class_by_label,
         'heading_by_label': heading_by_label,
+        'height_by_label': height_by_label,
         'confidence_by_label': confidence_by_label,
         'area_by_label_m2': area_by_label_m2,
         'center_by_label': center_by_label,
@@ -4018,6 +4396,10 @@ def _consensus_yolo_template(
             'template': template,
             'heading': float(template.get('heading', 0.0)) % 180.0,
             'class': int(template.get('class', BLD_CLASS_MEDIUM)),
+            'height_m': float(template.get(
+                'height_m',
+                DEFAULT_FACADE_HEIGHT_M.get(int(template.get('class', BLD_CLASS_MEDIUM)), 8.0),
+            )),
             'confidence': max(0.0, float(template.get('confidence', 0.0))),
             **metrics,
         })
@@ -4073,6 +4455,7 @@ def _consensus_yolo_template(
     long_len = float(np.median([rec['long_len'] for rec in shape_records]))
     short_len = float(np.median([rec['short_len'] for rec in shape_records]))
     placement_cls = int(shape_records[0]['class'])
+    height_m = float(np.median([rec['height_m'] for rec in shape_records]))
     centers = np.asarray(
         [records[idx]['template']['center'] for idx in best_shape_idx],
         dtype=np.float32,
@@ -4083,6 +4466,7 @@ def _consensus_yolo_template(
         'center': center.astype(np.float32),
         'points': points,
         'class': placement_cls,
+        'height_m': height_m,
         'heading': float(consensus_heading),
         'confidence': float(np.mean([rec['confidence'] for rec in shape_records])),
         'area_px': float(long_len * short_len),
@@ -5174,6 +5558,7 @@ def run(
     dsftool_path=None,
     skip_osm_excl_download=False,
     custom_scenery_dir=None,
+    avoid_custom_scenery=True,
     smart_gap_fill=None,
     debug_image_only=False,
     dds_filter=None,
@@ -5402,10 +5787,12 @@ def run(
 
     timings = {
         'simheaven_parse': 0.0,
+        'custom_scenery_parse': 0.0,
         'cache_load': 0.0,
         'dds_load': 0.0,
-        'yolo_inference': 0.0,
-        'inference': 0.0,
+        'segformer_inference': 0.0,
+        'trained_yolo_inference': 0.0,
+        'stock_yolo_inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
         'road_cache': 0.0,
@@ -5504,6 +5891,15 @@ def run(
         else yolo_max_det
     )
     yolo_imgsz = int(yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
+    yolo_batch_size = max(
+        1,
+        _env_int("O4_SFR_BLD_YOLO_BATCH", DEFAULT_YOLO_OBB_BATCH),
+    )
+    stock_yolo_batch_size = max(
+        1,
+        _env_int("O4_SFR_STOCK_YOLO_BATCH", _stock_yolo_batch_default()),
+    )
+    yolo_fuse_model = _env_flag("O4_SFR_BLD_YOLO_FUSE")
     yolo_suppress_coverage = max(0.0, float(yolo_suppress_coverage or 0.0))
     yolo_suppress_min_overlap_m2 = max(
         0.0, float(yolo_suppress_min_overlap_m2 or 0.0)
@@ -5529,7 +5925,8 @@ def run(
     elif yolo_enabled:
         print(
             f"YOLO OBB placement: enabled checkpoint={yolo_checkpoint} "
-            f"conf={yolo_conf} iou={yolo_iou} stride={yolo_stride}"
+            f"conf={yolo_conf} iou={yolo_iou} stride={yolo_stride} "
+            f"batch={yolo_batch_size} fuse={yolo_fuse_model}"
         )
         print(
             "YOLO OBB placement: direct detections only "
@@ -5537,7 +5934,10 @@ def run(
         )
         print("YOLO OBB placement: facade-first mode")
         try:
-            yolo_model = _load_yolo_obb_model(yolo_checkpoint)
+            yolo_model = _load_yolo_obb_model(
+                yolo_checkpoint,
+                fuse=yolo_fuse_model,
+            )
             yolo_available = True
         except Exception as exc:
             if yolo_allow_missing:
@@ -5565,7 +5965,8 @@ def run(
         print(
             f"Stock YOLO OBB (DOTAv1): loaded "
             f"{STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT}; "
-            f"keeping classes {STOCKYOLO.STATIC_DOTA_CLASSES}",
+            f"keeping classes {STOCKYOLO.STATIC_DOTA_CLASSES}; "
+            f"batch={stock_yolo_batch_size}",
             flush=True,
         )
     except Exception as exc:
@@ -5603,6 +6004,40 @@ def run(
     sh_bld_sig = (_polys_signature(sh_bld_polys),
                   _simheaven_objects_signature(sh_bld_objects))
     print(f"simHeaven buildings: {len(sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
+
+    _t = time.perf_counter()
+    if avoid_custom_scenery and dsftool_path and os.path.exists(dsftool_path):
+        custom_bld_polys, custom_bld_objects, custom_bld_skipped, custom_bld_layers = (
+            _load_custom_scenery_building_exclusions(
+                custom_scenery_dir,
+                lat,
+                lon,
+                out_dsf,
+                dsftool_path,
+                cache_dir,
+            )
+        )
+    else:
+        custom_bld_polys, custom_bld_objects = [], []
+        custom_bld_skipped = 0
+        custom_bld_layers = 0
+    timings['custom_scenery_parse'] += time.perf_counter() - _t
+    if custom_bld_polys or custom_bld_objects:
+        existing_bld_polys.extend(custom_bld_polys)
+    custom_bld_index = _prepare_simheaven_objects(custom_bld_objects)
+    custom_bld_sig = (
+        _polys_signature(custom_bld_polys),
+        _simheaven_objects_signature(custom_bld_objects),
+    )
+    if avoid_custom_scenery:
+        print(
+            "Custom scenery buildings: "
+            f"{len(custom_bld_objects)} objects  "
+            f"{len(custom_bld_polys)} facade polys  "
+            f"layers={custom_bld_layers}  skipped_objects={custom_bld_skipped}"
+        )
+    else:
+        print("Custom scenery buildings: disabled")
 
     default_assets_available = True
     sfd_assets_available = _find_library_export(custom_scenery_dir, 'sfd_global/')
@@ -5743,6 +6178,7 @@ def run(
         ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
         separator_sig, heading_sig,
         excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
+        custom_bld_sig, bool(avoid_custom_scenery),
         mesh_water_sig,
         residential_poly_sig,
         default_assets_available, sfd_assets_available, simheaven_assets_available,
@@ -5750,12 +6186,13 @@ def run(
         bool(yolo_enabled), yolo_signature,
         yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
         round(float(yolo_iou), 6), yolo_max_det,
+        yolo_batch_size, stock_yolo_batch_size, bool(yolo_fuse_model),
         round(float(yolo_suppress_coverage), 6),
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v2: context-based facade variant picker + SegFormer always-on + placed_stock_objects rename
-        "schema=v2-facades-only-stockyolo",
+        # v4: stock-YOLO storage tanks use circular facade footprints.
+        "schema=v4-stock-yolo-tank-cylinders",
     )
 
     t_start = time.time()
@@ -5886,7 +6323,7 @@ def run(
                         model, proc, device = SEGFORMER.load_vegetation_model(device)
                     _t = time.perf_counter()
                     veg_map = SEGFORMER.run_inference(model, device, img, proc)
-                    _record_elapsed(timings, file_timings, 'inference', _t)
+                    _record_elapsed(timings, file_timings, 'segformer_inference', _t)
                 if not disable_cache and not mesh_water_full:
                     _t = time.perf_counter()
                     np.save(cache_path, veg_map)
@@ -5929,6 +6366,8 @@ def run(
                 _yolo_key = _yolo_obb_cache_key(
                     fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
                     yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
+                    batch_size=yolo_batch_size,
+                    fused=yolo_fuse_model,
                 )
                 if not disable_cache:
                     _t = time.perf_counter()
@@ -5964,8 +6403,9 @@ def run(
                                 max_det=yolo_max_det,
                                 device=("0" if torch.cuda.is_available() else "cpu"),
                                 m_per_px=m_per_px,
+                                batch_size=yolo_batch_size,
                             )
-                            _record_elapsed(timings, file_timings, 'yolo_inference', _t)
+                            _record_elapsed(timings, file_timings, 'trained_yolo_inference', _t)
                             if detail_timing:
                                 _cuda_counts = _cuda_memory_counts_mb()
                                 if _cuda_counts is not None:
@@ -5993,8 +6433,9 @@ def run(
                         lat_n=lat_n, lat_s=lat_s, lon_w=lon_w, lon_e=lon_e,
                         m_per_px=m_per_px,
                         device=("0" if torch.cuda.is_available() else "cpu"),
+                        batch_size=stock_yolo_batch_size,
                     )
-                    _record_elapsed(timings, file_timings, 'yolo_inference', _t)
+                    _record_elapsed(timings, file_timings, 'stock_yolo_inference', _t)
                     placed_stock_objects.extend(stock_res.placed_objects)
                     placed_facades.extend(stock_res.placed_facades)
                     placed_draped.extend(stock_res.placed_draped)
@@ -6068,6 +6509,8 @@ def run(
                 existing_bld_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
             local_sh_bld_objects = _simheaven_objects_for_bounds(
                 sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
+            local_custom_bld_objects = _simheaven_objects_for_bounds(
+                custom_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
             local_residential_roads = []
             local_residential_polys = []
             local_heading_segments = []
@@ -6080,6 +6523,7 @@ def run(
                 grid_n, road_width_px, road_dilate_px,
                 separator_sig, rail_sig, heading_sig, residential_poly_sig,
                 excl_poly_sig, existing_bld_poly_sig, sh_bld_sig,
+                custom_bld_sig,
             )
             _road_cached = None
             if not disable_cache:
@@ -6099,6 +6543,7 @@ def run(
                 poly_mask = _road_cached.get('poly_mask')
                 existing_bld_mask = _road_cached.get('existing_bld_mask')
                 sh_bld_mask = _road_cached.get('sh_bld_mask')
+                custom_bld_mask = _road_cached.get('custom_bld_mask')
                 n_road_cache_hits += 1
             else:
                 n_road_cache_misses += 1
@@ -6150,6 +6595,15 @@ def run(
                     )
                     _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
+                custom_bld_mask = None
+                if local_custom_bld_objects:
+                    _t = time.perf_counter()
+                    custom_bld_mask = _rasterize_simheaven_objects(
+                        local_custom_bld_objects, lat_n, lat_s, lon_w, lon_e,
+                        img_h, img_w, m_per_px
+                    )
+                    _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
+
             _t = time.perf_counter()
             bld_zone = bld_zone & (~road_mask)
             static_occ_mask = road_mask.copy()
@@ -6173,6 +6627,9 @@ def run(
 
             if sh_bld_mask is not None and sh_bld_mask.any():
                 static_occ_mask = static_occ_mask | sh_bld_mask
+
+            if custom_bld_mask is not None and custom_bld_mask.any():
+                static_occ_mask = static_occ_mask | custom_bld_mask
 
             DEGREE_TOL = 1e-4
             if lat_n >= lat + 1 - DEGREE_TOL:   static_occ_mask[:edge_px,  :]  = 1
@@ -6273,7 +6730,10 @@ def run(
                                 lat_n, lat_s, lon_w, lon_e,
                             ),
                             facade_path,
-                            float(DEFAULT_FACADE_HEIGHT_M.get(facade_cls, 8.0)),
+                            float(detection.get(
+                                'height_m',
+                                DEFAULT_FACADE_HEIGHT_M.get(facade_cls, 8.0),
+                            )),
                         ))
                         direct_yolo_facade_placements += 1
                         placed_viz_polys.append((footprint_poly.copy(), facade_cls))
@@ -6607,7 +7067,7 @@ def run(
                         footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
                     ),
                     facade_path,
-                    float(DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0)),
+                    float(best.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
                 ))
                 placed_viz_polys.append((footprint_poly.copy(), try_cls))
                 _mark_poly(building_spacing_mask, footprint_poly)
@@ -7095,6 +7555,7 @@ def run(
                 _blend_viz_mask(poly_mask, (120, 0, 255), 0.75)
                 _blend_viz_mask(existing_bld_mask, (0, 0, 0), 0.70)
                 _blend_viz_mask(sh_bld_mask, (255, 255, 255), 0.65)
+                _blend_viz_mask(custom_bld_mask, (0, 255, 255), 0.65)
                 pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil, "RGBA")
                 dot_colours = {
                     BLD_CLASS_TINY_RESIDENTIAL: (80, 220, 80),
@@ -7207,14 +7668,14 @@ def run(
             if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
                 _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
             img = veg_map = mesh_water_mask = bld_raw = bld_zone = sfr_road_dilated = None
-            road_mask = rail_mask = poly_mask = existing_bld_mask = sh_bld_mask = None
+            road_mask = rail_mask = poly_mask = existing_bld_mask = sh_bld_mask = custom_bld_mask = None
             static_occ_mask = static_occ_integral = building_spacing_mask = None
             placed_yolo_mask = fit_scratch = None
             road_divided_zone = fallback_zone = zone_class = roof_evidence = None
             yolo_detections = yolo_guidance = yolo_viz_polys = placed_viz_polys = None
             cc_labels = cc_stats = cc_centroids = valid_labels = None
             local_separator_roads = local_rails = local_excl_polys = None
-            local_existing_bld_polys = local_sh_bld_objects = None
+            local_existing_bld_polys = local_sh_bld_objects = local_custom_bld_objects = None
             local_residential_roads = local_residential_polys = local_heading_segments = None
             residential_area_mask = dynamic_center_block_masks = None
             if (
@@ -7338,10 +7799,12 @@ def run(
     print(
         "[Bld timing] "
         f"simHeaven={timings['simheaven_parse']:.1f}s  "
+        f"customScenery={timings['custom_scenery_parse']:.1f}s  "
         f"cache_load={timings['cache_load']:.1f}s  "
         f"dds_load={timings['dds_load']:.1f}s  "
-        f"yolo={timings['yolo_inference']:.1f}s  "
-        f"inference={timings['inference']:.1f}s  "
+        f"segformer={timings['segformer_inference']:.1f}s  "
+        f"trained_yolo={timings['trained_yolo_inference']:.1f}s  "
+        f"stock_yolo={timings['stock_yolo_inference']:.1f}s  "
         f"road_cache={timings['road_cache']:.1f}s  "
         f"road_raster={timings['road_raster']:.1f}s  "
         f"mesh_water={timings['mesh_water']:.1f}s  "
@@ -7416,6 +7879,7 @@ def main():
         grid_n          = args.grid_n,
         osm_roads_path  = args.osm_roads,
         custom_scenery_dir = args.custom_scenery_dir,
+        avoid_custom_scenery = not args.no_custom_scenery_avoidance,
         yolo_enabled = not args.no_yolo,
         yolo_checkpoint = args.yolo_checkpoint,
         yolo_conf = args.yolo_conf,
