@@ -535,6 +535,12 @@ cfg_tile_vars = {
         "type": str,
         "default": r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt",
         "short_name": "bld_yolo_ckpt",
+        "file_picker": True,
+        "file_picker_title": "Choose YOLO model checkpoint",
+        "filetypes": [
+            ("YOLO model files", ("*.pt", "*.pth", "*.onnx", "*.engine")),
+            ("All files", "*.*"),
+        ],
         "hint": "YOLO OBB checkpoint used for primary building placements.",
     },
     "sfr_bld_yolo_conf": {

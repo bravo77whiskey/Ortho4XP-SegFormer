@@ -432,6 +432,8 @@ class Ortho4XP_Config(tk.Toplevel):
             state = "normal"
             for _, value in self.tile_entry_.items():
                 value.config(state=state)
+            for _, value in self.tile_file_button_.items():
+                value.config(state=state)
 
             self.btn_tile_dem.config(state=state)
             self.btn_reset_tile_cfg.config(state=state)
@@ -446,6 +448,8 @@ class Ortho4XP_Config(tk.Toplevel):
             )
             state = "disabled"
             for _, value in self.tile_entry_.items():                
+                value.config(state=state)
+            for _, value in self.tile_file_button_.items():
                 value.config(state=state)
 
             self.btn_tile_dem.config(state=state)
@@ -487,6 +491,7 @@ class Ortho4XP_Config(tk.Toplevel):
         main_frame.columnconfigure(0, weight=1)
 
         self.tile_entry_ = {}
+        self.tile_file_button_ = {}
 
         col = 0
         next_row = 0
@@ -551,16 +556,27 @@ class Ortho4XP_Config(tk.Toplevel):
                         style="O4.TCombobox",
                     )
                 else:
-                    self.tile_entry_[item] = ttk.Entry(
-                        frame_cfg, textvariable=self.v_[item], width=7
+                    if cfg_tile_vars[item].get("file_picker"):
+                        self._add_file_picker_entry(
+                            frame_cfg,
+                            item,
+                            self.tile_entry_,
+                            self.tile_file_button_,
+                            row,
+                            col + 1,
+                        )
+                    else:
+                        self.tile_entry_[item] = ttk.Entry(
+                            frame_cfg, textvariable=self.v_[item], width=7
+                        )
+                if item not in self.tile_file_button_:
+                    self.tile_entry_[item].grid(
+                        row=row,
+                        column=col + 1,
+                        padx=(0, 20),
+                        pady=2,
+                        sticky=N + S + W,
                     )
-                self.tile_entry_[item].grid(
-                    row=row,
-                    column=col + 1,
-                    padx=(0, 20),
-                    pady=2,
-                    sticky=N + S + W,
-                )
                 row += 1
             next_row = max(next_row, row)
             col += 2
@@ -696,6 +712,7 @@ class Ortho4XP_Config(tk.Toplevel):
         main_frame.columnconfigure(0, weight=1)
 
         self.global_entry_ = {}
+        self.global_file_button_ = {}
 
         col = 0
         next_row = 0
@@ -754,16 +771,27 @@ class Ortho4XP_Config(tk.Toplevel):
                         style="O4.TCombobox",
                     )
                 else:
-                    self.global_entry_[item] = ttk.Entry(
-                        frame_cfg, textvariable=self.v_[item], width=7
+                    if cfg_global_tile_vars[item].get("file_picker"):
+                        self._add_file_picker_entry(
+                            frame_cfg,
+                            item,
+                            self.global_entry_,
+                            self.global_file_button_,
+                            row,
+                            col + 1,
+                        )
+                    else:
+                        self.global_entry_[item] = ttk.Entry(
+                            frame_cfg, textvariable=self.v_[item], width=7
+                        )
+                if item not in self.global_file_button_:
+                    self.global_entry_[item].grid(
+                        row=row,
+                        column=col + 1,
+                        padx=(0, 20),
+                        pady=2,
+                        sticky=N + S + W,
                     )
-                self.global_entry_[item].grid(
-                    row=row,
-                    column=col + 1,
-                    padx=(0, 20),
-                    pady=2,
-                    sticky=N + S + W,
-                )
                 row += 1
             next_row = max(next_row, row)
             col += 2
@@ -1681,6 +1709,54 @@ class Ortho4XP_Config(tk.Toplevel):
                     key, value = normalize_config_entry(key, value)
                     config_dict[key] = value
         return config_dict
+
+    def _add_file_picker_entry(
+        self,
+        parent: tk.Widget,
+        item: str,
+        entry_dict: dict,
+        button_dict: dict,
+        row: int,
+        column: int,
+    ) -> None:
+        """Add an editable path entry with a file picker button."""
+        frame = tk.Frame(parent, border=0, padx=0, pady=0, **THEME.frame_options())
+        frame.columnconfigure(0, weight=1)
+        entry_dict[item] = ttk.Entry(frame, textvariable=self.v_[item], width=7)
+        entry_dict[item].grid(row=0, column=0, sticky=N + S + E + W)
+        button_dict[item] = ttk.Button(
+            frame,
+            image=self.folder_icon,
+            command=lambda item=item: self.choose_file(item),
+            style="Flat.TButton",
+        )
+        button_dict[item].grid(row=0, column=1, padx=(2, 0), pady=0, sticky=N + S + W)
+        frame.grid(
+            row=row,
+            column=column,
+            padx=(0, 20),
+            pady=2,
+            sticky=N + S + W,
+        )
+
+    def choose_file(self, item: str) -> None:
+        cfg = cfg_vars[item]
+        current = self.v_[item].get()
+        initialdir = None
+        if current:
+            current_dir = os.path.dirname(current)
+            if os.path.isdir(current_dir):
+                initialdir = current_dir
+        options = {
+            "parent": self,
+            "title": cfg.get("file_picker_title", "Choose file"),
+            "filetypes": cfg.get("filetypes", [("All files", "*.*")]),
+        }
+        if initialdir:
+            options["initialdir"] = initialdir
+        tmp = filedialog.askopenfilename(**options)
+        if tmp:
+            self.v_[item].set(str(tmp))
 
     def choose_dem(self, global_config=False):
         tmp = filedialog.askopenfilename(

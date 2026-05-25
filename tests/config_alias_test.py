@@ -63,6 +63,16 @@ class ConfigAliasTests(unittest.TestCase):
         tile = CFG.Tile(12, 34, "")
         self.assertFalse(tile.sfr_veg_use_gfv2_asset_proximity)
 
+    def test_yolo_checkpoint_uses_file_picker_metadata(self):
+        tile_var = CFG.cfg_tile_vars["sfr_bld_yolo_checkpoint"]
+        global_var = CFG.cfg_global_tile_vars["global_sfr_bld_yolo_checkpoint"]
+
+        self.assertTrue(tile_var["file_picker"])
+        self.assertEqual(tile_var["file_picker_title"], "Choose YOLO model checkpoint")
+        self.assertIn(("All files", "*.*"), tile_var["filetypes"])
+        self.assertTrue(global_var["file_picker"])
+        self.assertEqual(global_var["filetypes"], tile_var["filetypes"])
+
 
 if __name__ == "__main__":
     unittest.main()
