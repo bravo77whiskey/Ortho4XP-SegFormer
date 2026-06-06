@@ -71,7 +71,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         with mock.patch.object(BLD, "STOCKYOLO", legacy_stock):
             self.assertEqual(BLD._stock_yolo_batch_default(), 1)
 
-    def test_yolo_obb_height_class_decode_uses_model_class_count(self):
+    def test_yolo_obb_height_class_decode_ignores_height_bin(self):
         model_class = (
             (BLD.BLD_CLASS_APARTMENT_BLOCK - 1) * BLD.YOLO_HEIGHT_BIN_COUNT
             + BLD.YOLO_HEIGHT_BINS_M.index(60.0)
@@ -83,16 +83,74 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
 
         self.assertEqual(placement, BLD.BLD_CLASS_APARTMENT_BLOCK)
-        self.assertEqual(height_m, 60.0)
+        self.assertIsNone(height_m)
 
-    def test_legacy_yolo_class_decode_uses_default_facade_height(self):
+    def test_legacy_yolo_class_decode_returns_placement_only(self):
         placement, height_m = BLD._decode_yolo_obb_detection_class(
             BLD.BLD_CLASS_MEDIUM - 1,
             model_class_count=len(BLD.BLD_PLACEMENT_CLASSES),
         )
 
         self.assertEqual(placement, BLD.BLD_CLASS_MEDIUM)
-        self.assertEqual(height_m, BLD.DEFAULT_FACADE_HEIGHT_M[BLD.BLD_CLASS_MEDIUM])
+        self.assertIsNone(height_m)
+
+    def test_height_priors_use_finite_asset_range_per_class(self):
+        pools = {cls: [] for cls in BLD.BLD_PLACEMENT_CLASSES}
+        pools[BLD.BLD_CLASS_MEDIUM] = [
+            {"height_m": 5.0},
+            {"height_m": 12.0},
+            {"height_m": None},
+            {"height_m": BLD.MAX_GENERATED_BUILDING_HEIGHT_M + 1.0},
+        ]
+
+        priors = BLD._height_priors_by_class(pools)
+
+        self.assertEqual(
+            priors[BLD.BLD_CLASS_MEDIUM],
+            (5.0, 12.0, BLD.DEFAULT_FACADE_HEIGHT_M[BLD.BLD_CLASS_MEDIUM]),
+        )
+
+    def test_randomized_facade_height_is_seeded_and_bounded(self):
+        priors = {BLD.BLD_CLASS_MEDIUM: (5.0, 12.0, 7.0)}
+        rng_a = np.random.default_rng(12345)
+        rng_b = np.random.default_rng(12345)
+
+        heights_a = [
+            BLD._randomized_facade_height_m(
+                rng_a, priors, BLD.BLD_CLASS_MEDIUM
+            )
+            for _ in range(8)
+        ]
+        heights_b = [
+            BLD._randomized_facade_height_m(
+                rng_b, priors, BLD.BLD_CLASS_MEDIUM
+            )
+            for _ in range(8)
+        ]
+
+        self.assertEqual(heights_a, heights_b)
+        self.assertTrue(all(5.0 <= height <= 12.0 for height in heights_a))
+
+    def test_randomized_facade_height_falls_back_for_empty_or_single_range(self):
+        empty_pools = {cls: [] for cls in BLD.BLD_PLACEMENT_CLASSES}
+        empty_priors = BLD._height_priors_by_class(empty_pools)
+
+        self.assertEqual(
+            BLD._randomized_facade_height_m(
+                np.random.default_rng(1),
+                empty_priors,
+                BLD.BLD_CLASS_SMALL_RESIDENTIAL,
+            ),
+            BLD.DEFAULT_FACADE_HEIGHT_M[BLD.BLD_CLASS_SMALL_RESIDENTIAL],
+        )
+        self.assertEqual(
+            BLD._randomized_facade_height_m(
+                np.random.default_rng(1),
+                {BLD.BLD_CLASS_MEDIUM: (9.0, 9.0, 9.0)},
+                BLD.BLD_CLASS_MEDIUM,
+            ),
+            9.0,
+        )
 
     def test_pipeline_yolo_defaults_match_config_defaults(self):
         import O4_Cfg_Vars as CFG

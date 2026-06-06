@@ -3521,6 +3521,68 @@ def _keep_smallest_asset_per_class(asset_pools):
     return asset_pools
 
 
+def _height_priors_by_class(asset_pools):
+    """Return per-placement-class facade height ranges from available assets."""
+    priors = {}
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        heights = []
+        for asset in (asset_pools or {}).get(zone_class, ()):
+            try:
+                height = float(asset.get('height_m'))
+            except (TypeError, ValueError):
+                continue
+            if (
+                math.isfinite(height) and
+                height > 0.0 and
+                height <= float(MAX_GENERATED_BUILDING_HEIGHT_M)
+            ):
+                heights.append(height)
+
+        if heights:
+            min_h = float(min(heights))
+            max_h = float(max(heights))
+            default_h = float(DEFAULT_FACADE_HEIGHT_M.get(zone_class, min_h))
+            mode_h = float(np.clip(default_h, min_h, max_h))
+        else:
+            fallback_h = float(DEFAULT_FACADE_HEIGHT_M.get(zone_class, 8.0))
+            fallback_h = min(fallback_h, float(MAX_GENERATED_BUILDING_HEIGHT_M))
+            min_h = max_h = mode_h = fallback_h
+        priors[int(zone_class)] = (min_h, max_h, mode_h)
+    return priors
+
+
+def _height_priors_signature(height_priors_by_class):
+    return tuple(
+        (
+            int(zone_class),
+            round(float(bounds[0]), 3),
+            round(float(bounds[1]), 3),
+            round(float(bounds[2]), 3),
+        )
+        for zone_class, bounds in sorted((height_priors_by_class or {}).items())
+    )
+
+
+def _randomized_facade_height_m(rng, height_priors_by_class, placement_cls):
+    """Sample a deterministic-runtime facade height for a placement class."""
+    try:
+        zone_class = int(placement_cls)
+    except (TypeError, ValueError):
+        zone_class = BLD_CLASS_MEDIUM
+    bounds = (height_priors_by_class or {}).get(zone_class)
+    if bounds is None:
+        fallback_h = float(DEFAULT_FACADE_HEIGHT_M.get(zone_class, 8.0))
+        return min(fallback_h, float(MAX_GENERATED_BUILDING_HEIGHT_M))
+
+    min_h, max_h, mode_h = (float(v) for v in bounds)
+    min_h = max(0.1, min(min_h, float(MAX_GENERATED_BUILDING_HEIGHT_M)))
+    max_h = max(min_h, min(max_h, float(MAX_GENERATED_BUILDING_HEIGHT_M)))
+    mode_h = float(np.clip(mode_h, min_h, max_h))
+    if max_h <= min_h + 1e-6:
+        return min_h
+    return float(rng.triangular(min_h, mode_h, max_h))
+
+
 def _asset_footprint_span_m(asset):
     """Return the larger raw footprint side for centre-spacing estimates."""
     max_side_m = asset.get('footprint_max_side_m')
@@ -4519,19 +4581,23 @@ def _yolo_model_class_count(model):
 
 
 def _decode_yolo_obb_detection_class(model_cls_int, model_class_count=None):
-    """Decode legacy 8-class or height-expanded YOLO OBB classes."""
+    """Decode legacy 8-class or height-expanded YOLO OBB classes.
+
+    Height-expanded checkpoints are treated as placement-class models at
+    runtime; facade heights are randomized from regional/class asset priors.
+    """
     height_model_class_count = len(BLD_PLACEMENT_CLASSES) * YOLO_HEIGHT_BIN_COUNT
     if int(model_class_count or 0) == height_model_class_count:
         placement_index, height_bin = divmod(int(model_cls_int), YOLO_HEIGHT_BIN_COUNT)
         if 0 <= placement_index < len(BLD_PLACEMENT_CLASSES):
             return (
                 int(BLD_PLACEMENT_CLASSES[placement_index]),
-                float(YOLO_HEIGHT_BINS_M[height_bin]),
+                None,
             )
 
     mapped_cls = int(model_cls_int) + 1
     if mapped_cls in BLD_PLACEMENT_CLASSES:
-        return mapped_cls, float(DEFAULT_FACADE_HEIGHT_M.get(mapped_cls, 8.0))
+        return mapped_cls, None
     return None, None
 
 
@@ -4600,7 +4666,7 @@ def _yolo_obb_detection_from_points(
         placement_cls = int(placement_cls)
     else:
         placement_cls = _roof_fragment_class(area_m2, max_side_m, 1.0)
-        height_m = float(DEFAULT_FACADE_HEIGHT_M.get(placement_cls, 8.0))
+    height_m = float(DEFAULT_FACADE_HEIGHT_M.get(placement_cls, 8.0))
 
     return {
         'points': clipped.tolist(),
@@ -7165,6 +7231,8 @@ def run(
         class_min_fit_inradius_m = {cls: 0.0 for cls in BLD_PLACEMENT_CLASSES}
     yolo_object_fit_table = _build_yolo_object_candidate_index(asset_pools)
     asset_catalog_signature = _asset_pools_signature(asset_pools)
+    height_priors_by_class = _height_priors_by_class(asset_pools)
+    height_priors_signature = _height_priors_signature(height_priors_by_class)
     enabled_yolo_object_assets_by_path = {
         asset['path']: asset
         for pool in asset_pools.values()
@@ -7262,6 +7330,7 @@ def run(
         default_assets_available, sfd_assets_available, simheaven_assets_available,
         tuple(enabled_extra_library_ids),
         asset_catalog_signature,
+        height_priors_signature,
         natural_asset_region,
         simheaven_package_region,
         effective_asset_region,
@@ -7273,8 +7342,8 @@ def run(
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v8: trained-YOLO object selection uses scored measured-asset candidates.
-        "schema=v8-yolo-object-scored-fit",
+        # v9: facade heights are randomized from regional/class asset priors.
+        "schema=v9-runtime-randomized-facade-heights",
     )
 
     t_start = time.time()
@@ -7301,6 +7370,11 @@ def run(
                 "big",
             )
             rng = np.random.default_rng(rng_seed)
+            height_rng_seed = int.from_bytes(
+                hashlib.sha1(f"bld-height:{fname}".encode("utf-8")).digest()[:8],
+                "big",
+            )
+            height_rng = np.random.default_rng(height_rng_seed)
             _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
             _cached_bld = None
             if (
@@ -7864,10 +7938,9 @@ def run(
                                     lat_n, lat_s, lon_w, lon_e,
                                 ),
                                 facade_path,
-                                float(detection.get(
-                                    'height_m',
-                                    DEFAULT_FACADE_HEIGHT_M.get(facade_cls, 8.0),
-                                )),
+                                _randomized_facade_height_m(
+                                    height_rng, height_priors_by_class, facade_cls
+                                ),
                             ))
                             direct_yolo_facade_placements += 1
                             placed_viz_polys.append((footprint_poly.copy(), facade_cls))
@@ -8202,7 +8275,9 @@ def run(
                         footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
                     ),
                     facade_path,
-                    float(best.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
+                    _randomized_facade_height_m(
+                        height_rng, height_priors_by_class, try_cls
+                    ),
                 ))
                 placed_viz_polys.append((footprint_poly.copy(), try_cls))
                 _mark_poly(building_spacing_mask, footprint_poly)
@@ -8489,7 +8564,9 @@ def run(
                         placed_facades.append((
                             _pixel_ring_to_latlon(footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
                             asset['path'],
-                            float(asset.get('height_m', DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0))),
+                            _randomized_facade_height_m(
+                                height_rng, height_priors_by_class, try_cls
+                            ),
                         ))
                     placed_viz_polys.append((footprint_poly.copy(), try_cls))
                     _mark_poly(building_spacing_mask, spacing_poly)
@@ -8594,10 +8671,9 @@ def run(
                                     lat_n, lat_s, lon_w, lon_e,
                                 ),
                                 asset['path'],
-                                float(asset.get(
-                                    'height_m',
-                                    DEFAULT_FACADE_HEIGHT_M.get(try_cls, 8.0),
-                                )),
+                                _randomized_facade_height_m(
+                                    height_rng, height_priors_by_class, try_cls
+                                ),
                             ))
                         placed_viz_polys.append((footprint_poly.copy(), try_cls))
                         _mark_poly(building_spacing_mask, spacing_poly)
