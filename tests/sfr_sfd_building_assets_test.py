@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 import bz2
+import os
 from unittest import mock
 from pathlib import Path
 
@@ -14,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import O4_SFR_Building_Overlay as BLD
+import O4_SFR_Asset_Inventory as ASSETINV
 import O4_SFR_DSF_Utils as DSF
 
 
@@ -36,6 +38,30 @@ def _write_tile_dsf(package: Path, lat=22, lon=120):
     dsf.parent.mkdir(parents=True, exist_ok=True)
     dsf.write_text("", encoding="utf-8")
     return dsf
+
+
+def _write_library_package(custom: Path, name: str, lines):
+    package = custom / name
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "library.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return package
+
+
+def _activate_packages(custom: Path, *packages: Path):
+    (custom / "scenery_packs.ini").write_text(
+        "".join(
+            f"SCENERY_PACK Custom Scenery/{package.name}/\n"
+            for package in packages
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_obj8(path: Path, vertices):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["I", "800", "OBJ", ""]
+    lines.extend(f"VT {x} {y} {z} 0 0 0 0 0" for x, y, z in vertices)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class SfdBuildingAssetTests(unittest.TestCase):
@@ -870,6 +896,114 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertIsNone(selected)
         self.assertEqual(status, "context_skipped")
+
+    def test_scored_yolo_selection_uses_smaller_residential_object_before_facade(self):
+        asset = {
+            "kind": "object",
+            "path": "simheaven/houses/house_10x10x2.obj",
+            "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "source": "test",
+            "footprint_class": BLD.BLD_CLASS_SMALL_RESIDENTIAL,
+        }
+        index = BLD._build_yolo_object_candidate_index({
+            BLD.BLD_CLASS_SMALL_RESIDENTIAL: [asset],
+        })
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 16.0, 12.0, 0.0)
+        detection = {
+            "length_m": 16.0,
+            "width_m": 12.0,
+            "area_m2": 192.0,
+            "placement_class": BLD.BLD_CLASS_SMALL_RESIDENTIAL,
+        }
+
+        selected, status = BLD._select_yolo_object_candidate(
+            index,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+        )
+
+        self.assertEqual(status, "selected")
+        self.assertEqual(selected["asset"]["path"], asset["path"])
+
+    def test_scored_yolo_selection_handles_non_integer_near_size_match(self):
+        asset = {
+            "kind": "object",
+            "path": "simheaven/houses/house_9p9x7p9.obj",
+            "bounds_m": (-4.95, 4.95, -3.95, 3.95),
+            "source": "test",
+            "footprint_class": BLD.BLD_CLASS_TINY_RESIDENTIAL,
+        }
+        old_table = BLD._build_yolo_object_fit_table({
+            BLD.BLD_CLASS_TINY_RESIDENTIAL: [asset],
+        })
+        index = BLD._build_yolo_object_candidate_index({
+            BLD.BLD_CLASS_TINY_RESIDENTIAL: [asset],
+        })
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 9.95, 7.95, 0.0)
+        detection = {
+            "length_m": 9.95,
+            "width_m": 7.95,
+            "area_m2": 9.95 * 7.95,
+            "placement_class": BLD.BLD_CLASS_TINY_RESIDENTIAL,
+        }
+
+        self.assertNotIn(BLD._yolo_object_dimension_key(detection), old_table)
+        selected, status = BLD._select_yolo_object_candidate(
+            index,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+        )
+
+        self.assertEqual(status, "selected")
+        self.assertEqual(selected["asset"]["path"], asset["path"])
+
+    def test_scored_yolo_selection_keeps_large_classes_at_strict_coverage(self):
+        asset = {
+            "kind": "object",
+            "path": "commercial_10x10.obj",
+            "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "source": "test",
+            "footprint_class": BLD.BLD_CLASS_MEDIUM,
+        }
+        index = BLD._build_yolo_object_candidate_index({
+            BLD.BLD_CLASS_MEDIUM: [asset],
+        })
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 13.0, 10.0, 0.0)
+        detection = {
+            "length_m": 13.0,
+            "width_m": 10.0,
+            "area_m2": 130.0,
+            "placement_class": BLD.BLD_CLASS_MEDIUM,
+        }
+
+        selected, status = BLD._select_yolo_object_candidate(
+            index,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(status, "coverage_reject")
+
+    def test_optional_library_house_asset_requires_residential_context(self):
+        asset = {
+            "kind": "object",
+            "path": "opensceneryx/objects/buildings/houses/suburban_1.obj",
+        }
+
+        self.assertTrue(BLD._asset_requires_residential_context(asset))
 
     def test_building_zone_cell_mask_tracks_only_occupied_grid_cells(self):
         bld_zone = np.zeros((8, 8), dtype=np.uint8)
@@ -2337,6 +2471,205 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIsNone(
             BLD._bounds_for_object_path("SFD_Global/Asia/Suburban_South_Test.obj")
         )
+
+    def test_simheaven_export_discovery_filters_and_deduplicates_assets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            package = _write_library_package(
+                custom,
+                "simHeaven_X-World_Africa-6-scenery",
+                [
+                    "EXPORT simheaven/houses/house_04x06x1.obj objects/a.obj",
+                    "EXPORT_BACKUP simheaven/houses/house_04x06x1.obj objects/b.obj",
+                    "EXPORT simheaven/houses/house_09x12x3.obj objects/c.obj",
+                    "EXPORT simheaven/residential/residential_20x20x8.obj objects/tall.obj",
+                    "EXPORT simheaven/sheds/shed_02x03x1.obj objects/shed.obj",
+                    "EXPORT simheaven/commercial/school_30x40.obj objects/school.obj",
+                ],
+            )
+            _activate_packages(custom, package)
+
+            pools = BLD._build_simheaven_asset_pools(
+                [],
+                0.0,
+                0.0,
+                "africa",
+                custom_scenery_dir=custom,
+            )
+            paths = _paths_for_classes(pools, BLD.BLD_PLACEMENT_CLASSES)
+
+        self.assertIn("simheaven/houses/house_04x06x1.obj", paths)
+        self.assertIn("simheaven/houses/house_09x12x3.obj", paths)
+        self.assertNotIn("simheaven/residential/residential_20x20x8.obj", paths)
+        self.assertNotIn("simheaven/sheds/shed_02x03x1.obj", paths)
+        self.assertNotIn("simheaven/commercial/school_30x40.obj", paths)
+        self.assertEqual(
+            sum(
+                1
+                for pool in pools.values()
+                for asset in pool
+                if asset["path"] == "simheaven/houses/house_04x06x1.obj"
+            ),
+            1,
+        )
+
+    def test_sfd_export_measurement_adds_region_asset_with_offcenter_bounds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            package = _write_library_package(
+                custom,
+                "SFD Global Autogen",
+                [
+                    "EXPORT SFD_Global/Asia/Industry_30x70.obj Asia/Industry_30x70.obj",
+                    "EXPORT SFD_Global/Asia/Gas_Station.obj Asia/Gas_Station.obj",
+                ],
+            )
+            _write_obj8(
+                package / "Asia" / "Industry_30x70.obj",
+                [(-12.0, 0.0, -35.0), (18.0, 0.0, -35.0), (18.0, 0.0, 35.0), (-12.0, 0.0, 35.0)],
+            )
+            _write_obj8(
+                package / "Asia" / "Gas_Station.obj",
+                [(-8.0, 0.0, -8.0), (8.0, 0.0, 8.0)],
+            )
+            _activate_packages(custom, package)
+
+            pools = BLD._build_sfd_asset_pools(
+                35.0,
+                139.0,
+                "asia",
+                custom_scenery_dir=custom,
+            )
+            assets = [
+                asset
+                for pool in pools.values()
+                for asset in pool
+                if asset["path"] == "SFD_Global/Asia/Industry_30x70.obj"
+            ]
+            paths = _paths_for_classes(pools, BLD.BLD_PLACEMENT_CLASSES)
+
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]["bounds_m"], (-12.0, 18.0, -35.0, 35.0))
+        self.assertIn("SFD_Global/Asia/Industry_30x70.obj", paths)
+        self.assertNotIn("SFD_Global/Asia/Gas_Station.obj", paths)
+
+    def test_optional_library_policy_controls_curated_measured_assets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            package = _write_library_package(
+                custom,
+                "OpenSceneryX",
+                [
+                    "EXPORT opensceneryx/objects/buildings/industrial/warehouse_1.obj objects/warehouse.obj",
+                    "EXPORT opensceneryx/objects/buildings/industrial/chimney.obj objects/chimney.obj",
+                    "EXPORT opensceneryx/objects/buildings/industrial/silo_1.obj objects/silo.obj",
+                    "EXPORT opensceneryx/objects/buildings/industrial/storage_tank.obj objects/tank.obj",
+                    "EXPORT opensceneryx/objects/buildings/marine/lighthouses/1.obj objects/lighthouse.obj",
+                ],
+            )
+            r2_package = _write_library_package(
+                custom,
+                "R2_Library",
+                [
+                    "EXPORT R2_Library/industrial/kominy/komin_B30.obj objects/komin.obj",
+                    "EXPORT R2_Library/industrial/elektrarny/chladici_vez_A95.obj objects/chladici_vez.obj",
+                    "EXPORT R2_Library/industrial/elektrarny/reaktor.obj objects/reaktor.obj",
+                    "EXPORT R2_Library/industrial/nadrze/nadrz88m.obj objects/nadrz.obj",
+                ],
+            )
+            _write_obj8(
+                package / "objects" / "warehouse.obj",
+                [(-10.0, 0.0, -15.0), (10.0, 0.0, -15.0), (10.0, 0.0, 15.0), (-10.0, 0.0, 15.0)],
+            )
+            _write_obj8(
+                package / "objects" / "chimney.obj",
+                [(-3.0, 0.0, -3.0), (3.0, 0.0, -3.0), (3.0, 0.0, 3.0), (-3.0, 0.0, 3.0)],
+            )
+            _write_obj8(
+                package / "objects" / "silo.obj",
+                [(-4.0, 0.0, -4.0), (4.0, 0.0, -4.0), (4.0, 0.0, 4.0), (-4.0, 0.0, 4.0)],
+            )
+            _write_obj8(
+                package / "objects" / "tank.obj",
+                [(-6.0, 0.0, -6.0), (6.0, 0.0, -6.0), (6.0, 0.0, 6.0), (-6.0, 0.0, 6.0)],
+            )
+            _write_obj8(
+                package / "objects" / "lighthouse.obj",
+                [(-2.0, 0.0, -2.0), (2.0, 0.0, 2.0)],
+            )
+            for name in ("komin", "chladici_vez", "reaktor", "nadrz"):
+                _write_obj8(
+                    r2_package / "objects" / f"{name}.obj",
+                    [(-5.0, 0.0, -5.0), (5.0, 0.0, -5.0), (5.0, 0.0, 5.0), (-5.0, 0.0, 5.0)],
+                )
+            _activate_packages(custom, package, r2_package)
+
+            with mock.patch.dict(os.environ, {"O4_SFR_BLD_EXTRA_LIBRARIES": "auto"}):
+                auto_pools = BLD._build_optional_library_asset_pools(custom_scenery_dir=custom)
+            with mock.patch.dict(os.environ, {"O4_SFR_BLD_EXTRA_LIBRARIES": "off"}):
+                off_pools = BLD._build_optional_library_asset_pools(custom_scenery_dir=custom)
+
+        auto_paths = _paths_for_classes(auto_pools, BLD.BLD_PLACEMENT_CLASSES)
+        off_paths = _paths_for_classes(off_pools, BLD.BLD_PLACEMENT_CLASSES)
+        self.assertIn(
+            "opensceneryx/objects/buildings/industrial/warehouse_1.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "opensceneryx/objects/buildings/marine/lighthouses/1.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "opensceneryx/objects/buildings/industrial/chimney.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "opensceneryx/objects/buildings/industrial/silo_1.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "opensceneryx/objects/buildings/industrial/storage_tank.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "R2_Library/industrial/kominy/komin_B30.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "R2_Library/industrial/elektrarny/chladici_vez_A95.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "R2_Library/industrial/elektrarny/reaktor.obj",
+            auto_paths,
+        )
+        self.assertNotIn(
+            "R2_Library/industrial/nadrze/nadrz88m.obj",
+            auto_paths,
+        )
+        self.assertEqual(off_paths, set())
+
+    def test_asset_inventory_dry_run_reports_exports_without_mutating(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            package = _write_library_package(
+                custom,
+                "simHeaven_X-World_Africa-6-scenery",
+                ["EXPORT simheaven/houses/house_04x06x1.obj objects/a.obj"],
+            )
+            _activate_packages(custom, package)
+
+            before = sorted(path.relative_to(custom) for path in custom.rglob("*"))
+            exports = ASSETINV.scan_library_exports(
+                custom_scenery_dir=custom,
+                package_name_patterns=("simheaven",),
+                suffixes=(".obj",),
+            )
+            after = sorted(path.relative_to(custom) for path in custom.rglob("*"))
+
+        self.assertEqual(before, after)
+        self.assertEqual(len(exports), 1)
+        self.assertEqual(exports[0].virtual_path, "simheaven/houses/house_04x06x1.obj")
 
 
 if __name__ == "__main__":

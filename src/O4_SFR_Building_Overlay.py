@@ -39,6 +39,7 @@ import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
+import O4_SFR_Asset_Inventory as ASSETINV
 from O4_SFR_DSF_Utils import (
     active_scenery_pack_dirs,
     ensure_cached_dsf_text,
@@ -143,6 +144,13 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("yolo_placed", "yolo_placed"),
                 ("yolo_obj", "yolo_object_placed"),
                 ("yolo_fac", "yolo_facade_placed"),
+                ("yolo_obj_no_cand", "yolo_object_no_candidates"),
+                ("yolo_obj_nodim", "yolo_object_no_dimensions"),
+                ("yolo_obj_size", "yolo_object_size_reject"),
+                ("yolo_obj_cov", "yolo_object_coverage_reject"),
+                ("yolo_obj_outline", "yolo_object_outline_reject"),
+                ("yolo_obj_context", "yolo_object_context_skipped"),
+                ("yolo_obj_occ", "yolo_object_occupancy_reject"),
                 ("yolo_blocked", "yolo_blocked"),
                 ("yolo_overlap_blocked", "yolo_overlap_blocked"),
                 ("yolo_tpl", "yolo_template_placed"),
@@ -2490,10 +2498,125 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 MAX_GENERATED_BUILDING_HEIGHT_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 57
-BLD_PLACEMENT_FAST_CACHE_VERSION = 59
+BLD_PLACEMENT_CACHE_VERSION = 59
+BLD_PLACEMENT_FAST_CACHE_VERSION = 61
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 BLD_SMART_GAP_FILL_ENABLED = False
+
+CURATED_EXTRA_BUILDING_LIBRARIES = {
+    "opensceneryx": {
+        "label": "OpenSceneryX",
+        "package_patterns": ("opensceneryx",),
+        "virtual_prefixes": ("opensceneryx/",),
+    },
+    "world-models": {
+        "label": "world-models",
+        "package_patterns": ("world-models",),
+        "virtual_prefixes": ("objects/", "world-models/"),
+    },
+    "cdb-library": {
+        "label": "CDB-Library",
+        "package_patterns": ("cdb-library",),
+        "virtual_prefixes": ("cdb-library/",),
+    },
+    "handyobjects": {
+        "label": "The Handy Objects Library",
+        "package_patterns": ("the_handy_objects_library", "handy objects"),
+        "virtual_prefixes": ("handyobjects/",),
+    },
+    "r2-library": {
+        "label": "R2_Library",
+        "package_patterns": ("r2_library", "r2-library"),
+        "virtual_prefixes": ("r2_library/",),
+    },
+}
+
+OPTIONAL_LIBRARY_INCLUDE_TOKENS = (
+    "/house",
+    "/houses/",
+    "/residential/",
+    "/commercial/",
+    "/industrial/",
+    "/industry",
+    "/warehouse",
+    "/buildings/houses/",
+    "/buildings/residential/",
+    "/buildings/commercial/",
+    "/buildings/industrial/",
+    "/terraced/",
+    "/apartments/",
+    "/apartment",
+)
+
+GENERIC_BUILDING_EXCLUDE_TOKENS = (
+    "/airport",
+    "aircraft",
+    "antenna",
+    "barrier",
+    "billboard",
+    "boat",
+    "bridge",
+    "car_",
+    "/cars/",
+    "cathedral",
+    "chapel",
+    "chimney",
+    "church",
+    "clinic",
+    "container",
+    "cooling_tower",
+    "chladici_vez",
+    "crane",
+    "dock",
+    "dumpster",
+    "fence",
+    "fuel",
+    "gas_",
+    "hangar",
+    "hospital",
+    "hotel",
+    "jetty",
+    "jetway",
+    "komin",
+    "/kominy/",
+    "lighthouse",
+    "mast",
+    "marine",
+    "monument",
+    "nadrz",
+    "/nadrze/",
+    "oil_",
+    "parking",
+    "petrol",
+    "pipeline",
+    "propane",
+    "radio_",
+    "reactor",
+    "reaktor",
+    "recreational",
+    "school",
+    "ship",
+    "sign",
+    "silo",
+    "smokestack",
+    "smoke_stack",
+    "smoke-stack",
+    "sports",
+    "stadium",
+    "storage_tank",
+    "/store",
+    "store_",
+    "supermarket",
+    "/tank",
+    "tank_",
+    "terminal",
+    "tower",
+    "train",
+    "trash",
+    "utility",
+    "vehicle",
+    "windmill",
+)
 
 YOLO_OBB_CACHE_VERSION = 2
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -2511,6 +2634,11 @@ YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
 YOLO_TEMPLATE_SHAPE_REL_TOL = 0.20
 YOLO_TEMPLATE_SHAPE_ABS_TOL_PX = 4.0
 YOLO_OBJECT_MIN_COVERAGE = 0.80
+YOLO_OBJECT_MIN_COVERAGE_BY_CLASS = {
+    BLD_CLASS_TINY_RESIDENTIAL: 0.50,
+    BLD_CLASS_SMALL_RESIDENTIAL: 0.50,
+    BLD_CLASS_COMPACT_RESIDENTIAL: 0.65,
+}
 
 
 def _building_fill_modes(smart_gap_fill):
@@ -3543,7 +3671,14 @@ def _asset_requires_residential_context(asset):
             '/scandinavia/' in path or
             '/south_america/suburban' in path
         )
-    return False
+    return (
+        '/house' in path or
+        '/houses/' in path or
+        '/residential/' in path or
+        '/buildings/houses/' in path or
+        '/buildings/residential/' in path or
+        '/terraced/' in path
+    )
 
 
 def _asset_fit_inradius_m(asset):
@@ -3571,15 +3706,347 @@ def _class_min_fit_inradius_m(asset_pools):
     return min_by_class
 
 
-def _build_sfd_asset_pools(tile_lat, tile_lon, asset_region=None):
+def _extra_library_policy():
+    """Return optional building-library enrichment policy from the environment."""
+    return os.environ.get("O4_SFR_BLD_EXTRA_LIBRARIES", "auto").strip() or "auto"
+
+
+def _enabled_extra_library_ids(policy=None):
+    """Return curated optional-library ids enabled by policy."""
+    policy = (policy if policy is not None else _extra_library_policy()).strip().lower()
+    if policy in {"", "auto", "1", "true", "yes", "on"}:
+        return tuple(CURATED_EXTRA_BUILDING_LIBRARIES)
+    if policy in {"off", "0", "false", "no", "none"}:
+        return ()
+
+    enabled = []
+    requested = [part.strip().lower() for part in policy.split(",") if part.strip()]
+    for requested_name in requested:
+        for lib_id, meta in CURATED_EXTRA_BUILDING_LIBRARIES.items():
+            names = {
+                lib_id,
+                meta["label"].lower(),
+                meta["label"].lower().replace(" ", "-"),
+                meta["label"].lower().replace(" ", "_"),
+            }
+            names.update(pattern.lower() for pattern in meta["package_patterns"])
+            if requested_name in names and lib_id not in enabled:
+                enabled.append(lib_id)
+    return tuple(enabled)
+
+
+def _runtime_library_package_patterns(include_sfd=False, include_simheaven=False,
+                                      extra_library_ids=()):
+    patterns = []
+    if include_sfd:
+        patterns.append("sfd global autogen")
+    if include_simheaven:
+        patterns.append("simheaven")
+    for lib_id in extra_library_ids or ():
+        meta = CURATED_EXTRA_BUILDING_LIBRARIES.get(lib_id)
+        if meta:
+            patterns.extend(meta["package_patterns"])
+    return tuple(dict.fromkeys(patterns))
+
+
+def _scan_runtime_library_exports(custom_scenery_dir, *, include_sfd=False,
+                                  include_simheaven=False,
+                                  extra_library_ids=()):
+    """Scan only packages that may contribute runtime building assets."""
+    patterns = _runtime_library_package_patterns(
+        include_sfd=include_sfd,
+        include_simheaven=include_simheaven,
+        extra_library_ids=extra_library_ids,
+    )
+    if not patterns:
+        return []
+    return ASSETINV.scan_library_exports(
+        custom_scenery_dir=custom_scenery_dir,
+        package_name_patterns=patterns,
+        suffixes=(".obj",),
+    )
+
+
+def _library_exports_by_virtual_path(library_exports):
+    return ASSETINV.unique_virtual_exports(library_exports or (), suffix=".obj")
+
+
+def _bounds_union(bounds_iter):
+    bounds = [tuple(float(v) for v in item) for item in bounds_iter if item is not None]
+    if not bounds:
+        return None
+    return (
+        min(item[0] for item in bounds),
+        max(item[1] for item in bounds),
+        min(item[2] for item in bounds),
+        max(item[3] for item in bounds),
+    )
+
+
+def _measured_bounds_for_exports(exports, cache_dir=None):
+    """Return unioned OBJ8 bounds for all physical variants of one virtual path."""
+    return _bounds_union(
+        _read_obj8_bounds(export.resolved_path, cache_dir)
+        for export in exports
+        if getattr(export, "resolved_path", None)
+    )
+
+
+def _footprint_within_limits(bounds_m, *, max_area_m2=12_000.0, max_side_m=170.0):
+    if bounds_m is None:
+        return False
+    try:
+        area_m2, side_m = _footprint_metrics(bounds_m)
+    except Exception:
+        return False
+    return 12.0 <= float(area_m2) <= max_area_m2 and 2.0 <= float(side_m) <= max_side_m
+
+
+def _path_has_any(path, tokens):
+    p = (path or "").replace("\\", "/").lower()
+    return any(token in p for token in tokens)
+
+
+def _is_sfd_building_asset_candidate(obj_path):
+    p = (obj_path or "").replace("\\", "/").lower()
+    if not p.startswith("sfd_global/"):
+        return False
+    if _is_excluded_building_filler_asset(p):
+        return False
+    if _path_has_any(p, GENERIC_BUILDING_EXCLUDE_TOKENS):
+        return False
+    return _path_has_any(
+        p,
+        (
+            "/suburban",
+            "/apartment",
+            "/apartments_",
+            "/industry",
+            "/industrial",
+            "/urban_mid",
+            "/garage",
+            "/shed",
+        ),
+    )
+
+
+def _sfd_export_matches_region(obj_path, asset_region):
+    p = (obj_path or "").replace("\\", "/").lower()
+    region = (asset_region or "generic").lower()
+    if region == "scandinavia":
+        return p.startswith("sfd_global/scandinavia/")
+    if region == "australia_oceania":
+        return p.startswith("sfd_global/australia/") or "/asia/suburban_south" in p
+    if region == "asia":
+        return p.startswith("sfd_global/asia/") or p.startswith("sfd_global/buildings/")
+    if region == "se_asia":
+        return "/asia/suburban_south" in p or p.startswith("sfd_global/asia/shed")
+    if region == "africa":
+        return p.startswith("sfd_global/africa/")
+    if region == "mediterranean":
+        return p.startswith("sfd_global/med/")
+    if region == "north_america_ne":
+        return p.startswith("sfd_global/new_england/")
+    if region in ("north_america", "north_america_west"):
+        return p.startswith("sfd_global/us_west_coast/") or p.startswith("sfd_global/new_england/")
+    if region == "south_america":
+        return p.startswith("sfd_global/south_america/")
+    if region in ("europe", "generic"):
+        return p.startswith("sfd_global/med/")
+    return False
+
+
+def _scanned_simheaven_catalog_paths(library_exports=None, custom_scenery_dir=None):
+    """Return installed repeatable simHeaven aliases with encoded dimensions."""
+    if library_exports is None and custom_scenery_dir:
+        library_exports = _scan_runtime_library_exports(
+            custom_scenery_dir,
+            include_simheaven=True,
+        )
+    paths = []
+    for key, exports in _library_exports_by_virtual_path(library_exports).items():
+        if not key.startswith("simheaven/"):
+            continue
+        obj_path = exports[0].virtual_path
+        if not _is_repeatable_simheaven_asset(obj_path):
+            continue
+        dims = _simheaven_object_dims(obj_path)
+        if dims is None:
+            continue
+        height_m = _object_estimated_height_m(obj_path)
+        if _is_very_tall_building_asset(obj_path, height_m):
+            continue
+        paths.append(obj_path)
+    return tuple(sorted(set(paths), key=lambda item: item.lower()))
+
+
+def _scanned_sfd_catalog_entries(asset_region, library_exports=None,
+                                 custom_scenery_dir=None, cache_dir=None):
+    """Return ``(virtual_path, measured_bounds)`` SFD entries for a region."""
+    if library_exports is None and custom_scenery_dir:
+        library_exports = _scan_runtime_library_exports(
+            custom_scenery_dir,
+            include_sfd=True,
+        )
+    entries = []
+    for key, exports in _library_exports_by_virtual_path(library_exports).items():
+        obj_path = exports[0].virtual_path
+        if not _is_sfd_building_asset_candidate(obj_path):
+            continue
+        if not _sfd_export_matches_region(obj_path, asset_region):
+            continue
+        height_m = _object_estimated_height_m(obj_path)
+        if _is_very_tall_building_asset(obj_path, height_m):
+            continue
+        bounds_m = _measured_bounds_for_exports(exports, cache_dir)
+        if not _footprint_within_limits(bounds_m):
+            continue
+        entries.append((obj_path, bounds_m))
+    return tuple(sorted(entries, key=lambda item: item[0].lower()))
+
+
+def _is_optional_library_export_enabled(export, enabled_library_ids):
+    package = (getattr(export, "package_name", "") or "").lower()
+    virtual_path = (getattr(export, "virtual_path", "") or "").replace("\\", "/").lower()
+    for lib_id in enabled_library_ids or ():
+        meta = CURATED_EXTRA_BUILDING_LIBRARIES.get(lib_id)
+        if not meta:
+            continue
+        if not any(pattern in package for pattern in meta["package_patterns"]):
+            continue
+        if any(virtual_path.startswith(prefix.lower()) for prefix in meta["virtual_prefixes"]):
+            return True
+        if lib_id == "world-models" and package == "world-models":
+            return True
+    return False
+
+
+def _is_optional_library_building_candidate(obj_path):
+    p = (obj_path or "").replace("\\", "/").lower()
+    if not p.endswith(".obj"):
+        return False
+    if _is_excluded_building_filler_asset(p):
+        return False
+    if _path_has_any(p, GENERIC_BUILDING_EXCLUDE_TOKENS):
+        return False
+    return _path_has_any(p, OPTIONAL_LIBRARY_INCLUDE_TOKENS)
+
+
+def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports=None,
+                                        enabled_library_ids=None, cache_dir=None):
+    """Return optional curated installed-library building assets."""
+    asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
+    enabled_library_ids = tuple(
+        enabled_library_ids
+        if enabled_library_ids is not None else _enabled_extra_library_ids()
+    )
+    if not enabled_library_ids:
+        return asset_pools
+    if library_exports is None and custom_scenery_dir:
+        library_exports = _scan_runtime_library_exports(
+            custom_scenery_dir,
+            extra_library_ids=enabled_library_ids,
+        )
+    grouped = _library_exports_by_virtual_path(library_exports)
+    for key, exports in grouped.items():
+        export = exports[0]
+        obj_path = export.virtual_path
+        if not _is_optional_library_export_enabled(export, enabled_library_ids):
+            continue
+        if not _is_optional_library_building_candidate(obj_path):
+            continue
+        height_m = _object_estimated_height_m(obj_path)
+        if _is_very_tall_building_asset(obj_path, height_m):
+            continue
+        bounds_m = _measured_bounds_for_exports(exports, cache_dir)
+        if not _footprint_within_limits(bounds_m, max_area_m2=7_000.0, max_side_m=110.0):
+            continue
+        _append_object_asset(
+            asset_pools,
+            obj_path,
+            bounds_m,
+            CURATED_EXTRA_BUILDING_LIBRARIES.get(
+                next(
+                    (
+                        lib_id for lib_id in enabled_library_ids
+                        if _is_optional_library_export_enabled(export, (lib_id,))
+                    ),
+                    "",
+                ),
+                {},
+            ).get("label", export.package_name),
+        )
+    return asset_pools
+
+
+def _asset_pools_signature(asset_pools):
+    """Return a compact signature of active placement assets for cache keys."""
+    rows = []
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        for asset in asset_pools.get(zone_class, ()):
+            bounds = asset.get("bounds_m")
+            rows.append((
+                int(zone_class),
+                asset.get("kind", ""),
+                asset.get("path", ""),
+                asset.get("source", ""),
+                tuple(round(float(v), 3) for v in bounds) if bounds is not None else (),
+                round(float(asset.get("height_m") or 0.0), 3),
+            ))
+    digest = hashlib.sha1(repr(sorted(rows)).encode("utf-8")).hexdigest()
+    return digest, len(rows)
+
+
+def _describe_asset_pool_counts(asset_pools):
+    """Return compact per-class object asset counts for diagnostics."""
+    parts = []
+    for zone_class in BLD_PLACEMENT_CLASSES:
+        pool = [
+            asset for asset in asset_pools.get(zone_class, ())
+            if asset.get('kind') == 'object'
+        ]
+        if not pool:
+            continue
+        sources = {}
+        for asset in pool:
+            source = asset.get('source') or 'unknown'
+            sources[source] = sources.get(source, 0) + 1
+        source_bits = ",".join(
+            f"{source}:{count}"
+            for source, count in sorted(sources.items())
+        )
+        parts.append(
+            f"{BLD_CLASS_LABELS.get(zone_class, zone_class)}={len(pool)}({source_bits})"
+        )
+    return "  ".join(parts)
+
+
+def _build_sfd_asset_pools(
+    tile_lat,
+    tile_lon,
+    asset_region=None,
+    custom_scenery_dir=None,
+    library_exports=None,
+    cache_dir=None,
+):
     """Return strict tree-free SFD candidates grouped by footprint class."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
-    for obj_path in _sfd_catalog_paths(tile_lat, tile_lon, asset_region):
+    region = asset_region or _asset_region(tile_lat, tile_lon)
+    known_entries = [
+        (obj_path, _bounds_for_object_path(obj_path))
+        for obj_path in _sfd_catalog_paths(tile_lat, tile_lon, region)
+    ]
+    scanned_entries = _scanned_sfd_catalog_entries(
+        region,
+        library_exports=library_exports,
+        custom_scenery_dir=custom_scenery_dir,
+        cache_dir=cache_dir,
+    )
+    for obj_path, bounds_m in known_entries + list(scanned_entries):
         if obj_path in seen_paths:
             continue
         seen_paths.add(obj_path)
-        bounds_m = _bounds_for_object_path(obj_path)
         if bounds_m is None:
             continue
         _append_object_asset(asset_pools, obj_path, bounds_m, 'SFD Global')
@@ -3627,12 +4094,24 @@ def _simheaven_zone_class(width_m, depth_m):
 
 
 def _build_simheaven_asset_pools(
-    simheaven_objects=None, tile_lat=45.0, tile_lon=7.0, asset_region=None
+    simheaven_objects=None,
+    tile_lat=45.0,
+    tile_lon=7.0,
+    asset_region=None,
+    custom_scenery_dir=None,
+    library_exports=None,
 ):
     """Return simHeaven object candidates grouped by placement size class."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
-    for obj_path in _simheaven_catalog_paths(tile_lat, tile_lon, asset_region):
+    catalog_paths = (
+        tuple(_simheaven_catalog_paths(tile_lat, tile_lon, asset_region)) +
+        _scanned_simheaven_catalog_paths(
+            library_exports=library_exports,
+            custom_scenery_dir=custom_scenery_dir,
+        )
+    )
+    for obj_path in catalog_paths:
         if obj_path in seen_paths:
             continue
         if not _is_repeatable_simheaven_asset(obj_path):
@@ -3691,7 +4170,8 @@ def _find_library_export(custom_scenery_dir, library_prefix):
     return False
 
 
-def _describe_asset_sources(default_available, sfd_available, simheaven_available):
+def _describe_asset_sources(default_available, sfd_available, simheaven_available,
+                            extra_library_labels=()):
     """Return a short user-facing summary of building asset source selection."""
     parts = []
     if default_available:
@@ -3700,6 +4180,7 @@ def _describe_asset_sources(default_available, sfd_available, simheaven_availabl
         parts.append('SFD')
     if simheaven_available:
         parts.append('simHeaven')
+    parts.extend(label for label in (extra_library_labels or ()) if label)
     if not parts:
         return 'none'
     return ', '.join(parts)
@@ -5314,6 +5795,104 @@ def _build_yolo_object_fit_table(
     return table
 
 
+def _yolo_object_min_coverage_for_class(zone_class, default=YOLO_OBJECT_MIN_COVERAGE):
+    """Return the minimum object/YOLO footprint coverage for a detection class."""
+    try:
+        zone_class = int(zone_class)
+    except (TypeError, ValueError):
+        return float(default)
+    return float(YOLO_OBJECT_MIN_COVERAGE_BY_CLASS.get(zone_class, default))
+
+
+def _yolo_object_candidate_class_sequence(zone_class):
+    """Return object classes to try for a direct YOLO detection."""
+    try:
+        zone_class = int(zone_class)
+    except (TypeError, ValueError):
+        zone_class = BLD_CLASS_MEDIUM
+    if zone_class not in BLD_PLACEMENT_CLASSES:
+        zone_class = _yolo_facade_class(zone_class) or BLD_CLASS_MEDIUM
+
+    residential = (
+        BLD_CLASS_TINY_RESIDENTIAL,
+        BLD_CLASS_SMALL_RESIDENTIAL,
+        BLD_CLASS_COMPACT_RESIDENTIAL,
+    )
+    if zone_class in residential:
+        ordered = sorted(
+            residential,
+            key=lambda cls: (abs(int(cls) - zone_class), int(cls)),
+        )
+    else:
+        ordered = [zone_class]
+
+    ordered.extend(
+        cls for cls in BLD_PLACEMENT_CLASSES
+        if cls not in ordered
+    )
+    return tuple(ordered)
+
+
+def _build_yolo_object_candidate_index(asset_pools):
+    """Return object candidates grouped for scored direct-YOLO selection."""
+    by_class = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
+    seen_orientations = set()
+    for asset in _all_object_assets_by_size(asset_pools):
+        bounds_m = asset.get('bounds_m')
+        if bounds_m is None:
+            continue
+        try:
+            footprint_area_m2, _ = _footprint_metrics(bounds_m)
+            req_width_m, req_depth_m = _required_centered_dimensions_for_bounds(bounds_m)
+        except Exception:
+            continue
+        if footprint_area_m2 <= 0.0 or req_width_m <= 0.0 or req_depth_m <= 0.0:
+            continue
+        try:
+            asset_class = int(asset.get('footprint_class') or _class_for_object_asset(
+                asset.get('path'), bounds_m
+            ))
+        except Exception:
+            asset_class = _class_for_footprint(bounds_m)
+        if asset_class not in by_class:
+            asset_class = _nearest_available_class(asset_class, by_class)
+
+        orientations = (
+            (max(req_depth_m, req_width_m), min(req_depth_m, req_width_m), 0.0),
+            (max(req_width_m, req_depth_m), min(req_width_m, req_depth_m), -90.0),
+        )
+        for required_length_m, required_width_m, heading_delta in orientations:
+            orientation_id = (
+                asset.get('path', ''),
+                round(float(heading_delta), 6),
+                round(float(required_length_m), 4),
+                round(float(required_width_m), 4),
+            )
+            if orientation_id in seen_orientations:
+                continue
+            seen_orientations.add(orientation_id)
+            by_class[asset_class].append({
+                'asset': asset,
+                'heading_delta': float(heading_delta),
+                'required_length_m': float(required_length_m),
+                'required_width_m': float(required_width_m),
+                'coverage_area_m2': float(footprint_area_m2),
+            })
+
+    for candidates in by_class.values():
+        candidates.sort(
+            key=lambda item: (
+                item['asset'].get('source', ''),
+                item['asset'].get('path', ''),
+                float(item['heading_delta']),
+            )
+        )
+    return {
+        'kind': 'scored_yolo_object_candidates',
+        'assets_by_class': by_class,
+    }
+
+
 _GLOBAL_YOLO_OBJECT_FIT_TABLE = None
 
 
@@ -5404,14 +5983,81 @@ def _select_yolo_object_candidate(
     residential_context=True,
     enabled_assets_by_path=None,
     min_coverage=YOLO_OBJECT_MIN_COVERAGE,
+    static_occ_mask=None,
+    building_spacing_mask=None,
+    scratch_mask=None,
+    static_occ_integral=None,
 ):
     """Return a mapped object candidate that fits inside the YOLO polygon."""
-    key = _yolo_object_dimension_key(detection)
-    if key is None:
+    if not isinstance(fit_table, dict) or fit_table.get('kind') != 'scored_yolo_object_candidates':
+        key = _yolo_object_dimension_key(detection)
+        if key is None:
+            return None, 'miss'
+        candidates = (fit_table or {}).get(key)
+        if not candidates:
+            return None, 'miss'
+
+        try:
+            detection_area_m2 = float(detection.get('area_m2') or 0.0)
+        except (TypeError, ValueError):
+            detection_area_m2 = 0.0
+        if detection_area_m2 <= 0.0:
+            detection_area_m2 = (
+                abs(float(cv2.contourArea(np.asarray(yolo_poly, dtype=np.float32)))) *
+                float(m_per_px) * float(m_per_px)
+            )
+        if detection_area_m2 <= 0.0:
+            return None, 'miss'
+
+        context_skipped = 0
+        for candidate in candidates:
+            candidate_asset = candidate['asset']
+            path = candidate_asset.get('path')
+            if enabled_assets_by_path is not None:
+                asset = enabled_assets_by_path.get(path)
+                if asset is None:
+                    continue
+            else:
+                asset = candidate_asset
+            if not residential_context and _asset_requires_residential_context(asset):
+                context_skipped += 1
+                continue
+            footprint_area_m2 = float(candidate['footprint_area_m2'])
+            if footprint_area_m2 / detection_area_m2 < float(min_coverage):
+                continue
+            final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
+            footprint_poly = _footprint_poly(
+                int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
+            )
+            if not _poly_inside_poly(footprint_poly, yolo_poly):
+                continue
+            return {
+                'asset': asset,
+                'heading': final_heading,
+                'footprint_poly': footprint_poly,
+            }, 'selected'
+
+        if context_skipped:
+            return None, 'context_skipped'
         return None, 'miss'
-    candidates = (fit_table or {}).get(key)
-    if not candidates:
-        return None, 'miss'
+
+    def _detection_dimensions_m():
+        try:
+            length_m = float(detection.get('length_m'))
+            width_m = float(detection.get('width_m'))
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(length_m) and math.isfinite(width_m)):
+            return None
+        length_m, width_m = max(length_m, width_m), min(length_m, width_m)
+        if length_m <= 0.0 or width_m <= 0.0:
+            return None
+        return length_m, width_m
+
+    dims_m = _detection_dimensions_m()
+    if dims_m is None:
+        return None, 'no_dimensions'
+    detection_length_m, detection_width_m = dims_m
 
     try:
         detection_area_m2 = float(detection.get('area_m2') or 0.0)
@@ -5423,39 +6069,106 @@ def _select_yolo_object_candidate(
             float(m_per_px) * float(m_per_px)
         )
     if detection_area_m2 <= 0.0:
-        return None, 'miss'
+        return None, 'no_dimensions'
 
-    context_skipped = 0
-    for candidate in candidates:
-        candidate_asset = candidate['asset']
-        path = candidate_asset.get('path')
-        if enabled_assets_by_path is not None:
-            asset = enabled_assets_by_path.get(path)
-            if asset is None:
+    zone_class = int(detection.get('placement_class') or BLD_CLASS_MEDIUM)
+    min_coverage = _yolo_object_min_coverage_for_class(zone_class, min_coverage)
+    det_aspect = detection_length_m / max(detection_width_m, 1e-6)
+    best = None
+    counters = {
+        'context_skipped': 0,
+        'size_reject': 0,
+        'coverage_reject': 0,
+        'outline_reject': 0,
+        'occupancy_reject': 0,
+        'seen': 0,
+    }
+
+    for class_rank, asset_class in enumerate(_yolo_object_candidate_class_sequence(zone_class)):
+        candidates = fit_table['assets_by_class'].get(asset_class, ())
+        for candidate in candidates:
+            counters['seen'] += 1
+            candidate_asset = candidate['asset']
+            path = candidate_asset.get('path')
+            if enabled_assets_by_path is not None:
+                asset = enabled_assets_by_path.get(path)
+                if asset is None:
+                    continue
+            else:
+                asset = candidate_asset
+            if not residential_context and _asset_requires_residential_context(asset):
+                counters['context_skipped'] += 1
                 continue
-        else:
-            asset = candidate_asset
-        if not residential_context and _asset_requires_residential_context(asset):
-            context_skipped += 1
-            continue
-        footprint_area_m2 = float(candidate['footprint_area_m2'])
-        if footprint_area_m2 / detection_area_m2 < float(min_coverage):
-            continue
-        final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
-        footprint_poly = _footprint_poly(
-            int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
-        )
-        if not _poly_inside_poly(footprint_poly, yolo_poly):
-            continue
-        return {
-            'asset': asset,
-            'heading': final_heading,
-            'footprint_poly': footprint_poly,
-        }, 'selected'
+            if (
+                float(candidate['required_length_m']) > detection_length_m + 1e-6 or
+                float(candidate['required_width_m']) > detection_width_m + 1e-6
+            ):
+                counters['size_reject'] += 1
+                continue
 
-    if context_skipped:
-        return None, 'context_skipped'
-    return None, 'miss'
+            footprint_area_m2 = float(candidate['coverage_area_m2'])
+            coverage = footprint_area_m2 / detection_area_m2
+            if coverage < min_coverage:
+                counters['coverage_reject'] += 1
+                continue
+
+            final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
+            footprint_poly = _footprint_poly(
+                int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
+            )
+            if not _poly_inside_poly(footprint_poly, yolo_poly):
+                counters['outline_reject'] += 1
+                continue
+            if (
+                static_occ_mask is not None and building_spacing_mask is not None and
+                not _direct_yolo_poly_fits(
+                    static_occ_mask,
+                    building_spacing_mask,
+                    footprint_poly,
+                    scratch_mask=scratch_mask,
+                    static_occ_integral=static_occ_integral,
+                )
+            ):
+                counters['occupancy_reject'] += 1
+                continue
+
+            cand_aspect = (
+                float(candidate['required_length_m']) /
+                max(float(candidate['required_width_m']), 1e-6)
+            )
+            aspect_error = abs(math.log(max(cand_aspect, 1e-6) / max(det_aspect, 1e-6)))
+            score = (
+                -float(coverage),
+                float(aspect_error),
+                abs(int(asset_class) - zone_class),
+                int(class_rank),
+                asset.get('source', ''),
+                asset.get('path', ''),
+                float(candidate['heading_delta']),
+            )
+            selected = {
+                'asset': asset,
+                'heading': final_heading,
+                'footprint_poly': footprint_poly,
+            }
+            if best is None or score < best[0]:
+                best = (score, selected)
+
+    if best is not None:
+        return best[1], 'selected'
+    if counters['seen'] == 0:
+        return None, 'no_candidates'
+    for status in (
+        'context_skipped',
+        'occupancy_reject',
+        'outline_reject',
+        'coverage_reject',
+        'size_reject',
+    ):
+        if counters[status]:
+            return None, status
+    return None, 'no_candidates'
+
 
 
 def _yolo_poly_bbox(points):
@@ -6341,6 +7054,13 @@ def run(
     simheaven_assets_available = (
         bool(sh_bld_objects) or _find_library_export(custom_scenery_dir, 'simheaven/')
     )
+    enabled_extra_library_ids = _enabled_extra_library_ids()
+    runtime_library_exports = _scan_runtime_library_exports(
+        custom_scenery_dir,
+        include_sfd=sfd_assets_available,
+        include_simheaven=simheaven_assets_available,
+        extra_library_ids=enabled_extra_library_ids,
+    )
     asset_lat = lat + 0.5
     asset_lon = lon + 0.5
     natural_asset_region = _natural_asset_region(asset_lat, asset_lon)
@@ -6370,12 +7090,30 @@ def run(
     ]
     if sfd_assets_available:
         enabled_asset_pools.append(
-            _build_sfd_asset_pools(asset_lat, asset_lon, effective_asset_region)
+            _build_sfd_asset_pools(
+                asset_lat,
+                asset_lon,
+                effective_asset_region,
+                library_exports=runtime_library_exports,
+                cache_dir=cache_dir,
+            )
         )
     if simheaven_assets_available:
         enabled_asset_pools.append(_build_simheaven_asset_pools(
-            sh_bld_objects, asset_lat, asset_lon, effective_asset_region
+            sh_bld_objects,
+            asset_lat,
+            asset_lon,
+            effective_asset_region,
+            library_exports=runtime_library_exports,
         ))
+    extra_asset_pools = _build_optional_library_asset_pools(
+        custom_scenery_dir=custom_scenery_dir,
+        library_exports=runtime_library_exports,
+        enabled_library_ids=enabled_extra_library_ids,
+        cache_dir=cache_dir,
+    )
+    if any(extra_asset_pools.values()):
+        enabled_asset_pools.append(extra_asset_pools)
     asset_pools = _merge_asset_pools(*enabled_asset_pools)
     smallest_asset_only = _env_flag("O4_SFR_BLD_SMALLEST_ASSET_ONLY")
     if smallest_asset_only:
@@ -6384,10 +7122,19 @@ def run(
         default_assets_available,
         sfd_assets_available,
         simheaven_assets_available,
+        sorted({
+            asset.get('source', '')
+            for pool in extra_asset_pools.values()
+            for asset in pool
+            if asset.get('source')
+        }),
     )
     if smallest_asset_only:
         asset_sources_label += " (smallest asset per class)"
     print(f"Building assets: {asset_sources_label}")
+    asset_pool_counts = _describe_asset_pool_counts(asset_pools)
+    if asset_pool_counts:
+        print(f"Building asset pool counts: {asset_pool_counts}")
     if not any(asset_pools.values()):
         print("Building assets: none available for placement")
         return 0
@@ -6416,7 +7163,8 @@ def run(
     class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
     if disable_center_blockers:
         class_min_fit_inradius_m = {cls: 0.0 for cls in BLD_PLACEMENT_CLASSES}
-    yolo_object_fit_table = _global_yolo_object_fit_table()
+    yolo_object_fit_table = _build_yolo_object_candidate_index(asset_pools)
+    asset_catalog_signature = _asset_pools_signature(asset_pools)
     enabled_yolo_object_assets_by_path = {
         asset['path']: asset
         for pool in asset_pools.values()
@@ -6512,6 +7260,8 @@ def run(
         mesh_water_sig,
         residential_poly_sig,
         default_assets_available, sfd_assets_available, simheaven_assets_available,
+        tuple(enabled_extra_library_ids),
+        asset_catalog_signature,
         natural_asset_region,
         simheaven_package_region,
         effective_asset_region,
@@ -6523,8 +7273,8 @@ def run(
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v7: trained-YOLO detections may place mapped objects before facade fallback.
-        "schema=v7-yolo-object-dimension-fit",
+        # v8: trained-YOLO object selection uses scored measured-asset candidates.
+        "schema=v8-yolo-object-scored-fit",
     )
 
     t_start = time.time()
@@ -7064,6 +7814,10 @@ def run(
                             m_per_px,
                             residential_context=residential_context,
                             enabled_assets_by_path=enabled_yolo_object_assets_by_path,
+                            static_occ_mask=static_occ_mask,
+                            building_spacing_mask=building_spacing_mask,
+                            scratch_mask=fit_scratch,
+                            static_occ_integral=static_occ_integral,
                         )
                         if object_candidate is not None:
                             asset = object_candidate['asset']
@@ -7086,14 +7840,17 @@ def run(
                                 file_counts.get('yolo_object_placed', 0) + 1
                             )
                         else:
-                            if object_status == 'context_skipped':
-                                file_counts['yolo_object_context_skipped'] = (
-                                    file_counts.get('yolo_object_context_skipped', 0) + 1
-                                )
-                            else:
-                                file_counts['yolo_object_lookup_miss'] = (
-                                    file_counts.get('yolo_object_lookup_miss', 0) + 1
-                                )
+                            status_key = {
+                                'no_candidates': 'yolo_object_no_candidates',
+                                'size_reject': 'yolo_object_size_reject',
+                                'coverage_reject': 'yolo_object_coverage_reject',
+                                'outline_reject': 'yolo_object_outline_reject',
+                                'context_skipped': 'yolo_object_context_skipped',
+                                'occupancy_reject': 'yolo_object_occupancy_reject',
+                                'no_dimensions': 'yolo_object_no_dimensions',
+                                'miss': 'yolo_object_lookup_miss',
+                            }.get(object_status, 'yolo_object_lookup_miss')
+                            file_counts[status_key] = file_counts.get(status_key, 0) + 1
                             final_h = heading
                             facade_path = _facade_for_detection(
                                 facade_cls, veg_map, jx, jy, m_per_px,
