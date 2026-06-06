@@ -408,7 +408,7 @@ cfg_tile_vars = {
         "type": bool,
         "default": False,
         "short_name": "sfr_veg_gfv2_typ",
-        "hint": "Use nearby Global Forests v2 polygons to choose generated vegetation asset types. Disabled by default for faster climate-based asset selection.",
+        "hint": "Use the tile's most common acceptable Global Forests v2 polygon type to choose generated vegetation asset types. Disabled by default for faster climate-based asset selection.",
     },
     "sfr_veg_avoid_simheaven_forests": {
         "type": bool,

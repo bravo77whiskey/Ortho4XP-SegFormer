@@ -701,10 +701,10 @@ def _dds_polygon_cache_key(
     region,
     climate_code=None,
     asset_selection_mode="climate",
-    gfv2_type_source_sig=None,
+    gfv2_type_source_path=None,
 ):
     return {
-        'version': 3,
+        'version': 4,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -719,7 +719,7 @@ def _dds_polygon_cache_key(
         'region': region,
         'climate_code': climate_code,
         'asset_selection_mode': asset_selection_mode,
-        'gfv2_type_source_sig': gfv2_type_source_sig,
+        'gfv2_type_source_path': gfv2_type_source_path,
     }
 
 
@@ -839,6 +839,21 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
             print(f"  [{layer_name}] failed {dsf_path}: {exc}")
 
     return polys
+
+
+def _dominant_acceptable_gfv2_path(records):
+    """Return the most common acceptable GFv2 source path in a tile."""
+    counts = {}
+    for record in records or ():
+        path = record.get('path') if isinstance(record, dict) else None
+        metadata = FOREST_ASSETS.parse_gfv2_path(path)
+        if metadata is None or not FOREST_ASSETS.is_acceptable_gfv2_type_source(path):
+            continue
+        normalized = metadata['path']
+        counts[normalized] = counts.get(normalized, 0) + 1
+    if not counts:
+        return None
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
 # ── .for file selection ───────────────────────────────────────────────────────
@@ -1084,127 +1099,6 @@ def _contour_to_latlon(cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
     return result
 
 
-def _contour_centroid_lonlat(cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
-    moments = cv2.moments(cnt)
-    if moments.get("m00", 0.0):
-        px = float(moments["m10"] / moments["m00"])
-        py = float(moments["m01"] / moments["m00"])
-    else:
-        pts = cnt[:, 0, :].astype(np.float64, copy=False)
-        px = float(np.mean(pts[:, 0]))
-        py = float(np.mean(pts[:, 1]))
-    return px_to_latlon(px, py, img_w, img_h, lat_n, lat_s, lon_w, lon_e)
-
-
-def _poly_centroid_lonlat(poly):
-    pts = poly.get('pts', poly) if isinstance(poly, dict) else poly
-    if not pts:
-        return None
-    lons = [pt[0] for pt in pts]
-    lats = [pt[1] for pt in pts]
-    return (sum(lons) / len(lons), sum(lats) / len(lats))
-
-
-def _lonlat_distance_m(a, b):
-    lon_a, lat_a = a
-    lon_b, lat_b = b
-    mid_lat = math.radians((lat_a + lat_b) * 0.5)
-    dx = (lon_a - lon_b) * 111320.0 * math.cos(mid_lat)
-    dy = (lat_a - lat_b) * 110540.0
-    return math.hypot(dx, dy)
-
-
-def _project_lonlat_m(lonlat, origin_lat):
-    lon, lat = lonlat
-    return (
-        lon * 111320.0 * math.cos(math.radians(origin_lat)),
-        lat * 110540.0,
-    )
-
-
-def _build_gfv2_type_lookup(gfv2_records, origin_lat):
-    """Build a nearest-neighbour lookup for acceptable GFv2 type sources."""
-    accepted = []
-    for record in gfv2_records or ():
-        path = record.get('path')
-        if not FOREST_ASSETS.is_acceptable_gfv2_type_source(path):
-            continue
-        centroid = record.get('_centroid')
-        if centroid is None:
-            centroid = _poly_centroid_lonlat(record)
-            record['_centroid'] = centroid
-        if centroid is None:
-            continue
-        x_m, y_m = _project_lonlat_m(centroid, origin_lat)
-        accepted.append(
-            {
-                'path': path,
-                '_centroid': centroid,
-                '_xy_m': (x_m, y_m),
-            }
-        )
-    if not accepted:
-        return None
-
-    try:
-        from rtree import index as _rtree_index
-
-        rtree_index = _rtree_index.Index()
-        for idx, record in enumerate(accepted):
-            x_m, y_m = record['_xy_m']
-            rtree_index.insert(idx, (x_m, y_m, x_m, y_m))
-    except Exception:
-        rtree_index = None
-
-    return {
-        'records': accepted,
-        'index': rtree_index,
-        'origin_lat': origin_lat,
-    }
-
-
-def _nearest_acceptable_gfv2_path(
-    centroid_lonlat,
-    gfv2_records,
-    max_distance_m=350.0,
-):
-    if isinstance(gfv2_records, dict):
-        records = gfv2_records.get('records') or ()
-        rtree_index = gfv2_records.get('index')
-        origin_lat = gfv2_records.get('origin_lat', centroid_lonlat[1])
-        if rtree_index is not None:
-            x_m, y_m = _project_lonlat_m(centroid_lonlat, origin_lat)
-            best_path = None
-            best_dist = float(max_distance_m)
-            candidate_count = min(8, len(records))
-            for idx in rtree_index.nearest((x_m, y_m, x_m, y_m), candidate_count):
-                record = records[int(idx)]
-                dist = _lonlat_distance_m(centroid_lonlat, record['_centroid'])
-                if dist < best_dist:
-                    best_dist = dist
-                    best_path = record['path']
-            return best_path
-        gfv2_records = records
-
-    best_path = None
-    best_dist = float(max_distance_m)
-    for record in gfv2_records or ():
-        path = record.get('path')
-        if not FOREST_ASSETS.is_acceptable_gfv2_type_source(path):
-            continue
-        record_centroid = record.get('_centroid')
-        if record_centroid is None:
-            record_centroid = _poly_centroid_lonlat(record)
-            record['_centroid'] = record_centroid
-        if record_centroid is None:
-            continue
-        dist = _lonlat_distance_m(centroid_lonlat, record_centroid)
-        if dist < best_dist:
-            best_dist = dist
-            best_path = path
-    return best_path
-
-
 def _write_winding(f, ring_pts):
     pts = ring_pts
     if len(pts) > MAX_RING_PTS + 1:
@@ -1224,7 +1118,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       m_per_px, min_area_px, simplify_px,
                       region, rng, density_override,
                       context_masks=None, type_counts=None,
-                      gfv2_type_records=None):
+                      gfv2_type_path=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring)."""
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
@@ -1253,7 +1147,6 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         prepared_stats = None
         frac = 0.0
         veg_type = None
-        gfv2_type_path = None
         if veg_cls == SEGFORMER.CLASS_TREE:
             prepared_fill = _contour_fill_stats(cnt, m_per_px, include_ring=True)
             frac = _polygon_fill_frac(mask, cnt, prepared=prepared_fill)
@@ -1265,14 +1158,6 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             )
             if type_counts is not None:
                 type_counts[veg_type] = type_counts.get(veg_type, 0) + 1
-            if gfv2_type_records:
-                centroid_lonlat = _contour_centroid_lonlat(
-                    cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-                )
-                gfv2_type_path = _nearest_acceptable_gfv2_path(
-                    centroid_lonlat,
-                    gfv2_type_records,
-                )
         else:
             frac = _polygon_fill_frac(mask, cnt)
 
@@ -1412,7 +1297,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     )
     print(
         "vegetation asset selection:"
-        f" {'GFv2 proximity' if use_gfv2_asset_proximity else 'climate default'}"
+        f" {'GFv2 tile-dominant' if use_gfv2_asset_proximity else 'climate default'}"
     )
     print(
         f"building overlap avoid: SFR cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
@@ -1534,7 +1419,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     tree_row_sig = _roads_signature(veg_context_tree_rows)
 
     forest_layers = []
-    gfv2_type_index = None
+    gfv2_type_path = None
     if dsftool_path and os.path.exists(dsftool_path):
         layer_specs = [
             (
@@ -1568,12 +1453,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             prepared = _prepare_polygons(polys)
             if layer_name == "Global Forests v2":
                 if use_gfv2_asset_proximity:
-                    typed_prepared = [
-                        poly for poly in prepared
-                        if FOREST_ASSETS.is_acceptable_gfv2_type_source(poly.get('path'))
-                    ]
-                    gfv2_type_index = BBOX.build_bounds_index(typed_prepared)
-                    print(f"{layer_name} type sources: {len(typed_prepared)} accepted polygons")
+                    gfv2_type_path = _dominant_acceptable_gfv2_path(prepared)
+                    if gfv2_type_path:
+                        print(f"{layer_name} tile-dominant type source: {gfv2_type_path}")
+                    else:
+                        print(f"{layer_name} type sources: no acceptable polygons")
                 else:
                     print(f"{layer_name} type sources: disabled (climate asset selection)")
             forest_layers.append(
@@ -1592,9 +1476,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         (layer['name'], round(float(layer['buffer_m']), 4), _polys_signature(layer['polys']))
         for layer in forest_layers
     )
-    gfv2_type_source_sig = None
-    if use_gfv2_asset_proximity and gfv2_type_index:
-        gfv2_type_source_sig = _polys_signature(gfv2_type_index['items'].tolist())
+    gfv2_type_source_path = gfv2_type_path if use_gfv2_asset_proximity else None
 
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
@@ -2039,8 +1921,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             excl_buffer_m,
             region,
             koppen_code,
-            'gfv2_proximity' if use_gfv2_asset_proximity else 'climate',
-            gfv2_type_source_sig if use_gfv2_asset_proximity else None,
+            'gfv2_tile_dominant' if use_gfv2_asset_proximity else 'climate',
+            gfv2_type_source_path,
         )
         _poly_cached = None
         if not disable_cache:
@@ -2073,14 +1955,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       density_override=density_override,
                       context_masks=local_context_masks,
                       type_counts=None)
-        if use_gfv2_asset_proximity and gfv2_type_index:
-            gfv2_type_records = _poly_records_for_bounds(
-                gfv2_type_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.004
-            )
-            kwargs['gfv2_type_records'] = _build_gfv2_type_lookup(
-                gfv2_type_records,
-                origin_lat=(lat_n + lat_s) * 0.5,
-            )
+        if gfv2_type_source_path:
+            kwargs['gfv2_type_path'] = gfv2_type_source_path
 
         dds_seed = int.from_bytes(
             hashlib.sha1(f"veg-poly:{fname}".encode("utf-8")).digest()[:8],
@@ -2218,7 +2094,7 @@ def parse_args():
                     help='Extra exclusion buffer in metres around Global Forests v2 polygons.')
     ap.add_argument('--gfv2-asset-proximity', action='store_true',
                     dest='gfv2_asset_proximity',
-                    help='Use nearby Global Forests v2 polygons to choose generated vegetation asset types.')
+                    help='Use the tile-dominant Global Forests v2 polygon type to choose generated vegetation asset types.')
     ap.add_argument('--no-avoid-simheaven-forests', action='store_true',
                     dest='no_avoid_simheaven_forests',
                     help='Do not exclude simHeaven forest polygons from generated vegetation.')

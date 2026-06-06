@@ -205,7 +205,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         ):
             self.assertFalse(FOREST_ASSETS.is_acceptable_gfv2_type_source(path))
 
-    def test_sfr_for_entry_uses_nearest_gfv2_type_hint_when_available(self):
+    def test_sfr_for_entry_uses_gfv2_type_hint_when_available(self):
         for rng_index in range(8):
             path, _density = SFR_VEG._for_entry(
                 SEGFORMER.CLASS_TREE,
@@ -219,54 +219,61 @@ class ForestAssetPolicyTests(unittest.TestCase):
             )
             self.assertTrue(path.startswith("forests/tropical/woodland/"), msg=path)
 
-    def test_nearest_gfv2_type_hint_skips_rejected_sources(self):
+    def test_dominant_gfv2_type_hint_picks_most_common_acceptable_path(self):
         records = [
-            {
-                "pts": [(0.0, 0.0), (0.0001, 0.0), (0.0001, 0.0001)],
-                "path": "forests/tropical/palm/tropical_palm_75_y1.for",
-                "_centroid": (0.00002, 0.00002),
-            },
-            {
-                "pts": [(0.0, 0.0), (0.0002, 0.0), (0.0002, 0.0002)],
-                "path": "forests/tropical/woodland/tropical_woodland_75_y1.for",
-                "_centroid": (0.00008, 0.00008),
-            },
+            {"path": "forests/tropical/woodland/tropical_woodland_75_y1.for"},
+            {"path": "forests/tropical/woodland/tropical_woodland_75_y2.for"},
+            {"path": "forests/tropical/woodland/tropical_woodland_75_y2.for"},
+            {"path": "forests/tropical/palm/tropical_palm_75_y1.for"},
         ]
 
         self.assertEqual(
-            SFR_VEG._nearest_acceptable_gfv2_path((0.0, 0.0), records, max_distance_m=50.0),
-            "forests/tropical/woodland/tropical_woodland_75_y1.for",
+            SFR_VEG._dominant_acceptable_gfv2_path(records),
+            "forests/tropical/woodland/tropical_woodland_75_y2.for",
         )
 
-    def test_optimized_nearest_gfv2_lookup_skips_rejected_sources(self):
+    def test_dominant_gfv2_type_hint_skips_rejected_sources(self):
         records = [
-            {
-                "pts": [(0.0, 0.0), (0.0001, 0.0), (0.0001, 0.0001)],
-                "path": "forests/tropical/shrub/tropical_shrub_75_y1.for",
-                "_centroid": (0.00002, 0.00002),
-            },
-            {
-                "pts": [(0.0, 0.0), (0.0002, 0.0), (0.0002, 0.0002)],
-                "path": "forests/tropical/woodland/tropical_woodland_75_y1.for",
-                "_centroid": (0.00008, 0.00008),
-            },
+            {"path": "forests/tropical/palm/tropical_palm_75_y1.for"},
+            {"path": "forests/tropical/coconut/tropical_coconut_75_y1.for"},
+            {"path": "forests/subtropical/shrub/subtropical_shrub_50_y1.for"},
+            {"path": "forests/northmiddle/scrub/northmiddle_scrub_50_y1.for"},
+            {"path": "forests/tropical/woodland/tropical_woodland_75_y1.for"},
         ]
 
-        lookup = SFR_VEG._build_gfv2_type_lookup(records, origin_lat=0.0)
-
         self.assertEqual(
-            SFR_VEG._nearest_acceptable_gfv2_path((0.0, 0.0), lookup, max_distance_m=50.0),
+            SFR_VEG._dominant_acceptable_gfv2_path(records),
             "forests/tropical/woodland/tropical_woodland_75_y1.for",
         )
 
-    def test_climate_mode_does_not_call_gfv2_proximity_lookup(self):
+    def test_dominant_gfv2_type_hint_tie_breaks_by_path(self):
+        records = [
+            {"path": "forests/tropical/woodland/tropical_woodland_75_y2.for"},
+            {"path": "forests/tropical/woodland/tropical_woodland_75_y1.for"},
+        ]
+
+        self.assertEqual(
+            SFR_VEG._dominant_acceptable_gfv2_path(records),
+            "forests/tropical/woodland/tropical_woodland_75_y1.for",
+        )
+
+    def test_dominant_gfv2_type_hint_returns_none_without_acceptable_sources(self):
+        records = [
+            {"path": "forests/tropical/palm/tropical_palm_75_y1.for"},
+            {"path": "lib/vegetation/forests/broadleaves/warm_dry.for"},
+            {"path": None},
+        ]
+
+        self.assertIsNone(SFR_VEG._dominant_acceptable_gfv2_path(records))
+
+    def test_climate_mode_does_not_call_gfv2_type_hint_mapping(self):
         mask = np.zeros((20, 20), dtype=np.uint8)
         mask[2:18, 2:18] = 255
 
         with mock.patch.object(
-            SFR_VEG,
-            "_nearest_acceptable_gfv2_path",
-            side_effect=AssertionError("proximity lookup should be disabled"),
+            FOREST_ASSETS,
+            "gfv2_type_hint_candidates",
+            side_effect=AssertionError("GFv2 type mapping should be disabled"),
         ):
             polygons = SFR_VEG._process_dds_mask(
                 mask,
@@ -287,11 +294,42 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 density_override=None,
                 context_masks={},
                 type_counts={},
-                gfv2_type_records=None,
+                gfv2_type_path=None,
             )
 
         self.assertTrue(polygons)
         self.assertTrue(polygons[0][0].startswith("forests/northsouth/"))
+
+    def test_process_dds_mask_uses_tile_dominant_gfv2_type_hint_for_all_tree_polygons(self):
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        mask[2:16, 2:16] = 255
+        mask[22:36, 22:36] = 255
+
+        polygons = SFR_VEG._process_dds_mask(
+            mask,
+            SEGFORMER.CLASS_TREE,
+            img_w=40,
+            img_h=40,
+            lat_n=1.0,
+            lat_s=0.99,
+            lon_w=2.0,
+            lon_e=2.01,
+            tile_lat=0.0,
+            tile_lon=2.0,
+            m_per_px=2.0,
+            min_area_px=1.0,
+            simplify_px=1.0,
+            region="northsouth",
+            rng=_IndexRng(0),
+            density_override=None,
+            context_masks={},
+            type_counts={},
+            gfv2_type_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
+        )
+
+        self.assertEqual(len(polygons), 2)
+        for path, _density, _ring in polygons:
+            self.assertTrue(path.startswith("forests/tropical/woodland/"), msg=path)
 
     def test_cli_accepts_gfv2_asset_proximity_flag(self):
         argv = [
@@ -392,16 +430,22 @@ class ForestAssetPolicyTests(unittest.TestCase):
         climate_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
             asset_selection_mode="climate",
-            gfv2_type_source_sig=None,
+            gfv2_type_source_path=None,
         )
-        proximity_key = SFR_VEG._dds_polygon_cache_key(
+        dominant_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
-            asset_selection_mode="gfv2_proximity",
-            gfv2_type_source_sig=(2, 7, 0.123, 456),
+            asset_selection_mode="gfv2_tile_dominant",
+            gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y1.for",
+        )
+        other_dominant_key = SFR_VEG._dds_polygon_cache_key(
+            *base_args,
+            asset_selection_mode="gfv2_tile_dominant",
+            gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
         )
 
-        self.assertNotEqual(climate_key, proximity_key)
-        self.assertEqual(climate_key["version"], 3)
+        self.assertNotEqual(climate_key, dominant_key)
+        self.assertNotEqual(dominant_key, other_dominant_key)
+        self.assertEqual(climate_key["version"], 4)
 
     def test_vegetation_optional_mask_or_handles_missing_masks(self):
         lhs = None
