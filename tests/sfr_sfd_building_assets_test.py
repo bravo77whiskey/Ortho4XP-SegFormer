@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import O4_SFR_Building_Overlay as BLD
+import O4_SFR_DSF_Utils as DSF
 
 
 def _paths_for_classes(pools, classes):
@@ -22,6 +23,19 @@ def _paths_for_classes(pools, classes):
         for cls in classes
         for asset in pools.get(cls, ())
     }
+
+
+def _write_tile_dsf(package: Path, lat=22, lon=120):
+    lat_group = int(lat // 10) * 10
+    lon_group = int(lon // 10) * 10
+    lat_block = f"{'+' if lat_group >= 0 else '-'}{abs(lat_group):02d}"
+    lon_block = f"{'+' if lon_group >= 0 else '-'}{abs(lon_group):03d}"
+    lat_tile = f"{'+' if lat >= 0 else '-'}{abs(lat):02d}"
+    lon_tile = f"{'+' if lon >= 0 else '-'}{abs(lon):03d}"
+    dsf = package / "Earth nav data" / f"{lat_block}{lon_block}" / f"{lat_tile}{lon_tile}.dsf"
+    dsf.parent.mkdir(parents=True, exist_ok=True)
+    dsf.write_text("", encoding="utf-8")
+    return dsf
 
 
 class SfdBuildingAssetTests(unittest.TestCase):
@@ -1029,6 +1043,125 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(BLD._asset_region(42.0, 12.0), "mediterranean")
         self.assertEqual(BLD._asset_region(10.0, 25.0), "africa")
         self.assertEqual(BLD._asset_region(35.0, -40.0), "generic")
+
+    def test_simheaven_package_region_parser_handles_xworld_and_legacy_names(self):
+        cases = {
+            "simHeaven_X-World_Europe-6-scenery": "europe",
+            "simHeaven_X-World_America-1-vfr": "america",
+            "simHeaven_X-World_Americas-6-scenery": "america",
+            "simHeaven_X-World_Asia-3-details": "asia",
+            "simHeaven_X-World_Africa-6-scenery": "africa",
+            "simHeaven_X-World_Australia-Oceania-6-scenery": "australia_oceania",
+            "simHeaven_X-World_Antarctica-6-scenery": "antarctica",
+            "simHeaven_X-Europe-1-vfr": "europe",
+            "simHeaven_X-Asia-6-scenery": "asia",
+        }
+
+        for folder_name, expected in cases.items():
+            with self.subTest(folder_name=folder_name):
+                self.assertEqual(
+                    DSF.simheaven_package_region_from_name(folder_name),
+                    expected,
+                )
+        self.assertIsNone(
+            DSF.simheaven_package_region_from_name("simHeaven_Vegetation_Library")
+        )
+
+    def test_simheaven_package_region_search_respects_active_scenery_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            europe = custom / "simHeaven_X-World_Europe-6-scenery"
+            asia = custom / "simHeaven_X-World_Asia-6-scenery"
+            _write_tile_dsf(europe)
+            _write_tile_dsf(asia)
+            (custom / "scenery_packs.ini").write_text(
+                "\n".join(
+                    [
+                        "SCENERY_PACK Custom Scenery/simHeaven_X-World_Europe-6-scenery/",
+                        "SCENERY_PACK Custom Scenery/simHeaven_X-World_Asia-6-scenery/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            region, folder_name = DSF.find_simheaven_package_region_for_tile(
+                custom, 22, 120
+            )
+
+        self.assertEqual(region, "europe")
+        self.assertEqual(folder_name, "simHeaven_X-World_Europe-6-scenery")
+
+    def test_simheaven_package_region_search_ignores_disabled_packages(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            asia = custom / "simHeaven_X-World_Asia-6-scenery"
+            _write_tile_dsf(asia)
+            (custom / "scenery_packs.ini").write_text(
+                "SCENERY_PACK_DISABLED Custom Scenery/simHeaven_X-World_Asia-6-scenery/\n",
+                encoding="utf-8",
+            )
+
+            region, folder_name = DSF.find_simheaven_package_region_for_tile(
+                custom, 22, 120
+            )
+
+        self.assertIsNone(region)
+        self.assertIsNone(folder_name)
+
+    def test_simheaven_package_region_search_falls_back_without_scenery_packs_ini(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            asia = custom / "simHeaven_X-World_Asia-6-scenery"
+            _write_tile_dsf(asia)
+
+            region, folder_name = DSF.find_simheaven_package_region_for_tile(
+                custom, 22, 120
+            )
+
+        self.assertEqual(region, "asia")
+        self.assertEqual(folder_name, "simHeaven_X-World_Asia-6-scenery")
+
+    def test_simheaven_package_region_wins_for_default_asset_pools(self):
+        natural_na = BLD._default_object_catalog_paths(35.0, -120.0)
+        europe_package = BLD._default_object_catalog_paths(
+            35.0,
+            -120.0,
+            asset_region=BLD._asset_region(35.0, -120.0, "europe"),
+        )
+
+        self.assertIn("/lib/global8/us/feat_Building_50_40_600r40.obj", natural_na)
+        self.assertIn("/lib/global8/us/hill_sq_30_30r.obj", europe_package)
+        self.assertNotIn(
+            "/lib/global8/us/feat_Building_50_40_600r40.obj",
+            europe_package,
+        )
+
+    def test_simheaven_america_package_refines_generic_lonlat_to_north_america(self):
+        self.assertEqual(BLD._asset_region(35.0, -40.0), "generic")
+        self.assertEqual(BLD._asset_region(35.0, -40.0, "america"), "north_america")
+        paths = BLD._default_object_catalog_paths(
+            35.0,
+            -40.0,
+            asset_region=BLD._asset_region(35.0, -40.0, "america"),
+        )
+
+        self.assertIn("/lib/global8/us/feat_Building_50_40_600r40.obj", paths)
+        self.assertNotIn("/lib/global8/us/hill_sq_30_30r.obj", paths)
+
+    def test_simheaven_asia_package_refines_generic_lonlat_to_asia(self):
+        self.assertEqual(BLD._asset_region(0.0, 80.0), "generic")
+        self.assertEqual(BLD._asset_region(0.0, 80.0, "asia"), "asia")
+        paths = _paths_for_classes(
+            BLD._build_sfd_asset_pools(
+                0.0,
+                80.0,
+                asset_region=BLD._asset_region(0.0, 80.0, "asia"),
+            ),
+            BLD.BLD_PLACEMENT_CLASSES,
+        )
+
+        self.assertIn("SFD_Global/Asia/Suburban_1.obj", paths)
+        self.assertNotIn("SFD_Global/Med/Residential/Suburban_1.obj", paths)
 
     def test_residential_pools_have_expanded_regional_suburban_variety(self):
         cases = (

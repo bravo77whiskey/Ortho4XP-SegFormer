@@ -45,6 +45,7 @@ from O4_SFR_DSF_Utils import (
     find_active_custom_scenery_dsfs,
     find_simheaven_building_dsfs,
     find_simheaven_network_dsfs,
+    find_simheaven_package_region_for_tile,
     resolve_custom_scenery_dir,
 )
 from O4_SFR_Region_Boundaries import asset_region_for_latlon
@@ -2489,8 +2490,8 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 MAX_GENERATED_BUILDING_HEIGHT_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 55
-BLD_PLACEMENT_FAST_CACHE_VERSION = 57
+BLD_PLACEMENT_CACHE_VERSION = 56
+BLD_PLACEMENT_FAST_CACHE_VERSION = 58
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 BLD_SMART_GAP_FILL_ENABLED = False
 
@@ -3023,14 +3024,54 @@ ZONE_COLOURS = {
     BLD_CLASS_EXTRA_LARGE: np.array([135,  90, 255]),
 }
 
-def _asset_region(tile_lat, tile_lon):
+def _natural_asset_region(tile_lat, tile_lon):
     """Return the asset region key from Natural Earth boundary polygons."""
     return asset_region_for_latlon(tile_lat, tile_lon)
 
 
-def _default_object_catalog_paths(tile_lat, tile_lon):
+def _asset_region(tile_lat, tile_lon, simheaven_package_region=None):
+    """Return the effective asset region, optionally steered by X-World package."""
+    natural_region = _natural_asset_region(tile_lat, tile_lon)
+    package_region = (simheaven_package_region or "").strip().lower()
+    if not package_region:
+        return natural_region
+
+    if package_region == "europe":
+        if natural_region in ("scandinavia", "mediterranean", "europe"):
+            return natural_region
+        return "europe"
+
+    if package_region == "america":
+        if natural_region in (
+            "north_america",
+            "north_america_ne",
+            "north_america_west",
+            "south_america",
+        ):
+            return natural_region
+        if -90.0 <= float(tile_lon) <= -30.0 and -60.0 <= float(tile_lat) <= 15.0:
+            return "south_america"
+        return "north_america"
+
+    if package_region == "asia":
+        if natural_region in ("asia", "se_asia"):
+            return natural_region
+        if 90.0 <= float(tile_lon) <= 145.0 and -12.0 <= float(tile_lat) <= 25.0:
+            return "se_asia"
+        return "asia"
+
+    if package_region == "africa":
+        return "africa"
+    if package_region == "australia_oceania":
+        return "australia_oceania"
+    if package_region == "antarctica":
+        return "generic"
+    return natural_region
+
+
+def _default_object_catalog_paths(tile_lat, tile_lon, asset_region=None):
     """Return default object aliases that fit the regional context."""
-    region = _asset_region(tile_lat, tile_lon)
+    region = asset_region or _asset_region(tile_lat, tile_lon)
     if region in ("north_america", "north_america_ne", "north_america_west"):
         return DEFAULT_OBJECT_CATALOG_NORTH_AMERICA
     if region in ("scandinavia", "mediterranean", "europe", "generic"):
@@ -3038,9 +3079,9 @@ def _default_object_catalog_paths(tile_lat, tile_lon):
     return ()
 
 
-def _simheaven_catalog_paths(tile_lat, tile_lon):
+def _simheaven_catalog_paths(tile_lat, tile_lon, asset_region=None):
     """Return simHeaven virtual objects suited to the tile's region."""
-    region = _asset_region(tile_lat, tile_lon)
+    region = asset_region or _asset_region(tile_lat, tile_lon)
     if region in ("asia", "se_asia", "africa", "australia_oceania", "south_america"):
         return (
             SIMHEAVEN_SMALL_BUILDING_CATALOG +
@@ -3081,9 +3122,9 @@ def _is_excluded_building_filler_asset(path):
     return p in EXCLUDED_BUILDING_FILLER_ASSETS or 'carport' in p
 
 
-def _sfd_catalog_paths(tile_lat, tile_lon):
+def _sfd_catalog_paths(tile_lat, tile_lon, asset_region=None):
     """Return the strict audited SFD object allowlist for this location."""
-    region = _asset_region(tile_lat, tile_lon)
+    region = asset_region or _asset_region(tile_lat, tile_lon)
 
     if region == "scandinavia":
         return [
@@ -3529,11 +3570,11 @@ def _class_min_fit_inradius_m(asset_pools):
     return min_by_class
 
 
-def _build_sfd_asset_pools(tile_lat, tile_lon):
+def _build_sfd_asset_pools(tile_lat, tile_lon, asset_region=None):
     """Return strict tree-free SFD candidates grouped by footprint class."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
-    for obj_path in _sfd_catalog_paths(tile_lat, tile_lon):
+    for obj_path in _sfd_catalog_paths(tile_lat, tile_lon, asset_region):
         if obj_path in seen_paths:
             continue
         seen_paths.add(obj_path)
@@ -3544,7 +3585,7 @@ def _build_sfd_asset_pools(tile_lat, tile_lon):
     return asset_pools
 
 
-def _build_default_asset_pools(tile_lat=45.0, tile_lon=7.0):
+def _build_default_asset_pools(tile_lat=45.0, tile_lon=7.0, asset_region=None):
     """Return default X-Plane candidates grouped by footprint placement class."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     for zone_class in BLD_PLACEMENT_CLASSES:
@@ -3563,7 +3604,7 @@ def _build_default_asset_pools(tile_lat=45.0, tile_lon=7.0):
                 'requires_residential_context': False,
             })
     seen_paths = set()
-    for obj_path in _default_object_catalog_paths(tile_lat, tile_lon):
+    for obj_path in _default_object_catalog_paths(tile_lat, tile_lon, asset_region):
         if obj_path in seen_paths:
             continue
         seen_paths.add(obj_path)
@@ -3584,11 +3625,13 @@ def _simheaven_zone_class(width_m, depth_m):
     return _class_for_footprint(_bounds_from_dimensions(width_m, depth_m))
 
 
-def _build_simheaven_asset_pools(simheaven_objects=None, tile_lat=45.0, tile_lon=7.0):
+def _build_simheaven_asset_pools(
+    simheaven_objects=None, tile_lat=45.0, tile_lon=7.0, asset_region=None
+):
     """Return simHeaven object candidates grouped by placement size class."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
-    for obj_path in _simheaven_catalog_paths(tile_lat, tile_lon):
+    for obj_path in _simheaven_catalog_paths(tile_lat, tile_lon, asset_region):
         if obj_path in seen_paths:
             continue
         if not _is_repeatable_simheaven_asset(obj_path):
@@ -6054,12 +6097,38 @@ def run(
     )
     asset_lat = lat + 0.5
     asset_lon = lon + 0.5
-    enabled_asset_pools = [_build_default_asset_pools(asset_lat, asset_lon)]
+    natural_asset_region = _natural_asset_region(asset_lat, asset_lon)
+    simheaven_package_region, simheaven_package_folder = (
+        find_simheaven_package_region_for_tile(custom_scenery_dir, lat, lon)
+    )
+    effective_asset_region = _asset_region(
+        asset_lat, asset_lon, simheaven_package_region
+    )
+    if simheaven_package_region:
+        print(
+            "Asset region: "
+            f"natural={natural_asset_region}  "
+            f"simHeaven={simheaven_package_region} "
+            f"({simheaven_package_folder})  "
+            f"effective={effective_asset_region}"
+        )
+    else:
+        print(
+            "Asset region: "
+            f"natural={natural_asset_region}  "
+            f"simHeaven=none  effective={effective_asset_region}"
+        )
+
+    enabled_asset_pools = [
+        _build_default_asset_pools(asset_lat, asset_lon, effective_asset_region)
+    ]
     if sfd_assets_available:
-        enabled_asset_pools.append(_build_sfd_asset_pools(asset_lat, asset_lon))
+        enabled_asset_pools.append(
+            _build_sfd_asset_pools(asset_lat, asset_lon, effective_asset_region)
+        )
     if simheaven_assets_available:
         enabled_asset_pools.append(_build_simheaven_asset_pools(
-            sh_bld_objects, asset_lat, asset_lon
+            sh_bld_objects, asset_lat, asset_lon, effective_asset_region
         ))
     asset_pools = _merge_asset_pools(*enabled_asset_pools)
     smallest_asset_only = _env_flag("O4_SFR_BLD_SMALLEST_ASSET_ONLY")
@@ -6190,7 +6259,9 @@ def run(
         mesh_water_sig,
         residential_poly_sig,
         default_assets_available, sfd_assets_available, simheaven_assets_available,
-        _asset_region(asset_lat, asset_lon),
+        natural_asset_region,
+        simheaven_package_region,
+        effective_asset_region,
         bool(yolo_enabled), yolo_signature,
         yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
         round(float(yolo_iou), 6), yolo_max_det,
@@ -6199,8 +6270,8 @@ def run(
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v5: broader facade pools and deterministic simHeaven-gated picks.
-        "schema=v5-broader-facade-variety",
+        # v6: simHeaven X-World package region steers regional asset pools.
+        "schema=v6-simheaven-package-region",
     )
 
     t_start = time.time()

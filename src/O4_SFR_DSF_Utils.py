@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 import subprocess
 
 
@@ -87,6 +88,45 @@ def active_scenery_pack_dirs(custom_scenery_dir):
     return packs
 
 
+def _scenery_packs_ini_exists(custom_scenery_dir):
+    custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
+    if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
+        return False
+    return os.path.isfile(os.path.join(custom_scenery_dir, "scenery_packs.ini"))
+
+
+def simheaven_package_region_from_name(folder_name):
+    """Return the X-World package family encoded in a simHeaven folder name."""
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        (folder_name or "").strip().lower(),
+    ).strip("-")
+    if not normalized:
+        return None
+    if (
+        "simheaven" not in normalized
+        and "x-world" not in normalized
+        and not normalized.startswith("x-")
+    ):
+        return None
+    if "australia-oceania" in normalized or (
+        "australia" in normalized and "oceania" in normalized
+    ):
+        return "australia_oceania"
+    if "antarctica" in normalized:
+        return "antarctica"
+    if "americas" in normalized or "america" in normalized:
+        return "america"
+    if "europe" in normalized:
+        return "europe"
+    if "africa" in normalized:
+        return "africa"
+    if "asia" in normalized:
+        return "asia"
+    return None
+
+
 def _scan_custom_scenery(custom_scenery_dir, tile_dsf_relpath, folder_filter):
     """Yield matching DSF files from a configured Custom Scenery directory."""
     custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
@@ -95,20 +135,44 @@ def _scan_custom_scenery(custom_scenery_dir, tile_dsf_relpath, folder_filter):
 
     matches = []
     seen_paths = set()
-    for entry in sorted(os.scandir(custom_scenery_dir), key=lambda item: item.name.lower()):
-        if not entry.is_dir():
+    if _scenery_packs_ini_exists(custom_scenery_dir):
+        entries = active_scenery_pack_dirs(custom_scenery_dir)
+    else:
+        entries = [
+            (entry.name, entry.path)
+            for entry in sorted(
+                os.scandir(custom_scenery_dir),
+                key=lambda item: item.name.lower(),
+            )
+            if entry.is_dir()
+        ]
+    for folder_name, package_dir in entries:
+        if not folder_filter(folder_name.lower()):
             continue
-        if not folder_filter(entry.name.lower()):
-            continue
-        dsf_path = os.path.join(entry.path, tile_dsf_relpath)
+        dsf_path = os.path.join(package_dir, tile_dsf_relpath)
         if not os.path.isfile(dsf_path):
             continue
         resolved_path = os.path.realpath(dsf_path)
         if resolved_path in seen_paths:
             continue
         seen_paths.add(resolved_path)
-        matches.append((entry.name, dsf_path))
+        matches.append((folder_name, dsf_path))
     return matches
+
+
+def find_simheaven_package_region_for_tile(custom_scenery_dir, lat, lon):
+    """Return ``(region, folder_name)`` for the first matching X-World tile DSF."""
+    tile_dsf_relpath = _tile_dsf_relpath(lat, lon)
+    matches = _scan_custom_scenery(
+        custom_scenery_dir,
+        tile_dsf_relpath,
+        lambda folder_name: simheaven_package_region_from_name(folder_name) is not None,
+    )
+    for folder_name, _dsf_path in matches:
+        package_region = simheaven_package_region_from_name(folder_name)
+        if package_region:
+            return package_region, folder_name
+    return None, None
 
 
 def find_active_custom_scenery_dsfs(custom_scenery_dir, tile_dsf_name, skip_dsf_path=None):
