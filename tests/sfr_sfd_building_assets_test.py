@@ -721,6 +721,156 @@ class SfdBuildingAssetTests(unittest.TestCase):
             )
         )
 
+    def test_yolo_detection_records_oriented_meter_dimensions(self):
+        points = BLD._points_from_yolo_heading((50.0, 50.0), 20.0, 8.0, 35.0)
+
+        detection = BLD._yolo_obb_detection_from_points(
+            points,
+            confidence=0.9,
+            cls=BLD.BLD_CLASS_MEDIUM - 1,
+            img_w=100,
+            img_h=100,
+            m_per_px=1.0,
+            model_class_count=len(BLD.BLD_PLACEMENT_CLASSES),
+        )
+
+        self.assertIsNotNone(detection)
+        self.assertAlmostEqual(detection["length_m"], 20.0, delta=0.2)
+        self.assertAlmostEqual(detection["width_m"], 8.0, delta=0.2)
+        self.assertEqual(BLD._yolo_object_dimension_key(detection), (20, 8))
+
+    def test_yolo_object_fit_table_includes_both_asset_orientations(self):
+        asset = {
+            "kind": "object",
+            "path": "rect.obj",
+            "bounds_m": (-4.5, 4.5, -6.0, 6.0),
+            "source": "test",
+        }
+        pools = {BLD.BLD_CLASS_MEDIUM: [asset]}
+
+        table = BLD._build_yolo_object_fit_table(pools)
+
+        self.assertIn((12, 9), table)
+        self.assertIn((9, 12), table)
+        self.assertEqual(table[(12, 9)][0]["asset"]["path"], "rect.obj")
+        self.assertEqual(table[(9, 12)][0]["asset"]["path"], "rect.obj")
+
+    def test_yolo_object_fit_table_rejects_less_than_eighty_percent_coverage(self):
+        asset = {
+            "kind": "object",
+            "path": "small.obj",
+            "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "source": "test",
+        }
+        pools = {BLD.BLD_CLASS_MEDIUM: [asset]}
+
+        table = BLD._build_yolo_object_fit_table(pools)
+
+        self.assertIn((10, 10), table)
+        self.assertNotIn((13, 10), table)
+
+    def test_yolo_object_fit_table_uses_centered_dimensions_for_offcenter_bounds(self):
+        asset = {
+            "kind": "object",
+            "path": "offcenter.obj",
+            "bounds_m": (-4.0, 6.0, -5.0, 5.0),
+            "source": "test",
+        }
+        pools = {BLD.BLD_CLASS_MEDIUM: [asset]}
+
+        table = BLD._build_yolo_object_fit_table(pools)
+
+        self.assertNotIn((10, 10), table)
+        self.assertIn((10, 12), table)
+        self.assertIn((12, 10), table)
+
+    def test_yolo_object_selection_places_when_mapping_fits_polygon(self):
+        asset = {
+            "kind": "object",
+            "path": "mapped.obj",
+            "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "mark_bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "source": "test",
+        }
+        table = BLD._build_yolo_object_fit_table({BLD.BLD_CLASS_MEDIUM: [asset]})
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 12.0, 10.0, 0.0)
+        detection = {
+            "length_m": 12.0,
+            "width_m": 10.0,
+            "area_m2": 120.0,
+        }
+
+        selected, status = BLD._select_yolo_object_candidate(
+            table,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+        )
+
+        self.assertEqual(status, "selected")
+        self.assertEqual(selected["asset"]["path"], "mapped.obj")
+        self.assertIsNotNone(selected["footprint_poly"])
+
+    def test_yolo_object_selection_falls_back_when_no_mapping_exists(self):
+        asset = {
+            "kind": "object",
+            "path": "mapped.obj",
+            "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "source": "test",
+        }
+        table = BLD._build_yolo_object_fit_table({BLD.BLD_CLASS_MEDIUM: [asset]})
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 20.0, 20.0, 0.0)
+        detection = {
+            "length_m": 20.0,
+            "width_m": 20.0,
+            "area_m2": 400.0,
+        }
+
+        selected, status = BLD._select_yolo_object_candidate(
+            table,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(status, "miss")
+
+    def test_yolo_object_selection_reports_residential_context_skip(self):
+        asset = {
+            "kind": "object",
+            "path": "simheaven/houses/house_09x12x2.obj",
+            "bounds_m": (-4.5, 4.5, -6.0, 6.0),
+            "source": "test",
+        }
+        table = BLD._build_yolo_object_fit_table({BLD.BLD_CLASS_MEDIUM: [asset]})
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 12.0, 9.0, 0.0)
+        detection = {
+            "length_m": 12.0,
+            "width_m": 9.0,
+            "area_m2": 108.0,
+        }
+
+        selected, status = BLD._select_yolo_object_candidate(
+            table,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+            residential_context=False,
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(status, "context_skipped")
+
     def test_building_zone_cell_mask_tracks_only_occupied_grid_cells(self):
         bld_zone = np.zeros((8, 8), dtype=np.uint8)
         bld_zone[1, 1] = 1

@@ -2490,12 +2490,12 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 MAX_GENERATED_BUILDING_HEIGHT_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 56
-BLD_PLACEMENT_FAST_CACHE_VERSION = 58
+BLD_PLACEMENT_CACHE_VERSION = 57
+BLD_PLACEMENT_FAST_CACHE_VERSION = 59
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 BLD_SMART_GAP_FILL_ENABLED = False
 
-YOLO_OBB_CACHE_VERSION = 1
+YOLO_OBB_CACHE_VERSION = 2
 DEFAULT_YOLO_OBB_CHECKPOINT = (
     r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
 )
@@ -2510,6 +2510,7 @@ YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
 YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
 YOLO_TEMPLATE_SHAPE_REL_TOL = 0.20
 YOLO_TEMPLATE_SHAPE_ABS_TOL_PX = 4.0
+YOLO_OBJECT_MIN_COVERAGE = 0.80
 
 
 def _building_fill_modes(smart_gap_fill):
@@ -4090,6 +4091,7 @@ def _yolo_obb_detection_from_points(
             if abs(height_px) > abs(width_px):
                 img_angle += 90.0
             max_side_px = max(abs(width_px), abs(height_px))
+            min_side_px = min(abs(width_px), abs(height_px))
         except Exception:
             xywhr = None
     if xywhr is None:
@@ -4101,8 +4103,12 @@ def _yolo_obb_detection_from_points(
         long_vec = edges[long_edge_index]
         img_angle = math.degrees(math.atan2(float(long_vec[1]), float(long_vec[0])))
         max_side_px = float(edge_lengths[long_edge_index])
+        min_side_px = float(edge_lengths[(long_edge_index + 1) % 4])
+        if min_side_px > max_side_px:
+            max_side_px, min_side_px = min_side_px, max_side_px
     heading = (90.0 - img_angle) % 180.0
     max_side_m = float(max_side_px) * float(m_per_px)
+    min_side_m = float(min_side_px) * float(m_per_px)
     area_m2 = area_px * float(m_per_px) * float(m_per_px)
     model_cls_int = int(cls)
     placement_cls, height_m = _decode_yolo_obb_detection_class(
@@ -4126,6 +4132,8 @@ def _yolo_obb_detection_from_points(
         'model_class': model_cls_int,
         'area_m2': float(area_m2),
         'max_side_m': float(max_side_m),
+        'length_m': float(max_side_m),
+        'width_m': float(min_side_m),
         'placement_class': int(placement_cls),
         'height_m': float(height_m),
     }
@@ -5213,6 +5221,243 @@ def _all_object_assets_by_size(asset_pools):
     return [asset for _area, asset in assets]
 
 
+def _required_centered_dimensions_for_bounds(bounds_m):
+    """Return dimensions required to keep off-centre bounds inside a centred OBB."""
+    xmin, xmax, zmin, zmax = (float(v) for v in bounds_m)
+    width_m = 2.0 * max(abs(xmin), abs(xmax))
+    depth_m = 2.0 * max(abs(zmin), abs(zmax))
+    return width_m, depth_m
+
+
+def _yolo_object_dimension_key(detection):
+    """Return floored integer-metre (length, width) lookup key for a detection."""
+    try:
+        length_m = float(detection.get('length_m'))
+        width_m = float(detection.get('width_m'))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(length_m) and math.isfinite(width_m)):
+        return None
+    length_key = int(math.floor(max(length_m, width_m) + 1e-4))
+    width_key = int(math.floor(min(length_m, width_m) + 1e-4))
+    if length_key <= 0 or width_key <= 0:
+        return None
+    return length_key, width_key
+
+
+def _build_yolo_object_fit_table(
+    asset_pools,
+    min_coverage=YOLO_OBJECT_MIN_COVERAGE,
+):
+    """Return a full integer-metre detection-dimension lookup for object assets."""
+    table = {}
+    min_coverage = max(1e-6, float(min_coverage))
+    seen_orientations = set()
+    for asset in _all_object_assets_by_size(asset_pools):
+        bounds_m = asset.get('bounds_m')
+        if bounds_m is None:
+            continue
+        try:
+            footprint_area_m2, _ = _footprint_metrics(bounds_m)
+            req_width_m, req_depth_m = _required_centered_dimensions_for_bounds(bounds_m)
+        except Exception:
+            continue
+        if footprint_area_m2 <= 0.0 or req_width_m <= 0.0 or req_depth_m <= 0.0:
+            continue
+
+        orientations = (
+            (req_depth_m, req_width_m, 0.0),
+            (req_width_m, req_depth_m, -90.0),
+        )
+        for required_length_m, required_width_m, heading_delta in orientations:
+            min_length_key = int(math.ceil(required_length_m - 1e-6))
+            min_width_key = int(math.ceil(required_width_m - 1e-6))
+            if min_length_key <= 0 or min_width_key <= 0:
+                continue
+            max_detection_area_m2 = footprint_area_m2 / min_coverage
+            max_length_key = int(math.floor(max_detection_area_m2 / min_width_key))
+            orientation_id = (
+                asset.get('path', ''),
+                round(float(heading_delta), 6),
+                min_length_key,
+                min_width_key,
+            )
+            if orientation_id in seen_orientations:
+                continue
+            seen_orientations.add(orientation_id)
+            for length_key in range(min_length_key, max_length_key + 1):
+                max_width_key = int(math.floor(max_detection_area_m2 / length_key))
+                if max_width_key < min_width_key:
+                    continue
+                for width_key in range(min_width_key, max_width_key + 1):
+                    key = (int(length_key), int(width_key))
+                    coverage = footprint_area_m2 / max(1.0, float(length_key * width_key))
+                    table.setdefault(key, []).append({
+                        'asset': asset,
+                        'heading_delta': float(heading_delta),
+                        'required_length_m': float(required_length_m),
+                        'required_width_m': float(required_width_m),
+                        'coverage': float(coverage),
+                        'footprint_area_m2': float(footprint_area_m2),
+                    })
+
+    for key, candidates in table.items():
+        candidates.sort(
+            key=lambda item: (
+                -float(item['coverage']),
+                -float(item['footprint_area_m2']),
+                item['asset'].get('source', ''),
+                item['asset'].get('path', ''),
+                float(item['heading_delta']),
+            )
+        )
+    return table
+
+
+_GLOBAL_YOLO_OBJECT_FIT_TABLE = None
+
+
+def _all_known_yolo_object_asset_pools():
+    """Return object pools for every static asset catalog entry we know about."""
+    asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
+    seen_paths = set()
+
+    default_paths = set(DEFAULT_OBJECT_CATALOG_OLD_WORLD) | set(DEFAULT_OBJECT_CATALOG_NORTH_AMERICA)
+    for obj_path in sorted(default_paths):
+        if obj_path in seen_paths:
+            continue
+        seen_paths.add(obj_path)
+        dims = _default_object_dims(obj_path)
+        if dims is None:
+            continue
+        _append_object_asset(
+            asset_pools,
+            obj_path,
+            _bounds_from_dimensions(dims[0], dims[1]),
+            'Default X-Plane',
+        )
+
+    asset_regions = (
+        'generic',
+        'europe',
+        'scandinavia',
+        'mediterranean',
+        'north_america',
+        'north_america_ne',
+        'north_america_west',
+        'south_america',
+        'asia',
+        'se_asia',
+        'africa',
+        'australia_oceania',
+    )
+    for region in asset_regions:
+        for obj_path in _sfd_catalog_paths(0.0, 0.0, region):
+            if obj_path in seen_paths:
+                continue
+            seen_paths.add(obj_path)
+            bounds_m = _bounds_for_object_path(obj_path)
+            if bounds_m is None:
+                continue
+            _append_object_asset(asset_pools, obj_path, bounds_m, 'SFD Global')
+
+    simheaven_paths = (
+        SIMHEAVEN_SMALL_BUILDING_CATALOG +
+        SIMHEAVEN_RESIDENTIAL_CATALOG +
+        SIMHEAVEN_COMMERCIAL_CATALOG +
+        SIMHEAVEN_INDUSTRIAL_CATALOG
+    )
+    for obj_path in simheaven_paths:
+        if obj_path in seen_paths:
+            continue
+        if not _is_repeatable_simheaven_asset(obj_path):
+            continue
+        seen_paths.add(obj_path)
+        dims = _simheaven_object_dims(obj_path)
+        _append_object_asset(
+            asset_pools,
+            obj_path,
+            _bounds_from_dimensions(dims[0], dims[1]),
+            'simHeaven',
+        )
+    return asset_pools
+
+
+def _global_yolo_object_fit_table():
+    """Return the static object-dimension lookup, building it once per process."""
+    global _GLOBAL_YOLO_OBJECT_FIT_TABLE
+    if _GLOBAL_YOLO_OBJECT_FIT_TABLE is None:
+        _GLOBAL_YOLO_OBJECT_FIT_TABLE = _build_yolo_object_fit_table(
+            _all_known_yolo_object_asset_pools()
+        )
+    return _GLOBAL_YOLO_OBJECT_FIT_TABLE
+
+
+def _select_yolo_object_candidate(
+    fit_table,
+    detection,
+    yolo_poly,
+    jx,
+    jy,
+    heading,
+    m_per_px,
+    residential_context=True,
+    enabled_assets_by_path=None,
+    min_coverage=YOLO_OBJECT_MIN_COVERAGE,
+):
+    """Return a mapped object candidate that fits inside the YOLO polygon."""
+    key = _yolo_object_dimension_key(detection)
+    if key is None:
+        return None, 'miss'
+    candidates = (fit_table or {}).get(key)
+    if not candidates:
+        return None, 'miss'
+
+    try:
+        detection_area_m2 = float(detection.get('area_m2') or 0.0)
+    except (TypeError, ValueError):
+        detection_area_m2 = 0.0
+    if detection_area_m2 <= 0.0:
+        detection_area_m2 = (
+            abs(float(cv2.contourArea(np.asarray(yolo_poly, dtype=np.float32)))) *
+            float(m_per_px) * float(m_per_px)
+        )
+    if detection_area_m2 <= 0.0:
+        return None, 'miss'
+
+    context_skipped = 0
+    for candidate in candidates:
+        candidate_asset = candidate['asset']
+        path = candidate_asset.get('path')
+        if enabled_assets_by_path is not None:
+            asset = enabled_assets_by_path.get(path)
+            if asset is None:
+                continue
+        else:
+            asset = candidate_asset
+        if not residential_context and _asset_requires_residential_context(asset):
+            context_skipped += 1
+            continue
+        footprint_area_m2 = float(candidate['footprint_area_m2'])
+        if footprint_area_m2 / detection_area_m2 < float(min_coverage):
+            continue
+        final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
+        footprint_poly = _footprint_poly(
+            int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
+        )
+        if not _poly_inside_poly(footprint_poly, yolo_poly):
+            continue
+        return {
+            'asset': asset,
+            'heading': final_heading,
+            'footprint_poly': footprint_poly,
+        }, 'selected'
+
+    if context_skipped:
+        return None, 'context_skipped'
+    return None, 'miss'
+
+
 def _yolo_poly_bbox(points):
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
     return (
@@ -5871,7 +6116,8 @@ def run(
     else:
         smart_gap_fill = bool(smart_gap_fill)
     allow_inferred_fill, run_legacy_gap_fill = _building_fill_modes(smart_gap_fill)
-    # Pipeline is permanently in direct-YOLO facade-only mode.
+    # Pipeline is permanently in direct-YOLO mode; detected footprints try
+    # mapped objects first and fall back to facades when no object fits.
     allow_inferred_fill = False
     run_legacy_gap_fill = False
     yolo_cuda_cleanup_every = max(
@@ -5983,7 +6229,7 @@ def run(
             "YOLO OBB placement: direct detections only "
             f"(max asset height {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
         )
-        print("YOLO OBB placement: facade-first mode")
+        print("YOLO OBB placement: object-first mode with facade fallback")
         try:
             yolo_model = _load_yolo_obb_model(
                 yolo_checkpoint,
@@ -6170,6 +6416,13 @@ def run(
     class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
     if disable_center_blockers:
         class_min_fit_inradius_m = {cls: 0.0 for cls in BLD_PLACEMENT_CLASSES}
+    yolo_object_fit_table = _global_yolo_object_fit_table()
+    enabled_yolo_object_assets_by_path = {
+        asset['path']: asset
+        for pool in asset_pools.values()
+        for asset in pool
+        if asset.get('kind') == 'object' and asset.get('path')
+    }
 
     osm_roads = _prepare_roads(osm_roads)
     osm_roads_index = BBOX.build_bounds_index(osm_roads)
@@ -6270,8 +6523,8 @@ def run(
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v6: simHeaven X-World package region steers regional asset pools.
-        "schema=v6-simheaven-package-region",
+        # v7: trained-YOLO detections may place mapped objects before facade fallback.
+        "schema=v7-yolo-object-dimension-fit",
     )
 
     t_start = time.time()
@@ -6797,40 +7050,84 @@ def run(
                             file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                             continue
 
-                        final_h = heading
-                        facade_path = _facade_for_detection(
-                            facade_cls, veg_map, jx, jy, m_per_px,
-                            lat=float(o_lat), lon=float(o_lon),
-                            include_simheaven_assets=simheaven_assets_available,
+                        residential_context = (
+                            residential_area_mask is None or
+                            bool(residential_area_mask[jy, jx])
                         )
-                        footprint_poly = yolo_poly
-                        placed_facades.append((
-                            _pixel_ring_to_latlon(
-                                footprint_poly, img_w, img_h,
-                                lat_n, lat_s, lon_w, lon_e,
-                            ),
-                            facade_path,
-                            float(detection.get(
-                                'height_m',
-                                DEFAULT_FACADE_HEIGHT_M.get(facade_cls, 8.0),
-                            )),
-                        ))
-                        direct_yolo_facade_placements += 1
-                        placed_viz_polys.append((footprint_poly.copy(), facade_cls))
-                        _mark_poly(building_spacing_mask, footprint_poly)
-                        _mark_dynamic_center_blockers(
-                            dynamic_center_block_masks,
+                        object_candidate, object_status = _select_yolo_object_candidate(
+                            yolo_object_fit_table,
+                            detection,
+                            yolo_poly,
                             jx,
                             jy,
-                            final_h,
-                            DEFAULT_FACADE_BOUNDS.get(facade_cls),
+                            heading,
                             m_per_px,
-                            class_min_fit_inradius_m,
+                            residential_context=residential_context,
+                            enabled_assets_by_path=enabled_yolo_object_assets_by_path,
                         )
-                        pts_this.append((jx, jy, final_h, facade_cls))
-                        file_counts['yolo_facade_placed'] = (
-                            file_counts.get('yolo_facade_placed', 0) + 1
-                        )
+                        if object_candidate is not None:
+                            asset = object_candidate['asset']
+                            final_h = float(object_candidate['heading'])
+                            footprint_poly = object_candidate['footprint_poly']
+                            placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
+                            placed_viz_polys.append((footprint_poly.copy(), facade_cls))
+                            _mark_poly(building_spacing_mask, footprint_poly)
+                            _mark_dynamic_center_blockers(
+                                dynamic_center_block_masks,
+                                jx,
+                                jy,
+                                final_h,
+                                asset.get('mark_bounds_m'),
+                                m_per_px,
+                                class_min_fit_inradius_m,
+                            )
+                            pts_this.append((jx, jy, final_h, facade_cls))
+                            file_counts['yolo_object_placed'] = (
+                                file_counts.get('yolo_object_placed', 0) + 1
+                            )
+                        else:
+                            if object_status == 'context_skipped':
+                                file_counts['yolo_object_context_skipped'] = (
+                                    file_counts.get('yolo_object_context_skipped', 0) + 1
+                                )
+                            else:
+                                file_counts['yolo_object_lookup_miss'] = (
+                                    file_counts.get('yolo_object_lookup_miss', 0) + 1
+                                )
+                            final_h = heading
+                            facade_path = _facade_for_detection(
+                                facade_cls, veg_map, jx, jy, m_per_px,
+                                lat=float(o_lat), lon=float(o_lon),
+                                include_simheaven_assets=simheaven_assets_available,
+                            )
+                            footprint_poly = yolo_poly
+                            placed_facades.append((
+                                _pixel_ring_to_latlon(
+                                    footprint_poly, img_w, img_h,
+                                    lat_n, lat_s, lon_w, lon_e,
+                                ),
+                                facade_path,
+                                float(detection.get(
+                                    'height_m',
+                                    DEFAULT_FACADE_HEIGHT_M.get(facade_cls, 8.0),
+                                )),
+                            ))
+                            direct_yolo_facade_placements += 1
+                            placed_viz_polys.append((footprint_poly.copy(), facade_cls))
+                            _mark_poly(building_spacing_mask, footprint_poly)
+                            _mark_dynamic_center_blockers(
+                                dynamic_center_block_masks,
+                                jx,
+                                jy,
+                                final_h,
+                                DEFAULT_FACADE_BOUNDS.get(facade_cls),
+                                m_per_px,
+                                class_min_fit_inradius_m,
+                            )
+                            pts_this.append((jx, jy, final_h, facade_cls))
+                            file_counts['yolo_facade_placed'] = (
+                                file_counts.get('yolo_facade_placed', 0) + 1
+                            )
 
                         yolo_viz_polys[-1] = (yolo_poly.copy(), True)
                         cv2.fillPoly(placed_yolo_mask, [np.int32(yolo_poly)], 1)
