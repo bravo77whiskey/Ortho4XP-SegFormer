@@ -5695,9 +5695,84 @@ def _orientation_angles_for_bounds(bounds_m, desired_long_axis_heading):
     return (heading, (heading - 90.0) % 360.0)
 
 
-def _poly_fits(occ_mask: np.ndarray, pts: np.ndarray, scratch_mask: np.ndarray | None = None) -> bool:
+def _fit_bbox_for_poly(pts: np.ndarray, img_w: int, img_h: int):
+    """Return clipped [x1, y1, x2, y2] bbox for polygon fit checks."""
+    if pts.shape[0] == 0:
+        return (0, 0, 0, 0)
+    return (
+        max(0, int(pts[:, 0].min())),
+        max(0, int(pts[:, 1].min())),
+        min(int(img_w), int(pts[:, 0].max()) + 1),
+        min(int(img_h), int(pts[:, 1].max()) + 1),
+    )
+
+
+def _prepare_direct_yolo_detection(detection, img_w: int, img_h: int):
+    """Return cached polygon geometry for the direct-YOLO placement loop."""
+    yolo_poly = np.rint(
+        np.asarray(detection.get('points', ()), dtype=np.float32)
+    ).astype(np.int32)
+    if yolo_poly.shape != (4, 2):
+        return {
+            'valid': False,
+            'poly': yolo_poly,
+            'bbox': (0, 0, 0, 0),
+            'area_px': 0.0,
+            'jx': 0,
+            'jy': 0,
+        }
+    try:
+        jx = int(round(float(detection['center'][0])))
+        jy = int(round(float(detection['center'][1])))
+    except (KeyError, IndexError, TypeError, ValueError):
+        jx = jy = -1
+    return {
+        'valid': True,
+        'poly': yolo_poly,
+        'bbox': _fit_bbox_for_poly(yolo_poly, img_w, img_h),
+        'area_px': abs(float(cv2.contourArea(yolo_poly.astype(np.float32)))),
+        'jx': jx,
+        'jy': jy,
+    }
+
+
+def _poly_fits(
+    occ_mask: np.ndarray,
+    pts: np.ndarray,
+    scratch_mask: np.ndarray | None = None,
+    bbox=None,
+) -> bool:
     """Return True if polygon pts have no overlap with any set pixel in occ_mask."""
-    return _poly_fits_with_integral(occ_mask, pts, scratch_mask=scratch_mask)
+    return _poly_fits_with_integral(occ_mask, pts, scratch_mask=scratch_mask, bbox=bbox)
+
+
+def _spacing_poly_fits(
+    spacing_mask: np.ndarray,
+    yolo_poly: np.ndarray,
+    scratch_mask: np.ndarray | None = None,
+    spacing_integral: np.ndarray | None = None,
+    recent_spacing_mask: np.ndarray | None = None,
+    bbox=None,
+) -> bool:
+    """Return True if poly does not overlap building_spacing_mask. Uses an
+    integral image plus an incremental ``recent_spacing_mask`` to avoid a full
+    bbox ``countNonZero`` when the area is sparse."""
+    if bbox is None:
+        bbox = _fit_bbox_for_poly(yolo_poly, spacing_mask.shape[1], spacing_mask.shape[0])
+    x1, y1, x2, y2 = bbox
+    if x1 >= x2 or y1 >= y2:
+        return True
+    if spacing_integral is not None:
+        integral_has_occupancy = _integral_bbox_sum(spacing_integral, x1, y1, x2, y2) != 0
+    else:
+        integral_has_occupancy = cv2.countNonZero(spacing_mask[y1:y2, x1:x2]) != 0
+    recent_has_occupancy = (
+        recent_spacing_mask is not None and
+        cv2.countNonZero(recent_spacing_mask[y1:y2, x1:x2]) != 0
+    )
+    if not integral_has_occupancy and not recent_has_occupancy:
+        return True
+    return _poly_fits(spacing_mask, yolo_poly, scratch_mask, bbox=bbox)
 
 
 def _direct_yolo_poly_fits(
@@ -5706,17 +5781,54 @@ def _direct_yolo_poly_fits(
     yolo_poly: np.ndarray,
     scratch_mask: np.ndarray | None = None,
     static_occ_integral: np.ndarray | None = None,
+    bbox=None,
+    spacing_occ_integral: np.ndarray | None = None,
+    recent_spacing_mask: np.ndarray | None = None,
 ) -> bool:
     """Return True when a direct YOLO footprint clears static and dynamic blockers."""
-    return (
-        _poly_fits_with_integral(
-            static_occ_mask,
-            yolo_poly,
-            scratch_mask=scratch_mask,
-            occ_integral=static_occ_integral,
-        ) and
-        _poly_fits(building_spacing_mask, yolo_poly, scratch_mask)
+    if not _poly_fits_with_integral(
+        static_occ_mask,
+        yolo_poly,
+        scratch_mask=scratch_mask,
+        occ_integral=static_occ_integral,
+        bbox=bbox,
+    ):
+        return False
+    return _spacing_poly_fits(
+        building_spacing_mask,
+        yolo_poly,
+        scratch_mask=scratch_mask,
+        spacing_integral=spacing_occ_integral,
+        recent_spacing_mask=recent_spacing_mask,
+        bbox=bbox,
     )
+
+
+def _placed_yolo_poly_fits(
+    placed_yolo_mask: np.ndarray,
+    yolo_poly: np.ndarray,
+    scratch_mask: np.ndarray | None = None,
+    placed_yolo_integral: np.ndarray | None = None,
+    recent_yolo_mask: np.ndarray | None = None,
+    bbox=None,
+) -> bool:
+    """Return True if a YOLO polygon does not overlap already placed YOLOs."""
+    if bbox is None:
+        bbox = _fit_bbox_for_poly(yolo_poly, placed_yolo_mask.shape[1], placed_yolo_mask.shape[0])
+    x1, y1, x2, y2 = bbox
+    if x1 >= x2 or y1 >= y2:
+        return True
+    if placed_yolo_integral is not None:
+        integral_has_occupancy = _integral_bbox_sum(placed_yolo_integral, x1, y1, x2, y2) != 0
+    else:
+        integral_has_occupancy = cv2.countNonZero(placed_yolo_mask[y1:y2, x1:x2]) != 0
+    recent_has_occupancy = (
+        recent_yolo_mask is not None and
+        cv2.countNonZero(recent_yolo_mask[y1:y2, x1:x2]) != 0
+    )
+    if not integral_has_occupancy and not recent_has_occupancy:
+        return True
+    return _poly_fits(placed_yolo_mask, yolo_poly, scratch_mask, bbox=bbox)
 
 
 def _poly_inside_poly(inner_poly: np.ndarray, outer_poly: np.ndarray) -> bool:
@@ -5948,6 +6060,7 @@ def _build_yolo_object_candidate_index(asset_pools):
     for candidates in by_class.values():
         candidates.sort(
             key=lambda item: (
+                -float(item['coverage_area_m2']),
                 item['asset'].get('source', ''),
                 item['asset'].get('path', ''),
                 float(item['heading_delta']),
@@ -5956,7 +6069,59 @@ def _build_yolo_object_candidate_index(asset_pools):
     return {
         'kind': 'scored_yolo_object_candidates',
         'assets_by_class': by_class,
+        'merged_by_zone': {},
     }
+
+
+def _merged_yolo_candidates_by_zone(fit_table, zone_class):
+    """Return candidates across fallback classes sorted by -coverage_area_m2.
+
+    Returns a dict with ``entries`` (list of ``(class_rank, asset_class, candidate)``)
+    aligned with three numpy arrays — ``cov_area``, ``req_l``, ``req_w`` — used to
+    vectorise the size/coverage pre-filter at call time. Cached on
+    ``fit_table['merged_by_zone']`` so the merge runs once per zone_class.
+    """
+    cache = fit_table.setdefault('merged_by_zone', {})
+    try:
+        cache_key = int(zone_class)
+    except (TypeError, ValueError):
+        cache_key = zone_class
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    assets_by_class = fit_table.get('assets_by_class', {}) or {}
+    entries = []
+    class_sequence = _yolo_object_candidate_class_sequence(zone_class)
+    for class_rank, asset_class in enumerate(class_sequence):
+        for candidate in assets_by_class.get(asset_class, ()):  # already coverage-desc within class
+            entries.append((class_rank, int(asset_class), candidate))
+    entries.sort(
+        key=lambda item: (
+            -float(item[2]['coverage_area_m2']),
+            int(item[0]),
+            int(item[1]),
+            item[2]['asset'].get('source', ''),
+            item[2]['asset'].get('path', ''),
+            float(item[2]['heading_delta']),
+        )
+    )
+    n = len(entries)
+    cov_area = np.empty(n, dtype=np.float64)
+    req_l = np.empty(n, dtype=np.float64)
+    req_w = np.empty(n, dtype=np.float64)
+    for i, (_rank, _cls, cand) in enumerate(entries):
+        cov_area[i] = float(cand['coverage_area_m2'])
+        req_l[i] = float(cand['required_length_m'])
+        req_w[i] = float(cand['required_width_m'])
+    bundle = {
+        'entries': entries,
+        'cov_area': cov_area,
+        'req_l': req_l,
+        'req_w': req_w,
+    }
+    cache[cache_key] = bundle
+    return bundle
 
 
 _GLOBAL_YOLO_OBJECT_FIT_TABLE = None
@@ -6053,6 +6218,8 @@ def _select_yolo_object_candidate(
     building_spacing_mask=None,
     scratch_mask=None,
     static_occ_integral=None,
+    spacing_occ_integral=None,
+    recent_spacing_mask=None,
 ):
     """Return a mapped object candidate that fits inside the YOLO polygon."""
     if not isinstance(fit_table, dict) or fit_table.get('kind') != 'scored_yolo_object_candidates':
@@ -6150,80 +6317,96 @@ def _select_yolo_object_candidate(
         'seen': 0,
     }
 
-    for class_rank, asset_class in enumerate(_yolo_object_candidate_class_sequence(zone_class)):
-        candidates = fit_table['assets_by_class'].get(asset_class, ())
-        for candidate in candidates:
-            counters['seen'] += 1
-            candidate_asset = candidate['asset']
-            path = candidate_asset.get('path')
-            if enabled_assets_by_path is not None:
-                asset = enabled_assets_by_path.get(path)
-                if asset is None:
-                    continue
-            else:
-                asset = candidate_asset
-            if not residential_context and _asset_requires_residential_context(asset):
-                counters['context_skipped'] += 1
+    best_cov_area_m2 = -1.0
+    merged_bundle = _merged_yolo_candidates_by_zone(fit_table, zone_class)
+    entries = merged_bundle['entries']
+    if not entries:
+        return None, 'no_candidates'
+    # Vectorised size + coverage pre-filter: avoids per-candidate Python checks
+    # for every clearly-too-big or below-min-coverage asset. The min_coverage
+    # bound also enforces the down-stream cov_area / det_area comparison.
+    min_cov_area_m2 = float(min_coverage) * detection_area_m2
+    size_ok = (
+        (merged_bundle['req_l'] <= detection_length_m + 1e-6) &
+        (merged_bundle['req_w'] <= detection_width_m + 1e-6)
+    )
+    cov_ok = merged_bundle['cov_area'] >= min_cov_area_m2 - 1e-12
+    viable_mask = size_ok & cov_ok
+    size_rejected = int((~size_ok).sum())
+    coverage_rejected = int(np.count_nonzero(size_ok & ~cov_ok))
+    if size_rejected:
+        counters['size_reject'] = size_rejected
+    if coverage_rejected:
+        counters['coverage_reject'] = coverage_rejected
+    viable_idx = np.flatnonzero(viable_mask)
+    for idx in viable_idx:
+        idx = int(idx)
+        class_rank, asset_class, candidate = entries[idx]
+        candidate_cov_area_m2 = float(merged_bundle['cov_area'][idx])
+        if best is not None and candidate_cov_area_m2 < best_cov_area_m2 - 1e-9:
+            break  # remaining candidates have strictly smaller coverage; cannot beat best on score
+        counters['seen'] += 1
+        candidate_asset = candidate['asset']
+        path = candidate_asset.get('path')
+        if enabled_assets_by_path is not None:
+            asset = enabled_assets_by_path.get(path)
+            if asset is None:
                 continue
-            if (
-                float(candidate['required_length_m']) > detection_length_m + 1e-6 or
-                float(candidate['required_width_m']) > detection_width_m + 1e-6
-            ):
-                counters['size_reject'] += 1
-                continue
+        else:
+            asset = candidate_asset
+        if not residential_context and _asset_requires_residential_context(asset):
+            counters['context_skipped'] += 1
+            continue
 
-            footprint_area_m2 = float(candidate['coverage_area_m2'])
-            coverage = footprint_area_m2 / detection_area_m2
-            if coverage < min_coverage:
-                counters['coverage_reject'] += 1
-                continue
+        coverage = candidate_cov_area_m2 / detection_area_m2
 
-            final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
-            footprint_poly = _footprint_poly(
-                int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
+        final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
+        footprint_poly = _footprint_poly(
+            int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
+        )
+        if not _poly_inside_poly(footprint_poly, yolo_poly):
+            counters['outline_reject'] += 1
+            continue
+        if (
+            static_occ_mask is not None and building_spacing_mask is not None and
+            not _direct_yolo_poly_fits(
+                static_occ_mask,
+                building_spacing_mask,
+                footprint_poly,
+                scratch_mask=scratch_mask,
+                static_occ_integral=static_occ_integral,
+                spacing_occ_integral=spacing_occ_integral,
+                recent_spacing_mask=recent_spacing_mask,
             )
-            if not _poly_inside_poly(footprint_poly, yolo_poly):
-                counters['outline_reject'] += 1
-                continue
-            if (
-                static_occ_mask is not None and building_spacing_mask is not None and
-                not _direct_yolo_poly_fits(
-                    static_occ_mask,
-                    building_spacing_mask,
-                    footprint_poly,
-                    scratch_mask=scratch_mask,
-                    static_occ_integral=static_occ_integral,
-                )
-            ):
-                counters['occupancy_reject'] += 1
-                continue
+        ):
+            counters['occupancy_reject'] += 1
+            continue
 
-            cand_aspect = (
-                float(candidate['required_length_m']) /
-                max(float(candidate['required_width_m']), 1e-6)
-            )
-            aspect_error = abs(math.log(max(cand_aspect, 1e-6) / max(det_aspect, 1e-6)))
-            score = (
-                -float(coverage),
-                float(aspect_error),
-                abs(int(asset_class) - zone_class),
-                int(class_rank),
-                asset.get('source', ''),
-                asset.get('path', ''),
-                float(candidate['heading_delta']),
-            )
-            selected = {
-                'asset': asset,
-                'heading': final_heading,
-                'footprint_poly': footprint_poly,
-            }
-            if best is None or score < best[0]:
-                best = (score, selected)
+        cand_aspect = (
+            float(candidate['required_length_m']) /
+            max(float(candidate['required_width_m']), 1e-6)
+        )
+        aspect_error = abs(math.log(max(cand_aspect, 1e-6) / max(det_aspect, 1e-6)))
+        score = (
+            -float(coverage),
+            float(aspect_error),
+            abs(int(asset_class) - zone_class),
+            int(class_rank),
+            asset.get('source', ''),
+            asset.get('path', ''),
+            float(candidate['heading_delta']),
+        )
+        selected = {
+            'asset': asset,
+            'heading': final_heading,
+            'footprint_poly': footprint_poly,
+        }
+        if best is None or score < best[0]:
+            best = (score, selected)
+            best_cov_area_m2 = candidate_cov_area_m2
 
     if best is not None:
         return best[1], 'selected'
-    if counters['seen'] == 0:
-        return None, 'no_candidates'
     for status in (
         'context_skipped',
         'occupancy_reject',
@@ -7831,23 +8014,40 @@ def run(
 
             if yolo_detections:
                 _t_yolo_place = time.perf_counter()
+                placed_yolo_integral = cv2.integral(placed_yolo_mask, sdepth=cv2.CV_32S)
+                recent_yolo_mask = np.zeros_like(placed_yolo_mask)
+                recent_yolo_marks = 0
+                recent_yolo_rebuild_threshold = 256
+                building_spacing_integral = cv2.integral(
+                    building_spacing_mask, sdepth=cv2.CV_32S
+                )
+                recent_spacing_mask = np.zeros_like(building_spacing_mask)
+                recent_spacing_marks = 0
+                recent_spacing_rebuild_threshold = 256
                 for detection in yolo_detections:
-                    yolo_poly = np.rint(
-                        np.asarray(detection.get('points', ()), dtype=np.float32)
-                    ).astype(np.int32)
-                    if yolo_poly.shape != (4, 2):
+                    prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
+                    yolo_poly = prepared_yolo['poly']
+                    yolo_bbox = prepared_yolo['bbox']
+                    if not prepared_yolo['valid']:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
                     yolo_viz_polys.append((yolo_poly.copy(), False))
-                    jx = int(round(float(detection['center'][0])))
-                    jy = int(round(float(detection['center'][1])))
+                    jx = int(prepared_yolo['jx'])
+                    jy = int(prepared_yolo['jy'])
                     if not (0 <= jx < img_w and 0 <= jy < img_h):
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
                     if static_occ_mask[jy, jx]:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
-                    if not _poly_fits(placed_yolo_mask, yolo_poly, fit_scratch):
+                    if not _placed_yolo_poly_fits(
+                        placed_yolo_mask,
+                        yolo_poly,
+                        fit_scratch,
+                        placed_yolo_integral=placed_yolo_integral,
+                        recent_yolo_mask=recent_yolo_mask,
+                        bbox=yolo_bbox,
+                    ):
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         file_counts['yolo_overlap_blocked'] = (
                             file_counts.get('yolo_overlap_blocked', 0) + 1
@@ -7859,6 +8059,9 @@ def run(
                         yolo_poly,
                         scratch_mask=fit_scratch,
                         static_occ_integral=static_occ_integral,
+                        bbox=yolo_bbox,
+                        spacing_occ_integral=building_spacing_integral,
+                        recent_spacing_mask=recent_spacing_mask,
                     ):
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
@@ -7892,6 +8095,8 @@ def run(
                             building_spacing_mask=building_spacing_mask,
                             scratch_mask=fit_scratch,
                             static_occ_integral=static_occ_integral,
+                            spacing_occ_integral=building_spacing_integral,
+                            recent_spacing_mask=recent_spacing_mask,
                         )
                         if object_candidate is not None:
                             asset = object_candidate['asset']
@@ -7900,6 +8105,8 @@ def run(
                             placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
                             placed_viz_polys.append((footprint_poly.copy(), facade_cls))
                             _mark_poly(building_spacing_mask, footprint_poly)
+                            cv2.fillPoly(recent_spacing_mask, [np.int32(footprint_poly)], 1)
+                            recent_spacing_marks += 1
                             _mark_dynamic_center_blockers(
                                 dynamic_center_block_masks,
                                 jx,
@@ -7945,6 +8152,8 @@ def run(
                             direct_yolo_facade_placements += 1
                             placed_viz_polys.append((footprint_poly.copy(), facade_cls))
                             _mark_poly(building_spacing_mask, footprint_poly)
+                            cv2.fillPoly(recent_spacing_mask, [np.int32(footprint_poly)], 1)
+                            recent_spacing_marks += 1
                             _mark_dynamic_center_blockers(
                                 dynamic_center_block_masks,
                                 jx,
@@ -7961,6 +8170,20 @@ def run(
 
                         yolo_viz_polys[-1] = (yolo_poly.copy(), True)
                         cv2.fillPoly(placed_yolo_mask, [np.int32(yolo_poly)], 1)
+                        cv2.fillPoly(recent_yolo_mask, [np.int32(yolo_poly)], 1)
+                        recent_yolo_marks += 1
+                        if recent_yolo_marks >= recent_yolo_rebuild_threshold:
+                            placed_yolo_integral = cv2.integral(
+                                placed_yolo_mask, sdepth=cv2.CV_32S
+                            )
+                            recent_yolo_mask.fill(0)
+                            recent_yolo_marks = 0
+                        if recent_spacing_marks >= recent_spacing_rebuild_threshold:
+                            building_spacing_integral = cv2.integral(
+                                building_spacing_mask, sdepth=cv2.CV_32S
+                            )
+                            recent_spacing_mask.fill(0)
+                            recent_spacing_marks = 0
                         file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
                         placed_direct = True
                     if not placed_direct:
