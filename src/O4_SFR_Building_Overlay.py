@@ -26,6 +26,7 @@ Example:
         --spacing 15 --close 15 --open 5
 """
 import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib, fnmatch
+from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
 import numpy as np
@@ -2498,8 +2499,8 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 MAX_GENERATED_BUILDING_HEIGHT_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 59
-BLD_PLACEMENT_FAST_CACHE_VERSION = 61
+BLD_PLACEMENT_CACHE_VERSION = 60
+BLD_PLACEMENT_FAST_CACHE_VERSION = 62
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 BLD_SMART_GAP_FILL_ENABLED = False
 
@@ -2617,6 +2618,49 @@ GENERIC_BUILDING_EXCLUDE_TOKENS = (
     "vehicle",
     "windmill",
 )
+
+OPTIONAL_LIBRARY_SPECIAL_LANDMARK_TOKENS = (
+    "/wind_turbine",
+    "wind_turbine",
+    "wind-turbine",
+    "windmill",
+    "velektrarna",
+    "solar_panel",
+    "solar-panel",
+    "/solar/",
+    "/hydro/",
+    "vodojem",
+    "/bts/",
+    "btska",
+    "antenna",
+    "mast",
+    "power_station",
+    "power-station",
+    "powerplant",
+    "power_plant",
+    "gasometer",
+    "smokestack",
+    "smoke_stack",
+    "smoke-stack",
+    "/reklamy/",
+    "billboard",
+    "advert",
+)
+
+OPTIONAL_ASSET_REGION_ALIASES = {
+    "generic": {"generic"},
+    "europe": {"europe", "scandinavia", "mediterranean"},
+    "scandinavia": {"europe", "scandinavia"},
+    "mediterranean": {"europe", "mediterranean"},
+    "north_america": {"north_america", "north_america_ne", "north_america_west"},
+    "north_america_ne": {"north_america", "north_america_ne"},
+    "north_america_west": {"north_america", "north_america_west"},
+    "south_america": {"south_america"},
+    "asia": {"asia", "se_asia"},
+    "se_asia": {"asia", "se_asia"},
+    "africa": {"africa"},
+    "australia_oceania": {"australia_oceania"},
+}
 
 YOLO_OBB_CACHE_VERSION = 2
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -3983,6 +4027,119 @@ def _is_optional_library_export_enabled(export, enabled_library_ids):
     return False
 
 
+def _optional_library_id_for_export(export, enabled_library_ids):
+    """Return the curated optional-library id for one library export."""
+    for lib_id in enabled_library_ids or ():
+        if _is_optional_library_export_enabled(export, (lib_id,)):
+            return lib_id
+    return None
+
+
+def _optional_asset_region_match(asset_regions, asset_region):
+    """Return True when a classified optional asset is valid for a tile region."""
+    if not asset_regions:
+        return False
+    region = (asset_region or "generic").lower()
+    allowed = OPTIONAL_ASSET_REGION_ALIASES.get(region, {region})
+    return bool(set(asset_regions).intersection(allowed))
+
+
+def _optional_library_asset_regions(obj_path, lib_id=None):
+    """Return explicit region tags for optional-library building assets.
+
+    Empty tuple means the path is intentionally treated as unclassified and is
+    not eligible for generated building placement.
+    """
+    p = (obj_path or "").replace("\\", "/").lower()
+    lib_id = (lib_id or "").lower()
+    if p.startswith("world-models/"):
+        p = p[len("world-models/"):]
+
+    if lib_id == "world-models" or p.startswith("objects/"):
+        if (
+            p.startswith("objects/houses/us/") or
+            p.startswith("objects/world-models/houses/us/")
+        ):
+            return ("north_america",)
+        if (
+            p.startswith("objects/houses/nz/") or
+            p.startswith("objects/world-models/houses/nz/")
+        ):
+            return ("australia_oceania",)
+        if (
+            "/eu/med/" in p or
+            p.startswith("objects/houses/eu/med/") or
+            p.startswith("objects/commercial/eu/med/")
+        ):
+            return ("mediterranean",)
+        if (
+            p.startswith("objects/houses/eu/") or
+            p.startswith("objects/commercial/eu/") or
+            p.startswith("objects/industrial/eu/") or
+            p.startswith("objects/world-models/houses/eu/") or
+            p.startswith("objects/world-models/commercial/eu/") or
+            p.startswith("objects/world-models/industrial/eu/")
+        ):
+            return ("europe",)
+
+    if lib_id == "cdb-library" or p.startswith("cdb-library/"):
+        if (
+            p.startswith("cdb-library/buildings/samoa/") or
+            "/papua_" in p or
+            "/hihifo_" in p
+        ):
+            return ("australia_oceania",)
+
+    return ()
+
+
+def _optional_library_rejection_reason(obj_path, lib_id, asset_region):
+    """Return None for accepted optional assets, otherwise a compact reason."""
+    p = (obj_path or "").replace("\\", "/").lower()
+    if _path_has_any(p, OPTIONAL_LIBRARY_SPECIAL_LANDMARK_TOKENS):
+        return "special-landmark"
+    regions = _optional_library_asset_regions(obj_path, lib_id)
+    if not regions:
+        return "unclassified"
+    if not _optional_asset_region_match(regions, asset_region):
+        return "region-mismatch"
+    return None
+
+
+def _optional_library_audit_counters(library_exports, enabled_library_ids, asset_region):
+    """Return accepted/rejected optional-library candidate counts for diagnostics."""
+    counters = {
+        "accepted": Counter(),
+        "rejected_unclassified": Counter(),
+        "rejected_region_mismatch": Counter(),
+        "rejected_special_landmark": Counter(),
+        "regions": Counter(),
+        "samples": defaultdict(list),
+    }
+    for _key, exports in _library_exports_by_virtual_path(library_exports).items():
+        export = exports[0]
+        lib_id = _optional_library_id_for_export(export, enabled_library_ids)
+        if not lib_id:
+            continue
+        obj_path = export.virtual_path
+        if not _is_optional_library_building_candidate(obj_path):
+            continue
+        reason = _optional_library_rejection_reason(obj_path, lib_id, asset_region)
+        if reason is None:
+            counters["accepted"][lib_id] += 1
+            regions = _optional_library_asset_regions(obj_path, lib_id)
+            for region in regions:
+                counters["regions"][(lib_id, region)] += 1
+            sample_key = (lib_id, "accepted")
+        else:
+            key = "rejected_" + reason.replace("-", "_")
+            counters[key][lib_id] += 1
+            sample_key = (lib_id, reason)
+        if len(counters["samples"][sample_key]) < 5:
+            counters["samples"][sample_key].append(obj_path)
+    return counters
+
+
 def _is_optional_library_building_candidate(obj_path):
     p = (obj_path or "").replace("\\", "/").lower()
     if not p.endswith(".obj"):
@@ -3995,7 +4152,8 @@ def _is_optional_library_building_candidate(obj_path):
 
 
 def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports=None,
-                                        enabled_library_ids=None, cache_dir=None):
+                                        enabled_library_ids=None, cache_dir=None,
+                                        asset_region=None):
     """Return optional curated installed-library building assets."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     enabled_library_ids = tuple(
@@ -4013,9 +4171,12 @@ def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports
     for key, exports in grouped.items():
         export = exports[0]
         obj_path = export.virtual_path
-        if not _is_optional_library_export_enabled(export, enabled_library_ids):
+        lib_id = _optional_library_id_for_export(export, enabled_library_ids)
+        if not lib_id:
             continue
         if not _is_optional_library_building_candidate(obj_path):
+            continue
+        if _optional_library_rejection_reason(obj_path, lib_id, asset_region):
             continue
         height_m = _object_estimated_height_m(obj_path)
         if _is_very_tall_building_asset(obj_path, height_m):
@@ -4027,16 +4188,9 @@ def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports
             asset_pools,
             obj_path,
             bounds_m,
-            CURATED_EXTRA_BUILDING_LIBRARIES.get(
-                next(
-                    (
-                        lib_id for lib_id in enabled_library_ids
-                        if _is_optional_library_export_enabled(export, (lib_id,))
-                    ),
-                    "",
-                ),
-                {},
-            ).get("label", export.package_name),
+            CURATED_EXTRA_BUILDING_LIBRARIES.get(lib_id, {}).get(
+                "label", export.package_name
+            ),
         )
     return asset_pools
 
@@ -7360,6 +7514,7 @@ def run(
         library_exports=runtime_library_exports,
         enabled_library_ids=enabled_extra_library_ids,
         cache_dir=cache_dir,
+        asset_region=effective_asset_region,
     )
     if any(extra_asset_pools.values()):
         enabled_asset_pools.append(extra_asset_pools)
@@ -7525,8 +7680,8 @@ def run(
         round(float(yolo_suppress_min_overlap_m2), 4),
         float(MAX_GENERATED_BUILDING_HEIGHT_M),
         # Bump on schema-breaking changes to per-DDS cache contents.
-        # v9: facade heights are randomized from regional/class asset priors.
-        "schema=v9-runtime-randomized-facade-heights",
+        # v10: optional extra-library assets require explicit regional matches.
+        "schema=v10-regional-optional-library-assets",
     )
 
     t_start = time.time()

@@ -2611,24 +2611,135 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIn("SFD_Global/Asia/Industry_30x70.obj", paths)
         self.assertNotIn("SFD_Global/Asia/Gas_Station.obj", paths)
 
-    def test_optional_library_policy_controls_curated_measured_assets(self):
+    def test_optional_library_classifier_maps_known_regional_assets(self):
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "objects/houses/EU/GB/RES_05x11_2_UK_1.obj",
+                "world-models",
+            ),
+            ("europe",),
+        )
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "objects/commercial/EU/med/commercial_20.0x10.0_18_lugano.obj",
+                "world-models",
+            ),
+            ("mediterranean",),
+        )
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "objects/houses/US/AZ/RES_10x12_US.obj",
+                "world-models",
+            ),
+            ("north_america",),
+        )
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "objects/houses/NZ/RES_10.00x10.00_NZ.obj",
+                "world-models",
+            ),
+            ("australia_oceania",),
+        )
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "CDB-Library/buildings/samoa/house_samoa1.obj",
+                "cdb-library",
+            ),
+            ("australia_oceania",),
+        )
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "CDB-Library/buildings/houses/papua_house1.obj",
+                "cdb-library",
+            ),
+            ("australia_oceania",),
+        )
+        self.assertEqual(
+            BLD._optional_library_asset_regions(
+                "CDB-Library/buildings/houses/hihifo_house1.obj",
+                "cdb-library",
+            ),
+            ("australia_oceania",),
+        )
+
+    def test_optional_library_rejects_unclassified_and_special_landmarks(self):
+        self.assertEqual(
+            BLD._optional_library_rejection_reason(
+                "opensceneryx/objects/buildings/industrial/wind_turbines/1.obj",
+                "opensceneryx",
+                "europe",
+            ),
+            "special-landmark",
+        )
+        self.assertEqual(
+            BLD._optional_library_rejection_reason(
+                "R2_Library/industrial/elektrarny/velektrarna_100m.obj",
+                "r2-library",
+                "europe",
+            ),
+            "special-landmark",
+        )
+        self.assertEqual(
+            BLD._optional_library_rejection_reason(
+                "opensceneryx/objects/buildings/commercial/offices/brick/1.obj",
+                "opensceneryx",
+                "europe",
+            ),
+            "unclassified",
+        )
+        self.assertEqual(
+            BLD._optional_library_rejection_reason(
+                "objects/houses/US/AZ/RES_10x12_US.obj",
+                "world-models",
+                "europe",
+            ),
+            "region-mismatch",
+        )
+        self.assertIsNone(
+            BLD._optional_library_rejection_reason(
+                "objects/houses/US/AZ/RES_10x12_US.obj",
+                "world-models",
+                "north_america_west",
+            )
+        )
+
+    def test_optional_library_policy_controls_regional_measured_assets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             custom = Path(tmpdir) / "Custom Scenery"
-            package = _write_library_package(
+            osx_package = _write_library_package(
                 custom,
                 "OpenSceneryX",
                 [
                     "EXPORT opensceneryx/objects/buildings/industrial/warehouse_1.obj objects/warehouse.obj",
+                    "EXPORT opensceneryx/objects/buildings/industrial/wind_turbines/1.obj objects/wind.obj",
                     "EXPORT opensceneryx/objects/buildings/industrial/chimney.obj objects/chimney.obj",
                     "EXPORT opensceneryx/objects/buildings/industrial/silo_1.obj objects/silo.obj",
                     "EXPORT opensceneryx/objects/buildings/industrial/storage_tank.obj objects/tank.obj",
                     "EXPORT opensceneryx/objects/buildings/marine/lighthouses/1.obj objects/lighthouse.obj",
                 ],
             )
+            world_package = _write_library_package(
+                custom,
+                "world-models",
+                [
+                    "EXPORT objects/houses/EU/GB/RES_05x11_2_UK_1.obj objects/eu_house.obj",
+                    "EXPORT objects/houses/US/AZ/RES_10x12_US.obj objects/us_house.obj",
+                    "EXPORT objects/houses/NZ/RES_10.00x10.00_NZ.obj objects/nz_house.obj",
+                ],
+            )
+            cdb_package = _write_library_package(
+                custom,
+                "CDB-Library",
+                [
+                    "EXPORT CDB-Library/buildings/samoa/house_samoa1.obj objects/samoa.obj",
+                    "EXPORT CDB-Library/buildings/houses/building_house01.obj objects/generic_house.obj",
+                ],
+            )
             r2_package = _write_library_package(
                 custom,
                 "R2_Library",
                 [
+                    "EXPORT R2_Library/industrial/elektrarny/velektrarna_100m.obj objects/wind_power.obj",
                     "EXPORT R2_Library/industrial/kominy/komin_B30.obj objects/komin.obj",
                     "EXPORT R2_Library/industrial/elektrarny/chladici_vez_A95.obj objects/chladici_vez.obj",
                     "EXPORT R2_Library/industrial/elektrarny/reaktor.obj objects/reaktor.obj",
@@ -2636,74 +2747,138 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 ],
             )
             _write_obj8(
-                package / "objects" / "warehouse.obj",
+                osx_package / "objects" / "warehouse.obj",
                 [(-10.0, 0.0, -15.0), (10.0, 0.0, -15.0), (10.0, 0.0, 15.0), (-10.0, 0.0, 15.0)],
             )
             _write_obj8(
-                package / "objects" / "chimney.obj",
+                osx_package / "objects" / "wind.obj",
+                [(-10.0, 0.0, -15.0), (10.0, 0.0, -15.0), (10.0, 0.0, 15.0), (-10.0, 0.0, 15.0)],
+            )
+            _write_obj8(
+                osx_package / "objects" / "chimney.obj",
                 [(-3.0, 0.0, -3.0), (3.0, 0.0, -3.0), (3.0, 0.0, 3.0), (-3.0, 0.0, 3.0)],
             )
             _write_obj8(
-                package / "objects" / "silo.obj",
+                osx_package / "objects" / "silo.obj",
                 [(-4.0, 0.0, -4.0), (4.0, 0.0, -4.0), (4.0, 0.0, 4.0), (-4.0, 0.0, 4.0)],
             )
             _write_obj8(
-                package / "objects" / "tank.obj",
+                osx_package / "objects" / "tank.obj",
                 [(-6.0, 0.0, -6.0), (6.0, 0.0, -6.0), (6.0, 0.0, 6.0), (-6.0, 0.0, 6.0)],
             )
             _write_obj8(
-                package / "objects" / "lighthouse.obj",
+                osx_package / "objects" / "lighthouse.obj",
                 [(-2.0, 0.0, -2.0), (2.0, 0.0, 2.0)],
             )
+            for package_dir, name in (
+                (world_package, "eu_house"),
+                (world_package, "us_house"),
+                (world_package, "nz_house"),
+                (cdb_package, "samoa"),
+                (cdb_package, "generic_house"),
+                (r2_package, "wind_power"),
+            ):
+                _write_obj8(
+                    package_dir / "objects" / f"{name}.obj",
+                    [(-5.0, 0.0, -6.0), (5.0, 0.0, -6.0), (5.0, 0.0, 6.0), (-5.0, 0.0, 6.0)],
+                )
             for name in ("komin", "chladici_vez", "reaktor", "nadrz"):
                 _write_obj8(
                     r2_package / "objects" / f"{name}.obj",
                     [(-5.0, 0.0, -5.0), (5.0, 0.0, -5.0), (5.0, 0.0, 5.0), (-5.0, 0.0, 5.0)],
                 )
-            _activate_packages(custom, package, r2_package)
+            _activate_packages(custom, osx_package, world_package, cdb_package, r2_package)
 
             with mock.patch.dict(os.environ, {"O4_SFR_BLD_EXTRA_LIBRARIES": "auto"}):
-                auto_pools = BLD._build_optional_library_asset_pools(custom_scenery_dir=custom)
+                europe_pools = BLD._build_optional_library_asset_pools(
+                    custom_scenery_dir=custom,
+                    asset_region="europe",
+                )
+                north_america_pools = BLD._build_optional_library_asset_pools(
+                    custom_scenery_dir=custom,
+                    asset_region="north_america",
+                )
+                oceania_pools = BLD._build_optional_library_asset_pools(
+                    custom_scenery_dir=custom,
+                    asset_region="australia_oceania",
+                )
             with mock.patch.dict(os.environ, {"O4_SFR_BLD_EXTRA_LIBRARIES": "off"}):
-                off_pools = BLD._build_optional_library_asset_pools(custom_scenery_dir=custom)
+                off_pools = BLD._build_optional_library_asset_pools(
+                    custom_scenery_dir=custom,
+                    asset_region="europe",
+                )
 
-        auto_paths = _paths_for_classes(auto_pools, BLD.BLD_PLACEMENT_CLASSES)
+        europe_paths = _paths_for_classes(europe_pools, BLD.BLD_PLACEMENT_CLASSES)
+        north_america_paths = _paths_for_classes(north_america_pools, BLD.BLD_PLACEMENT_CLASSES)
+        oceania_paths = _paths_for_classes(oceania_pools, BLD.BLD_PLACEMENT_CLASSES)
         off_paths = _paths_for_classes(off_pools, BLD.BLD_PLACEMENT_CLASSES)
         self.assertIn(
+            "objects/houses/EU/GB/RES_05x11_2_UK_1.obj",
+            europe_paths,
+        )
+        self.assertNotIn(
+            "objects/houses/US/AZ/RES_10x12_US.obj",
+            europe_paths,
+        )
+        self.assertIn(
+            "objects/houses/US/AZ/RES_10x12_US.obj",
+            north_america_paths,
+        )
+        self.assertIn(
+            "objects/houses/NZ/RES_10.00x10.00_NZ.obj",
+            oceania_paths,
+        )
+        self.assertIn(
+            "CDB-Library/buildings/samoa/house_samoa1.obj",
+            oceania_paths,
+        )
+        self.assertNotIn(
+            "CDB-Library/buildings/houses/building_house01.obj",
+            oceania_paths,
+        )
+        self.assertNotIn(
             "opensceneryx/objects/buildings/industrial/warehouse_1.obj",
-            auto_paths,
+            europe_paths,
+        )
+        self.assertNotIn(
+            "opensceneryx/objects/buildings/industrial/wind_turbines/1.obj",
+            europe_paths,
         )
         self.assertNotIn(
             "opensceneryx/objects/buildings/marine/lighthouses/1.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertNotIn(
             "opensceneryx/objects/buildings/industrial/chimney.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertNotIn(
             "opensceneryx/objects/buildings/industrial/silo_1.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertNotIn(
             "opensceneryx/objects/buildings/industrial/storage_tank.obj",
-            auto_paths,
+            europe_paths,
+        )
+        self.assertNotIn(
+            "R2_Library/industrial/elektrarny/velektrarna_100m.obj",
+            europe_paths,
         )
         self.assertNotIn(
             "R2_Library/industrial/kominy/komin_B30.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertNotIn(
             "R2_Library/industrial/elektrarny/chladici_vez_A95.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertNotIn(
             "R2_Library/industrial/elektrarny/reaktor.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertNotIn(
             "R2_Library/industrial/nadrze/nadrz88m.obj",
-            auto_paths,
+            europe_paths,
         )
         self.assertEqual(off_paths, set())
 

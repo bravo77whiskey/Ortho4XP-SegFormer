@@ -126,6 +126,7 @@ def main():
         custom_scenery_dir=custom_scenery_dir,
         library_exports=exports,
         enabled_library_ids=enabled_extra,
+        asset_region=region,
     )
     merged = BLD._merge_asset_pools(default_pools, sfd_pools, simheaven_pools, extra_pools)
 
@@ -136,6 +137,29 @@ def main():
     counts, by_source = _asset_counts(merged)
     _print_counter("Mapped placement assets by class:", counts)
     _print_counter("Mapped placement assets by source:", by_source)
+    optional_audit = BLD._optional_library_audit_counters(
+        exports,
+        enabled_extra,
+        region,
+    )
+    print("Optional library regional classification:")
+    for key, title in (
+        ("accepted", "accepted"),
+        ("rejected_unclassified", "rejected-unclassified"),
+        ("rejected_region_mismatch", "rejected-region-mismatch"),
+        ("rejected_special_landmark", "rejected-special-landmark"),
+    ):
+        _print_counter(f"  {title}:", optional_audit[key])
+    if optional_audit["regions"]:
+        print("  accepted regions:")
+        for (lib_id, region_name), value in sorted(optional_audit["regions"].items()):
+            print(f"    {lib_id}/{region_name}: {value}")
+    if optional_audit["samples"]:
+        print("  samples:")
+        for (lib_id, reason), paths in sorted(optional_audit["samples"].items()):
+            print(f"    {lib_id} {reason}:")
+            for path in paths[:max(0, args.samples)]:
+                print(f"      {path}")
 
     mapped_paths = {
         asset["path"].lower()
@@ -165,8 +189,12 @@ def main():
             else:
                 skipped["SFD filtered"] += 1
         elif any(BLD._is_optional_library_export_enabled(group[0], (lib_id,)) for lib_id in enabled_extra):
-            if BLD._is_optional_library_building_candidate(path):
-                recommended["optional measured candidate"].append(path)
+            lib_id = BLD._optional_library_id_for_export(group[0], enabled_extra)
+            if (
+                BLD._is_optional_library_building_candidate(path)
+                and BLD._optional_library_rejection_reason(path, lib_id, region) is None
+            ):
+                recommended["optional regional measured candidate"].append(path)
             else:
                 skipped["optional filtered"] += 1
 
