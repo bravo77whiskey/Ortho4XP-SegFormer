@@ -25,7 +25,7 @@ Example:
         "H:/XP12/Custom Scenery/yOrtho4XP_Bld_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
-import sys, os, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib, fnmatch
+import sys, os, json, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib, fnmatch
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
@@ -2530,6 +2530,68 @@ CURATED_EXTRA_BUILDING_LIBRARIES = {
         "package_patterns": ("r2_library", "r2-library"),
         "virtual_prefixes": ("r2_library/",),
     },
+    "ff-library": {
+        "label": "FFLibrary",
+        "package_patterns": ("ff_library", "fflibrary", "ff library"),
+        "virtual_prefixes": ("ff_library/", "fflibrary/"),
+        # German/DACH residential & VFR facades.
+        "regions": ("europe",),
+    },
+    "ruscenery": {
+        "label": "RuScenery",
+        "package_patterns": ("ruscenery", "ru_scenery", "ru-scenery"),
+        "virtual_prefixes": ("ruscenery/", "ru_scenery/"),
+        # Russian / Eastern European blocks and houses.
+        "regions": ("europe",),
+    },
+    "bs2001": {
+        "label": "BS2001 Object Library",
+        "package_patterns": ("bs2001",),
+        "virtual_prefixes": ("bs2001/",),
+        # European airport/road objects with some residential clutter.
+        "regions": ("europe",),
+    },
+    "ar-library": {
+        "label": "AR_Library",
+        "package_patterns": ("ar_library", "ar-library"),
+        "virtual_prefixes": ("ar_library/",),
+        # Argentine residential & commercial assets.
+        "regions": ("south_america",),
+    },
+    "ob-library": {
+        "label": "OB_Library",
+        "package_patterns": ("ob_library", "ob-library"),
+        "virtual_prefixes": ("ob_library/",),
+        # Generic houses, hangars, towers — global fallback bucket.
+        "regions": ("generic",),
+    },
+    "zdp-library": {
+        "label": "ZDP Library",
+        "package_patterns": ("zdp_library", "zdp-library", "zdp"),
+        "virtual_prefixes": ("zdp/", "zdp_library/"),
+        # Mixed Americas / Europe shared assets used with MisterX sceneries.
+        "regions": ("north_america", "europe"),
+    },
+    "misterx": {
+        "label": "MisterX Library",
+        "package_patterns": ("misterx_library", "misterx", "mister_x"),
+        "virtual_prefixes": ("misterx/", "misterx_library/"),
+        # Mostly airport/aircraft; only residential subset survives include/exclude tokens.
+        "regions": ("generic",),
+    },
+    "vectors-to-final": {
+        "label": "Vectors to Final",
+        "package_patterns": ("vectors_to_final", "vectors-to-final"),
+        "virtual_prefixes": ("vectors_to_final/", "v2f/"),
+        # Niche Cold-War / vintage thematic — primarily European bases.
+        "regions": ("europe",),
+    },
+    "o4sfr": {
+        "label": "O4SFR_Library",
+        "package_patterns": ("o4sfr_library", "o4sfr"),
+        "virtual_prefixes": ("o4sfr/",),
+        # Our shipped library — per-asset region encoded in path token /<region>/.
+    },
 }
 
 OPTIONAL_LIBRARY_INCLUDE_TOKENS = (
@@ -3505,8 +3567,16 @@ def _class_for_object_asset(obj_path, bounds_m):
     )
 
 
-def _append_object_asset(asset_pools, obj_path, bounds_m, source):
-    """Append one rectangular object asset to the footprint-classed pool map."""
+def _append_object_asset(asset_pools, obj_path, bounds_m, source,
+                         region_priority=None):
+    """Append one rectangular object asset to the footprint-classed pool map.
+
+    ``region_priority`` is an integer where lower = preferred:
+        0 = region-specific match (e.g. asset regions {'europe'} on an EU tile)
+        1 = generic wildcard match
+        2 = unspecified (falls back like 1 today)
+    Pools sort by this key first when picking placement candidates.
+    """
     if _is_excluded_building_filler_asset(obj_path):
         return False
     if bounds_m is None:
@@ -3525,6 +3595,7 @@ def _append_object_asset(asset_pools, obj_path, bounds_m, source):
         'footprint_max_side_m': max_side_m,
         'footprint_class': zone_class,
         'source': source,
+        'region_priority': 1 if region_priority is None else int(region_priority),
         'requires_residential_context': _asset_requires_residential_context(
             {'kind': 'object', 'path': obj_path}
         ),
@@ -3532,15 +3603,40 @@ def _append_object_asset(asset_pools, obj_path, bounds_m, source):
     return True
 
 
+def _region_priority_for_asset_regions(asset_regions, asset_region):
+    """Return 0 when the asset is region-specific for the tile, 1 if generic."""
+    if not asset_regions:
+        return 1
+    if "generic" in asset_regions and len(asset_regions) == 1:
+        # Pure-generic wildcard.
+        return 1
+    region = (asset_region or "generic").lower()
+    allowed = OPTIONAL_ASSET_REGION_ALIASES.get(region, {region})
+    if set(asset_regions).intersection(allowed):
+        return 0
+    # Mixed regional + generic where the regional doesn't match the tile.
+    # Fall back to generic priority since "generic" is still a wildcard.
+    return 1 if "generic" in asset_regions else 1
+
+
 def _asset_retry_sort_key(asset):
-    """Sort assets so exhaustive retries test tighter footprints first."""
+    """Sort assets so exhaustive retries test tighter footprints first.
+
+    ``region_priority`` comes FIRST: regional matches (0) win over generic
+    wildcards (1) for any tile that has classified regional candidates.
+    Inside a priority tier, the existing footprint-tight-first order applies.
+    """
     area_m2 = asset.get('footprint_area_m2')
     max_side_m = asset.get('footprint_max_side_m')
     if area_m2 is None or max_side_m is None:
         bounds_m = asset.get('bounds_m')
         if bounds_m is not None:
             area_m2, max_side_m = _footprint_metrics(bounds_m)
+    region_priority = asset.get('region_priority')
+    if region_priority is None:
+        region_priority = 1
     return (
+        int(region_priority),
         float('inf') if area_m2 is None else float(area_m2),
         float('inf') if max_side_m is None else float(max_side_m),
         asset.get('source', ''),
@@ -4036,12 +4132,76 @@ def _optional_library_id_for_export(export, enabled_library_ids):
 
 
 def _optional_asset_region_match(asset_regions, asset_region):
-    """Return True when a classified optional asset is valid for a tile region."""
+    """Return True when a classified optional asset is valid for a tile region.
+
+    The token ``"generic"`` on an asset acts as a wildcard so global libraries
+    (OB_Library, MisterX residual residential subset, the o4sfr generic bucket)
+    can serve tiles in any natural-earth region.
+    """
     if not asset_regions:
         return False
+    if "generic" in asset_regions:
+        return True
     region = (asset_region or "generic").lower()
     allowed = OPTIONAL_ASSET_REGION_ALIASES.get(region, {region})
     return bool(set(asset_regions).intersection(allowed))
+
+
+_O4SFR_PATH_REGION_TOKENS = {
+    "/north_america/": ("north_america",),
+    "/north-america/": ("north_america",),
+    "/america/": ("north_america", "south_america"),
+    "/americas/": ("north_america", "south_america"),
+    "/south_america/": ("south_america",),
+    "/south-america/": ("south_america",),
+    "/latam/": ("south_america",),
+    "/europe/": ("europe",),
+    "/scandinavia/": ("scandinavia",),
+    "/mediterranean/": ("mediterranean",),
+    "/asia/": ("asia",),
+    "/se_asia/": ("se_asia",),
+    "/southeast_asia/": ("se_asia",),
+    "/africa/": ("africa",),
+    "/australia_oceania/": ("australia_oceania",),
+    "/oceania/": ("australia_oceania",),
+}
+
+
+def _load_region_overrides():
+    """Load Track A visual-triage decisions from disk.
+
+    Returns a tuple ``((lib_id, family_prefix, regions), ...)`` sorted by
+    descending ``len(family_prefix)`` so the longest (most specific) match
+    wins when a path is a prefix of another override.
+
+    Missing file is treated as "no overrides" rather than an error -- the
+    file is generated by ``scripts/asset_pipeline/compile_region_overrides.py``
+    and may not exist in a fresh checkout.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(here, "O4_SFR_Region_Overrides.json")
+    if not os.path.isfile(json_path):
+        return ()
+    try:
+        with open(json_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return ()
+    entries = []
+    for row in (data.get("overrides") or ()):
+        lib_id = (row.get("lib_id") or "").lower()
+        family = (row.get("family_prefix") or "").replace("\\", "/").lower()
+        regions = tuple(
+            r.lower() for r in (row.get("regions") or ()) if r
+        )
+        if not lib_id or not family or not regions:
+            continue
+        entries.append((lib_id, family, regions))
+    entries.sort(key=lambda item: (-len(item[1]), item[0]))
+    return tuple(entries)
+
+
+_REGION_OVERRIDES = _load_region_overrides()
 
 
 def _optional_library_asset_regions(obj_path, lib_id=None):
@@ -4049,9 +4209,26 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
 
     Empty tuple means the path is intentionally treated as unclassified and is
     not eligible for generated building placement.
+
+    Resolution order, first match wins:
+
+    1. ``O4_SFR_Region_Overrides.json`` (visual-triage decisions).
+    2. Per-library hand-coded path rules (world-models, cdb-library, o4sfr).
+    3. The library's static ``regions`` registration in
+       ``CURATED_EXTRA_BUILDING_LIBRARIES``.
     """
     p = (obj_path or "").replace("\\", "/").lower()
     lib_id = (lib_id or "").lower()
+
+    # (1) Triage overrides win first.  The list is sorted longest-prefix
+    # first; an entry whose ``family_prefix`` is a prefix of ``p`` matches.
+    if lib_id and _REGION_OVERRIDES:
+        for ov_lib, ov_prefix, ov_regions in _REGION_OVERRIDES:
+            if ov_lib != lib_id:
+                continue
+            if p == ov_prefix or p.startswith(ov_prefix):
+                return ov_regions
+
     if p.startswith("world-models/"):
         p = p[len("world-models/"):]
 
@@ -4089,6 +4266,25 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
             "/hihifo_" in p
         ):
             return ("australia_oceania",)
+
+    # Our shipped library carries the region in a path token: o4sfr/<region>/...
+    if lib_id == "o4sfr" or p.startswith("o4sfr/"):
+        for token, regions in _O4SFR_PATH_REGION_TOKENS.items():
+            if token in p:
+                return regions
+        return ("generic",)
+
+    # Fall back to the library's static `regions` registration.  Libraries that
+    # leave this empty stay "unclassified" and won't enter the placement pool
+    # unless a path branch above promotes them.
+    entry = CURATED_EXTRA_BUILDING_LIBRARIES.get(lib_id) if lib_id else None
+    if entry:
+        static_regions = entry.get("regions")
+        if static_regions:
+            return tuple(static_regions)
+        if "regions" in entry:
+            # Explicit empty tuple => intentionally global / generic fallback.
+            return ("generic",)
 
     return ()
 
@@ -4184,6 +4380,10 @@ def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports
         bounds_m = _measured_bounds_for_exports(exports, cache_dir)
         if not _footprint_within_limits(bounds_m, max_area_m2=7_000.0, max_side_m=110.0):
             continue
+        regions = _optional_library_asset_regions(obj_path, lib_id)
+        region_priority = _region_priority_for_asset_regions(
+            regions, asset_region
+        )
         _append_object_asset(
             asset_pools,
             obj_path,
@@ -4191,6 +4391,7 @@ def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports
             CURATED_EXTRA_BUILDING_LIBRARIES.get(lib_id, {}).get(
                 "label", export.package_name
             ),
+            region_priority=region_priority,
         )
     return asset_pools
 

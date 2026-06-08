@@ -45,6 +45,54 @@ def _print_counter(title, counter):
         print(f"  {key}: {value}")
 
 
+def _installed_package_names(custom_scenery_dir):
+    """Return lowercased folder names of every package directly under Custom Scenery."""
+    if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
+        return set()
+    return {
+        entry.name.lower()
+        for entry in os.scandir(custom_scenery_dir)
+        if entry.is_dir()
+    }
+
+
+def _region_compatible(asset_regions, tile_region):
+    """Mirror BLD._optional_asset_region_match for display purposes."""
+    if not asset_regions:
+        return False
+    return BLD._optional_asset_region_match(tuple(asset_regions), tile_region)
+
+
+def _report_curated_library_installation(custom_scenery_dir, region, enabled_extra):
+    """Show registered libraries: installed?, enabled?, region-compatible?"""
+    installed = _installed_package_names(custom_scenery_dir)
+    enabled_set = set(enabled_extra or ())
+    print("Curated library installation status:")
+    rows = []
+    for lib_id, entry in sorted(BLD.CURATED_EXTRA_BUILDING_LIBRARIES.items()):
+        patterns = tuple(entry.get("package_patterns") or ())
+        matched = sorted(
+            name for name in installed
+            if any(pattern in name for pattern in patterns)
+        )
+        regions = entry.get("regions")
+        if regions is None:
+            region_state = "per-path"
+        elif _region_compatible(regions, region):
+            region_state = f"ok({','.join(regions)})"
+        else:
+            region_state = f"off-region({','.join(regions)})"
+        flags = []
+        flags.append("installed" if matched else "missing")
+        flags.append("enabled" if lib_id in enabled_set else "disabled")
+        flags.append(region_state)
+        rows.append((lib_id, entry.get("label", lib_id), matched, flags))
+    for lib_id, label, matched, flags in rows:
+        match_part = f" -> {matched[0]}" if matched else ""
+        extra = f" (+{len(matched) - 1} more)" if len(matched) > 1 else ""
+        print(f"  {lib_id:18s} [{', '.join(flags)}] {label}{match_part}{extra}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Audit installed building object assets for SFR placement."
@@ -134,6 +182,7 @@ def main():
     print(f"Asset region: {region}")
     print(f"Library exports scanned: runtime={len(exports)} all={len(all_exports)}")
     print(f"Extra library policy: {BLD._extra_library_policy()} enabled={', '.join(enabled_extra) or 'none'}")
+    _report_curated_library_installation(custom_scenery_dir, region, enabled_extra)
     counts, by_source = _asset_counts(merged)
     _print_counter("Mapped placement assets by class:", counts)
     _print_counter("Mapped placement assets by source:", by_source)

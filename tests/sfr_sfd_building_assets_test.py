@@ -749,6 +749,156 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(run_legacy_gap_fill, BLD.BLD_SMART_GAP_FILL_ENABLED)
         self.assertFalse(run_legacy_gap_fill)
 
+    def test_prepared_direct_yolo_bbox_matches_standard_fit(self):
+        detection = {
+            "center": [30.2, 30.4],
+            "points": [[20.4, 18.6], [42.2, 20.1], [40.8, 43.7], [19.3, 41.9]],
+        }
+        prepared = BLD._prepare_direct_yolo_detection(detection, 64, 64)
+        poly = prepared["poly"]
+        expected_bbox = BLD._fit_bbox_for_poly(poly, 64, 64)
+
+        self.assertTrue(prepared["valid"])
+        self.assertEqual(prepared["bbox"], expected_bbox)
+        self.assertEqual((prepared["jx"], prepared["jy"]), (30, 30))
+        self.assertGreater(prepared["area_px"], 1.0)
+
+        occ_mask = np.zeros((64, 64), dtype=np.uint8)
+        scratch = np.zeros_like(occ_mask)
+        self.assertEqual(
+            BLD._poly_fits(occ_mask, poly, scratch),
+            BLD._poly_fits(occ_mask, poly, scratch, bbox=prepared["bbox"]),
+        )
+        occ_mask[30, 30] = 1
+        self.assertEqual(
+            BLD._poly_fits(occ_mask, poly, scratch),
+            BLD._poly_fits(occ_mask, poly, scratch, bbox=prepared["bbox"]),
+        )
+
+    def test_direct_yolo_fit_with_bbox_matches_unbounded_path(self):
+        static_occ_mask = np.zeros((64, 64), dtype=np.uint8)
+        spacing_mask = np.zeros_like(static_occ_mask)
+        static_occ_mask[30:34, :] = 1
+        spacing_mask[12, 12] = 1
+        scratch = np.zeros_like(static_occ_mask)
+        yolo_poly = np.array(
+            [[20, 20], [44, 20], [44, 44], [20, 44]],
+            dtype=np.int32,
+        )
+        bbox = BLD._fit_bbox_for_poly(yolo_poly, 64, 64)
+
+        standard = BLD._direct_yolo_poly_fits(
+            static_occ_mask,
+            spacing_mask,
+            yolo_poly,
+            scratch_mask=scratch,
+            static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+        )
+        bbox_path = BLD._direct_yolo_poly_fits(
+            static_occ_mask,
+            spacing_mask,
+            yolo_poly,
+            scratch_mask=scratch,
+            static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+            bbox=bbox,
+        )
+
+        self.assertEqual(standard, bbox_path)
+
+    def test_placed_yolo_overlap_gate_matches_exact_poly_fit(self):
+        placed_mask = np.zeros((64, 64), dtype=np.uint8)
+        placed_poly = np.array(
+            [[10, 10], [20, 10], [20, 20], [10, 20]],
+            dtype=np.int32,
+        )
+        BLD.cv2.fillPoly(placed_mask, [placed_poly], 1)
+        integral = BLD.cv2.integral(placed_mask, sdepth=BLD.cv2.CV_32S)
+        recent_mask = np.zeros_like(placed_mask)
+        scratch = np.zeros_like(placed_mask)
+        cases = [
+            np.array([[24, 10], [34, 10], [34, 20], [24, 20]], dtype=np.int32),
+            np.array([[18, 10], [28, 10], [28, 20], [18, 20]], dtype=np.int32),
+            np.array([[20, 10], [30, 10], [30, 20], [20, 20]], dtype=np.int32),
+        ]
+
+        for poly in cases:
+            bbox = BLD._fit_bbox_for_poly(poly, 64, 64)
+            self.assertEqual(
+                BLD._poly_fits(placed_mask, poly, scratch, bbox=bbox),
+                BLD._placed_yolo_poly_fits(
+                    placed_mask,
+                    poly,
+                    scratch,
+                    placed_yolo_integral=integral,
+                    recent_yolo_mask=recent_mask,
+                    bbox=bbox,
+                ),
+            )
+
+    def test_placed_yolo_overlap_gate_checks_recent_placements(self):
+        placed_mask = np.zeros((64, 64), dtype=np.uint8)
+        stale_integral = BLD.cv2.integral(placed_mask, sdepth=BLD.cv2.CV_32S)
+        recent_mask = np.zeros_like(placed_mask)
+        placed_poly = np.array(
+            [[10, 10], [20, 10], [20, 20], [10, 20]],
+            dtype=np.int32,
+        )
+        BLD.cv2.fillPoly(placed_mask, [placed_poly], 1)
+        BLD.cv2.fillPoly(recent_mask, [placed_poly], 1)
+        overlap_poly = np.array(
+            [[18, 10], [28, 10], [28, 20], [18, 20]],
+            dtype=np.int32,
+        )
+
+        self.assertFalse(
+            BLD._placed_yolo_poly_fits(
+                placed_mask,
+                overlap_poly,
+                np.zeros_like(placed_mask),
+                placed_yolo_integral=stale_integral,
+                recent_yolo_mask=recent_mask,
+                bbox=BLD._fit_bbox_for_poly(overlap_poly, 64, 64),
+            )
+        )
+
+    def test_yolo_object_selection_keeps_footprint_occupancy_gate(self):
+        asset = {
+            "kind": "object",
+            "path": "mapped.obj",
+            "bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "mark_bounds_m": (-5.0, 5.0, -5.0, 5.0),
+            "source": "test",
+            "footprint_class": BLD.BLD_CLASS_MEDIUM,
+        }
+        table = BLD._build_yolo_object_candidate_index({BLD.BLD_CLASS_MEDIUM: [asset]})
+        yolo_poly = BLD._points_from_yolo_heading((30.0, 30.0), 12.0, 10.0, 0.0)
+        detection = {
+            "length_m": 12.0,
+            "width_m": 10.0,
+            "area_m2": 120.0,
+            "placement_class": BLD.BLD_CLASS_MEDIUM,
+        }
+        static_occ_mask = np.zeros((64, 64), dtype=np.uint8)
+        spacing_mask = np.zeros_like(static_occ_mask)
+        spacing_mask[30, 30] = 1
+
+        selected, status = BLD._select_yolo_object_candidate(
+            table,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            30,
+            30,
+            0.0,
+            1.0,
+            static_occ_mask=static_occ_mask,
+            building_spacing_mask=spacing_mask,
+            scratch_mask=np.zeros_like(static_occ_mask),
+            static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(status, "occupancy_reject")
+
     def test_direct_yolo_footprint_rejects_simheaven_object_overlap(self):
         simheaven_objects = {
             "lat": np.array([0.5], dtype=np.float32),
@@ -2679,13 +2829,25 @@ class SfdBuildingAssetTests(unittest.TestCase):
             ),
             "special-landmark",
         )
+        # An opensceneryx path with no entry in the visual-triage overrides
+        # file and no per-library hardcoded rule stays unclassified.
+        # ("commercial/hotels/" is not yet triaged; "offices/brick/" used to
+        # be unclassified but is now tagged generic via the override file.)
         self.assertEqual(
             BLD._optional_library_rejection_reason(
-                "opensceneryx/objects/buildings/commercial/offices/brick/1.obj",
+                "opensceneryx/objects/buildings/commercial/hotels/1.obj",
                 "opensceneryx",
                 "europe",
             ),
             "unclassified",
+        )
+        # The override file promotes opensceneryx wooden houses to europe.
+        self.assertIsNone(
+            BLD._optional_library_rejection_reason(
+                "opensceneryx/objects/buildings/residential/houses/wooden/3.obj",
+                "opensceneryx",
+                "europe",
+            ),
         )
         self.assertEqual(
             BLD._optional_library_rejection_reason(
@@ -2832,7 +2994,11 @@ class SfdBuildingAssetTests(unittest.TestCase):
             "CDB-Library/buildings/samoa/house_samoa1.obj",
             oceania_paths,
         )
-        self.assertNotIn(
+        # building_house01 was previously unclassified; after Track A visual
+        # triage it is tagged "generic" -> usable on every tile (with lower
+        # priority than a region-locked match).  Its presence on the oceania
+        # pool is now expected.
+        self.assertIn(
             "CDB-Library/buildings/houses/building_house01.obj",
             oceania_paths,
         )

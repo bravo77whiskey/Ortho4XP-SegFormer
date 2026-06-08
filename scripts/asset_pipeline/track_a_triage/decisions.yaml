@@ -1,0 +1,310 @@
+# Track A library region assignments (visual triage).
+#
+# Each entry maps a `family_prefix` (a path prefix in the library's
+# library.txt EXPORT virtual paths) to one or more regions.  Regions follow
+# the same vocabulary as _O4SFR_PATH_REGION_TOKENS in
+# src/O4_SFR_Building_Overlay.py:
+#   europe | scandinavia | mediterranean
+#   north_america | south_america
+#   asia | se_asia | africa | australia_oceania
+#   generic
+#
+# Rule: lock to a region only when the visual is strongly that region.
+# "generic" makes the asset usable in every tile but lower priority than a
+# region-locked asset for the same BLD_CLASS bucket.
+
+version: 1
+decisions:
+  # ---- OpenSceneryX -------------------------------------------------------
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/residential/houses/wooden/
+    regions: [europe]
+    confidence: high
+    notes: "Haussmannian-style multi-storey facade: cream stone walls, shutters, dark mansard roofs"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/residential/houses/brick/
+    regions: [generic]
+    confidence: low
+    notes: "Brick texture; render lacks shape detail to lock a region"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/residential/houses/stone/
+    regions: [mediterranean, europe]
+    confidence: medium
+    notes: "Irregular tan/brown stone walls — Mediterranean rural feel"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/residential/huts/wooden/
+    regions: [generic]
+    confidence: medium
+    notes: "Small wooden plank hut/cabin — fits Scandinavia / NA / rural Europe"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/residential/huts/metal/
+    regions: [generic]
+    confidence: high
+    notes: "Dark metal shed; universal industrial/agricultural type"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/residential/garages/wooden/
+    regions: [generic]
+    confidence: high
+    notes: "Generic small wooden garage"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/garages/
+    regions: [generic]
+    confidence: medium
+    notes: "Striped wood/metal commercial garage; no strong cues"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/offices/brick/
+    regions: [generic]
+    confidence: medium
+    notes: "Boxy striped office; generic Western"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/offices/concrete/
+    regions: [generic]
+    confidence: low
+    notes: "Render too dark to read; treat as global"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/offices/prefabricated/
+    regions: [generic]
+    confidence: low
+    notes: "Dark prefab cube; no regional signal"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/offices/stone/
+    regions: [europe]
+    confidence: medium
+    notes: "Stone Haussmannian-style office facade with mansard detail"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/offices/stucco/
+    regions: [generic]
+    confidence: medium
+    notes: "Stucco-textured office; no strong cues"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/offices/wooden/
+    regions: [generic]
+    confidence: medium
+    notes: "Wood-panelled storefront; no strong regional cues"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/commercial/restaurants/
+    regions: [generic]
+    confidence: low
+    notes: "Tall narrow tan structure; insufficient detail"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/industrial/factories/
+    regions: [europe]
+    confidence: medium
+    notes: "Victorian-style brick factory with smokestack"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/industrial/factories/victorian.obj
+    regions: [europe]
+    confidence: high
+    notes: "Filename + visual confirm Victorian (UK industrial) heritage style"
+  - lib_id: opensceneryx
+    family_prefix: opensceneryx/objects/buildings/industrial/factory_smoky.obj
+    regions: [europe]
+    confidence: medium
+    notes: "Victorian factory with smoke; same family as factories/victorian"
+
+  # ---- Handy Objects Library ---------------------------------------------
+  # The library is named "Handy Objects" -- the author's intent is general
+  # utility, not regional flavor.  All six families read as generic Western
+  # boxes; none carry strong region cues in the renders.
+  - lib_id: handyobjects
+    family_prefix: handyobjects/buildings/house_i.obj
+    regions: [generic]
+    confidence: medium
+    notes: "Multi-roof brick-textured box; no strong regional cues"
+  - lib_id: handyobjects
+    family_prefix: handyobjects/buildings/house_ii.obj
+    regions: [generic]
+    confidence: medium
+    notes: "Long flat-roofed residential block; generic Western"
+  - lib_id: handyobjects
+    family_prefix: handyobjects/buildings/house_iii.obj
+    regions: [generic]
+    confidence: medium
+    notes: "Variant of house_ii; generic flat-roofed residential"
+  - lib_id: handyobjects
+    family_prefix: handyobjects/buildings/house_iv.obj
+    regions: [generic]
+    confidence: medium
+    notes: "L-shaped family house with sloped roof; generic Western/European"
+  - lib_id: handyobjects
+    family_prefix: handyobjects/buildings/warehouse_i.obj
+    regions: [generic]
+    confidence: high
+    notes: "Corrugated-stripe warehouse; universal industrial"
+  - lib_id: handyobjects
+    family_prefix: handyobjects/buildings/warehouse_ii.obj
+    regions: [generic]
+    confidence: high
+    notes: "Plain warehouse box; universal industrial"
+
+  # ---- CDB-Library --------------------------------------------------------
+  # CDB has three clear regional clusters: Pacific (samoa/papua/hihifo),
+  # Italian/Portuguese (casa/scuola/piano), and generic shelter geometry.
+  # The hardcoded path rules in _optional_library_asset_regions already
+  # handle samoa/papua/hihifo via the existing branch but only for paths
+  # prefixed with cdb-library/buildings/samoa/ -- the houses/ subtree was
+  # being missed.  Promote these explicitly here.
+
+  # Pacific cluster -- small island vernacular: thatched hip / pyramid roofs,
+  # stilt frames, plain wall texture.
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/samoa/house_samoa1.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Samoan fale silhouette: low hipped roof, simple open frame"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/samoa/house_samoa2.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Samoan fale variant; pyramid roof + open base"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/samoa/house_samoa3.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Samoan fale; long hipped roof"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/samoa/house_samoa4.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Samoan fale; raised platform, hipped roof"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/papua_house1.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Papua-style house: pitched roof, possibly on stilts"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/papua_house2.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Papua-style house with steep pitched roof"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/papua_house3.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Papua-style house, hipped roof + small extension"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/papua_house4.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Papua-style house on legs/stilts, narrow tall silhouette"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/papua_house5.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Papua-style house, simple pitched roof"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/papua_house6.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Papua-style house, narrow rectangular"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/hihifo_house1.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Wallis & Futuna (Hihifo) island house: simple hipped-roof box"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/hihifo_house2.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Hihifo variant with L-shape stepped form"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/hihifo_house3.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Hihifo island simple hipped-roof box"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/hihifo_house4.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Hihifo small box with hipped roof"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/hihifo_house5.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Hihifo two-section stepped house"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/hihifo_house6.obj
+    regions: [australia_oceania]
+    confidence: high
+    notes: "Hihifo pyramidal hipped roof house"
+
+  # Italian / Portuguese cluster -- author's native vocabulary picks up
+  # "casa", "piano" (Italian for floor), "scuola" (school).
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_4_piano.obj
+    regions: [mediterranean]
+    confidence: medium
+    notes: "Italian '4 piano' (4-storey block); plain mediterranean apartment"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_casa_de_madeira.obj
+    regions: [south_america]
+    confidence: medium
+    notes: "Portuguese 'casa de madeira' (wooden house); Brazilian rural vernacular"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_casa_small01.obj
+    regions: [mediterranean, south_america]
+    confidence: medium
+    notes: "'Casa' small house with colourful patterned facade; Mediterranean / Latin"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_casa_small02.obj
+    regions: [mediterranean, south_america]
+    confidence: medium
+    notes: "'Casa' small house; tall stacked patterned form"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_casa_small03.obj
+    regions: [mediterranean, south_america]
+    confidence: medium
+    notes: "'Casa' small house with colourful facade"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_scuolaelementaryold.obj
+    regions: [mediterranean]
+    confidence: medium
+    notes: "Italian 'scuola elementare' (old elementary school); civic Mediterranean"
+
+  # Generic cluster -- numbered modular houses + plain shelters that read
+  # as generic Western utility shapes.
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_house01.obj
+    regions: [generic]
+    confidence: low
+    notes: "Modular house with patterned facade; no strong regional cues"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_house02.obj
+    regions: [generic]
+    confidence: low
+    notes: "Modular house variant; generic"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_house03.obj
+    regions: [generic]
+    confidence: low
+    notes: "Modular house variant; generic"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_house04.obj
+    regions: [generic]
+    confidence: low
+    notes: "Modular house variant; generic"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/building_house05.obj
+    regions: [generic]
+    confidence: low
+    notes: "Modular house variant; generic"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/shelter06.obj
+    regions: [generic]
+    confidence: high
+    notes: "Plain shelter block; universal utility"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/shelter07.obj
+    regions: [generic]
+    confidence: high
+    notes: "Plain shelter block; universal utility"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/shelter08.obj
+    regions: [generic]
+    confidence: high
+    notes: "Plain shelter block; universal utility"
+  - lib_id: cdb-library
+    family_prefix: cdb-library/buildings/houses/shelter09.obj
+    regions: [generic]
+    confidence: high
+    notes: "Plain shelter block; universal utility"

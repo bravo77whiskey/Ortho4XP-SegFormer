@@ -1,0 +1,387 @@
+{
+  "version": 1,
+  "overrides": [
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/industrial/factories/victorian.obj",
+      "regions": [
+        "europe"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/offices/prefabricated/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_scuolaelementaryold.obj",
+      "regions": [
+        "mediterranean"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/offices/concrete/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/industrial/factory_smoky.obj",
+      "regions": [
+        "europe"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/residential/garages/wooden/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_casa_de_madeira.obj",
+      "regions": [
+        "south_america"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/residential/houses/wooden/",
+      "regions": [
+        "europe"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/offices/stucco/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/offices/wooden/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/residential/houses/brick/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/residential/houses/stone/",
+      "regions": [
+        "mediterranean",
+        "europe"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/offices/brick/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/offices/stone/",
+      "regions": [
+        "europe"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/residential/huts/wooden/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_casa_small01.obj",
+      "regions": [
+        "mediterranean",
+        "south_america"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_casa_small02.obj",
+      "regions": [
+        "mediterranean",
+        "south_america"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_casa_small03.obj",
+      "regions": [
+        "mediterranean",
+        "south_america"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/residential/huts/metal/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/restaurants/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/industrial/factories/",
+      "regions": [
+        "europe"
+      ]
+    },
+    {
+      "lib_id": "opensceneryx",
+      "family_prefix": "opensceneryx/objects/buildings/commercial/garages/",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_4_piano.obj",
+      "regions": [
+        "mediterranean"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_house01.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_house02.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_house03.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_house04.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/building_house05.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/hihifo_house1.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/hihifo_house2.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/hihifo_house3.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/hihifo_house4.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/hihifo_house5.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/hihifo_house6.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/papua_house1.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/papua_house2.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/papua_house3.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/papua_house4.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/papua_house5.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/papua_house6.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/samoa/house_samoa1.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/samoa/house_samoa2.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/samoa/house_samoa3.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/samoa/house_samoa4.obj",
+      "regions": [
+        "australia_oceania"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/shelter06.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/shelter07.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/shelter08.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "cdb-library",
+      "family_prefix": "cdb-library/buildings/houses/shelter09.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "handyobjects",
+      "family_prefix": "handyobjects/buildings/warehouse_ii.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "handyobjects",
+      "family_prefix": "handyobjects/buildings/warehouse_i.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "handyobjects",
+      "family_prefix": "handyobjects/buildings/house_iii.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "handyobjects",
+      "family_prefix": "handyobjects/buildings/house_ii.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "handyobjects",
+      "family_prefix": "handyobjects/buildings/house_iv.obj",
+      "regions": [
+        "generic"
+      ]
+    },
+    {
+      "lib_id": "handyobjects",
+      "family_prefix": "handyobjects/buildings/house_i.obj",
+      "regions": [
+        "generic"
+      ]
+    }
+  ]
+}

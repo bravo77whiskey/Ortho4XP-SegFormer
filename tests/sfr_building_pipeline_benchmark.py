@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--open-k", type=int, default=5)
     parser.add_argument("--min-zone-m2", type=float, default=200.0)
     parser.add_argument("--grid-n", type=int, default=16)
+    parser.add_argument("--yolo-conf", type=float, default=None)
+    parser.add_argument("--yolo-iou", type=float, default=None)
+    parser.add_argument("--yolo-stride", type=int, default=None)
+    parser.add_argument("--yolo-max-det", type=int, default=None)
+    parser.add_argument("--yolo-suppress-coverage", type=float, default=0.0)
+    parser.add_argument("--yolo-suppress-min-overlap-m2", type=float, default=25.0)
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
     parser.add_argument(
@@ -216,6 +222,12 @@ def main() -> int:
             dsftool_path=str(dsftool) if dsftool else None,
             skip_osm_excl_download=args.skip_osm_download,
             custom_scenery_dir=str(custom_scenery_dir) if custom_scenery_dir else None,
+            yolo_conf=args.yolo_conf,
+            yolo_iou=args.yolo_iou,
+            yolo_stride=args.yolo_stride,
+            yolo_max_det=args.yolo_max_det,
+            yolo_suppress_coverage=args.yolo_suppress_coverage,
+            yolo_suppress_min_overlap_m2=args.yolo_suppress_min_overlap_m2,
         )
         print(f"[bench] total wall={time.perf_counter() - t0:.2f}s")
     finally:
