@@ -295,15 +295,28 @@ def _iter_yolo_crop_batches(image: np.ndarray, stride: int, batch_size: int):
 def _pixel_quad_to_lonlat(quad_px: np.ndarray, img_w: int, img_h: int,
                           lat_n: float, lat_s: float,
                           lon_w: float, lon_e: float) -> list[tuple[float, float]]:
-    """Convert a 4-vertex OBB pixel quad to a closed lon/lat ring."""
+    """Convert a pixel-space polygon to a closed, CCW lon/lat ring."""
     ring = []
     for px, py in quad_px:
         lon = lon_w + float(px) / float(img_w) * (lon_e - lon_w)
         lat = lat_n - float(py) / float(img_h) * (lat_n - lat_s)
         ring.append((float(lon), float(lat)))
+    if _signed_lonlat_ring_area(ring) < 0.0:
+        ring.reverse()
     if ring and ring[0] != ring[-1]:
         ring.append(ring[0])
     return ring
+
+
+def _signed_lonlat_ring_area(ring: list[tuple[float, float]]) -> float:
+    """Return positive area for counter-clockwise lon/lat rings."""
+    if len(ring) < 3:
+        return 0.0
+    pts = ring[:-1] if ring[0] == ring[-1] else ring
+    area = 0.0
+    for (lon_a, lat_a), (lon_b, lat_b) in zip(pts, pts[1:] + pts[:1]):
+        area += lon_a * lat_b - lon_b * lat_a
+    return 0.5 * area
 
 
 def _pixel_circle_polygon(cx: float, cy: float, radius_px: float,

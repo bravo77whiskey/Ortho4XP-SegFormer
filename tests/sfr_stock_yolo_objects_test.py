@@ -243,6 +243,7 @@ class StockYoloFacadeGeometryTests(unittest.TestCase):
         self.assertEqual(path, "simheaven/facades/tank.fac")
         self.assertEqual(len(ring), STOCK.STORAGE_TANK_CIRCLE_SEGMENTS + 1)
         self.assertEqual(ring[0], ring[-1])
+        self.assertGreater(STOCK._signed_lonlat_ring_area(ring), 0.0)
 
         center_lon = 120.0 / 256.0
         center_lat = 1.0 - 110.0 / 256.0
@@ -268,6 +269,7 @@ class StockYoloFacadeGeometryTests(unittest.TestCase):
         self.assertIn(path, STOCK.STOCK_YOLO_ASSET_MAP[3][1])
         self.assertEqual(len(ring), 5)
         self.assertEqual(ring[0], ring[-1])
+        self.assertGreater(STOCK._signed_lonlat_ring_area(ring), 0.0)
         self.assertEqual(result.occupied_px_polys[0].shape[0], 4)
 
 
