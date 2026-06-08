@@ -4305,6 +4305,8 @@ def _optional_library_rejection_reason(obj_path, lib_id, asset_region):
 def _optional_library_audit_counters(library_exports, enabled_library_ids, asset_region):
     """Return accepted/rejected optional-library candidate counts for diagnostics."""
     counters = {
+        "exports": Counter(),
+        "building_candidates": Counter(),
         "accepted": Counter(),
         "rejected_unclassified": Counter(),
         "rejected_region_mismatch": Counter(),
@@ -4317,9 +4319,11 @@ def _optional_library_audit_counters(library_exports, enabled_library_ids, asset
         lib_id = _optional_library_id_for_export(export, enabled_library_ids)
         if not lib_id:
             continue
+        counters["exports"][lib_id] += 1
         obj_path = export.virtual_path
         if not _is_optional_library_building_candidate(obj_path):
             continue
+        counters["building_candidates"][lib_id] += 1
         reason = _optional_library_rejection_reason(obj_path, lib_id, asset_region)
         if reason is None:
             counters["accepted"][lib_id] += 1
@@ -4334,6 +4338,52 @@ def _optional_library_audit_counters(library_exports, enabled_library_ids, asset
         if len(counters["samples"][sample_key]) < 5:
             counters["samples"][sample_key].append(obj_path)
     return counters
+
+
+def _describe_optional_library_diagnostics(library_exports, enabled_library_ids,
+                                           asset_region, extra_asset_pools):
+    """Return a compact optional-library scan/filter summary for logs."""
+    enabled_library_ids = tuple(enabled_library_ids or ())
+    if not enabled_library_ids:
+        return "disabled"
+    counters = _optional_library_audit_counters(
+        library_exports,
+        enabled_library_ids,
+        asset_region,
+    )
+    exports = sum(counters["exports"].values())
+    candidates = sum(counters["building_candidates"].values())
+    accepted = sum(counters["accepted"].values())
+    pooled_by_source = Counter(
+        asset.get("source") or "unknown"
+        for pool in (extra_asset_pools or {}).values()
+        for asset in pool
+    )
+    pooled = sum(pooled_by_source.values())
+    if not exports:
+        return (
+            f"enabled={','.join(enabled_library_ids)}  "
+            "exports=0  packages=not-found-or-no-library-exports"
+        )
+    rejected_bits = []
+    for key, label in (
+        ("rejected_unclassified", "unclassified"),
+        ("rejected_region_mismatch", "region-mismatch"),
+        ("rejected_special_landmark", "special-landmark"),
+    ):
+        value = sum(counters[key].values())
+        if value:
+            rejected_bits.append(f"{label}:{value}")
+    pooled_bits = ",".join(
+        f"{source}:{count}"
+        for source, count in sorted(pooled_by_source.items())
+    ) or "none"
+    return (
+        f"enabled={','.join(enabled_library_ids)}  "
+        f"exports={exports}  candidates={candidates}  "
+        f"accepted={accepted}  pooled={pooled}({pooled_bits})  "
+        f"rejected={','.join(rejected_bits) or 'none'}"
+    )
 
 
 def _is_optional_library_building_candidate(obj_path):
@@ -7737,6 +7787,15 @@ def run(
     if smallest_asset_only:
         asset_sources_label += " (smallest asset per class)"
     print(f"Building assets: {asset_sources_label}")
+    print(
+        "Optional building libraries: "
+        + _describe_optional_library_diagnostics(
+            runtime_library_exports,
+            enabled_extra_library_ids,
+            effective_asset_region,
+            extra_asset_pools,
+        )
+    )
     asset_pool_counts = _describe_asset_pool_counts(asset_pools)
     if asset_pool_counts:
         print(f"Building asset pool counts: {asset_pool_counts}")

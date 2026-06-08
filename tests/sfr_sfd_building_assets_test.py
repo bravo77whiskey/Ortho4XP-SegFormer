@@ -3048,6 +3048,52 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
         self.assertEqual(off_paths, set())
 
+    def test_optional_library_diagnostics_reports_scan_and_pool_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            package = _write_library_package(
+                custom,
+                "world-models",
+                [
+                    "EXPORT objects/houses/EU/GB/RES_05x11_2_UK_1.obj objects/eu_house.obj",
+                    "EXPORT objects/houses/US/AZ/RES_10x12_US.obj objects/us_house.obj",
+                ],
+            )
+            _write_obj8(
+                package / "objects" / "eu_house.obj",
+                [(-5.0, 0.0, -6.0), (5.0, 0.0, -6.0), (5.0, 0.0, 6.0), (-5.0, 0.0, 6.0)],
+            )
+            _write_obj8(
+                package / "objects" / "us_house.obj",
+                [(-5.0, 0.0, -6.0), (5.0, 0.0, -6.0), (5.0, 0.0, 6.0), (-5.0, 0.0, 6.0)],
+            )
+            _activate_packages(custom, package)
+
+            enabled = ("world-models",)
+            exports = BLD._scan_runtime_library_exports(
+                custom,
+                extra_library_ids=enabled,
+            )
+            pools = BLD._build_optional_library_asset_pools(
+                custom_scenery_dir=custom,
+                library_exports=exports,
+                enabled_library_ids=enabled,
+                asset_region="europe",
+            )
+            diagnostics = BLD._describe_optional_library_diagnostics(
+                exports,
+                enabled,
+                "europe",
+                pools,
+            )
+
+        self.assertIn("enabled=world-models", diagnostics)
+        self.assertIn("exports=2", diagnostics)
+        self.assertIn("candidates=2", diagnostics)
+        self.assertIn("accepted=1", diagnostics)
+        self.assertIn("world-models:1", diagnostics)
+        self.assertIn("region-mismatch:1", diagnostics)
+
     def test_asset_inventory_dry_run_reports_exports_without_mutating(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             custom = Path(tmpdir) / "Custom Scenery"

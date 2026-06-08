@@ -53,6 +53,7 @@ added_datas = [
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Bounds_Index.py"),            "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Climate_Regions.py"),         "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Persistent_Cache.py"),        "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_Region_Overrides.json"),      "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Region_Boundaries.py"),       "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Inference.py"),          "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Building_Overlay.py"),   "sfr_scripts/src"),
