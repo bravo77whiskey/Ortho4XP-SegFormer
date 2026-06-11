@@ -5145,57 +5145,90 @@ def _append_yolo_result_detections(
 
 
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
-                            device=None, m_per_px=1.0, batch_size=1):
+                            device=None, m_per_px=1.0, batch_size=1,
+                            return_metadata=False):
     img_h, img_w = image.shape[:2]
-    detections = []
     model_class_count = _yolo_model_class_count(model)
 
+    def _detect(effective_batch):
+        detections = []
+        if effective_batch <= 1:
+            for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+                with torch.inference_mode():
+                    results = model.predict(
+                        source=crop,
+                        imgsz=int(imgsz),
+                        conf=float(conf),
+                        iou=float(iou),
+                        max_det=int(max_det),
+                        device=device,
+                        verbose=False,
+                        stream=True,
+                    )
+                    for result in results:
+                        _append_yolo_result_detections(
+                            detections, result, ox, oy,
+                            img_w=img_w, img_h=img_h, m_per_px=m_per_px,
+                            model_class_count=model_class_count,
+                        )
+                    del results
+        else:
+            for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch):
+                offsets = [(ox, oy) for ox, oy, _ in batch]
+                crops = [crop for _, _, crop in batch]
+                with torch.inference_mode():
+                    results = model.predict(
+                        source=crops,
+                        imgsz=int(imgsz),
+                        conf=float(conf),
+                        iou=float(iou),
+                        max_det=int(max_det),
+                        device=device,
+                        verbose=False,
+                        stream=True,
+                        batch=effective_batch,
+                    )
+                    for (ox, oy), result in zip(offsets, results):
+                        _append_yolo_result_detections(
+                            detections, result, ox, oy,
+                            img_w=img_w, img_h=img_h, m_per_px=m_per_px,
+                            model_class_count=model_class_count,
+                        )
+                    del results, crops, offsets
+        return detections
+
     batch_size = max(1, int(batch_size or 1))
-    if batch_size <= 1:
-        for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
-            with torch.inference_mode():
-                results = model.predict(
-                    source=crop,
-                    imgsz=int(imgsz),
-                    conf=float(conf),
-                    iou=float(iou),
-                    max_det=int(max_det),
-                    device=device,
-                    verbose=False,
-                    stream=True,
-                )
-                for result in results:
-                    _append_yolo_result_detections(
-                        detections, result, ox, oy,
-                        img_w=img_w, img_h=img_h, m_per_px=m_per_px,
-                        model_class_count=model_class_count,
-                    )
-                del results
-    else:
-        for batch in _iter_yolo_crop_batches(image, int(stride), batch_size):
-            offsets = [(ox, oy) for ox, oy, _ in batch]
-            crops = [crop for _, _, crop in batch]
-            with torch.inference_mode():
-                results = model.predict(
-                    source=crops,
-                    imgsz=int(imgsz),
-                    conf=float(conf),
-                    iou=float(iou),
-                    max_det=int(max_det),
-                    device=device,
-                    verbose=False,
-                    stream=True,
-                    batch=batch_size,
-                )
-                for (ox, oy), result in zip(offsets, results):
-                    _append_yolo_result_detections(
-                        detections, result, ox, oy,
-                        img_w=img_w, img_h=img_h, m_per_px=m_per_px,
-                        model_class_count=model_class_count,
-                    )
-                del results, crops, offsets
+    effective_batch_size = batch_size
+    fell_back = False
+    try:
+        detections = _detect(batch_size)
+    except RuntimeError as exc:
+        if batch_size > 1 and SEGFORMER.is_cuda_oom(exc):
+            # Discard any partial batched results and restart from scratch so
+            # the fallback output is identical to a pure batch-1 run.
+            print(
+                f"    YOLO OBB batch={batch_size} hit CUDA OOM; "
+                "retrying with batch=1",
+                flush=True,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            detections = _detect(1)
+            effective_batch_size = 1
+            fell_back = True
+        else:
+            raise
 
     detections.sort(key=lambda item: (float(item['area_m2']), -float(item['confidence'])))
+    if return_metadata:
+        return {
+            'detections': detections,
+            'requested_batch': batch_size,
+            'effective_batch': effective_batch_size,
+            'fell_back': fell_back,
+        }
     return detections
 
 
@@ -7555,6 +7588,10 @@ def run(
         else yolo_max_det
     )
     yolo_imgsz = int(yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
+    # Batch stays 1 by default: the scripts/*_batch_autotune.py harnesses
+    # showed batch>1 changes borderline detections on dense tiles (not
+    # placement-exact), for ~0.3s/DDS saved on an RTX 4080. Opting in via the
+    # env vars is OOM-safe — the inference loops retry at batch=1 on CUDA OOM.
     yolo_batch_size = max(
         1,
         _env_int("O4_SFR_BLD_YOLO_BATCH", DEFAULT_YOLO_OBB_BATCH),
@@ -7896,56 +7933,381 @@ def run(
     placed_draped = []    # list of (lonlat_ring, pol_path) — stock YOLO ground polys (.pol)
     direct_yolo_facade_placements = 0
     candidate_grid_cache = {}
-    _bld_params = (
-        (
-            BLD_PLACEMENT_CACHE_VERSION
-            if strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
-        ),
-        spacing_m, close_k, open_k, min_zone_m2,
-        max_candidates_per_dds,
-        PLACE_UNKNOWN_OBJECTS,
-        footprint_pad_m,
-        mark_pad_m,
-        smallest_asset_only,
-        allow_inferred_fill,
-        run_legacy_gap_fill,
-        disable_center_blockers,
-        max_gap_candidates_per_dds,
-        max_gap_candidates_per_component,
-        yolo_template_gap_m,
-        yolo_template_max_candidates_per_zone,
-        yolo_template_heading_tol_deg,
-        yolo_template_shape_rel_tol,
-        yolo_template_shape_abs_tol_px,
-        tuple(sorted(class_min_footprint_span_m.items())),
-        ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
-        ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
-        separator_sig, heading_sig,
-        excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
-        custom_bld_sig, bool(avoid_custom_scenery),
-        mesh_water_sig,
-        residential_poly_sig,
-        default_assets_available, sfd_assets_available, simheaven_assets_available,
-        tuple(enabled_extra_library_ids),
-        asset_catalog_signature,
-        height_priors_signature,
-        natural_asset_region,
-        simheaven_package_region,
-        effective_asset_region,
-        bool(yolo_enabled), yolo_signature,
-        yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
-        round(float(yolo_iou), 6), yolo_max_det,
-        yolo_batch_size, stock_yolo_batch_size, bool(yolo_fuse_model),
-        round(float(yolo_suppress_coverage), 6),
-        round(float(yolo_suppress_min_overlap_m2), 4),
-        float(MAX_GENERATED_BUILDING_HEIGHT_M),
-        # Bump on schema-breaking changes to per-DDS cache contents.
-        # v10: optional extra-library assets require explicit regional matches.
-        "schema=v10-regional-optional-library-assets",
+    def _building_cache_params(effective_yolo_batch, effective_stock_yolo_batch):
+        return (
+            (
+                BLD_PLACEMENT_CACHE_VERSION
+                if strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
+            ),
+            spacing_m, close_k, open_k, min_zone_m2,
+            max_candidates_per_dds,
+            PLACE_UNKNOWN_OBJECTS,
+            footprint_pad_m,
+            mark_pad_m,
+            smallest_asset_only,
+            allow_inferred_fill,
+            run_legacy_gap_fill,
+            disable_center_blockers,
+            max_gap_candidates_per_dds,
+            max_gap_candidates_per_component,
+            yolo_template_gap_m,
+            yolo_template_max_candidates_per_zone,
+            yolo_template_heading_tol_deg,
+            yolo_template_shape_rel_tol,
+            yolo_template_shape_abs_tol_px,
+            tuple(sorted(class_min_footprint_span_m.items())),
+            ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
+            ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
+            separator_sig, heading_sig,
+            excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
+            custom_bld_sig, bool(avoid_custom_scenery),
+            mesh_water_sig,
+            residential_poly_sig,
+            default_assets_available, sfd_assets_available, simheaven_assets_available,
+            tuple(enabled_extra_library_ids),
+            asset_catalog_signature,
+            height_priors_signature,
+            natural_asset_region,
+            simheaven_package_region,
+            effective_asset_region,
+            bool(yolo_enabled), yolo_signature,
+            yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
+            round(float(yolo_iou), 6), yolo_max_det,
+            int(effective_yolo_batch), int(effective_stock_yolo_batch),
+            bool(yolo_fuse_model),
+            round(float(yolo_suppress_coverage), 6),
+            round(float(yolo_suppress_min_overlap_m2), 4),
+            float(MAX_GENERATED_BUILDING_HEIGHT_M),
+            # Bump on schema-breaking changes to per-DDS cache contents.
+            # v10: optional extra-library assets require explicit regional matches.
+            "schema=v10-regional-optional-library-assets",
+        )
+
+    _requested_bld_params = _building_cache_params(
+        yolo_batch_size, stock_yolo_batch_size
     )
 
-    t_start = time.time()
+    def _prepare_dds_inference(fi, fname, m):
+        """Inference phase for one DDS: veg class map, trained YOLO, stock YOLO.
+
+        Runs one DDS ahead on the prefetch worker thread so GPU inference
+        overlaps the CPU placement stages of the previous DDS. Only touches
+        this DDS's own cache files and thread-local accumulators; all global
+        state merges happen on the main thread in file order, so the output
+        is identical to the sequential path.
+        """
+        nonlocal model, proc, device
+        import pickle as _pickle
+        local_timings = {}
+        file_timings = {}
+        file_counts = {}
+
+        def _rec(key, start):
+            elapsed = time.perf_counter() - start
+            local_timings[key] = local_timings.get(key, 0.0) + elapsed
+            file_timings[key] = file_timings.get(key, 0.0) + elapsed
+
+        prep = {
+            'fi': fi,
+            'fname': fname,
+            'cached_bld': None,
+            'no_image': False,
+            'img': None,
+            'veg_map': None,
+            'mesh_water_mask': None,
+            'mesh_water_full': False,
+            'img_h': 0,
+            'img_w': 0,
+            'm_per_px': 1.0,
+            'yolo_detections': [],
+            'yolo_guidance': None,
+            'effective_yolo_batch_size': yolo_batch_size,
+            'yolo_batch_fell_back': False,
+            'effective_stock_yolo_batch_size': stock_yolo_batch_size,
+            'stock_yolo_batch_fell_back': False,
+            'stock_res': None,
+            'file_timings': file_timings,
+            'file_counts': file_counts,
+            'local_timings': local_timings,
+        }
+        if disable_cache:
+            # Drop any stale per-DDS cache before starting this DDS.
+            _remove_cache_files(_dds_cache_paths(fname))
+
+        # ── Building placement cache ──────────────────────────────────────
+        # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
+        _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
+        if (
+            not ignore_placement_cache and
+            not disable_cache and
+            os.path.exists(_bld_cache_file)
+        ):
+            try:
+                with open(_bld_cache_file, 'rb') as _f:
+                    _cd = _pickle.load(_f)
+                if _cd.get('params') == _requested_bld_params:
+                    if _cd.get('source') == 'direct_yolo':
+                        prep['cached_bld'] = _cd['placements']
+                        return prep
+            except Exception:
+                pass
+
+        til_y_top  = int(m.group(1))
+        til_x_left = int(m.group(2))
+        zl         = int(m.group(4))
+
+        # Geographic bounds
+        lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
+
+        # Inference (cached per DDS filename — filename encodes tile coords + ZL)
+        cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
+        img = None
+        veg_map = None
+        mesh_water_mask = None
+        mesh_water_full = False
+        img_h = img_w = 0
+        if not disable_cache and os.path.exists(cache_path):
+            _t = time.perf_counter()
+            veg_map = np.load(cache_path)
+            _rec('cache_load', _t)
+            img_h, img_w = veg_map.shape[:2]
+            _t = time.perf_counter()
+            mesh_water_mask = _rasterize_mesh_water_mask(
+                mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+            )
+            _rec('mesh_water', _t)
+            mesh_water_px = int(np.count_nonzero(mesh_water_mask)) if mesh_water_mask is not None else 0
+            mesh_water_full = mesh_water_px == int(img_h * img_w)
+            if (
+                not mesh_water_full and
+                bool(np.all(veg_map == SEGFORMER.CLASS_WATER))
+            ):
+                # Earlier mesh-water shortcut builds could write a synthetic
+                # all-water map into the shared inference cache.  Treat that
+                # shape as stale when the fixed mesh reader says this DDS is
+                # not fully water.
+                veg_map = None
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+                if detail_timing:
+                    print(
+                        f"    [Bld stage] {fname} stale all-water class-map ignored",
+                        flush=True,
+                    )
+            if detail_timing:
+                if veg_map is not None:
+                    print(f"    [Bld stage] {fname} class-map cached", flush=True)
+        if veg_map is None:
+            _t = time.perf_counter()
+            img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+            if img is None:
+                prep['no_image'] = True
+                return prep
+            img_h, img_w = img.shape[:2]
+            _rec('dds_load', _t)
+            _t = time.perf_counter()
+            mesh_water_mask = _rasterize_mesh_water_mask(
+                mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+            )
+            _rec('mesh_water', _t)
+            mesh_water_full = (
+                mesh_water_mask is not None and
+                int(np.count_nonzero(mesh_water_mask)) == int(img_h * img_w)
+            )
+            if mesh_water_full:
+                veg_map = np.full(
+                    (img_h, img_w), SEGFORMER.CLASS_WATER, dtype=np.int8
+                )
+                if detail_timing:
+                    print(
+                        f"    [Bld stage] {fname} mesh water full; inference skipped",
+                        flush=True,
+                    )
+            else:
+                if model is None:
+                    model, proc, device = SEGFORMER.load_vegetation_model(device)
+                _t = time.perf_counter()
+                veg_map = SEGFORMER.run_inference(model, device, img, proc)
+                _rec('segformer_inference', _t)
+            if not disable_cache and not mesh_water_full:
+                _t = time.perf_counter()
+                np.save(cache_path, veg_map)
+                _rec('cache_save', _t)
+            if detail_timing:
+                if not mesh_water_full:
+                    print(f"    [Bld stage] {fname} inference complete", flush=True)
+        if mesh_water_mask is not None:
+            mesh_water_px = int(np.count_nonzero(mesh_water_mask))
+            file_counts['mesh_water_px'] = mesh_water_px
+            mesh_water_full = mesh_water_px == int(img_h * img_w)
+
+        # Pixel size in metres (approximate, using mid-latitude)
+        mid_lat_rad = math.radians((lat_n + lat_s) / 2)
+        lon_span_m  = (lon_e - lon_w) * 111320 * math.cos(mid_lat_rad)
+        lat_span_m  = (lat_n - lat_s) * 110540
+        m_per_px_x = lon_span_m / img_w
+        m_per_px_y = lat_span_m / img_h
+        m_per_px   = (m_per_px_x + m_per_px_y) / 2
+
+        yolo_detections = []
+        yolo_guidance = None
+        if yolo_enabled:
+            _yolo_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_yolo_obb.pkl'))
+            _yolo_key = _yolo_obb_cache_key(
+                fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
+                yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
+                batch_size=yolo_batch_size,
+                fused=yolo_fuse_model,
+            )
+            if not disable_cache:
+                _t = time.perf_counter()
+                cached_yolo = _load_yolo_obb_cache(_yolo_cache_file, _yolo_key)
+                _rec('cache_load', _t)
+            else:
+                cached_yolo = None
+            if cached_yolo is not None:
+                yolo_detections = cached_yolo
+            else:
+                if img is None:
+                    _img_t = time.perf_counter()
+                    img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                    if img is not None:
+                        _rec('dds_load', _img_t)
+                if img is not None:
+                    try:
+                        if detail_timing:
+                            _cuda_counts = _cuda_memory_counts_mb()
+                            if _cuda_counts is not None:
+                                (
+                                    file_counts['yolo_cuda_alloc_before_mb'],
+                                    file_counts['yolo_cuda_reserved_before_mb'],
+                                ) = _cuda_counts
+                        _t = time.perf_counter()
+                        yolo_result = _run_yolo_obb_inference(
+                            yolo_model,
+                            img,
+                            imgsz=yolo_imgsz,
+                            stride=yolo_stride,
+                            conf=yolo_conf,
+                            iou=yolo_iou,
+                            max_det=yolo_max_det,
+                            device=("0" if torch.cuda.is_available() else "cpu"),
+                            m_per_px=m_per_px,
+                            batch_size=yolo_batch_size,
+                            return_metadata=True,
+                        )
+                        yolo_detections = yolo_result['detections']
+                        prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
+                        prep['yolo_batch_fell_back'] = yolo_result['fell_back']
+                        if yolo_result['fell_back']:
+                            file_counts['yolo_batch_fallback'] = 1
+                        _rec('trained_yolo_inference', _t)
+                        if detail_timing:
+                            _cuda_counts = _cuda_memory_counts_mb()
+                            if _cuda_counts is not None:
+                                (
+                                    file_counts['yolo_cuda_alloc_after_mb'],
+                                    file_counts['yolo_cuda_reserved_after_mb'],
+                                ) = _cuda_counts
+                        if not disable_cache:
+                            _save_yolo_obb_cache(
+                                _yolo_cache_file,
+                                _yolo_obb_cache_key(
+                                    fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
+                                    yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
+                                    batch_size=yolo_result['effective_batch'],
+                                    fused=yolo_fuse_model,
+                                ),
+                                yolo_detections,
+                            )
+                    except Exception as exc:
+                        print(f"    [Bld stage] {fname} YOLO OBB failed: {exc}")
+                        yolo_detections = []
+        # ── Stock YOLO-OBB pre-step (DOTAv1 static objects) ──────────────
+        # Runs on the same loaded image; the main thread merges the returned
+        # placements and OBB pixel quads in file order.
+        if stock_yolo_model is not None and img is not None:
+            try:
+                _t = time.perf_counter()
+                stock_res = STOCKYOLO.run_stock_yolo_pass(
+                    img,
+                    model=stock_yolo_model,
+                    img_w=img_w, img_h=img_h,
+                    lat=lat, lon=lon,
+                    lat_n=lat_n, lat_s=lat_s, lon_w=lon_w, lon_e=lon_e,
+                    m_per_px=m_per_px,
+                    device=("0" if torch.cuda.is_available() else "cpu"),
+                    batch_size=stock_yolo_batch_size,
+                )
+                _rec('stock_yolo_inference', _t)
+                prep['stock_res'] = stock_res
+                prep['effective_stock_yolo_batch_size'] = stock_res.effective_batch_size
+                prep['stock_yolo_batch_fell_back'] = stock_res.batch_fell_back
+                if stock_res.batch_fell_back:
+                    file_counts['stock_yolo_batch_fallback'] = 1
+                if stock_res.counts_by_class:
+                    _summary = " ".join(
+                        f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
+                        for c, n in sorted(stock_res.counts_by_class.items())
+                    )
+                    file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
+                    print(f"    [Bld stage] {fname} stock YOLO: {_summary}", flush=True)
+            except Exception as exc:
+                print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
+        raw_yolo_count = len(yolo_detections)
+        if yolo_suppress_coverage > 0.0 and yolo_detections:
+            yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
+                yolo_detections,
+                coverage_threshold=yolo_suppress_coverage,
+                min_overlap_m2=yolo_suppress_min_overlap_m2,
+                m_per_px=m_per_px,
+            )
+            file_counts['yolo_raw_detections'] = raw_yolo_count
+            file_counts['yolo_suppressed_overlap'] = yolo_suppressed
+        file_counts['yolo_detections'] = len(yolo_detections)
+        if yolo_detections:
+            yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
+
+        prep['img'] = img
+        prep['veg_map'] = veg_map
+        prep['mesh_water_mask'] = mesh_water_mask
+        prep['mesh_water_full'] = mesh_water_full
+        prep['img_h'] = img_h
+        prep['img_w'] = img_w
+        prep['m_per_px'] = m_per_px
+        prep['yolo_detections'] = yolo_detections
+        prep['yolo_guidance'] = yolo_guidance
+        return prep
+
+    # One-ahead inference prefetch: a single worker thread keeps the GPU busy
+    # with the next DDS while the main thread runs the CPU placement stages.
+    # Disable with O4_SFR_BLD_PREFETCH=0 to get the fully sequential path.
+    prefetch_enabled = os.environ.get("O4_SFR_BLD_PREFETCH", "1").strip() != "0"
     n_files = len(files)
+    prefetch_executor = None
+    _prefetch_futures = {}
+    if prefetch_enabled and n_files > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        prefetch_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="sfr-bld-prefetch"
+        )
+
+    def _submit_prefetch(start_idx):
+        if prefetch_executor is None or _prefetch_futures:
+            return
+        for nfi in range(start_idx, n_files + 1):
+            nfname = files[nfi - 1]
+            nm = STD_RE.match(nfname)
+            if not nm:
+                continue
+            _prefetch_futures[nfi] = prefetch_executor.submit(
+                _prepare_dds_inference, nfi, nfname, nm
+            )
+            return
+
+    t_start = time.time()
     for fi, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
         if not m: continue
@@ -7953,14 +8315,27 @@ def run(
         file_timings = {}
         file_counts = {}
         file_t0 = time.perf_counter()
-        if disable_cache:
-            # Drop any stale per-DDS cache before starting this DDS.
-            _remove_cache_files(_dds_cache_files)
 
         try:
             print(f"  [{fi:3d}/{n_files}] {fname}  (starting)", flush=True)
-            # ── Building placement cache ──────────────────────────────────────
-            # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
+            _prep_future = _prefetch_futures.pop(fi, None)
+            if _prep_future is None and prefetch_executor is not None:
+                # Not prefetched yet (first DDS): still run it on the worker
+                # thread so ALL inference happens on one thread — cuDNN
+                # handles are per-thread and re-warm on a new thread.
+                _prep_future = prefetch_executor.submit(
+                    _prepare_dds_inference, fi, fname, m
+                )
+            if _prep_future is not None:
+                _prep = _prep_future.result()
+            else:
+                _prep = _prepare_dds_inference(fi, fname, m)
+            _submit_prefetch(fi + 1)
+            file_timings = _prep['file_timings']
+            file_counts = _prep['file_counts']
+            for _tk, _tv in _prep['local_timings'].items():
+                timings[_tk] += _tv
+
             # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
             import pickle as _pickle
             rng_seed = int.from_bytes(
@@ -7974,28 +8349,15 @@ def run(
             )
             height_rng = np.random.default_rng(height_rng_seed)
             _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
-            _cached_bld = None
-            if (
-                not ignore_placement_cache and
-                not disable_cache and
-                os.path.exists(_bld_cache_file)
-            ):
-                try:
-                    with open(_bld_cache_file, 'rb') as _f:
-                        _cd = _pickle.load(_f)
-                    if _cd.get('params') == _bld_params:
-                        if _cd.get('source') != 'direct_yolo':
-                            _cached_bld = None
-                        else:
-                            _cached_bld = _cd['placements']
-                except Exception:
-                    pass
+            _cached_bld = _prep['cached_bld']
             if _cached_bld is not None:
                 placed_stock_objects.extend(_cached_bld.get('objects', ()))
                 placed_facades.extend(_cached_bld.get('facades', ()))
                 cached_count = len(_cached_bld.get('objects', ())) + len(_cached_bld.get('facades', ()))
                 direct_yolo_facade_placements += len(_cached_bld.get('facades', ()))
                 print(f"  [{fi:3d}/{n_files}] {fname}  (bld cached — {cached_count} placements)", flush=True)
+                continue
+            if _prep['no_image']:
                 continue
             _start_object_idx = len(placed_stock_objects)
             _start_facade_idx = len(placed_facades)
@@ -8008,97 +8370,21 @@ def run(
             # Geographic bounds
             lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
-            # Inference (cached per DDS filename — filename encodes tile coords + ZL)
-            cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
-            img = None
-            veg_map = None
-            mesh_water_mask = None
-            mesh_water_full = False
-            if not disable_cache and os.path.exists(cache_path):
-                _t = time.perf_counter()
-                veg_map = np.load(cache_path)
-                _record_elapsed(timings, file_timings, 'cache_load', _t)
-                img_h, img_w = veg_map.shape[:2]
-                _t = time.perf_counter()
-                mesh_water_mask = _rasterize_mesh_water_mask(
-                    mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                )
-                _record_elapsed(timings, file_timings, 'mesh_water', _t)
-                mesh_water_px = int(np.count_nonzero(mesh_water_mask)) if mesh_water_mask is not None else 0
-                mesh_water_full = mesh_water_px == int(img_h * img_w)
-                if (
-                    not mesh_water_full and
-                    bool(np.all(veg_map == SEGFORMER.CLASS_WATER))
-                ):
-                    # Earlier mesh-water shortcut builds could write a synthetic
-                    # all-water map into the shared inference cache.  Treat that
-                    # shape as stale when the fixed mesh reader says this DDS is
-                    # not fully water.
-                    veg_map = None
-                    try:
-                        os.remove(cache_path)
-                    except OSError:
-                        pass
-                    if detail_timing:
-                        print(
-                            f"    [Bld stage] {fname} stale all-water class-map ignored",
-                            flush=True,
-                        )
-                if detail_timing:
-                    if veg_map is not None:
-                        print(f"    [Bld stage] {fname} class-map cached", flush=True)
-            if veg_map is None:
-                _t = time.perf_counter()
-                img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-                if img is None:
-                    continue
-                img_h, img_w = img.shape[:2]
-                _record_elapsed(timings, file_timings, 'dds_load', _t)
-                _t = time.perf_counter()
-                mesh_water_mask = _rasterize_mesh_water_mask(
-                    mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                )
-                _record_elapsed(timings, file_timings, 'mesh_water', _t)
-                mesh_water_full = (
-                    mesh_water_mask is not None and
-                    int(np.count_nonzero(mesh_water_mask)) == int(img_h * img_w)
-                )
-                if mesh_water_full:
-                    veg_map = np.full(
-                        (img_h, img_w), SEGFORMER.CLASS_WATER, dtype=np.int8
-                    )
-                    if detail_timing:
-                        print(
-                            f"    [Bld stage] {fname} mesh water full; inference skipped",
-                            flush=True,
-                        )
-                else:
-                    if model is None:
-                        model, proc, device = SEGFORMER.load_vegetation_model(device)
-                    _t = time.perf_counter()
-                    veg_map = SEGFORMER.run_inference(model, device, img, proc)
-                    _record_elapsed(timings, file_timings, 'segformer_inference', _t)
-                if not disable_cache and not mesh_water_full:
-                    _t = time.perf_counter()
-                    np.save(cache_path, veg_map)
-                    _record_elapsed(timings, file_timings, 'cache_save', _t)
-                if detail_timing:
-                    if not mesh_water_full:
-                        print(f"    [Bld stage] {fname} inference complete", flush=True)
-            if mesh_water_mask is not None:
-                mesh_water_px = int(np.count_nonzero(mesh_water_mask))
-                file_counts['mesh_water_px'] = mesh_water_px
-                mesh_water_full = mesh_water_px == int(img_h * img_w)
-
-            # Pixel size in metres (approximate, using mid-latitude)
-            mid_lat_rad = math.radians((lat_n + lat_s) / 2)
-            lon_span_m  = (lon_e - lon_w) * 111320 * math.cos(mid_lat_rad)
-            lat_span_m  = (lat_n - lat_s) * 110540
+            img = _prep['img']
+            veg_map = _prep['veg_map']
+            mesh_water_mask = _prep['mesh_water_mask']
+            mesh_water_full = _prep['mesh_water_full']
+            img_h = _prep['img_h']
+            img_w = _prep['img_w']
+            m_per_px = _prep['m_per_px']
+            yolo_detections = _prep['yolo_detections']
+            yolo_guidance = _prep['yolo_guidance']
+            _effective_bld_params = _building_cache_params(
+                _prep['effective_yolo_batch_size'],
+                _prep['effective_stock_yolo_batch_size'],
+            )
 
             # Spacing in pixels at this tile's native resolution
-            m_per_px_x = lon_span_m / img_w
-            m_per_px_y = lat_span_m / img_h
-            m_per_px   = (m_per_px_x + m_per_px_y) / 2
             spacing_px_by_class = _class_spacing_px(
                 spacing_m, m_per_px, class_min_footprint_span_m
             )
@@ -8113,109 +8399,13 @@ def run(
             k_road = cv2.getStructuringElement(
                 cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
 
-            yolo_detections = []
-            yolo_guidance = None
-            if yolo_enabled:
-                _yolo_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_yolo_obb.pkl'))
-                _yolo_key = _yolo_obb_cache_key(
-                    fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
-                    yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
-                    batch_size=yolo_batch_size,
-                    fused=yolo_fuse_model,
-                )
-                if not disable_cache:
-                    _t = time.perf_counter()
-                    cached_yolo = _load_yolo_obb_cache(_yolo_cache_file, _yolo_key)
-                    _record_elapsed(timings, file_timings, 'cache_load', _t)
-                else:
-                    cached_yolo = None
-                if cached_yolo is not None:
-                    yolo_detections = cached_yolo
-                else:
-                    if img is None:
-                        _img_t = time.perf_counter()
-                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-                        if img is not None:
-                            _record_elapsed(timings, file_timings, 'dds_load', _img_t)
-                    if img is not None:
-                        try:
-                            if detail_timing:
-                                _cuda_counts = _cuda_memory_counts_mb()
-                                if _cuda_counts is not None:
-                                    (
-                                        file_counts['yolo_cuda_alloc_before_mb'],
-                                        file_counts['yolo_cuda_reserved_before_mb'],
-                                    ) = _cuda_counts
-                            _t = time.perf_counter()
-                            yolo_detections = _run_yolo_obb_inference(
-                                yolo_model,
-                                img,
-                                imgsz=yolo_imgsz,
-                                stride=yolo_stride,
-                                conf=yolo_conf,
-                                iou=yolo_iou,
-                                max_det=yolo_max_det,
-                                device=("0" if torch.cuda.is_available() else "cpu"),
-                                m_per_px=m_per_px,
-                                batch_size=yolo_batch_size,
-                            )
-                            _record_elapsed(timings, file_timings, 'trained_yolo_inference', _t)
-                            if detail_timing:
-                                _cuda_counts = _cuda_memory_counts_mb()
-                                if _cuda_counts is not None:
-                                    (
-                                        file_counts['yolo_cuda_alloc_after_mb'],
-                                        file_counts['yolo_cuda_reserved_after_mb'],
-                                    ) = _cuda_counts
-                            if not disable_cache:
-                                _save_yolo_obb_cache(_yolo_cache_file, _yolo_key, yolo_detections)
-                        except Exception as exc:
-                            print(f"    [Bld stage] {fname} YOLO OBB failed: {exc}")
-                            yolo_detections = []
-            # ── Stock YOLO-OBB pre-step (DOTAv1 static objects) ──────────────
-            # Runs on the same loaded image; appends to global placement lists
-            # and records OBB pixel quads so static_occ_mask can absorb them
-            # before the trained-YOLO facade loop runs.
-            if stock_yolo_model is not None and img is not None:
-                try:
-                    _t = time.perf_counter()
-                    stock_res = STOCKYOLO.run_stock_yolo_pass(
-                        img,
-                        model=stock_yolo_model,
-                        img_w=img_w, img_h=img_h,
-                        lat=lat, lon=lon,
-                        lat_n=lat_n, lat_s=lat_s, lon_w=lon_w, lon_e=lon_e,
-                        m_per_px=m_per_px,
-                        device=("0" if torch.cuda.is_available() else "cpu"),
-                        batch_size=stock_yolo_batch_size,
-                    )
-                    _record_elapsed(timings, file_timings, 'stock_yolo_inference', _t)
-                    placed_stock_objects.extend(stock_res.placed_objects)
-                    placed_facades.extend(stock_res.placed_facades)
-                    placed_draped.extend(stock_res.placed_draped)
-                    stock_yolo_occupied_polys = list(stock_res.occupied_px_polys)
-                    if stock_res.counts_by_class:
-                        _summary = " ".join(
-                            f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
-                            for c, n in sorted(stock_res.counts_by_class.items())
-                        )
-                        file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
-                        print(f"    [Bld stage] {fname} stock YOLO: {_summary}", flush=True)
-                except Exception as exc:
-                    print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
-            raw_yolo_count = len(yolo_detections)
-            if yolo_suppress_coverage > 0.0 and yolo_detections:
-                yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
-                    yolo_detections,
-                    coverage_threshold=yolo_suppress_coverage,
-                    min_overlap_m2=yolo_suppress_min_overlap_m2,
-                    m_per_px=m_per_px,
-                )
-                file_counts['yolo_raw_detections'] = raw_yolo_count
-                file_counts['yolo_suppressed_overlap'] = yolo_suppressed
-            file_counts['yolo_detections'] = len(yolo_detections)
-            if yolo_detections:
-                yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
+            # Merge the stock YOLO pre-step placements in file order.
+            stock_res = _prep['stock_res']
+            if stock_res is not None:
+                placed_stock_objects.extend(stock_res.placed_objects)
+                placed_facades.extend(stock_res.placed_facades)
+                placed_draped.extend(stock_res.placed_draped)
+                stock_yolo_occupied_polys = list(stock_res.occupied_px_polys)
 
             # Zone cleanup
             _t = time.perf_counter()
@@ -8240,7 +8430,7 @@ def run(
                         _t = time.perf_counter()
                         with open(_bld_cache_file, 'wb') as _f:
                             _pickle.dump({
-                                'params': _bld_params,
+                                'params': _effective_bld_params,
                                 'source': 'direct_yolo',
                                 'placements': {'objects': (), 'facades': ()},
                             }, _f)
@@ -9358,7 +9548,7 @@ def run(
                     _t = time.perf_counter()
                     with open(_bld_cache_file, 'wb') as _f:
                         _pickle.dump({
-                            'params': _bld_params,
+                            'params': _effective_bld_params,
                             'source': 'direct_yolo',
                             'placements': {
                                 'objects': placed_stock_objects[_start_object_idx:],
@@ -9512,6 +9702,11 @@ def run(
                         col*TILE_VIZ:(col+1)*TILE_VIZ,
                     ] = np.array(fp_img)
                 _record_elapsed(timings, file_timings, 'viz', _t_viz)
+        except BaseException:
+            if prefetch_executor is not None:
+                prefetch_executor.shutdown(wait=True, cancel_futures=True)
+                prefetch_executor = None
+            raise
         finally:
             file_elapsed = time.perf_counter() - file_t0
             if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
@@ -9540,6 +9735,9 @@ def run(
                     pass
             if disable_cache:
                 _remove_cache_files(_dds_cache_files)
+
+    if prefetch_executor is not None:
+        prefetch_executor.shutdown(wait=True, cancel_futures=True)
 
     total_time = time.time() - t_start
     total_placements = (

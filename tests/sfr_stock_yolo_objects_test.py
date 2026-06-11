@@ -340,5 +340,108 @@ class StockYoloBatchingTests(unittest.TestCase):
         self.assertEqual(batched_model.calls[0]["batch"], 2)
 
 
+@unittest.skipIf(torch is None, "torch is not installed")
+class StockYoloOomFallbackTests(unittest.TestCase):
+    class _FakeObb:
+        def __init__(self):
+            self.xyxyxyxy = torch.tensor(
+                [[[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]]]
+            )
+            self.conf = torch.tensor([0.9])
+            self.cls = torch.tensor([2.0])
+
+    class _FakeResult:
+        def __init__(self):
+            self.obb = StockYoloOomFallbackTests._FakeObb()
+
+    class _OomOnBatchYolo:
+        """Yields one detection per crop at batch=1; OOMs on batched calls."""
+
+        def __init__(self):
+            self.calls = []
+
+        def predict(self, **kwargs):
+            self.calls.append(kwargs)
+            source = kwargs["source"]
+            if isinstance(source, list):
+                # Yield one result, then blow up mid-stream so partial
+                # results exist when the OOM hits.
+                def _failing():
+                    yield StockYoloOomFallbackTests._FakeResult()
+                    raise RuntimeError("CUDA out of memory.")
+
+                return _failing()
+            return iter((StockYoloOomFallbackTests._FakeResult(),))
+
+    def _common_kwargs(self):
+        return dict(
+            img_w=2048,
+            img_h=1024,
+            lat=22,
+            lon=120,
+            lat_n=23.0,
+            lat_s=22.0,
+            lon_w=120.0,
+            lon_e=121.0,
+            m_per_px=1.0,
+            stride=1024,
+            imgsz=1024,
+            device="cpu",
+        )
+
+    def test_oom_at_batch_falls_back_to_exact_batch_1_results(self):
+        image = np.zeros((1024, 2048, 3), dtype=np.uint8)
+
+        baseline_model = self._OomOnBatchYolo()
+        baseline = STOCK.run_stock_yolo_pass(
+            image, model=baseline_model, batch_size=1, **self._common_kwargs()
+        )
+
+        fallback_model = self._OomOnBatchYolo()
+        fallback = STOCK.run_stock_yolo_pass(
+            image, model=fallback_model, batch_size=8, **self._common_kwargs()
+        )
+
+        # No partial results from the aborted batched attempt may leak.
+        self.assertEqual(baseline.placed_objects, fallback.placed_objects)
+        self.assertEqual(baseline.placed_facades, fallback.placed_facades)
+        self.assertEqual(baseline.counts_by_class, fallback.counts_by_class)
+        self.assertEqual(
+            [poly.tolist() for poly in baseline.occupied_px_polys],
+            [poly.tolist() for poly in fallback.occupied_px_polys],
+        )
+        self.assertEqual(fallback.requested_batch_size, 8)
+        self.assertEqual(fallback.effective_batch_size, 1)
+        self.assertTrue(fallback.batch_fell_back)
+        # One failed batched call, then one batch-1 call per crop.
+        self.assertEqual(len(fallback_model.calls), 1 + len(baseline_model.calls))
+
+    def test_non_oom_runtime_error_propagates(self):
+        class AlwaysFailsYolo:
+            def predict(self, **_kwargs):
+                raise RuntimeError("device-side assert triggered")
+
+        with self.assertRaises(RuntimeError):
+            STOCK.run_stock_yolo_pass(
+                np.zeros((1024, 2048, 3), dtype=np.uint8),
+                model=AlwaysFailsYolo(),
+                batch_size=8,
+                **self._common_kwargs(),
+            )
+
+    def test_oom_at_batch_1_propagates(self):
+        class OomAlwaysYolo:
+            def predict(self, **_kwargs):
+                raise RuntimeError("CUDA out of memory.")
+
+        with self.assertRaises(RuntimeError):
+            STOCK.run_stock_yolo_pass(
+                np.zeros((1024, 2048, 3), dtype=np.uint8),
+                model=OomAlwaysYolo(),
+                batch_size=1,
+                **self._common_kwargs(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

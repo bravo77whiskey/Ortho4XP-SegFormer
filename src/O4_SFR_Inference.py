@@ -154,6 +154,10 @@ segformer_patch_size       = 512     # pixels fed to the model per forward pass
 segformer_overlap          = 64      # pixel overlap between adjacent patches (blending)
 segformer_max_vram_gb      = 0.0     # 0 = uncapped; otherwise cap auto mode to this many GB
 segformer_batch_size       = 0       # 0 = recommended default batch size
+# Fixed on purpose: a runtime autotune was removed for picking slower batches
+# from noisy timings, and raising this changes the batch dimension fed to
+# cuDNN, which can flip borderline fp16 argmax pixels in the shared _veg.npy
+# cache. Power users can override via the sfr_batch_size tile config.
 segformer_default_cuda_batch_size = 8
 segformer_use_amp          = os.environ.get("O4_SFR_USE_AMP", "").strip() == "1"
 segformer_channels_last    = os.environ.get("O4_SFR_CHANNELS_LAST", "").strip() == "1"
@@ -656,6 +660,11 @@ def _infer_batch_size(device, patch_size, num_classes):
 def _is_cuda_oom(exc):
     text = str(exc).lower()
     return "out of memory" in text or "cuda error: out of memory" in text
+
+
+def is_cuda_oom(exc):
+    """Public alias for callers outside this module."""
+    return _is_cuda_oom(exc)
 
 
 def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size, num_classes, mean, std):

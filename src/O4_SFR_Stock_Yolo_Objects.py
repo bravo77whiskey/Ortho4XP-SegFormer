@@ -70,6 +70,12 @@ DEFAULT_STOCK_YOLO_BATCH = 1
 STORAGE_TANK_DOTA_CLASS = 2
 STORAGE_TANK_CIRCLE_SEGMENTS = 24
 
+
+def _is_cuda_oom(exc):
+    # Local copy (module is deliberately self-contained; see O4_AI_Overlay).
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda error: out of memory" in text
+
 # ── DOTAv1 class taxonomy and static-class filter ────────────────────────────
 DOTA_CLASS_NAMES = {
     0: 'plane',                1: 'ship',
@@ -224,6 +230,9 @@ class StockYoloResults:
     occupied_px_polys: list = field(default_factory=list)
     counts_by_class:  dict = field(default_factory=dict)
     inference_time_s: float = 0.0
+    requested_batch_size: int = 1
+    effective_batch_size: int = 1
+    batch_fell_back: bool = False
 
 
 # ── Model loading & inference ────────────────────────────────────────────────
@@ -375,9 +384,8 @@ def run_stock_yolo_pass(
     import torch  # local import — heavy
 
     t0 = time.perf_counter()
-    res = StockYoloResults()
 
-    def _consume_result(r, ox, oy):
+    def _consume_result(res, r, ox, oy):
         obb = getattr(r, 'obb', None)
         if obb is None:
             return
@@ -454,43 +462,71 @@ def run_stock_yolo_pass(
             res.occupied_px_polys.append(occupied_poly.astype(np.int32))
             res.counts_by_class[cls_i] = res.counts_by_class.get(cls_i, 0) + 1
 
-    batch_size = max(1, int(batch_size or 1))
-    if batch_size <= 1:
-        for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
-            with torch.inference_mode():
-                results = model.predict(
-                    source=crop,
-                    imgsz=int(imgsz),
-                    conf=float(conf),
-                    iou=float(iou),
-                    max_det=int(max_det),
-                    device=device,
-                    verbose=False,
-                    stream=True,
-                )
-                for r in results:
-                    _consume_result(r, ox, oy)
-                del results
-    else:
-        for batch in _iter_yolo_crop_batches(image, int(stride), batch_size):
-            offsets = [(ox, oy) for ox, oy, _ in batch]
-            crops = [crop for _, _, crop in batch]
-            with torch.inference_mode():
-                results = model.predict(
-                    source=crops,
-                    imgsz=int(imgsz),
-                    conf=float(conf),
-                    iou=float(iou),
-                    max_det=int(max_det),
-                    device=device,
-                    verbose=False,
-                    stream=True,
-                    batch=batch_size,
-                )
-                for (ox, oy), r in zip(offsets, results):
-                    _consume_result(r, ox, oy)
-                del results, crops, offsets
+    def _detect(effective_batch):
+        res = StockYoloResults(
+            requested_batch_size=batch_size,
+            effective_batch_size=effective_batch,
+            batch_fell_back=(effective_batch != batch_size),
+        )
+        if effective_batch <= 1:
+            for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+                with torch.inference_mode():
+                    results = model.predict(
+                        source=crop,
+                        imgsz=int(imgsz),
+                        conf=float(conf),
+                        iou=float(iou),
+                        max_det=int(max_det),
+                        device=device,
+                        verbose=False,
+                        stream=True,
+                    )
+                    for r in results:
+                        _consume_result(res, r, ox, oy)
+                    del results
+        else:
+            for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch):
+                offsets = [(ox, oy) for ox, oy, _ in batch]
+                crops = [crop for _, _, crop in batch]
+                with torch.inference_mode():
+                    results = model.predict(
+                        source=crops,
+                        imgsz=int(imgsz),
+                        conf=float(conf),
+                        iou=float(iou),
+                        max_det=int(max_det),
+                        device=device,
+                        verbose=False,
+                        stream=True,
+                        batch=effective_batch,
+                    )
+                    for (ox, oy), r in zip(offsets, results):
+                        _consume_result(res, r, ox, oy)
+                    del results, crops, offsets
+        return res
 
+    batch_size = max(1, int(batch_size or 1))
+    try:
+        res = _detect(batch_size)
+    except RuntimeError as exc:
+        if batch_size > 1 and _is_cuda_oom(exc):
+            # Discard the partial batched results and restart from scratch so
+            # the fallback output is identical to a pure batch-1 run.
+            print(
+                f"    Stock YOLO batch={batch_size} hit CUDA OOM; "
+                "retrying with batch=1",
+                flush=True,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            res = _detect(1)
+        else:
+            raise
+
+    # Cumulative across both attempts when OOM fallback triggers — that is the
+    # honest wall cost of the pass.
     res.inference_time_s = time.perf_counter() - t0
     return res
 

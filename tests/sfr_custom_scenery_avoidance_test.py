@@ -1,0 +1,218 @@
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import O4_SFR_DSF_Utils as DSF
+import O4_SFR_Building_Overlay as BLD
+
+
+def _write_obj(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "I",
+                "800",
+                "OBJ",
+                "VT -1.0 0.0 -2.0 0 1 0 0 0",
+                "VT 3.0 0.0 4.0 0 1 0 1 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+class CustomSceneryAvoidanceTests(unittest.TestCase):
+    def test_scenery_packs_parser_keeps_enabled_existing_unique_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            active = custom / "Active Pack"
+            disabled = custom / "Disabled Pack"
+            space = custom / "Pack With Spaces"
+            active.mkdir(parents=True)
+            disabled.mkdir()
+            space.mkdir()
+            (custom / "scenery_packs.ini").write_text(
+                "\n".join(
+                    [
+                        "I",
+                        "1000 Version",
+                        "SCENERY",
+                        "SCENERY_PACK Custom Scenery/Active Pack/",
+                        "SCENERY_PACK_DISABLED Custom Scenery/Disabled Pack/",
+                        "SCENERY_PACK Custom Scenery/Pack With Spaces/",
+                        "SCENERY_PACK Custom Scenery/Active Pack/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            packs = DSF.active_scenery_pack_dirs(custom)
+
+        self.assertEqual([name for name, _ in packs], ["Active Pack", "Pack With Spaces"])
+
+    def test_active_custom_scenery_dsf_search_matches_basename_and_skips_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            active = custom / "Active Pack"
+            disabled = custom / "Disabled Pack"
+            output_pack = custom / "yOrtho4XP_Bld_Overlays"
+            for pack in (active, disabled, output_pack):
+                (pack / "Earth nav data" / "+20+120").mkdir(parents=True)
+                (pack / "Earth nav data" / "+20+120" / "+22+120.dsf").write_text("", encoding="utf-8")
+            output_dsf = output_pack / "Earth nav data" / "+20+120" / "+22+120.dsf"
+            (custom / "scenery_packs.ini").write_text(
+                "\n".join(
+                    [
+                        "SCENERY_PACK Custom Scenery/Active Pack/",
+                        "SCENERY_PACK_DISABLED Custom Scenery/Disabled Pack/",
+                        "SCENERY_PACK Custom Scenery/yOrtho4XP_Bld_Overlays/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            matches = DSF.find_active_custom_scenery_dsfs(
+                custom,
+                "+22+120.dsf",
+                skip_dsf_path=output_dsf,
+            )
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0][0], "Active Pack")
+        self.assertTrue(matches[0][1].endswith(os.path.join("+20+120", "+22+120.dsf")))
+
+    def test_obj8_bounds_and_library_resolution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            lib = custom / "Library Pack"
+            obj = lib / "objects" / "building.obj"
+            _write_obj(obj)
+            lib.mkdir(parents=True, exist_ok=True)
+            (lib / "library.txt").write_text(
+                "EXPORT lib/custom/building.obj objects/building.obj\n",
+                encoding="utf-8",
+            )
+            (custom / "scenery_packs.ini").write_text(
+                "SCENERY_PACK Custom Scenery/Library Pack/\n",
+                encoding="utf-8",
+            )
+            index = BLD._active_custom_library_index(custom)
+
+            resolved = BLD._resolve_custom_object_path(
+                "lib/custom/building.obj",
+                None,
+                index,
+            )
+            bounds = BLD._read_obj8_bounds(resolved, tmpdir)
+
+        self.assertEqual(Path(resolved), obj)
+        self.assertEqual(bounds, (-1.0, 3.0, -2.0, 4.0))
+
+    def test_generic_custom_dsf_parser_extracts_objects_and_facades(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            package = tmp / "Custom Scenery" / "Active Pack"
+            _write_obj(package / "objects" / "building.obj")
+            dsf = package / "Earth nav data" / "+20+120" / "+22+120.dsf"
+            dsf.parent.mkdir(parents=True)
+            dsf.write_text("", encoding="utf-8")
+            text = tmp / "source.txt"
+            text.write_text(
+                "\n".join(
+                    [
+                        "OBJECT_DEF objects/building.obj",
+                        "OBJECT_DEF objects/missing.obj",
+                        "POLYGON_DEF lib/custom/building.fac",
+                        "POLYGON_DEF lib/custom/forest.for",
+                        "OBJECT 0 120.5000000 22.5000000 45.0",
+                        "OBJECT 1 120.6000000 22.6000000 0.0",
+                        "BEGIN_POLYGON 0 0 2",
+                        "BEGIN_WINDING",
+                        "POLYGON_POINT 120.1 22.1",
+                        "POLYGON_POINT 120.2 22.1",
+                        "POLYGON_POINT 120.2 22.2",
+                        "END_WINDING",
+                        "END_POLYGON",
+                        "BEGIN_POLYGON 1 0 2",
+                        "BEGIN_WINDING",
+                        "POLYGON_POINT 120.3 22.3",
+                        "POLYGON_POINT 120.4 22.3",
+                        "POLYGON_POINT 120.4 22.4",
+                        "END_WINDING",
+                        "END_POLYGON",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(BLD, "ensure_cached_dsf_text", return_value=str(text)), \
+                    mock.patch.object(
+                        BLD,
+                        "find_active_custom_scenery_dsfs",
+                        return_value=[("Active Pack", str(dsf), str(package))],
+                    ), \
+                    mock.patch.object(BLD, "_active_custom_library_index", return_value={}):
+                polys, objects, skipped, layers = BLD._load_custom_scenery_building_exclusions(
+                    str(tmp / "Custom Scenery"),
+                    22,
+                    120,
+                    str(tmp / "out.dsf"),
+                    "DSFTool.exe",
+                    tmpdir,
+                )
+
+        self.assertEqual(layers, 1)
+        self.assertEqual(len(objects), 1)
+        self.assertEqual((objects[0]["w_m"], objects[0]["h_m"]), (4.0, 6.0))
+        self.assertEqual(len(polys), 1)
+        self.assertEqual(polys[0][0], (22.1, 120.1))
+        self.assertEqual(skipped, 1)
+
+    def test_custom_object_mask_rejects_overlapping_yolo_footprint(self):
+        custom_objects = {
+            "lat": BLD.np.array([0.5], dtype=BLD.np.float32),
+            "lon": BLD.np.array([0.5], dtype=BLD.np.float32),
+            "heading": BLD.np.array([0.0], dtype=BLD.np.float32),
+            "w_m": BLD.np.array([80.0], dtype=BLD.np.float32),
+            "h_m": BLD.np.array([80.0], dtype=BLD.np.float32),
+        }
+        static_occ_mask = BLD._rasterize_simheaven_objects(
+            custom_objects,
+            lat_n=1.0,
+            lat_s=0.0,
+            lon_w=0.0,
+            lon_e=1.0,
+            img_h=100,
+            img_w=100,
+            m_per_px=2.0,
+            margin_m=0.0,
+        )
+        scratch = BLD.np.zeros_like(static_occ_mask)
+        yolo_poly = BLD.np.array(
+            [[40, 40], [60, 40], [60, 60], [40, 60]],
+            dtype=BLD.np.int32,
+        )
+
+        self.assertFalse(
+            BLD._direct_yolo_poly_fits(
+                static_occ_mask,
+                BLD.np.zeros_like(static_occ_mask),
+                yolo_poly,
+                scratch_mask=scratch,
+                static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
+            )
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

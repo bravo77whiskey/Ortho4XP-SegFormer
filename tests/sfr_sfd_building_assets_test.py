@@ -376,6 +376,86 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertTrue(all(call["stream"] for call in batched_model.calls))
         self.assertEqual(batched_model.calls[0]["batch"], 2)
 
+    def test_yolo_obb_oom_fallback_reports_metadata_and_discards_partial_results(self):
+        class FakeObb:
+            def __init__(self):
+                self.xyxyxyxy = BLD.torch.tensor(
+                    [[[10.0, 10.0], [30.0, 10.0], [30.0, 20.0], [10.0, 20.0]]]
+                )
+                self.conf = BLD.torch.tensor([0.8])
+                self.cls = BLD.torch.tensor([0.0])
+
+        class FakeResult:
+            def __init__(self):
+                self.obb = FakeObb()
+
+        class OomOnBatchYolo:
+            def __init__(self):
+                self.calls = []
+
+            def predict(self, **kwargs):
+                self.calls.append(kwargs)
+                source = kwargs["source"]
+                if isinstance(source, list):
+                    def _failing():
+                        yield FakeResult()
+                        raise RuntimeError("CUDA out of memory.")
+
+                    return _failing()
+                return iter((FakeResult(),))
+
+        image = np.zeros((512, 1536, 3), dtype=np.uint8)
+        common = dict(
+            imgsz=512,
+            stride=512,
+            conf=0.18,
+            iou=0.5,
+            max_det=1000,
+            device="cpu",
+            m_per_px=1.0,
+        )
+
+        baseline_model = OomOnBatchYolo()
+        baseline = BLD._run_yolo_obb_inference(
+            baseline_model, image, batch_size=1, **common
+        )
+        fallback_model = OomOnBatchYolo()
+        fallback = BLD._run_yolo_obb_inference(
+            fallback_model,
+            image,
+            batch_size=8,
+            return_metadata=True,
+            **common,
+        )
+
+        self.assertEqual(baseline, fallback["detections"])
+        self.assertEqual(fallback["requested_batch"], 8)
+        self.assertEqual(fallback["effective_batch"], 1)
+        self.assertTrue(fallback["fell_back"])
+        self.assertEqual(len(fallback_model.calls), 1 + len(baseline_model.calls))
+
+    def test_yolo_obb_fallback_cache_key_uses_effective_batch(self):
+        detections = [{"area_m2": 100.0, "confidence": 0.8}]
+        requested_key = BLD._yolo_obb_cache_key(
+            "1_2_BI18.dds", 512, 512, None, 512, 512, 0.18, 0.5, 1000,
+            batch_size=8,
+        )
+        effective_key = BLD._yolo_obb_cache_key(
+            "1_2_BI18.dds", 512, 512, None, 512, 512, 0.18, 0.5, 1000,
+            batch_size=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = os.path.join(tmpdir, "1_2_BI18_yolo_obb.pkl")
+            BLD._save_yolo_obb_cache(cache_path, effective_key, detections)
+
+            self.assertNotEqual(requested_key, effective_key)
+            self.assertIsNone(BLD._load_yolo_obb_cache(cache_path, requested_key))
+            self.assertEqual(
+                BLD._load_yolo_obb_cache(cache_path, effective_key),
+                detections,
+            )
+
     def test_yolo_overlap_suppression_removes_lower_confidence_duplicates(self):
         detections = [
             {

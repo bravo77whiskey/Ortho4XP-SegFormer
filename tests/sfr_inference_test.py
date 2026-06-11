@@ -107,5 +107,12 @@ class SfrInferenceTests(unittest.TestCase):
             INF.segformer_batch_size = old_batch_size
 
 
+class CudaOomDetectionTests(unittest.TestCase):
+    def test_detects_oom_messages(self):
+        self.assertTrue(INF.is_cuda_oom(RuntimeError("CUDA out of memory.")))
+        self.assertTrue(INF.is_cuda_oom(RuntimeError("CUDA error: out of memory")))
+        self.assertFalse(INF.is_cuda_oom(RuntimeError("device-side assert triggered")))
+
+
 if __name__ == "__main__":
     unittest.main()
