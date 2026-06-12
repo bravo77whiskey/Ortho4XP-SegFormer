@@ -1,0 +1,168 @@
+# O4SFR ProcGen library build configuration.
+#
+# Everything that shapes the generated library lives here so a rebuild from a
+# clean checkout is reproducible: dimension ladders, the class->archetype
+# matrix, region flavors, variant counts and seeds.  grid.py turns this into
+# procgen_manifest.json; changing a value here changes asset ids/seeds only
+# where it must.
+
+version: 1
+lib_version: 1
+global_seed: 20260612
+output_package_name: O4SFR_ProcGen_Library
+
+atlas:
+  # 1024 halves every strip band (VRAM/bandwidth: 4x less than 2048); the
+  # V-band layout scales proportionally so UVs are resolution-independent.
+  size: 1024
+  seed: 101
+  # Flavors map 1:1 to a texture PNG; region dirs pick their flavor below.
+  flavors: [generic, europe, north_america, mediterranean, asia, africa,
+            south_america, australia_oceania]
+
+# Geometric dimension ladders.  A candidate asset is accepted by the matcher
+# when asset_l <= det_l, asset_w <= det_w and asset_area/det_area >= c, so a
+# per-axis ratio r yields worst-case coverage 1/r^2:
+#   tier_a (classes 1-3, strictest c=0.65): r=1.22 -> 0.672 worst case
+#   tier_b (classes 4-8, c=0.80):           r=1.10 -> 0.826 worst case
+# Key aspect caps exceed the DETECTION-domain aspect caps (3.0 / 4.0 / 5.0)
+# by roughly the ladder ratio: when the width axis quantizes down a rung,
+# coverage pushes the length axis up, so the fitting ASSET is more elongated
+# than the detection it serves.
+ladders:
+  tier_a:
+    ratio: 1.22
+    # 3.5 m start: the pool gate rejects footprints under 12 m^2, so the
+    # smallest square asset must be >= 3.47 m a side.
+    start_m: 3.5
+    # 25 m keeps a ~21 m rung so elongated class-2/3 detections (aspect 3,
+    # length up to ~28.5 m) still find a fitting asset.
+    stop_m: 25.0
+    max_aspect: 3.7
+  tier_b:
+    ratio: 1.10
+    start_m: 8.0
+    stop_m: 106.0
+    max_aspect: 4.4
+
+# Optional-library ingestion gate in O4_SFR_Building_Overlay.py
+# (_footprint_within_limits @ ~4431): area 12..7000 m^2, side 2..110 m.
+limits:
+  min_area_m2: 12.0
+  max_area_m2: 7000.0
+  max_side_m: 110.0
+
+# Class -> archetype matrix.  Area bands mirror BLD_PLACEMENT_CLASSES caps.
+# floors token F gives the pool height F*3.2 m via the _LxWxF filename token
+# (must stay <= 7: MAX_GENERATED_BUILDING_HEIGHT_M = 24.0).
+# "regions" become o4sfr/<region>/ path tokens; "generic" is the wildcard.
+# bucket must keep the include-token contract: residential|apartments|
+# commercial|industrial.
+bands:
+  - name: tiny_residential        # class 1
+    ladder: tier_a
+    min_area_m2: 12.0
+    max_area_m2: 90.0
+    bucket: residential
+    archetypes: [gable, hip, flatres]
+    floors: [1, 2]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  - name: small_residential       # class 2
+    ladder: tier_a
+    min_area_m2: 90.0
+    max_area_m2: 170.0
+    bucket: residential
+    archetypes: [gable, hip, lshape, flatres, shophouse]
+    floors: [1, 2]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  - name: compact_residential     # class 3
+    ladder: tier_a
+    min_area_m2: 170.0
+    max_area_m2: 270.0
+    bucket: residential
+    archetypes: [gable, hip, lshape, rowhouse, flatres, shophouse]
+    floors: [2, 3]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  # NOTE: tier B band floors overlap DOWN by the 0.8 coverage factor --
+  # a detection at a band's class floor needs assets up to 20% smaller
+  # than the floor, otherwise the band boundary leaves a coverage hole.
+  - name: medium                  # class 4
+    ladder: tier_b
+    min_area_m2: 216.0            # 270 * 0.8
+    max_area_m2: 450.0
+    bucket: apartments
+    archetypes: [rowhouse, aptslab, flatcom, shophouse]
+    floors: [2, 3, 4]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  - name: small_apartment         # class 5
+    ladder: tier_b
+    min_area_m2: 360.0            # 450 * 0.8
+    max_area_m2: 850.0
+    bucket: apartments
+    archetypes: [aptblock, flatcom]
+    floors: [3, 4, 5]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  - name: apartment_block         # class 6
+    ladder: tier_b
+    min_area_m2: 680.0            # 850 * 0.8
+    max_area_m2: 1650.0
+    bucket: apartments
+    archetypes: [aptslab, aptblock, flatcom]
+    floors: [4, 5, 6, 7]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  - name: large                   # class 7
+    ladder: tier_b
+    min_area_m2: 1320.0           # 1650 * 0.8
+    max_area_m2: 7000.0
+    max_aspect: 5.5
+    bucket: industrial
+    archetypes: [warehouse, bigbox]
+    floors: [2, 3, 4]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+
+# Buckets route commercial archetypes out of the apartments dir.
+archetype_buckets:
+  flatcom: commercial
+  bigbox: commercial
+
+# Per-region archetype routing: archetypes listed here are generated ONLY
+# for the named regions (unlisted archetypes appear everywhere). Massing is
+# regional identity: shophouses belong to Asian streets, terraced rows to
+# Europe/the Americas, flat-roof houses to warm/dry regions.
+archetype_regions:
+  flatres: [generic, mediterranean, asia, africa, south_america]
+  shophouse: [asia, generic]
+  rowhouse: [generic, europe, north_america, south_america, australia_oceania]
+  lshape: [generic, europe, north_america, asia, australia_oceania]
+
+# Region dir -> atlas flavor.  Notes from OPTIONAL_ASSET_REGION_ALIASES:
+# one asia dir serves asia + se_asia tiles; europe assets already serve
+# scandinavia + mediterranean tiles, the dedicated mediterranean dir just
+# adds the whitewash/clay-tile look where it fits best.
+region_flavors:
+  generic: generic
+  europe: europe
+  north_america: north_america
+  mediterranean: mediterranean
+  asia: asia
+  africa: africa
+  south_america: south_america
+  australia_oceania: australia_oceania
+
+# Deferred: 30-120 m height bins have no runtime consumer
+# (MAX_GENERATED_BUILDING_HEIGHT_M cap + discarded YOLO height bin).
+# Grid rows above floors<=7 are not generated; see plan M4.

@@ -1,0 +1,269 @@
+{
+ "flavors": {
+  "africa": "textures/o4sfr_procgen_atlas_africa.png",
+  "asia": "textures/o4sfr_procgen_atlas_asia.png",
+  "australia_oceania": "textures/o4sfr_procgen_atlas_australia_oceania.png",
+  "europe": "textures/o4sfr_procgen_atlas_europe.png",
+  "generic": "textures/o4sfr_procgen_atlas_generic.png",
+  "mediterranean": "textures/o4sfr_procgen_atlas_mediterranean.png",
+  "north_america": "textures/o4sfr_procgen_atlas_north_america.png",
+  "south_america": "textures/o4sfr_procgen_atlas_south_america.png"
+ },
+ "size": 1024,
+ "strips": {
+  "ground_brick": {
+   "kind": "ground",
+   "px": [
+    432,
+    480
+   ],
+   "v0": 0.535156,
+   "v1": 0.574219,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "ground_concrete": {
+   "kind": "ground",
+   "px": [
+    528,
+    576
+   ],
+   "v0": 0.441406,
+   "v1": 0.480469,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "ground_roller": {
+   "kind": "roller",
+   "px": [
+    624,
+    672
+   ],
+   "v0": 0.347656,
+   "v1": 0.386719,
+   "world_h_m": 3.2,
+   "world_w_m": 24.0
+  },
+  "ground_siding": {
+   "kind": "ground",
+   "px": [
+    384,
+    432
+   ],
+   "v0": 0.582031,
+   "v1": 0.621094,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "ground_storefront": {
+   "kind": "storefront",
+   "px": [
+    576,
+    624
+   ],
+   "v0": 0.394531,
+   "v1": 0.433594,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "ground_stucco": {
+   "kind": "ground",
+   "px": [
+    480,
+    528
+   ],
+   "v0": 0.488281,
+   "v1": 0.527344,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "plain_brick": {
+   "kind": "plain",
+   "px": [
+    704,
+    736
+   ],
+   "v0": 0.285156,
+   "v1": 0.308594,
+   "world_h_m": 2.0,
+   "world_w_m": 8.0
+  },
+  "plain_concrete": {
+   "kind": "plain",
+   "px": [
+    768,
+    800
+   ],
+   "v0": 0.222656,
+   "v1": 0.246094,
+   "world_h_m": 2.0,
+   "world_w_m": 8.0
+  },
+  "plain_siding": {
+   "kind": "plain",
+   "px": [
+    672,
+    704
+   ],
+   "v0": 0.316406,
+   "v1": 0.339844,
+   "world_h_m": 2.0,
+   "world_w_m": 8.0
+  },
+  "plain_stucco": {
+   "kind": "plain",
+   "px": [
+    736,
+    768
+   ],
+   "v0": 0.253906,
+   "v1": 0.277344,
+   "world_h_m": 2.0,
+   "world_w_m": 8.0
+  },
+  "roof_flat": {
+   "kind": "roof",
+   "px": [
+    960,
+    1024
+   ],
+   "v0": 0.003906,
+   "v1": 0.058594,
+   "world_h_m": 16.0,
+   "world_w_m": 16.0
+  },
+  "roof_metal": {
+   "kind": "roof",
+   "px": [
+    912,
+    960
+   ],
+   "v0": 0.066406,
+   "v1": 0.105469,
+   "world_h_m": 9.0,
+   "world_w_m": 12.0
+  },
+  "roof_shingle": {
+   "kind": "roof",
+   "px": [
+    816,
+    864
+   ],
+   "v0": 0.160156,
+   "v1": 0.199219,
+   "world_h_m": 9.0,
+   "world_w_m": 12.0
+  },
+  "roof_tile": {
+   "kind": "roof",
+   "px": [
+    864,
+    912
+   ],
+   "v0": 0.113281,
+   "v1": 0.152344,
+   "world_h_m": 9.0,
+   "world_w_m": 12.0
+  },
+  "trim_dark": {
+   "kind": "trim",
+   "px": [
+    800,
+    816
+   ],
+   "v0": 0.207031,
+   "v1": 0.214844,
+   "world_h_m": 0.3,
+   "world_w_m": 4.0
+  },
+  "wall_brick_a": {
+   "kind": "wall",
+   "px": [
+    96,
+    144
+   ],
+   "v0": 0.863281,
+   "v1": 0.902344,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_brick_b": {
+   "kind": "wall",
+   "px": [
+    144,
+    192
+   ],
+   "v0": 0.816406,
+   "v1": 0.855469,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_concrete_a": {
+   "kind": "wall",
+   "px": [
+    288,
+    336
+   ],
+   "v0": 0.675781,
+   "v1": 0.714844,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_concrete_b": {
+   "kind": "wall",
+   "px": [
+    336,
+    384
+   ],
+   "v0": 0.628906,
+   "v1": 0.667969,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_siding_a": {
+   "kind": "wall",
+   "px": [
+    0,
+    48
+   ],
+   "v0": 0.957031,
+   "v1": 0.996094,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_siding_b": {
+   "kind": "wall",
+   "px": [
+    48,
+    96
+   ],
+   "v0": 0.910156,
+   "v1": 0.949219,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_stucco_a": {
+   "kind": "wall",
+   "px": [
+    192,
+    240
+   ],
+   "v0": 0.769531,
+   "v1": 0.808594,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  },
+  "wall_stucco_b": {
+   "kind": "wall",
+   "px": [
+    240,
+    288
+   ],
+   "v0": 0.722656,
+   "v1": 0.761719,
+   "world_h_m": 3.2,
+   "world_w_m": 20.0
+  }
+ },
+ "window_period_m": 2.5
+}

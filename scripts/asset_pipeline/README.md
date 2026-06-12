@@ -112,3 +112,72 @@ python src/scripts/audit_sfr_building_assets.py --lat <lat> --lon <lon>
 
 The audit script reports per-curated-library install state and per-region
 candidate counts.
+
+---
+
+# O4SFR ProcGen Library (`procgen/`)
+
+A second, fully procedural library that fills the dimension grid the curated
+catalog can never cover: the YOLO matcher places assets only when footprint
+coverage is ≥ 0.5–0.8 with **no runtime scaling**, so every (length, width,
+height) a detection can take needs a nearby asset. `procgen/` generates
+**~3,600 dimension-exact virtual paths (~9,800 OBJ8s)** across nine
+parametric archetypes — gable / hip / L-shaped houses, rowhouses, apartment
+slabs & blocks, flat-roof commercial, warehouses, big-box retail — textured
+from eight shared 2048² PIL-generated atlases (generic, europe,
+north_america, mediterranean, asia, africa, south_america,
+australia_oceania), modeled headlessly in Blender and exported via
+xplane2blender.  Region flavors differ by palette AND by material
+distribution (`archetypes/styles.py`: clay tile on stucco for the
+Mediterranean, corrugated metal on render for Africa, concrete + metal/glazed
+tile for Asia, …); one `asia` dir serves asia + se_asia tiles and europe
+already covers scandinavia via `OPTIONAL_ASSET_REGION_ALIASES`.
+
+It is discovered under the existing `o4sfr` library id (folder-name
+substring match) with **zero core-code changes**: heights parse from the
+`_LxWxF` filename token (F × 3.2 m), bounds are measured from OBJ `VT`
+lines, regions ride the `o4sfr/<region>/…` path token.
+
+Key design points:
+
+- **Geometric dimension ladders** (`config.yaml`): per-axis ratio 1.22 for
+  residential classes (coverage floor 0.65) and 1.10 for classes 4+ (floor
+  0.8); Tier B band floors overlap *down* by the 0.8 coverage factor and key
+  aspect caps exceed the detection-domain caps by one ladder ratio — both
+  found empirically by `tests/procgen_coverage_test.py` (10k Monte-Carlo
+  detections per class against the real candidate index).
+- **One virtual path per (dimension key, floors, region, bucket)** with one
+  `EXPORT` line per archetype × visual variant: X-Plane randomizes the
+  physical OBJ per placement, which is what mixes archetypes inside a
+  neighborhood (the matcher itself breaks coverage ties deterministically).
+- **The declared footprint is the roof outline** (what the YOLO OBB sees);
+  walls are inset by the eave overhang so measured bounds equal the name.
+
+```
+# 1. Manifest from config (committed; the single source of truth).
+python scripts/asset_pipeline/procgen/grid.py
+
+# 2. Atlases (into the package) + atlas_layout.json (committed).
+python scripts/asset_pipeline/procgen/atlas.py --output "<Custom Scenery>/O4SFR_ProcGen_Library"
+
+# 3. Generate OBJ8s (headless Blender; ~35 min with --jobs 3).
+python scripts/asset_pipeline/procgen/generate_procedural_buildings.py \
+    --output "<Custom Scenery>/O4SFR_ProcGen_Library" \
+    --blender "F:/SteamLibrary/steamapps/common/Blender/blender.exe" --jobs 3
+
+# 4. library.txt + build_info.json.
+python scripts/asset_pipeline/procgen/build_procgen_library.py --output "<pkg>"
+
+# 5. Validate bounds/tris/textures/path tokens against the live overlay code.
+python scripts/asset_pipeline/procgen/verify_procgen_library.py --output "<pkg>"
+
+# 6. Visual QA contact sheets (previews/sheet_<archetype>.png).
+python scripts/asset_pipeline/procgen/preview_render.py --output "<pkg>" --blender <blender>
+```
+
+Tests: `tests/procgen_archetypes_test.py` (geometry contracts, no Blender),
+`tests/procgen_library_pool_test.py` (end-to-end pool ingestion of a
+fabricated package), `tests/procgen_coverage_test.py` (grid coverage).
+Deferred: 30–120 m height bins — blocked by
+`MAX_GENERATED_BUILDING_HEIGHT_M` and the discarded YOLO height bin; see
+the plan notes in `procgen/config.yaml`.

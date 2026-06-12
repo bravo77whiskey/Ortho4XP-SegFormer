@@ -1,0 +1,136 @@
+"""Patch two-band LOD shells into generated OBJ8s in place.
+
+Band 1 (0..swap): the full Blender-exported model.
+Band 2 (swap..far): an ~8-face silhouette shell rebuilt here in pure Python
+from the archetype's own metadata (exact ridge height + the same atlas
+strips), so the swap is invisible at distance. Beyond ``far`` the object
+culls. No Blender run needed -- this rewrites OBJ8 text directly.
+
+Run:  python apply_lod_shells.py --output <pkg> [--swap 2000] [--far 9000]
+      python apply_lod_shells.py --output <pkg> --strip     # remove bands
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+from archetypes import build_archetype  # noqa: E402
+from add_lod import strip_lod  # noqa: E402
+from lod_shell import merge_bands_into_obj8, roof_quad_mesh, shell_mesh  # noqa: E402
+
+# Band boundaries in metres: full mesh, silhouette shell, flat-top box,
+# roof-colored quad, then culled. Flat-roofed archetypes skip the box stage
+# (their shell already is a flat-top box) and span shell -> quad directly.
+# The 25 km cull matches the visibility of simHeaven's auto-LOD objects.
+DEFAULT_BANDS = (2000, 6000, 12000, 25000)
+
+
+def _strip_band(layout: dict, name: str):
+    row = layout["strips"][name]
+    return (float(row["v0"]), float(row["v1"]), float(row["world_w_m"]))
+
+
+def patch_shell(obj_path: str, archetype: str, length_m: float,
+                width_m: float, floors: int, seed: int, flavor: str,
+                layout: dict, bands=DEFAULT_BANDS) -> str:
+    spec = build_archetype(archetype, length_m, width_m, floors, seed,
+                           layout, flavor)
+    meta = spec.meta
+    if not meta:
+        return "no-meta"
+    d0, d1, d2, d3 = bands
+    wall_band = _strip_band(layout, meta["wall_strip"])
+    roof_band = _strip_band(layout, meta["roof_strip"])
+
+    lod_bands = []
+    if meta["kind"] == "pitched":
+        lod_bands.append((*shell_mesh(
+            length_m, width_m, floors, "pitched",
+            meta["ridge_z"], meta["eave_z"], wall_band, roof_band,
+        ), d0, d1))
+        lod_bands.append((*shell_mesh(
+            length_m, width_m, floors, "flat",
+            meta["eave_z"], meta["eave_z"], wall_band, roof_band,
+        ), d1, d2))
+        quad_z = meta["eave_z"]
+    else:
+        lod_bands.append((*shell_mesh(
+            length_m, width_m, floors, "flat",
+            meta["ridge_z"], meta["eave_z"], wall_band, roof_band,
+        ), d0, d2))
+        quad_z = meta["ridge_z"]
+    lod_bands.append((*roof_quad_mesh(length_m, width_m, quad_z, roof_band),
+                      d2, d3))
+    return merge_bands_into_obj8(obj_path, lod_bands)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--manifest", default=os.path.join(HERE, "procgen_manifest.json")
+    )
+    parser.add_argument(
+        "--layout", default=os.path.join(HERE, "atlas_layout.json")
+    )
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--bands", type=int, nargs=4,
+                        default=list(DEFAULT_BANDS),
+                        metavar=("FULL", "SHELL", "BOX", "QUAD"),
+                        help="Band boundaries in metres: full mesh end, "
+                             "shell end, flat-box end, roof-quad end (cull).")
+    parser.add_argument("--strip", action="store_true",
+                        help="Remove LOD bands instead of adding them "
+                             "(NOTE: band-2 shell geometry stays in the "
+                             "file but is never drawn; regenerate for a "
+                             "byte-clean library).")
+    args = parser.parse_args(argv)
+
+    with open(args.manifest, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    with open(args.layout, "r", encoding="utf-8") as fh:
+        layout = json.load(fh)
+
+    stats = {}
+    seen = set()
+    for asset in manifest["assets"]:
+        if not asset.get("enabled"):
+            continue
+        for variant in asset["variants"]:
+            physical = variant["physical_path"]
+            if physical in seen:
+                continue
+            seen.add(physical)
+            obj_path = os.path.join(args.output, physical)
+            if not os.path.isfile(obj_path):
+                stats["missing"] = stats.get("missing", 0) + 1
+                continue
+            if args.strip:
+                status = strip_lod(obj_path)
+            else:
+                status = patch_shell(
+                    obj_path, variant["archetype"],
+                    asset["length_m"], asset["width_m"], asset["floors"],
+                    variant["seed"], asset["flavor"],
+                    layout, tuple(args.bands),
+                )
+            stats[status] = stats.get(status, 0) + 1
+
+    print("LOD shells: " + "  ".join(
+        f"{key}={value}" for key, value in sorted(stats.items())
+    ))
+    failures = sum(
+        value for key, value in stats.items()
+        if key in ("no-tris", "no-meta", "unsupported")
+    )
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
