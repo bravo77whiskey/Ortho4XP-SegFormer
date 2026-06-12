@@ -567,6 +567,16 @@ cfg_tile_vars = {
         "short_name": "bld_yolo_max",
         "hint": "YOLO OBB maximum detections per inference crop.",
     },
+    "sfr_bld_yolo_outline_tolerance": {
+        "type": float,
+        "default": 1.0,
+        "short_name": "bld_yolo_outline_tol",
+        "hint": "Fraction of a 3D object's footprint area required to lie "
+                "inside the YOLO detection polygon. 1.0 = strict containment "
+                "(historical behavior). Values around 0.90-0.95 convert most "
+                "outline-rejected facade fallbacks into 3D object placements "
+                "at the cost of slight overhang past the detected outline.",
+    },
     # Other
     "custom_dem": {
         "type": str,
@@ -707,6 +717,7 @@ list_sfr_bld_vars = [
     "sfr_bld_yolo_iou",
     "sfr_bld_yolo_stride",
     "sfr_bld_yolo_max_det",
+    "sfr_bld_yolo_outline_tolerance",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars

@@ -20,6 +20,10 @@ class LibraryExport:
     virtual_path: str
     physical_path: str
     resolved_path: str | None
+    # Lowercased name of the governing ``REGION`` block, or None when the
+    # export is global. X-Plane only resolves region-gated exports inside
+    # that region, so consumers must not reference them on other tiles.
+    region: str | None = None
 
 
 def normalize_library_path(path):
@@ -108,6 +112,7 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
         return []
 
     exports = []
+    current_region = None
     with handle:
         for raw_line in handle:
             line = raw_line.strip()
@@ -117,6 +122,10 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
             if not parts:
                 continue
             command = parts[0].upper()
+            if command == "REGION" and len(parts) >= 2:
+                name = parts[1].strip().lower()
+                current_region = None if name in ("world", "all") else name
+                continue
             virtual_path = physical_path = None
             if command in {"EXPORT", "EXPORT_BACKUP", "EXPORT_EXCLUDE"} and len(parts) >= 3:
                 virtual_path, physical_path = parts[1], parts[2]
@@ -143,6 +152,7 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
                     virtual_path=virt,
                     physical_path=phys,
                     resolved_path=resolved if os.path.isfile(resolved) else None,
+                    region=current_region,
                 )
             )
     return exports

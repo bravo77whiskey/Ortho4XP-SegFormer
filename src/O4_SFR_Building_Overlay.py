@@ -87,6 +87,35 @@ def _stock_yolo_batch_default():
         return 1
 
 
+def _stock_yolo_batch_metadata(stock_res, requested_batch_size):
+    """Return stock-YOLO batch metadata, tolerating legacy result objects."""
+    requested = max(1, int(requested_batch_size or 1))
+    try:
+        effective = max(1, int(getattr(stock_res, "effective_batch_size")))
+    except (TypeError, ValueError, AttributeError):
+        effective = requested
+    batch_fell_back = bool(getattr(stock_res, "batch_fell_back", effective != requested))
+    return effective, batch_fell_back
+
+
+def _run_stock_yolo_pass_compat(image, **kwargs):
+    """Call stock-YOLO while tolerating older helper modules in deployed copies."""
+    try:
+        return STOCKYOLO.run_stock_yolo_pass(image, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        legacy_kwargs = dict(kwargs)
+        removed = False
+        for key in ("asset_map", "static_classes"):
+            if key in legacy_kwargs:
+                legacy_kwargs.pop(key)
+                removed = True
+        if not removed:
+            raise
+        return STOCKYOLO.run_stock_yolo_pass(image, **legacy_kwargs)
+
+
 def _cuda_memory_counts_mb():
     if not torch.cuda.is_available():
         return None
@@ -2745,6 +2774,12 @@ YOLO_OBJECT_MIN_COVERAGE_BY_CLASS = {
     BLD_CLASS_SMALL_RESIDENTIAL: 0.50,
     BLD_CLASS_COMPACT_RESIDENTIAL: 0.65,
 }
+# Fraction of an object's footprint area that must lie inside the YOLO
+# detection polygon. 1.0 keeps the historical strict all-vertices test;
+# values below 1.0 absorb the heading/anchor quantisation error that
+# otherwise rejects near-detection-size candidates (the dominant cause of
+# facade fallbacks on dense tiles). Overridable via run(yolo_outline_tolerance=...).
+YOLO_OBJECT_OUTLINE_MIN_INSIDE = 1.0
 
 
 def _building_fill_modes(smart_gap_fill):
@@ -2988,14 +3023,21 @@ _XP12_WAREHOUSE_FACADES = (
     "lib/buildings/facades/industrial/warehouse_09_90x90.fac",
     "lib/buildings/facades/industrial/warehouse_10_90x90.fac",
 )
+# NOTE: _SH_BUILDING / _SH_RESIDENTIAL / _SH_FARM resolve to simHeaven's
+# house_default_*.fac with ROOF_SLOPE SLANT. X-Plane constructs that roof
+# as concentric inset rings around the footprint — fine for the ~10-20 m
+# houses they were authored for, but on class-4+ megablock detections
+# (footprints up to 250 m) the rings degenerate into rainbow-banded roofs.
+# Keep them OUT of every class >= BLD_CLASS_MEDIUM variant pool.
 _SH_URBAN_FACADES = (
-    _SH_BUILDING, _SH_COMMERCIAL, _SH_RETAIL, _SH_HOTEL,
+    _SH_COMMERCIAL, _SH_RETAIL, _SH_HOTEL,
     _SH_HIGH_RES, _SH_HIGH_COM, _SH_SCHOOL, _SH_COLLEGE, _SH_UNIVERSITY,
 )
 _SH_ROAD_FACADES = (_SH_COMMERCIAL, _SH_RETAIL, _SH_GARAGE, _SH_HOTEL)
 _SH_RURAL_FACADES = (_SH_RESIDENTIAL, _SH_BUILDING, _SH_FARM, _SH_GARAGE)
+_SH_RURAL_FACADES_LG = (_SH_GARAGE,)  # slant-roof house facades excluded
 _SH_INDUSTRIAL_FACADES = (_SH_INDUSTRIAL, _SH_COMMERCIAL, _SH_GARAGE)
-_SH_WATERFRONT_FACADES = (_SH_BUILDING, _SH_HOTEL)
+_SH_WATERFRONT_FACADES = (_SH_HOTEL,)
 
 # CONTEXT_FACADE_VARIANTS[(placement_class, dominant_landcover_class)] = tuple of facade lib paths.
 # Picker uses the dominant non-building landcover class around the detection to pick a variant pool;
@@ -3008,7 +3050,7 @@ CONTEXT_FACADE_VARIANTS = {
     (BLD_CLASS_MEDIUM, _SF_DEVELOPED): _XP12_MID_FACADES + _XP12_STRIP_COMMERCIAL_FACADES[3:] + _SH_URBAN_FACADES,
     (BLD_CLASS_SMALL_APARTMENT, _SF_DEVELOPED): _XP12_MID_FACADES + _XP12_HIGH_FACADES[:8] + _SH_URBAN_FACADES,
     (BLD_CLASS_APARTMENT_BLOCK, _SF_DEVELOPED): _XP12_HIGH_FACADES + _SH_URBAN_FACADES,
-    (BLD_CLASS_LARGE, _SF_DEVELOPED): _XP12_STRIP_COMMERCIAL_FACADES[5:] + _XP12_WAREHOUSE_FACADES[2:] + (_SH_COMMERCIAL, _SH_RETAIL, _SH_BUILDING, _SH_HIGH_COM),
+    (BLD_CLASS_LARGE, _SF_DEVELOPED): _XP12_STRIP_COMMERCIAL_FACADES[5:] + _XP12_WAREHOUSE_FACADES[2:] + (_SH_COMMERCIAL, _SH_RETAIL, _SH_HIGH_COM),
     (BLD_CLASS_EXTRA_LARGE, _SF_DEVELOPED): _XP12_WAREHOUSE_FACADES[5:] + (_SH_COMMERCIAL, _SH_HIGH_COM),
 
     # Road-adjacent commercial strips.
@@ -3025,17 +3067,17 @@ CONTEXT_FACADE_VARIANTS = {
     (BLD_CLASS_TINY_RESIDENTIAL, _SF_AGRICULTURE): _XP12_LOW_FACADES[:3] + _SH_RURAL_FACADES,
     (BLD_CLASS_SMALL_RESIDENTIAL, _SF_AGRICULTURE): _XP12_LOW_FACADES[:4] + _SH_RURAL_FACADES,
     (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_AGRICULTURE): _XP12_LOW_FACADES[:5] + _XP12_MID_FACADES[:2] + _SH_RURAL_FACADES,
-    (BLD_CLASS_MEDIUM, _SF_AGRICULTURE): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES,
-    (BLD_CLASS_LARGE, _SF_AGRICULTURE): _XP12_WAREHOUSE_FACADES[:5] + (_SH_FARM, _SH_INDUSTRIAL),
-    (BLD_CLASS_EXTRA_LARGE, _SF_AGRICULTURE): _XP12_WAREHOUSE_FACADES[5:] + (_SH_FARM, _SH_INDUSTRIAL),
+    (BLD_CLASS_MEDIUM, _SF_AGRICULTURE): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES_LG,
+    (BLD_CLASS_LARGE, _SF_AGRICULTURE): _XP12_WAREHOUSE_FACADES[:5] + (_SH_INDUSTRIAL,),
+    (BLD_CLASS_EXTRA_LARGE, _SF_AGRICULTURE): _XP12_WAREHOUSE_FACADES[5:] + (_SH_INDUSTRIAL,),
     (BLD_CLASS_TINY_RESIDENTIAL, _SF_TREE): _XP12_LOW_FACADES[:3] + _SH_RURAL_FACADES,
     (BLD_CLASS_SMALL_RESIDENTIAL, _SF_TREE): _XP12_LOW_FACADES[:4] + _SH_RURAL_FACADES,
     (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_TREE): _XP12_LOW_FACADES + _SH_RURAL_FACADES,
-    (BLD_CLASS_MEDIUM, _SF_TREE): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_MEDIUM, _SF_TREE): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES_LG,
     (BLD_CLASS_TINY_RESIDENTIAL, _SF_RANGELAND): _XP12_LOW_FACADES[:3] + _SH_RURAL_FACADES,
     (BLD_CLASS_SMALL_RESIDENTIAL, _SF_RANGELAND): _XP12_LOW_FACADES[:4] + _SH_RURAL_FACADES,
     (BLD_CLASS_COMPACT_RESIDENTIAL, _SF_RANGELAND): _XP12_LOW_FACADES + _SH_RURAL_FACADES,
-    (BLD_CLASS_MEDIUM, _SF_RANGELAND): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES,
+    (BLD_CLASS_MEDIUM, _SF_RANGELAND): _XP12_LOW_FACADES + _XP12_MID_FACADES[:3] + _SH_RURAL_FACADES_LG,
 
     # Bareland reads best as industrial, warehouse, or big-lot commercial.
     (BLD_CLASS_MEDIUM, _SF_BARELAND): _XP12_WAREHOUSE_FACADES[:5] + _XP12_STRIP_COMMERCIAL_FACADES[5:] + _SH_INDUSTRIAL_FACADES,
@@ -3953,7 +3995,8 @@ def _runtime_library_package_patterns(include_sfd=False, include_simheaven=False
 
 def _scan_runtime_library_exports(custom_scenery_dir, *, include_sfd=False,
                                   include_simheaven=False,
-                                  extra_library_ids=()):
+                                  extra_library_ids=(),
+                                  suffixes=(".obj",)):
     """Scan only packages that may contribute runtime building assets."""
     patterns = _runtime_library_package_patterns(
         include_sfd=include_sfd,
@@ -3965,12 +4008,121 @@ def _scan_runtime_library_exports(custom_scenery_dir, *, include_sfd=False,
     return ASSETINV.scan_library_exports(
         custom_scenery_dir=custom_scenery_dir,
         package_name_patterns=patterns,
-        suffixes=(".obj",),
+        suffixes=suffixes,
     )
 
 
 def _library_exports_by_virtual_path(library_exports):
     return ASSETINV.unique_virtual_exports(library_exports or (), suffix=".obj")
+
+
+# library.txt ``REGION`` block names (pack-author vocabulary, e.g. SFD's
+# "scandinavia"/"asia_LHD", simHeaven's "asia") -> the overlay regions where
+# the export is assumed active. Names are matched by substring so variants
+# like asia_south or america_north resolve; unknown names match nothing
+# (conservative: better a smaller pool than a DSF reference X-Plane cannot
+# resolve -- see "Failed to find resource simheaven/houses/...").
+_LIBRARY_REGION_NAME_TOKENS = (
+    ("scandinavia", {"scandinavia"}),
+    ("mediterranean", {"mediterranean"}),
+    ("med", {"mediterranean"}),
+    ("europe", {"europe", "scandinavia", "mediterranean"}),
+    ("se_asia", {"se_asia", "asia"}),
+    ("asia", {"asia", "se_asia"}),
+    ("africa", {"africa"}),
+    ("australia", {"australia_oceania"}),
+    ("oceania", {"australia_oceania"}),
+    ("pacific", {"australia_oceania"}),
+    ("caribbean", {"south_america"}),
+    ("south_america", {"south_america"}),
+    ("america_south", {"south_america"}),
+    ("latam", {"south_america"}),
+    ("brazil", {"south_america"}),
+    ("north_america", {"north_america", "north_america_ne", "north_america_west"}),
+    ("america_north", {"north_america", "north_america_ne", "north_america_west"}),
+    ("canada", {"north_america", "north_america_ne", "north_america_west"}),
+    ("usa", {"north_america", "north_america_ne", "north_america_west"}),
+    ("us", {"north_america", "north_america_ne", "north_america_west"}),
+    ("america", {"north_america", "north_america_ne", "north_america_west",
+                 "south_america"}),
+)
+
+
+def _library_region_matches_tile(region_name, tile_region):
+    """Return True when a library REGION block is assumed active on the tile."""
+    if not region_name:
+        return True  # global export
+    name = str(region_name).lower()
+    tile = (tile_region or "generic").lower()
+    for token, regions in _LIBRARY_REGION_NAME_TOKENS:
+        if token in name:
+            return tile in regions
+    return False  # unknown region vocabulary: do not risk a dangling ref
+
+
+def _filter_exports_for_tile_region(library_exports, tile_region):
+    """Drop region-gated exports that X-Plane will not resolve on this tile."""
+    if not library_exports:
+        return library_exports
+    kept = []
+    dropped = 0
+    for export in library_exports:
+        if _library_region_matches_tile(
+            getattr(export, "region", None), tile_region
+        ):
+            kept.append(export)
+        else:
+            dropped += 1
+    if dropped:
+        print(
+            f"Library exports: dropped {dropped} region-gated exports "
+            f"inactive for tile region '{tile_region}' "
+            f"({len(kept)} remain)"
+        )
+    return kept
+
+
+def _exported_virtual_library_paths(library_exports, suffixes=(".obj", ".fac")):
+    """Return normalized virtual paths exported by installed libraries."""
+    suffixes = tuple(str(suffix).lower() for suffix in suffixes)
+    exported = set()
+    for export in library_exports or ():
+        virtual_path = getattr(export, "virtual_path", "") or ""
+        norm_path = _norm_library_path(virtual_path)
+        lower_path = norm_path.lower()
+        if suffixes and not lower_path.endswith(suffixes):
+            continue
+        exported.add(norm_path)
+    return exported
+
+
+def _stock_yolo_asset_path_available(path, exported_paths):
+    """Return True when a stock-YOLO library path can be emitted safely."""
+    norm_path = _norm_library_path(path)
+    lower_path = norm_path.lower()
+    if lower_path.startswith("lib/"):
+        return True
+    if lower_path.startswith("simheaven/") or lower_path.startswith("sfd_global/"):
+        return norm_path in exported_paths
+    return False
+
+
+def _filter_stock_yolo_asset_map(asset_map, exported_paths):
+    """Drop stock-YOLO asset variants that are not exported by installed libs."""
+    filtered = {}
+    dropped_paths = []
+    dropped_classes = []
+    for cls, (placement_type, paths, default_height_m) in (asset_map or {}).items():
+        kept_paths = tuple(
+            path for path in paths
+            if _stock_yolo_asset_path_available(path, exported_paths)
+        )
+        dropped_paths.extend(path for path in paths if path not in kept_paths)
+        if not kept_paths:
+            dropped_classes.append(cls)
+            continue
+        filtered[cls] = (placement_type, kept_paths, default_height_m)
+    return filtered, dropped_paths, dropped_classes
 
 
 def _bounds_union(bounds_iter):
@@ -4080,6 +4232,96 @@ def _scanned_simheaven_catalog_paths(library_exports=None, custom_scenery_dir=No
             continue
         paths.append(obj_path)
     return tuple(sorted(set(paths), key=lambda item: item.lower()))
+
+
+def _exported_simheaven_catalog_paths(library_exports):
+    """Return repeatable simHeaven aliases safe to reference from this overlay."""
+    if library_exports is None:
+        return None
+    return set(_scanned_simheaven_catalog_paths(library_exports=library_exports))
+
+
+def _exported_simheaven_object_paths(library_exports):
+    """Return all installed simHeaven OBJ aliases safe to reference in output."""
+    if library_exports is None:
+        return None
+    paths = set()
+    for key, exports in _library_exports_by_virtual_path(library_exports).items():
+        if key.startswith("simheaven/") and exports:
+            paths.add(exports[0].virtual_path)
+    return paths
+
+
+def _filter_unexported_simheaven_object_placements(placements, exported_paths):
+    """Drop simHeaven OBJ placements that are not exported library aliases."""
+    if exported_paths is None:
+        return list(placements or ()), 0
+    exported_norm = {_norm_library_path(path) for path in exported_paths}
+    kept = []
+    dropped = 0
+    for placement in placements or ():
+        try:
+            obj_path = placement[3]
+        except (TypeError, IndexError):
+            kept.append(placement)
+            continue
+        norm_path = _norm_library_path(obj_path)
+        if (
+            norm_path.startswith("simheaven/") and
+            norm_path.endswith(".obj") and
+            norm_path not in exported_norm
+        ):
+            dropped += 1
+            continue
+        kept.append(placement)
+    return kept, dropped
+
+
+def _count_unexported_simheaven_object_placements(placements, exported_paths):
+    """Count cached placements that reference unavailable simHeaven aliases."""
+    if exported_paths is None:
+        return 0
+    _kept, dropped = _filter_unexported_simheaven_object_placements(
+        placements,
+        exported_paths,
+    )
+    return dropped
+
+
+def _unexported_simheaven_object_path_counts(placements, exported_paths):
+    """Return unavailable simHeaven OBJ aliases referenced by placements."""
+    if exported_paths is None:
+        return Counter()
+    exported_norm = {_norm_library_path(path) for path in exported_paths}
+    bad_paths = Counter()
+    for placement in placements or ():
+        try:
+            obj_path = placement[3]
+        except (TypeError, IndexError):
+            continue
+        norm_path = _norm_library_path(obj_path)
+        if (
+            norm_path.startswith("simheaven/")
+            and norm_path.endswith(".obj")
+            and norm_path not in exported_norm
+        ):
+            bad_paths[obj_path] += 1
+    return bad_paths
+
+
+def _assert_no_unexported_simheaven_object_placements(placements, exported_paths):
+    """Fail loudly before writing scenery refs that X-Plane cannot resolve."""
+    bad_paths = _unexported_simheaven_object_path_counts(placements, exported_paths)
+    if not bad_paths:
+        return
+    examples = ", ".join(
+        f"{path} x{count}" for path, count in bad_paths.most_common(5)
+    )
+    raise RuntimeError(
+        "Building overlay contains unexported simHeaven OBJ reference(s); "
+        "refusing to write a DSF that X-Plane will load with missing scenery. "
+        f"Bad refs: {examples}"
+    )
 
 
 def _scanned_sfd_catalog_entries(asset_region, library_exports=None,
@@ -4571,6 +4813,12 @@ def _build_simheaven_asset_pools(
     """Return simHeaven object candidates grouped by placement size class."""
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
+    if library_exports is None and custom_scenery_dir:
+        library_exports = _scan_runtime_library_exports(
+            custom_scenery_dir,
+            include_simheaven=True,
+        )
+    exported_paths = _exported_simheaven_catalog_paths(library_exports)
     catalog_paths = (
         tuple(_simheaven_catalog_paths(tile_lat, tile_lon, asset_region)) +
         _scanned_simheaven_catalog_paths(
@@ -4582,6 +4830,8 @@ def _build_simheaven_asset_pools(
         if obj_path in seen_paths:
             continue
         if not _is_repeatable_simheaven_asset(obj_path):
+            continue
+        if exported_paths is not None and obj_path not in exported_paths:
             continue
         seen_paths.add(obj_path)
         dims = _simheaven_object_dims(obj_path)
@@ -4596,6 +4846,8 @@ def _build_simheaven_asset_pools(
         if not obj_path or obj_path in seen_paths:
             continue
         if not _is_repeatable_simheaven_asset(obj_path):
+            continue
+        if exported_paths is not None and obj_path not in exported_paths:
             continue
         seen_paths.add(obj_path)
         _append_object_asset(
@@ -5033,32 +5285,24 @@ def _yolo_obb_detection_from_points(
     if area_px <= 1.0:
         return None
 
-    if xywhr is not None:
-        try:
-            cx, cy, width_px, height_px, rotation_rad = [
-                float(v) for v in np.asarray(xywhr, dtype=np.float32).reshape(5)
-            ]
-            center = np.asarray([cx, cy], dtype=np.float32)
-            img_angle = math.degrees(rotation_rad)
-            if abs(height_px) > abs(width_px):
-                img_angle += 90.0
-            max_side_px = max(abs(width_px), abs(height_px))
-            min_side_px = min(abs(width_px), abs(height_px))
-        except Exception:
-            xywhr = None
-    if xywhr is None:
-        # Fallback for older Ultralytics versions.  Prefer the model xywhr
-        # angle when available because it is the normalized long-side axis.
-        edges = np.roll(clipped, -1, axis=0) - clipped
-        edge_lengths = np.linalg.norm(edges, axis=1)
-        long_edge_index = int(np.argmax(edge_lengths))
-        long_vec = edges[long_edge_index]
-        img_angle = math.degrees(math.atan2(float(long_vec[1]), float(long_vec[0])))
-        max_side_px = float(edge_lengths[long_edge_index])
-        min_side_px = float(edge_lengths[(long_edge_index + 1) % 4])
-        if min_side_px > max_side_px:
-            max_side_px, min_side_px = min_side_px, max_side_px
-    heading = (90.0 - img_angle) % 180.0
+    # Use the polygon corners for heading rather than Ultralytics ``xywhr``.
+    # ``xywhr`` uses a normalized OBB representation whose angle can flip with
+    # width/height canonicalization; facades were aligned because they used the
+    # polygon directly, so object headings must follow the same geometry.
+    edges = np.roll(clipped, -1, axis=0) - clipped
+    edge_lengths = np.linalg.norm(edges, axis=1)
+    long_edge_index = int(np.argmax(edge_lengths))
+    long_vec = edges[long_edge_index]
+    img_angle = math.degrees(math.atan2(float(long_vec[1]), float(long_vec[0])))
+    max_side_px = float(edge_lengths[long_edge_index])
+    min_side_px = float(edge_lengths[(long_edge_index + 1) % 4])
+    if min_side_px > max_side_px:
+        max_side_px, min_side_px = min_side_px, max_side_px
+    # Image pixels use +Y down, while X-Plane OBJ headings are compass-style
+    # clockwise from north. Horizontal/vertical axes are unchanged by the sign
+    # error, but diagonals must use image_angle + 90 so object headings follow
+    # the YOLO OBB rather than its mirror image.
+    heading = (img_angle + 90.0) % 180.0
     max_side_m = float(max_side_px) * float(m_per_px)
     min_side_m = float(min_side_px) * float(m_per_px)
     area_m2 = area_px * float(m_per_px) * float(m_per_px)
@@ -5393,7 +5637,7 @@ def _yolo_template_metrics(template):
 def _points_from_yolo_heading(center, long_len, short_len, heading):
     """Build an image-space rotated rectangle from YOLO heading and dimensions."""
     cx, cy = np.asarray(center, dtype=np.float32)
-    img_angle = math.radians(90.0 - float(heading))
+    img_angle = math.radians(float(heading) - 90.0)
     u_axis = np.asarray([math.cos(img_angle), math.sin(img_angle)], dtype=np.float32)
     v_axis = np.asarray([-u_axis[1], u_axis[0]], dtype=np.float32)
     hu = u_axis * (float(long_len) * 0.5)
@@ -6282,6 +6526,35 @@ def _poly_inside_poly(inner_poly: np.ndarray, outer_poly: np.ndarray) -> bool:
     return cv2.pointPolygonTest(outer, (float(center[0]), float(center[1])), False) >= -1e-6
 
 
+def _footprint_inside_detection(inner_poly: np.ndarray,
+                                outer_poly: np.ndarray) -> bool:
+    """Containment test for object footprints inside YOLO detection polys.
+
+    With YOLO_OBJECT_OUTLINE_MIN_INSIDE >= 1.0 this is the strict
+    all-vertices test. Below 1.0 it accepts a footprint when at least that
+    fraction of its area lies inside the detection polygon (both polygons
+    are convex: rotated footprint rectangles and crop-clipped OBBs), which
+    converts most outline-rejected facade fallbacks into object placements.
+    """
+    min_inside = float(YOLO_OBJECT_OUTLINE_MIN_INSIDE)
+    if min_inside >= 1.0 - 1e-9:
+        return _poly_inside_poly(inner_poly, outer_poly)
+    if _poly_inside_poly(inner_poly, outer_poly):
+        return True
+    inner = np.asarray(inner_poly, dtype=np.float32)
+    outer = np.asarray(outer_poly, dtype=np.float32)
+    if inner.shape[0] < 3 or outer.shape[0] < 3:
+        return False
+    inner_area = abs(float(cv2.contourArea(inner)))
+    if inner_area <= 0.0:
+        return False
+    try:
+        inter_area, _ = cv2.intersectConvexConvex(inner, outer)
+    except cv2.error:
+        return False
+    return float(inter_area) >= min_inside * inner_area - 1e-6
+
+
 def _yolo_facade_class(detection_class):
     try_cls = int(detection_class)
     if try_cls in BLD_PLACEMENT_CLASSES:
@@ -6700,7 +6973,7 @@ def _select_yolo_object_candidate(
             footprint_poly = _footprint_poly(
                 int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
             )
-            if not _poly_inside_poly(footprint_poly, yolo_poly):
+            if not _footprint_inside_detection(footprint_poly, yolo_poly):
                 continue
             return {
                 'asset': asset,
@@ -6802,7 +7075,7 @@ def _select_yolo_object_candidate(
         footprint_poly = _footprint_poly(
             int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
         )
-        if not _poly_inside_poly(footprint_poly, yolo_poly):
+        if not _footprint_inside_detection(footprint_poly, yolo_poly):
             counters['outline_reject'] += 1
             continue
         if (
@@ -7268,6 +7541,7 @@ def run(
     yolo_imgsz=DEFAULT_YOLO_OBB_IMGSZ,
     yolo_suppress_coverage=0.0,
     yolo_suppress_min_overlap_m2=25.0,
+    yolo_outline_tolerance=None,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
@@ -7605,6 +7879,19 @@ def run(
     yolo_suppress_min_overlap_m2 = max(
         0.0, float(yolo_suppress_min_overlap_m2 or 0.0)
     )
+    global YOLO_OBJECT_OUTLINE_MIN_INSIDE
+    _outline_tolerance = yolo_outline_tolerance
+    if "O4_SFR_BLD_YOLO_OUTLINE_TOL" in os.environ:
+        try:
+            _outline_tolerance = float(os.environ["O4_SFR_BLD_YOLO_OUTLINE_TOL"])
+        except ValueError:
+            pass
+    if _outline_tolerance is not None:
+        # Clamp to a sane band: below ~0.5 an object could sit mostly
+        # outside its detection, which defeats the footprint guarantee.
+        YOLO_OBJECT_OUTLINE_MIN_INSIDE = min(
+            1.0, max(0.5, float(_outline_tolerance))
+        )
     if "O4_SFR_BLD_YOLO_ENABLED" in os.environ:
         yolo_enabled = _env_flag("O4_SFR_BLD_YOLO_ENABLED", bool(yolo_enabled))
     else:
@@ -7633,7 +7920,15 @@ def run(
             "YOLO OBB placement: direct detections only "
             f"(max asset height {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
         )
-        print("YOLO OBB placement: object-first mode with facade fallback")
+        outline_mode = (
+            "strict containment"
+            if YOLO_OBJECT_OUTLINE_MIN_INSIDE >= 1.0 - 1e-9
+            else f"outline tolerance {YOLO_OBJECT_OUTLINE_MIN_INSIDE:.2f}"
+        )
+        print(
+            "YOLO OBB placement: object-first mode with facade fallback "
+            f"({outline_mode})"
+        )
         try:
             yolo_model = _load_yolo_obb_model(
                 yolo_checkpoint,
@@ -7666,7 +7961,6 @@ def run(
         print(
             f"Stock YOLO OBB (DOTAv1): loaded "
             f"{STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT}; "
-            f"keeping classes {STOCKYOLO.STATIC_DOTA_CLASSES}; "
             f"batch={stock_yolo_batch_size}",
             flush=True,
         )
@@ -7746,11 +8040,77 @@ def run(
         bool(sh_bld_objects) or _find_library_export(custom_scenery_dir, 'simheaven/')
     )
     enabled_extra_library_ids = _enabled_extra_library_ids()
-    runtime_library_exports = _scan_runtime_library_exports(
-        custom_scenery_dir,
-        include_sfd=sfd_assets_available,
-        include_simheaven=simheaven_assets_available,
-        extra_library_ids=enabled_extra_library_ids,
+    # Filter every scanned export down to the ones X-Plane will actually
+    # resolve on this tile: packs like SFD Global ship simHeaven-alias shims
+    # inside REGION blocks (e.g. REGION scandinavia), and referencing those
+    # aliases on other tiles produces "Failed to find resource" at sim load.
+    _tile_natural_region = _natural_asset_region(lat + 0.5, lon + 0.5)
+    runtime_library_exports = _filter_exports_for_tile_region(
+        _scan_runtime_library_exports(
+            custom_scenery_dir,
+            include_sfd=sfd_assets_available,
+            include_simheaven=simheaven_assets_available,
+            extra_library_ids=enabled_extra_library_ids,
+        ),
+        _tile_natural_region,
+    )
+    stock_yolo_library_exports = _filter_exports_for_tile_region(
+        _scan_runtime_library_exports(
+            custom_scenery_dir,
+            include_sfd=sfd_assets_available,
+            include_simheaven=simheaven_assets_available,
+            suffixes=(".obj", ".fac"),
+        ),
+        _tile_natural_region,
+    )
+    stock_yolo_exported_paths = _exported_virtual_library_paths(
+        stock_yolo_library_exports,
+        suffixes=(".obj", ".fac"),
+    )
+    stock_yolo_asset_map, dropped_stock_paths, dropped_stock_classes = (
+        _filter_stock_yolo_asset_map(
+            STOCKYOLO.STOCK_YOLO_ASSET_MAP,
+            stock_yolo_exported_paths,
+        )
+    )
+    stock_yolo_static_classes = tuple(
+        cls for cls in STOCKYOLO.STATIC_DOTA_CLASSES
+        if cls in stock_yolo_asset_map
+    )
+    if stock_yolo_model is not None:
+        if stock_yolo_static_classes:
+            print(
+                "Stock YOLO OBB (DOTAv1): "
+                f"keeping classes {stock_yolo_static_classes}",
+                flush=True,
+            )
+        else:
+            print(
+                "Stock YOLO OBB (DOTAv1): no resolvable stock assets; "
+                "skipping pre-step",
+                flush=True,
+            )
+            stock_yolo_model = None
+        if dropped_stock_paths:
+            sample = ", ".join(dropped_stock_paths[:5])
+            print(
+                "Stock YOLO OBB (DOTAv1): disabled unavailable asset refs "
+                f"{len(dropped_stock_paths)}"
+                + (f" ({sample})" if sample else ""),
+                flush=True,
+            )
+        if dropped_stock_classes:
+            labels = ", ".join(
+                f"{cls}:{STOCKYOLO.DOTA_CLASS_NAMES.get(cls, cls)}"
+                for cls in dropped_stock_classes
+            )
+            print(
+                "Stock YOLO OBB (DOTAv1): disabled classes with no assets "
+                f"({labels})",
+                flush=True,
+            )
+    exported_simheaven_object_paths = _exported_simheaven_object_paths(
+        runtime_library_exports
     )
     asset_lat = lat + 0.5
     asset_lon = lon + 0.5
@@ -7977,10 +8337,11 @@ def run(
             bool(yolo_fuse_model),
             round(float(yolo_suppress_coverage), 6),
             round(float(yolo_suppress_min_overlap_m2), 4),
+            round(float(YOLO_OBJECT_OUTLINE_MIN_INSIDE), 6),
             float(MAX_GENERATED_BUILDING_HEIGHT_M),
             # Bump on schema-breaking changes to per-DDS cache contents.
-            # v10: optional extra-library assets require explicit regional matches.
-            "schema=v10-regional-optional-library-assets",
+            # v13: invalidate v12 caches that may contain pre-filter simHeaven paths.
+            "schema=v13-exported-simheaven-objects",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -8047,8 +8408,28 @@ def run(
                     _cd = _pickle.load(_f)
                 if _cd.get('params') == _requested_bld_params:
                     if _cd.get('source') == 'direct_yolo':
-                        prep['cached_bld'] = _cd['placements']
-                        return prep
+                        _placements = _cd.get('placements') or {}
+                        _bad_simheaven = _count_unexported_simheaven_object_placements(
+                            _placements.get('objects', ()),
+                            exported_simheaven_object_paths,
+                        )
+                        if _bad_simheaven:
+                            file_counts['stale_bld_cache_unexported_simheaven'] = (
+                                int(_bad_simheaven)
+                            )
+                            try:
+                                os.remove(_bld_cache_file)
+                            except OSError:
+                                pass
+                            print(
+                                f"  [{fi:3d}/{n_files}] {fname}  "
+                                "stale bld cache ignored: "
+                                f"{_bad_simheaven} unexported simHeaven object refs",
+                                flush=True,
+                            )
+                        else:
+                            prep['cached_bld'] = _placements
+                            return prep
             except Exception:
                 pass
 
@@ -8231,7 +8612,7 @@ def run(
         if stock_yolo_model is not None and img is not None:
             try:
                 _t = time.perf_counter()
-                stock_res = STOCKYOLO.run_stock_yolo_pass(
+                stock_res = _run_stock_yolo_pass_compat(
                     img,
                     model=stock_yolo_model,
                     img_w=img_w, img_h=img_h,
@@ -8240,12 +8621,17 @@ def run(
                     m_per_px=m_per_px,
                     device=("0" if torch.cuda.is_available() else "cpu"),
                     batch_size=stock_yolo_batch_size,
+                    asset_map=stock_yolo_asset_map,
+                    static_classes=stock_yolo_static_classes,
                 )
                 _rec('stock_yolo_inference', _t)
                 prep['stock_res'] = stock_res
-                prep['effective_stock_yolo_batch_size'] = stock_res.effective_batch_size
-                prep['stock_yolo_batch_fell_back'] = stock_res.batch_fell_back
-                if stock_res.batch_fell_back:
+                _stock_effective_batch, _stock_batch_fell_back = (
+                    _stock_yolo_batch_metadata(stock_res, stock_yolo_batch_size)
+                )
+                prep['effective_stock_yolo_batch_size'] = _stock_effective_batch
+                prep['stock_yolo_batch_fell_back'] = _stock_batch_fell_back
+                if _stock_batch_fell_back:
                     file_counts['stock_yolo_batch_fallback'] = 1
                 if stock_res.counts_by_class:
                     _summary = " ".join(
@@ -8353,7 +8739,10 @@ def run(
             if _cached_bld is not None:
                 placed_stock_objects.extend(_cached_bld.get('objects', ()))
                 placed_facades.extend(_cached_bld.get('facades', ()))
-                cached_count = len(_cached_bld.get('objects', ())) + len(_cached_bld.get('facades', ()))
+                cached_count = (
+                    len(_cached_bld.get('objects', ())) +
+                    len(_cached_bld.get('facades', ()))
+                )
                 direct_yolo_facade_placements += len(_cached_bld.get('facades', ()))
                 print(f"  [{fi:3d}/{n_files}] {fname}  (bld cached — {cached_count} placements)", flush=True)
                 continue
@@ -9148,7 +9537,7 @@ def run(
                         continue
                     long_len = float(metrics['long_len'])
                     short_len = float(metrics['short_len'])
-                    img_angle = math.radians(90.0 - float(template['heading']))
+                    img_angle = math.radians(float(template['heading']) - 90.0)
                     u_axis = np.asarray(
                         [math.cos(img_angle), math.sin(img_angle)], dtype=np.float32
                     )
@@ -9243,7 +9632,7 @@ def run(
                         continue
                     long_len = float(metrics['long_len'])
                     short_len = float(metrics['short_len'])
-                    img_angle = math.radians(90.0 - float(template['heading']))
+                    img_angle = math.radians(float(template['heading']) - 90.0)
                     u_axis = np.asarray(
                         [math.cos(img_angle), math.sin(img_angle)], dtype=np.float32
                     )
@@ -9776,6 +10165,10 @@ def run(
     # ── Write DSF text ────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(os.path.abspath(out_dsf)), exist_ok=True)
     txt_path = out_dsf.replace('.dsf', '_bld.txt')
+    _assert_no_unexported_simheaven_object_placements(
+        placed_stock_objects,
+        exported_simheaven_object_paths,
+    )
 
     obj_paths = sorted(set(obj_path for _, _, _, obj_path in placed_stock_objects))
     obj_idx = {path: i for i, path in enumerate(obj_paths)}

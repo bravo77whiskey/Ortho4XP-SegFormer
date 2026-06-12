@@ -123,6 +123,7 @@ sfr_bld_avoid_custom_scenery = True
 sfr_bld_yolo_enabled = True
 sfr_bld_yolo_checkpoint = r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
 sfr_bld_yolo_conf = 0.18
+sfr_bld_yolo_outline_tolerance = 1.0
 sfr_bld_yolo_iou = 0.5
 sfr_bld_yolo_stride = 512
 sfr_bld_yolo_max_det = 1000
@@ -417,6 +418,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"checkpoint={sfr_bld_yolo_checkpoint!r} "
         f"conf={sfr_bld_yolo_conf!r} iou={sfr_bld_yolo_iou!r} "
         f"stride={sfr_bld_yolo_stride!r} max_det={sfr_bld_yolo_max_det!r} "
+        f"outline_tolerance={sfr_bld_yolo_outline_tolerance!r} "
         f"smart_gap_fill={sfr_bld_smart_gap_fill!r} "
         f"disable_cache={sfr_bld_disable_cache!r} "
         f"out_dsf={out_dsf!r}",
@@ -466,6 +468,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    yolo_max_det             = {sfr_bld_yolo_max_det!r},\n"
         f"    yolo_suppress_coverage   = {sfr_bld_yolo_suppress_coverage!r},\n"
         f"    yolo_suppress_min_overlap_m2 = {sfr_bld_yolo_suppress_min_overlap_m2!r},\n"
+        f"    yolo_outline_tolerance   = {sfr_bld_yolo_outline_tolerance!r},\n"
         f")\n"
     )
     ret = _run_venv(code)
