@@ -31,6 +31,33 @@ DEFAULT_DEPLOYED_PYTHON = Path(os.environ.get(
 TILE_RE = re.compile(r"zOrtho4XP_([+-]\d{2})([+-]\d{3})", re.IGNORECASE)
 
 
+def _cfg_custom_scenery_dir() -> Path | None:
+    """Return custom_scenery_dir from the repo's Ortho4XP.cfg, if usable.
+
+    This is what production tile builds pass to the overlay
+    (O4_SFR_Pipeline._scenery_paths), so the benchmark should default to the
+    same directory instead of inferring one from the tile path -- tile
+    folders are commonly junctions whose resolved parent is NOT the real
+    Custom Scenery (no scenery_packs.ini, no libraries).
+    """
+    cfg = ROOT / "Ortho4XP.cfg"
+    if not cfg.is_file():
+        return None
+    try:
+        for raw_line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+            key, sep, value = raw_line.partition("=")
+            if sep and key.strip() == "custom_scenery_dir":
+                value = value.strip()
+                if value:
+                    path = Path(value)
+                    if path.is_dir():
+                        return path
+                return None
+    except OSError:
+        return None
+    return None
+
+
 def _infer_tile(dds_path: Path) -> tuple[int, int, Path, Path | None]:
     tex_dir = dds_path.parent
     for parent in [tex_dir, *tex_dir.parents]:
@@ -90,6 +117,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-max-det", type=int, default=None)
     parser.add_argument("--yolo-suppress-coverage", type=float, default=0.0)
     parser.add_argument("--yolo-suppress-min-overlap-m2", type=float, default=25.0)
+    parser.add_argument("--yolo-outline-tolerance", type=float, default=None,
+                        help="Fraction of an object footprint required inside "
+                             "the YOLO polygon (1.0 = strict containment).")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
     parser.add_argument(
@@ -133,7 +163,9 @@ def main() -> int:
         args.use_cache = False
         args.clear_cache = True
 
-    input_path = Path(args.dds_or_tex_dir).resolve()
+    # abspath, NOT resolve(): tile folders are often junctions and following
+    # them would move every inferred parent off the real Custom Scenery.
+    input_path = Path(os.path.abspath(args.dds_or_tex_dir))
 
     selected_file = None
     if input_path.is_file():
@@ -154,11 +186,15 @@ def main() -> int:
     bench_root = ROOT / "tmp" / "bench_sfr_building" / _tile_name(lat, lon)
     cache_dir = Path(args.cache_dir).resolve() if args.cache_dir else bench_root / "cache"
     out_dsf = Path(args.out_dsf).resolve() if args.out_dsf else bench_root / "out" / f"{_tile_name(lat, lon)}.dsf"
-    custom_scenery_dir = (
-        Path(args.custom_scenery_dir).resolve()
-        if args.custom_scenery_dir
-        else inferred_scenery
-    )
+    if args.custom_scenery_dir:
+        custom_scenery_dir = Path(args.custom_scenery_dir)
+        scenery_source = "cli"
+    else:
+        custom_scenery_dir = _cfg_custom_scenery_dir()
+        scenery_source = "Ortho4XP.cfg"
+        if custom_scenery_dir is None:
+            custom_scenery_dir = inferred_scenery
+            scenery_source = "inferred-from-tile-path"
     dsftool = Path(args.dsftool).resolve() if args.dsftool else _default_dsftool()
 
     if args.clear_cache and cache_dir.exists():
@@ -201,7 +237,8 @@ def main() -> int:
         print(f"[bench] tile={_tile_name(lat, lon)} cache={'on' if args.use_cache else 'off'}")
         print(f"[bench] cache_dir={cache_dir}")
         print(f"[bench] out_dsf={out_dsf}")
-        print(f"[bench] custom_scenery_dir={custom_scenery_dir or ''}")
+        print(f"[bench] custom_scenery_dir={custom_scenery_dir or ''} "
+              f"(source={scenery_source})")
         print(f"[bench] dsftool={dsftool or ''}")
 
         t0 = time.perf_counter()
@@ -228,6 +265,7 @@ def main() -> int:
             yolo_max_det=args.yolo_max_det,
             yolo_suppress_coverage=args.yolo_suppress_coverage,
             yolo_suppress_min_overlap_m2=args.yolo_suppress_min_overlap_m2,
+            yolo_outline_tolerance=args.yolo_outline_tolerance,
         )
         print(f"[bench] total wall={time.perf_counter() - t0:.2f}s")
     finally:
