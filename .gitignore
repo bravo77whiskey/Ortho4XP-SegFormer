@@ -36,3 +36,5 @@ perdds_*.txt
 zl16_*.npy
 zl16_*.png
 *.npy
+training/
+scripts/

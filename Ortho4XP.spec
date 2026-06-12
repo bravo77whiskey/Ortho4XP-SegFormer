@@ -57,6 +57,7 @@ added_datas = [
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Region_Boundaries.py"),       "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Inference.py"),          "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Building_Overlay.py"),   "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_Stock_Yolo_Objects.py"), "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Utils.py"),          "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Vegetation_Overlay.py"), "sfr_scripts/src"),
 ]
@@ -114,6 +115,7 @@ hidden = [
     "O4_SFR_Region_Boundaries",
     "O4_SFR_Inference",
     "O4_SFR_Building_Overlay",
+    "O4_SFR_Stock_Yolo_Objects",
     "O4_SFR_DSF_Utils",
     "O4_SFR_Vegetation_Overlay",
     "O4_Parallel_Utils",

@@ -373,6 +373,8 @@ def run_stock_yolo_pass(
     max_det: int = 500,
     device: Optional[str] = None,
     batch_size: int = 1,
+    asset_map: Optional[dict[int, tuple[str, tuple[str, ...], Optional[float]]]] = None,
+    static_classes: Optional[tuple[int, ...]] = None,
 ) -> StockYoloResults:
     """Run the stock DOTAv1 YOLO-OBB on `image`, map detections to assets, and
     return placements + occupancy polygons.
@@ -384,6 +386,12 @@ def run_stock_yolo_pass(
     import torch  # local import — heavy
 
     t0 = time.perf_counter()
+    active_asset_map = asset_map if asset_map is not None else STOCK_YOLO_ASSET_MAP
+    active_static_classes = (
+        tuple(static_classes)
+        if static_classes is not None
+        else STATIC_DOTA_CLASSES
+    )
 
     def _consume_result(res, r, ox, oy):
         obb = getattr(r, 'obb', None)
@@ -403,9 +411,9 @@ def run_stock_yolo_pass(
         )
         for points, score, cls in zip(corners, confs, classes):
             cls_i = int(cls)
-            if cls_i not in STATIC_DOTA_CLASSES:
+            if cls_i not in active_static_classes:
                 continue
-            if cls_i not in STOCK_YOLO_ASSET_MAP:
+            if cls_i not in active_asset_map:
                 continue
             quad = np.asarray(points, dtype=np.float32).reshape(4, 2)
             quad[:, 0] += float(ox)
@@ -428,7 +436,7 @@ def run_stock_yolo_pass(
                         and 0 <= ix < static_occ_mask.shape[1]
                         and static_occ_mask[iy, ix]):
                     continue
-            placement_type, asset_paths, default_height_m = STOCK_YOLO_ASSET_MAP[cls_i]
+            placement_type, asset_paths, default_height_m = active_asset_map[cls_i]
             o_lon = lon_w + cx / float(img_w) * (lon_e - lon_w)
             o_lat = lat_n - cy / float(img_h) * (lat_n - lat_s)
             # Bounds check

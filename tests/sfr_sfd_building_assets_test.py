@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 import bz2
+import math
 import os
 from unittest import mock
 from pathlib import Path
@@ -64,12 +65,70 @@ def _write_obj8(path: Path, vertices):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _poly_long_axis_heading(points):
+    pts = np.asarray(points, dtype=np.float32)
+    edges = np.roll(pts, -1, axis=0) - pts
+    long_vec = edges[int(np.argmax(np.linalg.norm(edges, axis=1)))]
+    return (
+        math.degrees(math.atan2(float(long_vec[0]), -float(long_vec[1]))) + 360.0
+    ) % 180.0
+
+
 class SfdBuildingAssetTests(unittest.TestCase):
     def test_stock_yolo_batch_default_tolerates_legacy_module(self):
         legacy_stock = type("LegacyStockYolo", (), {})()
 
         with mock.patch.object(BLD, "STOCKYOLO", legacy_stock):
             self.assertEqual(BLD._stock_yolo_batch_default(), 1)
+
+    def test_stock_yolo_batch_metadata_tolerates_legacy_results(self):
+        legacy_result = type("LegacyStockYoloResults", (), {})()
+
+        effective, fell_back = BLD._stock_yolo_batch_metadata(
+            legacy_result,
+            requested_batch_size=4,
+        )
+
+        self.assertEqual(effective, 4)
+        self.assertFalse(fell_back)
+
+    def test_stock_yolo_batch_metadata_preserves_fallback_results(self):
+        result = type("StockYoloResultsLike", (), {
+            "effective_batch_size": 1,
+            "batch_fell_back": True,
+        })()
+
+        effective, fell_back = BLD._stock_yolo_batch_metadata(
+            result,
+            requested_batch_size=8,
+        )
+
+        self.assertEqual(effective, 1)
+        self.assertTrue(fell_back)
+
+    def test_stock_yolo_pass_compat_retries_without_new_filter_kwargs(self):
+        calls = []
+
+        def legacy_run_stock_yolo_pass(image, *, model, img_w, img_h):
+            calls.append((image, model, img_w, img_h))
+            return "legacy-result"
+
+        legacy_stock = type("LegacyStockYolo", (), {
+            "run_stock_yolo_pass": staticmethod(legacy_run_stock_yolo_pass),
+        })()
+
+        with mock.patch.object(BLD, "STOCKYOLO", legacy_stock):
+            result = BLD._run_stock_yolo_pass_compat(
+                "image",
+                model="model",
+                img_w=512,
+                img_h=512,
+                asset_map={},
+                static_classes=(),
+            )
+
+        self.assertEqual(result, "legacy-result")
+        self.assertEqual(calls, [("image", "model", 512, 512)])
 
     def test_yolo_obb_height_class_decode_ignores_height_bin(self):
         model_class = (
@@ -163,6 +222,10 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(
             PIPE.sfr_bld_yolo_max_det,
             CFG.cfg_tile_vars["sfr_bld_yolo_max_det"]["default"],
+        )
+        self.assertEqual(
+            PIPE.sfr_bld_yolo_outline_tolerance,
+            CFG.cfg_tile_vars["sfr_bld_yolo_outline_tolerance"]["default"],
         )
 
     def test_osm_tile_peer_path_handles_all_road_sources(self):
@@ -1053,6 +1116,57 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertAlmostEqual(detection["width_m"], 8.0, delta=0.2)
         self.assertEqual(BLD._yolo_object_dimension_key(detection), (20, 8))
 
+    def test_yolo_detection_heading_uses_polygon_when_xywhr_disagrees(self):
+        points = BLD._points_from_yolo_heading((50.0, 50.0), 20.0, 8.0, 35.0)
+
+        detection = BLD._yolo_obb_detection_from_points(
+            points,
+            confidence=0.9,
+            cls=BLD.BLD_CLASS_MEDIUM - 1,
+            img_w=100,
+            img_h=100,
+            m_per_px=1.0,
+            xywhr=[50.0, 50.0, 20.0, 8.0, 0.0],
+            model_class_count=len(BLD.BLD_PLACEMENT_CLASSES),
+        )
+
+        self.assertIsNotNone(detection)
+        self.assertAlmostEqual(detection["heading"], 35.0, delta=0.2)
+        self.assertAlmostEqual(detection["length_m"], 20.0, delta=0.2)
+        self.assertAlmostEqual(detection["width_m"], 8.0, delta=0.2)
+
+    def test_yolo_detection_diagonal_heading_uses_compass_axis(self):
+        points = np.array(
+            [
+                [42.93, 32.32],
+                [57.07, 46.46],
+                [51.41, 52.12],
+                [37.27, 37.98],
+            ],
+            dtype=np.float32,
+        )
+
+        detection = BLD._yolo_obb_detection_from_points(
+            points,
+            confidence=0.9,
+            cls=BLD.BLD_CLASS_MEDIUM - 1,
+            img_w=100,
+            img_h=100,
+            m_per_px=1.0,
+            model_class_count=len(BLD.BLD_PLACEMENT_CLASSES),
+        )
+
+        self.assertIsNotNone(detection)
+        self.assertAlmostEqual(detection["heading"], 135.0, delta=0.2)
+
+    def test_points_from_yolo_heading_matches_compass_diagonal(self):
+        points = BLD._points_from_yolo_heading((50.0, 50.0), 20.0, 8.0, 135.0)
+        edges = np.roll(points, -1, axis=0) - points
+        long_vec = edges[int(np.argmax(np.linalg.norm(edges, axis=1)))]
+        img_angle = math.degrees(math.atan2(float(long_vec[1]), float(long_vec[0])))
+
+        self.assertAlmostEqual(img_angle, 45.0, delta=0.2)
+
     def test_yolo_object_fit_table_includes_both_asset_orientations(self):
         asset = {
             "kind": "object",
@@ -1127,6 +1241,43 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(status, "selected")
         self.assertEqual(selected["asset"]["path"], "mapped.obj")
         self.assertIsNotNone(selected["footprint_poly"])
+
+    def test_yolo_object_selection_aligns_local_x_long_axis_to_detection(self):
+        asset = {
+            "kind": "object",
+            "path": "x_long.obj",
+            "bounds_m": (-6.0, 6.0, -2.0, 2.0),
+            "source": "test",
+        }
+        table = BLD._build_yolo_object_candidate_index({BLD.BLD_CLASS_MEDIUM: [asset]})
+        yolo_heading = 35.0
+        yolo_poly = BLD._points_from_yolo_heading((40.0, 40.0), 12.0, 4.0, yolo_heading)
+        detection = {
+            "length_m": 12.0,
+            "width_m": 4.0,
+            "area_m2": 48.0,
+            "placement_class": BLD.BLD_CLASS_MEDIUM,
+        }
+
+        selected, status = BLD._select_yolo_object_candidate(
+            table,
+            detection,
+            np.rint(yolo_poly).astype(np.int32),
+            40,
+            40,
+            yolo_heading,
+            1.0,
+        )
+
+        self.assertEqual(status, "selected")
+        self.assertAlmostEqual(selected["heading"], 305.0)
+        self.assertLessEqual(
+            BLD._angle_delta_180(
+                _poly_long_axis_heading(selected["footprint_poly"]),
+                yolo_heading,
+            ),
+            0.5,
+        )
 
     def test_yolo_object_selection_falls_back_when_no_mapping_exists(self):
         asset = {
@@ -2799,6 +2950,114 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 if asset["path"] == "simheaven/houses/house_04x06x1.obj"
             ),
             1,
+        )
+
+    def test_simheaven_pool_excludes_non_exported_dsf_local_objects(self):
+        export = type("Export", (), {
+            "virtual_path": "simheaven/houses/house_04x06x1.obj",
+            "resolved_path": None,
+        })()
+        simheaven_objects = [
+            {
+                "path": "simheaven/houses/house_05x06x1.obj",
+                "w_m": 5.0,
+                "h_m": 6.0,
+            },
+            {
+                "path": "simheaven/houses/house_04x06x1.obj",
+                "w_m": 4.0,
+                "h_m": 6.0,
+            },
+        ]
+
+        pools = BLD._build_simheaven_asset_pools(
+            simheaven_objects,
+            0.0,
+            0.0,
+            "africa",
+            library_exports=[export],
+        )
+        paths = _paths_for_classes(pools, BLD.BLD_PLACEMENT_CLASSES)
+
+        self.assertIn("simheaven/houses/house_04x06x1.obj", paths)
+        self.assertNotIn("simheaven/houses/house_05x06x1.obj", paths)
+
+    def test_unexported_simheaven_object_placements_are_filtered(self):
+        placements = [
+            (120.1, 22.1, 0.0, "simheaven/houses/house_04x06x1.obj"),
+            (120.2, 22.2, 0.0, "simheaven/houses/house_05x06x1.obj"),
+            (120.3, 22.3, 0.0, "o4sfr/asia/residential/house_4.3x3.5x1.obj"),
+        ]
+
+        filtered, dropped = BLD._filter_unexported_simheaven_object_placements(
+            placements,
+            {"simheaven/houses/house_04x06x1.obj"},
+        )
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual(
+            [placement[3] for placement in filtered],
+            [
+                "simheaven/houses/house_04x06x1.obj",
+                "o4sfr/asia/residential/house_4.3x3.5x1.obj",
+            ],
+        )
+
+    def test_unexported_simheaven_object_placements_fail_loudly(self):
+        placements = [
+            (120.1, 22.1, 0.0, "simheaven/houses/house_05x06x1.obj"),
+            (120.2, 22.2, 0.0, "o4sfr/asia/residential/house_4.3x3.5x1.obj"),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "house_05x06x1.obj"):
+            BLD._assert_no_unexported_simheaven_object_placements(
+                placements,
+                {"simheaven/houses/house_04x06x1.obj"},
+            )
+
+    def test_exported_simheaven_landmark_object_is_valid_output_ref(self):
+        export = type("Export", (), {
+            "virtual_path": "simheaven/landmarks/gantry-crane.obj",
+            "resolved_path": None,
+        })()
+        placements = [
+            (120.1, 22.1, 0.0, "simheaven/landmarks/gantry-crane.obj"),
+        ]
+
+        exported_paths = BLD._exported_simheaven_object_paths([export])
+
+        self.assertIn("simheaven/landmarks/gantry-crane.obj", exported_paths)
+        BLD._assert_no_unexported_simheaven_object_placements(
+            placements,
+            exported_paths,
+        )
+
+    def test_stock_yolo_asset_filter_disables_unexported_gantry_crane(self):
+        asset_map, dropped_paths, dropped_classes = BLD._filter_stock_yolo_asset_map(
+            {
+                7: (
+                    "object",
+                    ("simheaven/landmarks/gantry-crane.obj",),
+                    None,
+                ),
+                14: (
+                    "object",
+                    (
+                        "lib/garden/pools/pool_Small_7x10.obj",
+                        "SFD_Global/Australia/Pool.obj",
+                    ),
+                    None,
+                ),
+            },
+            exported_paths=set(),
+        )
+
+        self.assertNotIn(7, asset_map)
+        self.assertIn(7, dropped_classes)
+        self.assertIn("simheaven/landmarks/gantry-crane.obj", dropped_paths)
+        self.assertEqual(
+            asset_map[14][1],
+            ("lib/garden/pools/pool_Small_7x10.obj",),
         )
 
     def test_sfd_export_measurement_adds_region_asset_with_offcenter_bounds(self):

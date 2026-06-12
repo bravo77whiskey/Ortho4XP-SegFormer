@@ -198,7 +198,7 @@ class EnsureStockYoloCheckpointTests(unittest.TestCase):
 
 @unittest.skipIf(torch is None, "torch is not installed")
 class StockYoloFacadeGeometryTests(unittest.TestCase):
-    def _run_fake_detection(self, cls):
+    def _run_fake_detection(self, cls, **kwargs):
         class FakeObb:
             def __init__(self, cls):
                 self.xyxyxyxy = torch.tensor(
@@ -233,6 +233,7 @@ class StockYoloFacadeGeometryTests(unittest.TestCase):
             stride=256,
             imgsz=256,
             device="cpu",
+            **kwargs,
         )
 
     def test_storage_tank_facade_uses_closed_circular_ring(self):
@@ -271,6 +272,17 @@ class StockYoloFacadeGeometryTests(unittest.TestCase):
         self.assertEqual(ring[0], ring[-1])
         self.assertGreater(STOCK._signed_lonlat_ring_area(ring), 0.0)
         self.assertEqual(result.occupied_px_polys[0].shape[0], 4)
+
+    def test_custom_asset_map_can_disable_detected_class(self):
+        result = self._run_fake_detection(
+            7,
+            asset_map={},
+            static_classes=(),
+        )
+
+        self.assertEqual(result.placed_objects, [])
+        self.assertEqual(result.placed_facades, [])
+        self.assertEqual(result.counts_by_class, {})
 
 
 @unittest.skipIf(torch is None, "torch is not installed")
