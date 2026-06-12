@@ -12,9 +12,11 @@ global_seed: 20260612
 output_package_name: O4SFR_ProcGen_Library
 
 atlas:
-  # 1024 halves every strip band (VRAM/bandwidth: 4x less than 2048); the
-  # V-band layout scales proportionally so UVs are resolution-independent.
-  size: 1024
+  # 2048 = design resolution (windows ~30 px/m). The V-band layout scales
+  # proportionally so UVs are resolution-independent: changing size swaps
+  # texture detail only, installed OBJs need no rebuild. VRAM cost is
+  # ~5.6 MB DXT per flavor and only 1-2 flavors load per tile.
+  size: 2048
   seed: 101
   # Flavors map 1:1 to a texture PNG; region dirs pick their flavor below.
   flavors: [generic, europe, north_america, mediterranean, asia, africa,
