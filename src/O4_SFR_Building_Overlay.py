@@ -2753,7 +2753,9 @@ OPTIONAL_ASSET_REGION_ALIASES = {
     "australia_oceania": {"australia_oceania"},
 }
 
-YOLO_OBB_CACHE_VERSION = 2
+YOLO_OBB_CACHE_VERSION = 3
+YOLO_ANALYSIS_CACHE_VERSION = 1
+YOLO_ANALYSIS_TARGET_ZL = 16
 DEFAULT_YOLO_OBB_CHECKPOINT = (
     r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
 )
@@ -2761,7 +2763,7 @@ DEFAULT_YOLO_OBB_IMGSZ = 512
 DEFAULT_YOLO_OBB_STRIDE = 512
 DEFAULT_YOLO_OBB_CONF = 0.18
 DEFAULT_YOLO_OBB_IOU = 0.5
-DEFAULT_YOLO_OBB_MAX_DET = 1000
+DEFAULT_YOLO_OBB_MAX_DET = 3000
 DEFAULT_YOLO_OBB_BATCH = 1
 YOLO_GUIDANCE_MAX_DISTANCE_M = 70.0
 YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
@@ -5152,7 +5154,7 @@ def _checkpoint_signature(path):
 
 def _yolo_obb_cache_key(
     fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det,
-    batch_size=1, fused=False,
+    batch_size=1, fused=False, analysis_signature=None, analysis_target_zl=None,
 ):
     return {
         'version': YOLO_OBB_CACHE_VERSION,
@@ -5166,6 +5168,10 @@ def _yolo_obb_cache_key(
         'max_det': int(max_det),
         'batch_size': int(batch_size),
         'fused': bool(fused),
+        'analysis_target_zl': (
+            None if analysis_target_zl is None else int(analysis_target_zl)
+        ),
+        'analysis': analysis_signature,
     }
 
 
@@ -5201,6 +5207,192 @@ def _load_yolo_obb_model(checkpoint, *, fuse=False):
     if fuse and hasattr(model, 'fuse'):
         model.fuse()
     return model
+
+
+def _image_resampling_lanczos():
+    resampling = getattr(Image, "Resampling", Image)
+    return getattr(resampling, "LANCZOS")
+
+
+def _safe_cache_token(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "unknown")).strip("_") or "unknown"
+
+
+def _yolo_analysis_size(width, height, source_zl, target_zl=YOLO_ANALYSIS_TARGET_ZL):
+    """Return the RGB image size that presents this footprint at target-ZL scale."""
+    width = int(width)
+    height = int(height)
+    source_zl = int(source_zl)
+    target_zl = int(target_zl)
+    if source_zl <= target_zl:
+        return max(1, width), max(1, height)
+    scale = 2 ** (source_zl - target_zl)
+    return (
+        max(1, int(round(width / scale))),
+        max(1, int(round(height / scale))),
+    )
+
+
+def _yolo_analysis_signature(fname, source_path, img_w, img_h, source_zl, target_zl):
+    analysis_w, analysis_h = _yolo_analysis_size(
+        img_w, img_h, source_zl, target_zl=target_zl
+    )
+    return {
+        'source_fname': str(fname),
+        'source_path': None if source_path is None else os.path.abspath(os.fspath(source_path)),
+        'source_signature': _checkpoint_signature(source_path) if source_path else None,
+        'source_size': [int(img_w), int(img_h)],
+        'source_zl': int(source_zl),
+        'target_zl': int(target_zl),
+        'analysis_size': [int(analysis_w), int(analysis_h)],
+    }
+
+
+def build_yolo_zl16_analysis_image(
+    tex_dir,
+    til_y_top,
+    til_x_left,
+    provider,
+    source_zl,
+    target_zl=YOLO_ANALYSIS_TARGET_ZL,
+    cache_dir=None,
+    source_image=None,
+    source_path=None,
+    bounds=None,
+):
+    """Create or reuse a target-ZL RGB PNG for trained YOLO inference.
+
+    The returned image covers exactly the same geographic footprint as the
+    source texture. Higher-ZL inputs are downsampled so the detector sees the
+    same approximate ground scale as a ZL16 texture, while the original scenery
+    DDS remains untouched.
+    """
+    if source_image is None:
+        if source_path is None:
+            source_path = os.path.join(
+                os.fspath(tex_dir),
+                f"{int(til_y_top)}_{int(til_x_left)}_{provider}{int(source_zl):02d}.dds",
+            )
+        try:
+            with Image.open(source_path) as image:
+                source_image = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        except Exception as exc:
+            raise FileNotFoundError(f"Could not load YOLO analysis source {source_path}: {exc}") from exc
+
+    source_arr = np.asarray(source_image, dtype=np.uint8)
+    if source_arr.ndim != 3 or source_arr.shape[2] < 3:
+        raise ValueError("YOLO analysis source image must be an RGB-like array")
+    source_arr = source_arr[:, :, :3]
+    source_h, source_w = source_arr.shape[:2]
+    analysis_w, analysis_h = _yolo_analysis_size(
+        source_w, source_h, source_zl, target_zl=target_zl
+    )
+
+    root = (
+        os.path.join(os.getcwd(), "tmp", "sfr_yolo_zl16_cache")
+        if cache_dir is None
+        else os.path.join(os.fspath(cache_dir), "yolo_zl16_analysis")
+    )
+    os.makedirs(root, exist_ok=True)
+    provider_token = _safe_cache_token(provider)
+    stem = (
+        f"{int(til_y_top)}_{int(til_x_left)}_{provider_token}{int(source_zl):02d}"
+        f"_to_zl{int(target_zl):02d}_{analysis_w}x{analysis_h}"
+    )
+    png_path = os.path.join(root, stem + ".png")
+    meta_path = os.path.join(root, stem + ".json")
+    source_sig = _checkpoint_signature(source_path) if source_path else None
+    expected_meta = {
+        'version': YOLO_ANALYSIS_CACHE_VERSION,
+        'source_path': None if source_path is None else os.path.abspath(os.fspath(source_path)),
+        'source_signature': source_sig,
+        'source_zl': int(source_zl),
+        'target_zl': int(target_zl),
+        'til_y_top': int(til_y_top),
+        'til_x_left': int(til_x_left),
+        'provider': str(provider),
+        'source_size': [int(source_w), int(source_h)],
+        'analysis_size': [int(analysis_w), int(analysis_h)],
+        'bounds': None if bounds is None else [float(v) for v in bounds],
+    }
+    try:
+        if os.path.exists(png_path) and os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                if json.load(handle) == expected_meta:
+                    return png_path
+    except Exception:
+        pass
+
+    image = Image.fromarray(np.ascontiguousarray(source_arr), mode="RGB")
+    if image.size != (analysis_w, analysis_h):
+        image = image.resize((analysis_w, analysis_h), _image_resampling_lanczos())
+    image.save(png_path)
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(expected_meta, handle, indent=2, sort_keys=True)
+    return png_path
+
+
+def _load_yolo_analysis_image(
+    tex_dir,
+    fname,
+    til_y_top,
+    til_x_left,
+    provider,
+    source_zl,
+    target_zl,
+    cache_dir,
+    source_image,
+    source_path,
+    bounds,
+):
+    analysis_path = build_yolo_zl16_analysis_image(
+        tex_dir,
+        til_y_top,
+        til_x_left,
+        provider,
+        source_zl,
+        target_zl=target_zl,
+        cache_dir=cache_dir,
+        source_image=source_image,
+        source_path=source_path,
+        bounds=bounds,
+    )
+    with Image.open(analysis_path) as image:
+        analysis_image = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    source_h, source_w = np.asarray(source_image).shape[:2]
+    analysis_h, analysis_w = analysis_image.shape[:2]
+    scale_x = float(source_w) / max(1.0, float(analysis_w))
+    scale_y = float(source_h) / max(1.0, float(analysis_h))
+    return {
+        'path': analysis_path,
+        'image': analysis_image,
+        'scale_x': scale_x,
+        'scale_y': scale_y,
+        'signature': _yolo_analysis_signature(
+            fname, source_path, source_w, source_h, source_zl, target_zl
+        ),
+    }
+
+
+def _scale_yolo_detections_to_image(detections, scale_x, scale_y, img_w, img_h):
+    if not detections or (abs(scale_x - 1.0) < 1e-9 and abs(scale_y - 1.0) < 1e-9):
+        return detections
+    scaled = []
+    for detection in detections:
+        item = dict(detection)
+        points = np.asarray(item.get('points', ()), dtype=np.float32).reshape(-1, 2)
+        if points.size:
+            points[:, 0] = np.clip(points[:, 0] * float(scale_x), 0, max(0, img_w - 1))
+            points[:, 1] = np.clip(points[:, 1] * float(scale_y), 0, max(0, img_h - 1))
+            item['points'] = points.tolist()
+        center = np.asarray(item.get('center', ()), dtype=np.float32).reshape(-1)
+        if center.size >= 2:
+            item['center'] = [
+                float(np.clip(center[0] * float(scale_x), 0, max(0, img_w - 1))),
+                float(np.clip(center[1] * float(scale_y), 0, max(0, img_h - 1))),
+            ]
+        scaled.append(item)
+    return scaled
 
 
 def _iter_yolo_crops(image, stride):
@@ -5398,9 +5590,10 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
         detections = []
         if effective_batch <= 1:
             for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+                crop_bgr = np.ascontiguousarray(crop[..., ::-1])
                 with torch.inference_mode():
                     results = model.predict(
-                        source=crop,
+                        source=crop_bgr,
                         imgsz=int(imgsz),
                         conf=float(conf),
                         iou=float(iou),
@@ -5416,10 +5609,11 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                             model_class_count=model_class_count,
                         )
                     del results
+                del crop_bgr
         else:
             for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch):
                 offsets = [(ox, oy) for ox, oy, _ in batch]
-                crops = [crop for _, _, crop in batch]
+                crops = [np.ascontiguousarray(crop[..., ::-1]) for _, _, crop in batch]
                 with torch.inference_mode():
                     results = model.predict(
                         source=crops,
@@ -7579,16 +7773,21 @@ def run(
                 return p
         return None
 
+    def _source_image_path(fname, source_mode, ortho_dir):
+        if source_mode == 'dds':
+            return os.path.join(tex_dir, fname)
+        return _orthophoto_path(fname, ortho_dir)
+
     def _load_source_image(fname, source_mode, ortho_dir):
+        p = _source_image_path(fname, source_mode, ortho_dir)
+        if not p:
+            return None
         if source_mode == 'dds':
             return SEGFORMER.load_dds_or_none(
-                os.path.join(tex_dir, fname),
+                p,
                 log_prefix='[SFR Bld]',
                 display_name=fname,
             )
-        p = _orthophoto_path(fname, ortho_dir)
-        if not p:
-            return None
         try:
             return np.asarray(Image.open(p).convert('RGB'))
         except Exception:
@@ -7862,6 +8061,10 @@ def run(
         else yolo_max_det
     )
     yolo_imgsz = int(yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
+    yolo_analysis_target_zl = max(
+        1,
+        _env_int("O4_SFR_BLD_YOLO_ANALYSIS_ZL", YOLO_ANALYSIS_TARGET_ZL),
+    )
     # Batch stays 1 by default: the scripts/*_batch_autotune.py harnesses
     # showed batch>1 changes borderline detections on dense tiles (not
     # placement-exact), for ~0.3s/DDS saved on an RTX 4080. Opting in via the
@@ -7914,7 +8117,8 @@ def run(
         print(
             f"YOLO OBB placement: enabled checkpoint={yolo_checkpoint} "
             f"conf={yolo_conf} iou={yolo_iou} stride={yolo_stride} "
-            f"batch={yolo_batch_size} fuse={yolo_fuse_model}"
+            f"max_det={yolo_max_det} batch={yolo_batch_size} "
+            f"analysis_zl={yolo_analysis_target_zl} fuse={yolo_fuse_model}"
         )
         print(
             "YOLO OBB placement: direct detections only "
@@ -8333,6 +8537,7 @@ def run(
             bool(yolo_enabled), yolo_signature,
             yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
             round(float(yolo_iou), 6), yolo_max_det,
+            int(yolo_analysis_target_zl),
             int(effective_yolo_batch), int(effective_stock_yolo_batch),
             bool(yolo_fuse_model),
             round(float(yolo_suppress_coverage), 6),
@@ -8340,8 +8545,8 @@ def run(
             round(float(YOLO_OBJECT_OUTLINE_MIN_INSIDE), 6),
             float(MAX_GENERATED_BUILDING_HEIGHT_M),
             # Bump on schema-breaking changes to per-DDS cache contents.
-            # v13: invalidate v12 caches that may contain pre-filter simHeaven paths.
-            "schema=v13-exported-simheaven-objects",
+            # v14: invalidate v13 caches with native-ZL/RGB-interpreted YOLO detections.
+            "schema=v14-yolo-zl16-bgr-analysis",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -8535,12 +8740,18 @@ def run(
         yolo_detections = []
         yolo_guidance = None
         if yolo_enabled:
+            _source_path = _source_image_path(fname, _source_mode, _orthophoto_dir)
+            _analysis_signature = _yolo_analysis_signature(
+                fname, _source_path, img_w, img_h, zl, yolo_analysis_target_zl
+            )
             _yolo_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_yolo_obb.pkl'))
             _yolo_key = _yolo_obb_cache_key(
                 fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
                 yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
                 batch_size=yolo_batch_size,
                 fused=yolo_fuse_model,
+                analysis_signature=_analysis_signature,
+                analysis_target_zl=yolo_analysis_target_zl,
             )
             if not disable_cache:
                 _t = time.perf_counter()
@@ -8566,20 +8777,48 @@ def run(
                                     file_counts['yolo_cuda_reserved_before_mb'],
                                 ) = _cuda_counts
                         _t = time.perf_counter()
+                        yolo_analysis = _load_yolo_analysis_image(
+                            tex_dir,
+                            fname,
+                            til_y_top,
+                            til_x_left,
+                            m.group(3),
+                            zl,
+                            yolo_analysis_target_zl,
+                            cache_dir,
+                            img,
+                            _source_path,
+                            (lat_n, lat_s, lon_w, lon_e),
+                        )
+                        analysis_scale_x = float(yolo_analysis['scale_x'])
+                        analysis_scale_y = float(yolo_analysis['scale_y'])
+                        analysis_m_per_px = (
+                            float(m_per_px) * (analysis_scale_x + analysis_scale_y) / 2.0
+                        )
+                        file_counts['yolo_analysis_zl'] = int(yolo_analysis_target_zl)
+                        file_counts['yolo_analysis_scale_x1000'] = int(
+                            round(((analysis_scale_x + analysis_scale_y) / 2.0) * 1000)
+                        )
                         yolo_result = _run_yolo_obb_inference(
                             yolo_model,
-                            img,
+                            yolo_analysis['image'],
                             imgsz=yolo_imgsz,
                             stride=yolo_stride,
                             conf=yolo_conf,
                             iou=yolo_iou,
                             max_det=yolo_max_det,
                             device=("0" if torch.cuda.is_available() else "cpu"),
-                            m_per_px=m_per_px,
+                            m_per_px=analysis_m_per_px,
                             batch_size=yolo_batch_size,
                             return_metadata=True,
                         )
-                        yolo_detections = yolo_result['detections']
+                        yolo_detections = _scale_yolo_detections_to_image(
+                            yolo_result['detections'],
+                            analysis_scale_x,
+                            analysis_scale_y,
+                            img_w,
+                            img_h,
+                        )
                         prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
                         prep['yolo_batch_fell_back'] = yolo_result['fell_back']
                         if yolo_result['fell_back']:
@@ -8600,6 +8839,8 @@ def run(
                                     yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
                                     batch_size=yolo_result['effective_batch'],
                                     fused=yolo_fuse_model,
+                                    analysis_signature=_analysis_signature,
+                                    analysis_target_zl=yolo_analysis_target_zl,
                                 ),
                                 yolo_detections,
                             )

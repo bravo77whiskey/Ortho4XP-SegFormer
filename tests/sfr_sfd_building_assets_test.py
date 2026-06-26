@@ -8,6 +8,7 @@ from unittest import mock
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +76,59 @@ def _poly_long_axis_heading(points):
 
 
 class SfdBuildingAssetTests(unittest.TestCase):
+    def test_yolo_analysis_size_downscales_high_zl_to_target_scale(self):
+        self.assertEqual(
+            BLD._yolo_analysis_size(4096, 4096, source_zl=19, target_zl=16),
+            (512, 512),
+        )
+        self.assertEqual(
+            BLD._yolo_analysis_size(4096, 4096, source_zl=16, target_zl=16),
+            (4096, 4096),
+        )
+
+    def test_build_yolo_zl16_analysis_image_writes_downscaled_cache(self):
+        source = np.zeros((8, 8, 3), dtype=np.uint8)
+        source[:, :, 0] = 255
+
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis_path = BLD.build_yolo_zl16_analysis_image(
+                tmp,
+                til_y_top=100,
+                til_x_left=200,
+                provider="BI",
+                source_zl=18,
+                target_zl=16,
+                cache_dir=tmp,
+                source_image=source,
+                source_path=None,
+                bounds=(1.0, 0.0, 2.0, 3.0),
+            )
+
+            with Image.open(analysis_path) as image:
+                self.assertEqual(image.size, (2, 2))
+
+            self.assertTrue(Path(analysis_path).with_suffix(".json").exists())
+
+    def test_scale_yolo_detections_to_image_maps_points_and_center_only(self):
+        detections = [{
+            "points": [[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]],
+            "center": [1.0, 1.5],
+            "area_m2": 42.0,
+            "confidence": 0.75,
+        }]
+
+        scaled = BLD._scale_yolo_detections_to_image(
+            detections,
+            scale_x=4.0,
+            scale_y=4.0,
+            img_w=16,
+            img_h=16,
+        )
+
+        self.assertEqual(scaled[0]["points"][2], [8.0, 12.0])
+        self.assertEqual(scaled[0]["center"], [4.0, 6.0])
+        self.assertEqual(scaled[0]["area_m2"], 42.0)
+
     def test_stock_yolo_batch_default_tolerates_legacy_module(self):
         legacy_stock = type("LegacyStockYolo", (), {})()
 

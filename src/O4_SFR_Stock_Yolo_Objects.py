@@ -478,9 +478,10 @@ def run_stock_yolo_pass(
         )
         if effective_batch <= 1:
             for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+                crop_bgr = np.ascontiguousarray(crop[..., ::-1])
                 with torch.inference_mode():
                     results = model.predict(
-                        source=crop,
+                        source=crop_bgr,
                         imgsz=int(imgsz),
                         conf=float(conf),
                         iou=float(iou),
@@ -492,10 +493,11 @@ def run_stock_yolo_pass(
                     for r in results:
                         _consume_result(res, r, ox, oy)
                     del results
+                del crop_bgr
         else:
             for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch):
                 offsets = [(ox, oy) for ox, oy, _ in batch]
-                crops = [crop for _, _, crop in batch]
+                crops = [np.ascontiguousarray(crop[..., ::-1]) for _, _, crop in batch]
                 with torch.inference_mode():
                     results = model.predict(
                         source=crops,

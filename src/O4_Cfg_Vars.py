@@ -563,7 +563,7 @@ cfg_tile_vars = {
     },
     "sfr_bld_yolo_max_det": {
         "type": int,
-        "default": 1000,
+        "default": 3000,
         "short_name": "bld_yolo_max",
         "hint": "YOLO OBB maximum detections per inference crop.",
     },

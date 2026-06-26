@@ -126,7 +126,7 @@ sfr_bld_yolo_conf = 0.18
 sfr_bld_yolo_outline_tolerance = 1.0
 sfr_bld_yolo_iou = 0.5
 sfr_bld_yolo_stride = 512
-sfr_bld_yolo_max_det = 1000
+sfr_bld_yolo_max_det = 3000
 sfr_bld_yolo_suppress_coverage = 0.35
 sfr_bld_yolo_suppress_min_overlap_m2 = 25.0
 
