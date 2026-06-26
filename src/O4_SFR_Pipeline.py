@@ -129,6 +129,11 @@ sfr_bld_yolo_stride = 512
 sfr_bld_yolo_max_det = 100000
 sfr_bld_yolo_suppress_coverage = 0.35
 sfr_bld_yolo_suppress_min_overlap_m2 = 25.0
+sfr_bld_yolo_keep_mode = "drop"
+sfr_bld_yolo_keep_min_new_frac = 0.25
+sfr_bld_yolo_freearea_downsize = False
+sfr_bld_yolo_facade_clip = False
+sfr_bld_yolo_no_overlap_removal = True
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -468,6 +473,11 @@ def process_bld_tile(lat, lon, build_dir):
         f"    yolo_max_det             = {sfr_bld_yolo_max_det!r},\n"
         f"    yolo_suppress_coverage   = {sfr_bld_yolo_suppress_coverage!r},\n"
         f"    yolo_suppress_min_overlap_m2 = {sfr_bld_yolo_suppress_min_overlap_m2!r},\n"
+        f"    yolo_keep_mode           = {sfr_bld_yolo_keep_mode!r},\n"
+        f"    yolo_keep_min_new_frac   = {sfr_bld_yolo_keep_min_new_frac!r},\n"
+        f"    yolo_freearea_downsize   = {sfr_bld_yolo_freearea_downsize!r},\n"
+        f"    yolo_facade_clip         = {sfr_bld_yolo_facade_clip!r},\n"
+        f"    yolo_no_overlap_removal  = {sfr_bld_yolo_no_overlap_removal!r},\n"
         f"    yolo_outline_tolerance   = {sfr_bld_yolo_outline_tolerance!r},\n"
         f")\n"
     )

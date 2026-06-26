@@ -715,6 +715,13 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
         SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
         SFR.sfr_bld_yolo_outline_tolerance = tile.sfr_bld_yolo_outline_tolerance
+        SFR.sfr_bld_yolo_suppress_coverage = tile.sfr_bld_yolo_suppress_coverage
+        SFR.sfr_bld_yolo_suppress_min_overlap_m2 = tile.sfr_bld_yolo_suppress_min_overlap_m2
+        SFR.sfr_bld_yolo_keep_mode = tile.sfr_bld_yolo_keep_mode
+        SFR.sfr_bld_yolo_keep_min_new_frac = tile.sfr_bld_yolo_keep_min_new_frac
+        SFR.sfr_bld_yolo_freearea_downsize = tile.sfr_bld_yolo_freearea_downsize
+        SFR.sfr_bld_yolo_facade_clip = tile.sfr_bld_yolo_facade_clip
+        SFR.sfr_bld_yolo_no_overlap_removal = tile.sfr_bld_yolo_no_overlap_removal
         SFR.sfr_patch_size      = tile.sfr_patch_size
         SFR.sfr_overlap         = tile.sfr_overlap
         SFR.sfr_batch_size      = tile.sfr_batch_size

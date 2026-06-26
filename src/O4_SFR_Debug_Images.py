@@ -612,6 +612,11 @@ def generate_production_building_debug_images(
     yolo_max_det: int | None = None,
     yolo_suppress_coverage: float = 0.0,
     yolo_suppress_min_overlap_m2: float = 25.0,
+    yolo_keep_mode: str = "drop",
+    yolo_keep_min_new_frac: float = 0.25,
+    yolo_freearea_downsize: bool = False,
+    yolo_facade_clip: bool = False,
+    yolo_no_overlap_removal: bool = True,
     allow_road_overlap: bool = False,
 ) -> list[dict]:
     """Run the real building placement pipeline and stop after debug images."""
@@ -659,6 +664,11 @@ def generate_production_building_debug_images(
                 yolo_max_det=yolo_max_det,
                 yolo_suppress_coverage=yolo_suppress_coverage,
                 yolo_suppress_min_overlap_m2=yolo_suppress_min_overlap_m2,
+                yolo_keep_mode=yolo_keep_mode,
+                yolo_keep_min_new_frac=yolo_keep_min_new_frac,
+                yolo_freearea_downsize=yolo_freearea_downsize,
+                yolo_facade_clip=yolo_facade_clip,
+                yolo_no_overlap_removal=yolo_no_overlap_removal,
             )
             results.append({
                 "tile": tile_label,
@@ -730,6 +740,16 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--yolo-max-det", type=int, default=None)
     parser.add_argument("--yolo-suppress-coverage", type=float, default=0.0)
     parser.add_argument("--yolo-suppress-min-overlap-m2", type=float, default=25.0)
+    parser.add_argument("--yolo-keep-mode", choices=("drop", "marginal"), default="drop")
+    parser.add_argument("--yolo-keep-min-new-frac", type=float, default=0.25)
+    parser.add_argument("--yolo-freearea-downsize", action="store_true")
+    parser.add_argument("--yolo-facade-clip", action="store_true")
+    parser.add_argument("--yolo-no-overlap-removal", dest="yolo_no_overlap_removal",
+                        action="store_true", default=True,
+                        help="(default) Place every detection's full footprint with no road/rail/detection-vs-detection overlap avoidance.")
+    parser.add_argument("--yolo-restore-overlap-avoidance", dest="yolo_no_overlap_removal",
+                        action="store_false",
+                        help="Restore legacy overlap avoidance (roads, railways, and trained-YOLO self-overlap).")
     parser.add_argument(
         "--allow-road-overlap",
         action="store_true",
@@ -786,6 +806,11 @@ def main(argv: list[str] | None = None) -> int:
             yolo_max_det=args.yolo_max_det,
             yolo_suppress_coverage=args.yolo_suppress_coverage,
             yolo_suppress_min_overlap_m2=args.yolo_suppress_min_overlap_m2,
+            yolo_keep_mode=args.yolo_keep_mode,
+            yolo_keep_min_new_frac=args.yolo_keep_min_new_frac,
+            yolo_freearea_downsize=args.yolo_freearea_downsize,
+            yolo_facade_clip=args.yolo_facade_clip,
+            yolo_no_overlap_removal=args.yolo_no_overlap_removal,
             allow_road_overlap=args.allow_road_overlap,
         )
         summary_name = "summary.json"

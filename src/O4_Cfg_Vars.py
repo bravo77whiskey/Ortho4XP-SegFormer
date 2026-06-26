@@ -577,6 +577,67 @@ cfg_tile_vars = {
                 "outline-rejected facade fallbacks into 3D object placements "
                 "at the cost of slight overhang past the detected outline.",
     },
+    "sfr_bld_yolo_suppress_coverage": {
+        "type": float,
+        "default": 0.35,
+        "short_name": "bld_yolo_supp_cov",
+        "hint": "Overlap-coverage threshold for the legacy 'drop' overlap removal. "
+                "A YOLO detection is dropped when its intersection with an already-kept "
+                "detection exceeds this fraction of the smaller footprint. 0 disables "
+                "overlap removal. Ignored when keep mode is 'marginal'.",
+    },
+    "sfr_bld_yolo_suppress_min_overlap_m2": {
+        "type": float,
+        "default": 25.0,
+        "short_name": "bld_yolo_supp_min_m2",
+        "hint": "Minimum absolute overlap area in square metres before legacy 'drop' "
+                "overlap suppression applies to a pair of YOLO detections.",
+    },
+    "sfr_bld_yolo_keep_mode": {
+        "type": str,
+        "default": "drop",
+        "values": ["drop", "marginal"],
+        "short_name": "bld_yolo_keep_mode",
+        "hint": "Overlap removal strategy. 'drop' = legacy greedy NMS (removes "
+                "overlapping detections, which can thin out densely covered blocks). "
+                "'marginal' = set-cover keep that retains a detection whenever it adds "
+                "new ground area, preserving coverage while still removing redundant "
+                "overlap. Pair 'marginal' with free-area downsizing and facade clip.",
+    },
+    "sfr_bld_yolo_keep_min_new_frac": {
+        "type": float,
+        "default": 0.25,
+        "short_name": "bld_yolo_keep_frac",
+        "hint": "Marginal keep mode only: a detection is kept when at least this "
+                "fraction of its footprint is new ground not already covered by a "
+                "kept detection. Lower values keep more overlapping detections.",
+    },
+    "sfr_bld_yolo_freearea_downsize": {
+        "type": bool,
+        "default": False,
+        "short_name": "bld_yolo_freearea",
+        "hint": "Allow a smaller building asset into a partially-occupied detection by "
+                "gating minimum coverage against the remaining FREE area instead of the "
+                "full detection area, so gaps left by larger neighbours still get filled.",
+    },
+    "sfr_bld_yolo_facade_clip": {
+        "type": bool,
+        "default": False,
+        "short_name": "bld_yolo_facade_clip",
+        "hint": "Clip fallback facades to the occupancy-free region of their detection "
+                "instead of stamping the full detection polygon, so kept overlapping "
+                "detections tile instead of stacking flat facades on each other.",
+    },
+    "sfr_bld_yolo_no_overlap_removal": {
+        "type": bool,
+        "default": True,
+        "short_name": "bld_yolo_no_overlap",
+        "hint": "Maximise building coverage: place every trained-YOLO detection with NO "
+                "overlap avoidance between detections and NO avoidance of roads or "
+                "railways. Water, OSM building footprints, scenery objects and stock-YOLO "
+                "placements are still avoided. Disable to restore legacy overlap removal "
+                "(keep mode / suppression / spacing).",
+    },
     # Other
     "custom_dem": {
         "type": str,
@@ -718,6 +779,13 @@ list_sfr_bld_vars = [
     "sfr_bld_yolo_stride",
     "sfr_bld_yolo_max_det",
     "sfr_bld_yolo_outline_tolerance",
+    "sfr_bld_yolo_no_overlap_removal",
+    "sfr_bld_yolo_suppress_coverage",
+    "sfr_bld_yolo_suppress_min_overlap_m2",
+    "sfr_bld_yolo_keep_mode",
+    "sfr_bld_yolo_keep_min_new_frac",
+    "sfr_bld_yolo_freearea_downsize",
+    "sfr_bld_yolo_facade_clip",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars
