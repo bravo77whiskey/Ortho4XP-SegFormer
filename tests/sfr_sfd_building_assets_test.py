@@ -86,6 +86,9 @@ class SfdBuildingAssetTests(unittest.TestCase):
             (4096, 4096),
         )
 
+    def test_yolo_default_stride_matches_model_input_size(self):
+        self.assertEqual(BLD.DEFAULT_YOLO_OBB_STRIDE, BLD.DEFAULT_YOLO_OBB_IMGSZ)
+
     def test_build_yolo_zl16_analysis_image_writes_downscaled_cache(self):
         source = np.zeros((8, 8, 3), dtype=np.uint8)
         source[:, :, 0] = 255

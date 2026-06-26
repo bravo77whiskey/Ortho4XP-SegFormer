@@ -5,7 +5,7 @@ Usage:
     python src/scripts/generate_bld_overlay.py <tex_dir> <lat> <lon> <out_dsf> [options]
 
 Options:
-    --spacing   METRES   Object spacing in metres (default 20)
+    --spacing   METRES   Object spacing in metres (default 0)
     --close     PIXELS   Morphological close kernel radius (default 15)
     --open      PIXELS   Morphological open  kernel radius (default 5)
     --min-zone-m2 M2     Min zone area to bother filling   (default 200)
@@ -364,7 +364,7 @@ def parse_args():
     ap.add_argument(
         '--spacing',
         type=float,
-        default=20.0,
+        default=0.0,
         help='Target edge gap in metres between generated building footprints',
     )
     ap.add_argument('--close',     type=int,   default=15)
@@ -381,6 +381,8 @@ def parse_args():
                     help='Configured X-Plane root or Custom Scenery directory used to locate building libraries.')
     ap.add_argument('--no-custom-scenery-avoidance', action='store_true',
                     help='Disable active custom scenery object/facade overlap avoidance.')
+    ap.add_argument('--allow-road-overlap', action='store_true',
+                    help='Allow generated building footprints to overlap road masks.')
     ap.add_argument('--no-yolo', action='store_true',
                     help='Disable YOLO OBB direct building placements.')
     ap.add_argument('--yolo-checkpoint', default=None,
@@ -2763,7 +2765,7 @@ DEFAULT_YOLO_OBB_IMGSZ = 512
 DEFAULT_YOLO_OBB_STRIDE = 512
 DEFAULT_YOLO_OBB_CONF = 0.18
 DEFAULT_YOLO_OBB_IOU = 0.5
-DEFAULT_YOLO_OBB_MAX_DET = 3000
+DEFAULT_YOLO_OBB_MAX_DET = 100000
 DEFAULT_YOLO_OBB_BATCH = 1
 YOLO_GUIDANCE_MAX_DISTANCE_M = 70.0
 YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
@@ -7724,6 +7726,7 @@ def run(
     avoid_custom_scenery=True,
     smart_gap_fill=None,
     debug_image_only=False,
+    allow_road_overlap=False,
     dds_filter=None,
     ignore_placement_cache=False,
     yolo_enabled=True,
@@ -8522,6 +8525,7 @@ def run(
             tuple(sorted(class_min_footprint_span_m.items())),
             ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
             ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
+            bool(allow_road_overlap),
             separator_sig, heading_sig,
             excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
             custom_bld_sig, bool(avoid_custom_scenery),
@@ -9179,10 +9183,14 @@ def run(
                     _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
             _t = time.perf_counter()
-            bld_zone = bld_zone & (~road_mask)
-            static_occ_mask = road_mask.copy()
-            if sfr_road_dilated is not None and sfr_road_dilated.any():
-                static_occ_mask = static_occ_mask | sfr_road_dilated
+            if allow_road_overlap:
+                static_occ_mask = np.zeros_like(road_mask)
+                file_counts['road_overlap_allowed'] = 1
+            else:
+                bld_zone = bld_zone & (~road_mask)
+                static_occ_mask = road_mask.copy()
+                if sfr_road_dilated is not None and sfr_road_dilated.any():
+                    static_occ_mask = static_occ_mask | sfr_road_dilated
 
             if poly_mask is not None and poly_mask.any():
                 bld_zone  = bld_zone & (~poly_mask)
@@ -10290,6 +10298,8 @@ def run(
                     fp_draw = ImageDraw.Draw(fp_layer)
                     yolo_line_w = max(1, int(round(TILE_VIZ / 2048)))
                     for poly, placed in yolo_viz_polys:
+                        if not placed:
+                            continue
                         pts = [
                             (
                                 int(round(float(px2) * scale)),
@@ -10313,6 +10323,8 @@ def run(
                             outline = dot_colours.get(cls2, (0, 220, 0))
                             fp_draw.polygon(pts, fill=(245, 242, 232, 170), outline=outline + (255,))
                     for poly, placed in yolo_viz_polys:
+                        if not placed:
+                            continue
                         pts = [
                             (
                                 int(round(float(px2) * scale)),
@@ -10561,6 +10573,7 @@ def main():
         osm_roads_path  = args.osm_roads,
         custom_scenery_dir = args.custom_scenery_dir,
         avoid_custom_scenery = not args.no_custom_scenery_avoidance,
+        allow_road_overlap = args.allow_road_overlap,
         yolo_enabled = not args.no_yolo,
         yolo_checkpoint = args.yolo_checkpoint,
         yolo_conf = args.yolo_conf,

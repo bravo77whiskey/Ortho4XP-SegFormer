@@ -612,6 +612,7 @@ def generate_production_building_debug_images(
     yolo_max_det: int | None = None,
     yolo_suppress_coverage: float = 0.0,
     yolo_suppress_min_overlap_m2: float = 25.0,
+    allow_road_overlap: bool = False,
 ) -> list[dict]:
     """Run the real building placement pipeline and stop after debug images."""
     output_dir = Path(output_dir)
@@ -650,6 +651,7 @@ def generate_production_building_debug_images(
                 debug_image_only=True,
                 dds_filter=names,
                 ignore_placement_cache=True,
+                allow_road_overlap=allow_road_overlap,
                 yolo_checkpoint=str(yolo_checkpoint) if yolo_checkpoint else None,
                 yolo_conf=yolo_conf,
                 yolo_iou=yolo_iou,
@@ -713,7 +715,7 @@ def parse_args(argv: list[str] | None = None):
         action="store_true",
         help="Use the lightweight mask renderer instead of the production building-placement pipeline.",
     )
-    parser.add_argument("--spacing-m", type=float, default=20.0)
+    parser.add_argument("--spacing-m", type=float, default=0.0)
     parser.add_argument("--close-k", type=int, default=15)
     parser.add_argument("--open-k", type=int, default=5)
     parser.add_argument("--min-zone-m2", type=float, default=200.0)
@@ -728,6 +730,11 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--yolo-max-det", type=int, default=None)
     parser.add_argument("--yolo-suppress-coverage", type=float, default=0.0)
     parser.add_argument("--yolo-suppress-min-overlap-m2", type=float, default=25.0)
+    parser.add_argument(
+        "--allow-road-overlap",
+        action="store_true",
+        help="Allow generated building footprints to overlap road masks.",
+    )
     parser.add_argument(
         "--production-viz-size",
         type=int,
@@ -779,6 +786,7 @@ def main(argv: list[str] | None = None) -> int:
             yolo_max_det=args.yolo_max_det,
             yolo_suppress_coverage=args.yolo_suppress_coverage,
             yolo_suppress_min_overlap_m2=args.yolo_suppress_min_overlap_m2,
+            allow_road_overlap=args.allow_road_overlap,
         )
         summary_name = "summary.json"
     summary_path = Path(args.output_dir) / summary_name

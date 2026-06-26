@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--osm-roads", default=None)
     parser.add_argument("--custom-scenery-dir", default=None)
     parser.add_argument("--dsftool", default=None)
-    parser.add_argument("--spacing", type=float, default=20.0)
+    parser.add_argument("--spacing", type=float, default=0.0)
     parser.add_argument("--close-k", type=int, default=15)
     parser.add_argument("--open-k", type=int, default=5)
     parser.add_argument("--min-zone-m2", type=float, default=200.0)

@@ -467,7 +467,7 @@ cfg_tile_vars = {
     # SegFormer building overlay (src/scripts/generate_bld_overlay.py)
     "sfr_bld_spacing_m": {
         "type": float,
-        "default": 20.0,
+        "default": 0.0,
         "short_name": "bld_spacing_m",
         "hint": "Minimum target gap in metres between building footprint edges. Candidate centre spacing is derived from this gap plus the smallest asset footprint span in each size class.",
     },
@@ -563,7 +563,7 @@ cfg_tile_vars = {
     },
     "sfr_bld_yolo_max_det": {
         "type": int,
-        "default": 3000,
+        "default": 100000,
         "short_name": "bld_yolo_max",
         "hint": "YOLO OBB maximum detections per inference crop.",
     },

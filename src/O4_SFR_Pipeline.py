@@ -112,7 +112,7 @@ sfr_veg_default_buffer_m = 0.0
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
 sfr_veg_disable_cache = False
 
-sfr_bld_spacing_m     = 20.0
+sfr_bld_spacing_m     = 0.0
 sfr_bld_close_m       = 30.0
 sfr_bld_open_m        = 10.0
 sfr_bld_min_zone_m2   = 200.0
@@ -126,7 +126,7 @@ sfr_bld_yolo_conf = 0.18
 sfr_bld_yolo_outline_tolerance = 1.0
 sfr_bld_yolo_iou = 0.5
 sfr_bld_yolo_stride = 512
-sfr_bld_yolo_max_det = 3000
+sfr_bld_yolo_max_det = 100000
 sfr_bld_yolo_suppress_coverage = 0.35
 sfr_bld_yolo_suppress_min_overlap_m2 = 25.0
 
