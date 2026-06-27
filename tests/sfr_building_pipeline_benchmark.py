@@ -117,9 +117,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-max-det", type=int, default=None)
     parser.add_argument("--yolo-suppress-coverage", type=float, default=0.0)
     parser.add_argument("--yolo-suppress-min-overlap-m2", type=float, default=25.0)
+    parser.add_argument(
+        "--legacy-overlap-removal",
+        action="store_true",
+        help="Run the legacy avoidance path (yolo_no_overlap_removal=False) "
+             "instead of the max-coverage default, to reproduce the slow path.",
+    )
     parser.add_argument("--yolo-outline-tolerance", type=float, default=None,
                         help="Fraction of an object footprint required inside "
                              "the YOLO polygon (1.0 = strict containment).")
+    parser.add_argument(
+        "--no-custom-scenery-avoidance",
+        action="store_true",
+        help="Disable avoidance of existing custom-scenery objects/facades "
+             "(simulates a fresh tile with no prior yOrtho4XP_Bld_Overlays).",
+    )
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
     parser.add_argument(
@@ -259,12 +271,14 @@ def main() -> int:
             dsftool_path=str(dsftool) if dsftool else None,
             skip_osm_excl_download=args.skip_osm_download,
             custom_scenery_dir=str(custom_scenery_dir) if custom_scenery_dir else None,
+            avoid_custom_scenery=not args.no_custom_scenery_avoidance,
             yolo_conf=args.yolo_conf,
             yolo_iou=args.yolo_iou,
             yolo_stride=args.yolo_stride,
             yolo_max_det=args.yolo_max_det,
             yolo_suppress_coverage=args.yolo_suppress_coverage,
             yolo_suppress_min_overlap_m2=args.yolo_suppress_min_overlap_m2,
+            yolo_no_overlap_removal=not args.legacy_overlap_removal,
             yolo_outline_tolerance=args.yolo_outline_tolerance,
         )
         print(f"[bench] total wall={time.perf_counter() - t0:.2f}s")

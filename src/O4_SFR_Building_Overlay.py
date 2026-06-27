@@ -142,6 +142,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("cache", "cache_load"),
         ("segformer", "segformer_inference"),
         ("trained_yolo", "trained_yolo_inference"),
+        ("yolo_suppress", "yolo_suppress"),
         ("stock_yolo", "stock_yolo_inference"),
         ("zone", "zone_cleanup"),
         ("lookup", "lookup"),
@@ -154,6 +155,12 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("cc", "connected_components"),
         ("candidates", "candidate_grid"),
         ("place", "fit_loop"),
+        # O4_SFR_BLD_PLACE_PROFILE sub-phase breakdown (silent when 0).
+        ("place_prep", "place_prep"),
+        ("place_fits", "place_fits"),
+        ("place_select", "place_select"),
+        ("place_blockers", "place_blockers"),
+        ("place_maskfill", "place_maskfill"),
         ("save", "cache_save"),
         ("viz", "viz"),
     )
@@ -201,6 +208,11 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("side_head", "side_heading_zones"),
                 ("sh_head", "simheaven_heading_zones"),
                 ("fit_checks", "fit_checks"),
+                # O4_SFR_BLD_PLACE_PROFILE candidate-scan accounting.
+                ("place_select_calls", "place_select_calls"),
+                ("place_cands_offered", "place_cands_offered"),
+                ("place_cands_viable", "place_cands_viable"),
+                ("place_cands_scanned", "place_cands_scanned"),
                 ("placed", "placed"),
                 ("cuda_alloc_before_mb", "yolo_cuda_alloc_before_mb"),
                 ("cuda_alloc_after_mb", "yolo_cuda_alloc_after_mb"),
@@ -7147,8 +7159,19 @@ def _select_yolo_object_candidate(
     recent_spacing_mask=None,
     freearea_downsize=False,
     skip_occupancy=False,
+    profile_out=None,
 ):
-    """Return a mapped object candidate that fits inside the YOLO polygon."""
+    """Return a mapped object candidate that fits inside the YOLO polygon.
+
+    When ``profile_out`` is a dict it is used as an accumulator to attribute
+    placement cost: ``calls`` (selector invocations), ``entries`` (candidate
+    pool size offered), ``viable`` (survivors of the vectorised size/coverage
+    prefilter) and ``seen`` (candidates actually scanned in Python). Used by the
+    ``O4_SFR_BLD_PLACE_PROFILE`` diagnostic; ``None`` keeps the hot path free of
+    bookkeeping.
+    """
+    if profile_out is not None:
+        profile_out['calls'] = profile_out.get('calls', 0) + 1
     if not isinstance(fit_table, dict) or fit_table.get('kind') != 'scored_yolo_object_candidates':
         key = _yolo_object_dimension_key(detection)
         if key is None:
@@ -7156,6 +7179,8 @@ def _select_yolo_object_candidate(
         candidates = (fit_table or {}).get(key)
         if not candidates:
             return None, 'miss'
+        if profile_out is not None:
+            profile_out['entries'] = profile_out.get('entries', 0) + len(candidates)
 
         try:
             detection_area_m2 = float(detection.get('area_m2') or 0.0)
@@ -7171,6 +7196,8 @@ def _select_yolo_object_candidate(
 
         context_skipped = 0
         for candidate in candidates:
+            if profile_out is not None:
+                profile_out['seen'] = profile_out.get('seen', 0) + 1
             candidate_asset = candidate['asset']
             path = candidate_asset.get('path')
             if enabled_assets_by_path is not None:
@@ -7294,13 +7321,21 @@ def _select_yolo_object_candidate(
     )
     cov_ok = merged_bundle['cov_area'] >= min_cov_area_m2 - 1e-12
     viable_mask = size_ok & cov_ok
-    size_rejected = int((~size_ok).sum())
-    coverage_rejected = int(np.count_nonzero(size_ok & ~cov_ok))
-    if size_rejected:
-        counters['size_reject'] = size_rejected
-    if coverage_rejected:
-        counters['coverage_reject'] = coverage_rejected
     viable_idx = np.flatnonzero(viable_mask)
+    jxi = int(jx)
+    jyi = int(jy)
+    _check_occupancy = (
+        not skip_occupancy and
+        static_occ_mask is not None and building_spacing_mask is not None
+    )
+    # The footprint polygon, its inside-detection test and the occupancy test
+    # depend only on (bounds_m, heading_delta) for this call (jx/jy/heading/
+    # m_per_px and the masks are fixed). Many ProcGen assets share dimensions
+    # and sit adjacent in the coverage-sorted scan (notably the equal-coverage
+    # ties the loop must walk), so memoise the geometry to avoid recomputing the
+    # same cv2 footprint/intersection dozens of times per detection. Pure
+    # function of the key -> result is byte-identical to recomputing.
+    _geom_cache = {}
     for idx in viable_idx:
         idx = int(idx)
         class_rank, asset_class, candidate = entries[idx]
@@ -7322,26 +7357,35 @@ def _select_yolo_object_candidate(
 
         coverage = candidate_cov_area_m2 / detection_area_m2
 
-        final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
-        footprint_poly = _footprint_poly(
-            int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
+        heading_delta = float(candidate['heading_delta'])
+        bounds_m = asset['bounds_m']
+        geom_key = (
+            bounds_m if type(bounds_m) is tuple else tuple(bounds_m),
+            heading_delta,
         )
-        if not _footprint_inside_detection(footprint_poly, yolo_poly):
+        cached = _geom_cache.get(geom_key)
+        if cached is None:
+            final_heading = (float(heading) + heading_delta) % 360.0
+            footprint_poly = _footprint_poly(jxi, jyi, bounds_m, final_heading, m_per_px)
+            inside_ok = _footprint_inside_detection(footprint_poly, yolo_poly)
+            occ_ok = True
+            if inside_ok and _check_occupancy:
+                occ_ok = _direct_yolo_poly_fits(
+                    static_occ_mask,
+                    building_spacing_mask,
+                    footprint_poly,
+                    scratch_mask=scratch_mask,
+                    static_occ_integral=static_occ_integral,
+                    spacing_occ_integral=spacing_occ_integral,
+                    recent_spacing_mask=recent_spacing_mask,
+                )
+            cached = (footprint_poly, final_heading, inside_ok, occ_ok)
+            _geom_cache[geom_key] = cached
+        footprint_poly, final_heading, inside_ok, occ_ok = cached
+        if not inside_ok:
             counters['outline_reject'] += 1
             continue
-        if (
-            not skip_occupancy and
-            static_occ_mask is not None and building_spacing_mask is not None and
-            not _direct_yolo_poly_fits(
-                static_occ_mask,
-                building_spacing_mask,
-                footprint_poly,
-                scratch_mask=scratch_mask,
-                static_occ_integral=static_occ_integral,
-                spacing_occ_integral=spacing_occ_integral,
-                recent_spacing_mask=recent_spacing_mask,
-            )
-        ):
+        if not occ_ok:
             counters['occupancy_reject'] += 1
             continue
 
@@ -7368,8 +7412,18 @@ def _select_yolo_object_candidate(
             best = (score, selected)
             best_cov_area_m2 = candidate_cov_area_m2
 
+    if profile_out is not None:
+        profile_out['entries'] = profile_out.get('entries', 0) + len(entries)
+        profile_out['viable'] = profile_out.get('viable', 0) + int(viable_idx.size)
+        profile_out['seen'] = profile_out.get('seen', 0) + int(counters['seen'])
+
     if best is not None:
         return best[1], 'selected'
+    # No placement: compute the size/coverage reject tallies now (only needed to
+    # pick the no-result status; deferred out of the hot path above).
+    if not counters['size_reject'] and not counters['coverage_reject']:
+        counters['size_reject'] = int((~size_ok).sum())
+        counters['coverage_reject'] = int(np.count_nonzero(size_ok & ~cov_ok))
     for status in (
         'context_skipped',
         'occupancy_reject',
@@ -7428,15 +7482,16 @@ def _suppress_overlapping_yolo_marginal(
 ):
     """Set-cover style keep that preserves ground coverage.
 
-    Detections are processed largest-first; one is kept only when it adds at
+    Detections are processed smallest-first; one is kept only when it adds at
     least ``keep_min_new_frac`` of NEW ground area beyond the union of the
     already-kept detections. This removes redundant overlap (which would just
     stack buildings) while retaining detections that fill genuine gaps, so a
     densely-covered block stays covered instead of being thinned out.
 
     Returns ``(kept, dropped_count)``. Kept detections are returned in
-    largest-first order, which also makes them place big-buildings-first so the
-    occupancy-aware placement path can pack smaller assets into the remainder.
+    smallest-first order, so the smaller detection wins an inter-detection
+    overlap conflict and the placement path packs larger assets into whatever
+    remains.
     """
     keep_min_new_frac = min(1.0, max(0.0, float(keep_min_new_frac or 0.0)))
     detections = list(detections)
@@ -7467,33 +7522,47 @@ def _suppress_overlapping_yolo_marginal(
     acc_w = max(1, grid_w // scale)
     accumulator = np.zeros((acc_h, acc_w), dtype=np.uint8)
     scratch = np.zeros((acc_h, acc_w), dtype=np.uint8)
-    overlap = np.zeros((acc_h, acc_w), dtype=np.uint8)
     inv_scale = 1.0 / float(scale)
 
     order = sorted(
         range(len(detections)),
         key=lambda i: (
-            -float(detections[i].get('area_m2', 0.0)),
+            float(detections[i].get('area_m2', 0.0)),
             -float(detections[i].get('confidence', 0.0)),
             i,
         ),
     )
     kept = []
     dropped = 0
+    # Per-detection cost is restricted to the detection's own bbox window of the
+    # accumulator. A detection polygon only ever touches its bbox, so the cleared
+    # scratch, the cell counts and the accumulator overlap are byte-identical to
+    # scanning the whole grid — but O(bbox) instead of O(acc_w*acc_h), which
+    # matters when there are tens of thousands of detections (conf<=0.05).
     for i in order:
         pts = polys[i]
         if pts is None:
             dropped += 1
             continue
         scaled = np.round(pts * inv_scale).astype(np.int32)
-        scratch.fill(0)
+        bx1 = max(0, int(scaled[:, 0].min()))
+        bx2 = min(acc_w, int(scaled[:, 0].max()) + 1)
+        by1 = max(0, int(scaled[:, 1].min()))
+        by2 = min(acc_h, int(scaled[:, 1].max()) + 1)
+        if bx2 <= bx1 or by2 <= by1:
+            dropped += 1
+            continue
+        # Clear only this bbox window, then stamp the polygon (fillPoly clips to
+        # the array and only writes inside the polygon's bbox).
+        scratch[by1:by2, bx1:bx2] = 0
         cv2.fillPoly(scratch, [scaled], 1)
-        poly_cells = int(cv2.countNonZero(scratch))
+        region = scratch[by1:by2, bx1:bx2]
+        poly_cells = int(np.count_nonzero(region))
         if poly_cells <= 0:
             dropped += 1
             continue
-        cv2.bitwise_and(scratch, accumulator, dst=overlap)
-        new_cells = poly_cells - int(cv2.countNonZero(overlap))
+        overlap_cells = int(np.count_nonzero(region & accumulator[by1:by2, bx1:bx2]))
+        new_cells = poly_cells - overlap_cells
         if new_cells >= keep_min_new_frac * poly_cells:
             kept.append(i)
             cv2.fillPoly(accumulator, [scaled], 1)
@@ -8189,6 +8258,7 @@ def run(
         'dds_load': 0.0,
         'segformer_inference': 0.0,
         'trained_yolo_inference': 0.0,
+        'yolo_suppress': 0.0,
         'stock_yolo_inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
@@ -8206,8 +8276,15 @@ def run(
         'placement': 0.0,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
+        # O4_SFR_BLD_PLACE_PROFILE sub-phase breakdown of the fit_loop.
+        'place_prep': 0.0,
+        'place_fits': 0.0,
+        'place_select': 0.0,
+        'place_blockers': 0.0,
+        'place_maskfill': 0.0,
     }
     detail_timing = _env_flag("O4_SFR_TIMING_DETAIL")
+    place_profile = _env_flag("O4_SFR_BLD_PLACE_PROFILE")
     slow_timing_s = _env_float("O4_SFR_TIMING_SLOW", 3.0)
     max_candidates_per_dds = max(
         0, int(_env_float("O4_SFR_BLD_MAX_CANDIDATES", BLD_MAX_CANDIDATES_PER_DDS))
@@ -8319,6 +8396,14 @@ def run(
     yolo_freearea_downsize = bool(yolo_freearea_downsize)
     yolo_facade_clip = bool(yolo_facade_clip)
     yolo_no_overlap_removal = bool(yolo_no_overlap_removal)
+    # When inter-detection overlap avoidance is on, make dedup coverage-preserving:
+    # clip every overlapping detection to the free area so each keeps its
+    # non-overlapping ground, instead of dropping whole detections (which would
+    # leave a hole where the dropped detection extended beyond its overlap). This
+    # reuses the purpose-built facade-clip machinery, so force it on. The
+    # avoidance-off (max-coverage) path is untouched.
+    if not yolo_no_overlap_removal:
+        yolo_facade_clip = True
     global YOLO_OBJECT_OUTLINE_MIN_INSIDE
     _outline_tolerance = yolo_outline_tolerance
     if "O4_SFR_BLD_YOLO_OUTLINE_TOL" in os.environ:
@@ -9129,20 +9214,28 @@ def run(
             except Exception as exc:
                 print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
         raw_yolo_count = len(yolo_detections)
+        # Under avoidance, the detection stage must also preserve coverage: use
+        # marginal keep (drop only detections that add no new ground beyond what
+        # is already kept) rather than the lossy whole-detection 'drop', which
+        # would discard a large detection just because it overlaps a small one.
+        # Placement clip-to-free then fills each kept detection's free remainder.
+        _keep_mode = 'marginal' if not yolo_no_overlap_removal else yolo_keep_mode
         _suppress_active = (not yolo_no_overlap_removal) and (
-            yolo_keep_mode == 'marginal' or yolo_suppress_coverage > 0.0
+            _keep_mode == 'marginal' or yolo_suppress_coverage > 0.0
         )
         if _suppress_active and yolo_detections:
+            _t = time.perf_counter()
             yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
                 yolo_detections,
                 coverage_threshold=yolo_suppress_coverage,
                 min_overlap_m2=yolo_suppress_min_overlap_m2,
                 m_per_px=m_per_px,
-                keep_mode=yolo_keep_mode,
+                keep_mode=_keep_mode,
                 keep_min_new_frac=yolo_keep_min_new_frac,
                 img_w=img_w,
                 img_h=img_h,
             )
+            _rec('yolo_suppress', _t)
             file_counts['yolo_raw_detections'] = raw_yolo_count
             file_counts['yolo_suppressed_overlap'] = yolo_suppressed
         file_counts['yolo_detections'] = len(yolo_detections)
@@ -9213,7 +9306,7 @@ def run(
             file_timings = _prep['file_timings']
             file_counts = _prep['file_counts']
             for _tk, _tv in _prep['local_timings'].items():
-                timings[_tk] += _tv
+                timings[_tk] = timings.get(_tk, 0.0) + _tv
 
             # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
             import pickle as _pickle
@@ -9515,6 +9608,12 @@ def run(
 
             if yolo_detections:
                 _t_yolo_place = time.perf_counter()
+                # O4_SFR_BLD_PLACE_PROFILE: per-phase wall-time + candidate-scan
+                # accounting for the placement loop. perf_counter is only called
+                # when the flag is on, so the default path is unaffected.
+                _pf = place_profile
+                _pf_prep = _pf_fits = _pf_select = _pf_blockers = _pf_maskfill = 0.0
+                _pf_select_acc = {} if _pf else None
                 placed_yolo_integral = cv2.integral(placed_yolo_mask, sdepth=cv2.CV_32S)
                 recent_yolo_mask = np.zeros_like(placed_yolo_mask)
                 recent_yolo_marks = 0
@@ -9525,8 +9624,26 @@ def run(
                 recent_spacing_mask = np.zeros_like(building_spacing_mask)
                 recent_spacing_marks = 0
                 recent_spacing_rebuild_threshold = 256
+                # When inter-detection overlap avoidance is on, place smallest
+                # detections first so the smaller one wins an overlap conflict
+                # (OBB-dedup / object self-spacing). Under no_overlap_removal the
+                # order is irrelevant (everything places), so leave it untouched
+                # to keep the default max-coverage path byte-identical.
+                if not yolo_no_overlap_removal:
+                    yolo_detections = sorted(
+                        yolo_detections,
+                        key=lambda d: (
+                            float(d.get('area_m2', 0.0)),
+                            -float(d.get('confidence', 0.0)),
+                        ),
+                    )
                 for detection in yolo_detections:
-                    prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
+                    if _pf:
+                        _t_pf = time.perf_counter()
+                        prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
+                        _pf_prep += time.perf_counter() - _t_pf
+                    else:
+                        prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
                     yolo_poly = prepared_yolo['poly']
                     yolo_bbox = prepared_yolo['bbox']
                     if not prepared_yolo['valid']:
@@ -9560,6 +9677,7 @@ def run(
                         if not (yolo_facade_clip or yolo_no_overlap_removal):
                             file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                             continue
+                    _t_pf = time.perf_counter() if _pf else 0.0
                     if yolo_facade_clip or yolo_no_overlap_removal:
                         # Hard-gate only on static scenery; footprint overlap with
                         # other placed buildings is resolved by clipping below (or
@@ -9579,6 +9697,8 @@ def run(
                             spacing_occ_integral=building_spacing_integral,
                             recent_spacing_mask=recent_spacing_mask,
                         )
+                    if _pf:
+                        _pf_fits += time.perf_counter() - _t_pf
                     if not footprint_clear:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
@@ -9613,6 +9733,7 @@ def run(
                             residential_area_mask is None or
                             bool(residential_area_mask[jy, jx])
                         )
+                        _t_pf = time.perf_counter() if _pf else 0.0
                         object_candidate, object_status = _select_yolo_object_candidate(
                             yolo_object_fit_table,
                             detection,
@@ -9631,16 +9752,23 @@ def run(
                             recent_spacing_mask=recent_spacing_mask,
                             freearea_downsize=yolo_freearea_downsize,
                             skip_occupancy=yolo_no_overlap_removal,
+                            profile_out=_pf_select_acc,
                         )
+                        if _pf:
+                            _pf_select += time.perf_counter() - _t_pf
                         if object_candidate is not None:
                             asset = object_candidate['asset']
                             final_h = float(object_candidate['heading'])
                             footprint_poly = object_candidate['footprint_poly']
                             placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
                             placed_viz_polys.append((footprint_poly.copy(), facade_cls))
+                            _t_pf = time.perf_counter() if _pf else 0.0
                             _mark_poly(building_spacing_mask, footprint_poly)
                             cv2.fillPoly(recent_spacing_mask, [np.int32(footprint_poly)], 1)
+                            if _pf:
+                                _pf_maskfill += time.perf_counter() - _t_pf
                             recent_spacing_marks += 1
+                            _t_pf = time.perf_counter() if _pf else 0.0
                             _mark_dynamic_center_blockers(
                                 dynamic_center_block_masks,
                                 jx,
@@ -9650,6 +9778,8 @@ def run(
                                 m_per_px,
                                 class_min_fit_inradius_m,
                             )
+                            if _pf:
+                                _pf_blockers += time.perf_counter() - _t_pf
                             pts_this.append((jx, jy, final_h, facade_cls))
                             file_counts['yolo_object_placed'] = (
                                 file_counts.get('yolo_object_placed', 0) + 1
@@ -9705,11 +9835,15 @@ def run(
                                 placed_viz_polys.append(
                                     (np.asarray(footprint_poly).copy(), facade_cls)
                                 )
+                                _t_pf = time.perf_counter() if _pf else 0.0
                                 _mark_poly(building_spacing_mask, footprint_poly)
                                 cv2.fillPoly(
                                     recent_spacing_mask, [np.int32(footprint_poly)], 1
                                 )
+                                if _pf:
+                                    _pf_maskfill += time.perf_counter() - _t_pf
                                 recent_spacing_marks += 1
+                                _t_pf = time.perf_counter() if _pf else 0.0
                                 _mark_dynamic_center_blockers(
                                     dynamic_center_block_masks,
                                     jx,
@@ -9719,6 +9853,8 @@ def run(
                                     m_per_px,
                                     class_min_fit_inradius_m,
                                 )
+                                if _pf:
+                                    _pf_blockers += time.perf_counter() - _t_pf
                                 pts_this.append((jx, jy, final_h, facade_cls))
                                 file_counts['yolo_facade_placed'] = (
                                     file_counts.get('yolo_facade_placed', 0) + 1
@@ -9752,6 +9888,29 @@ def run(
                 yolo_place_elapsed = time.perf_counter() - _t_yolo_place
                 timings['placement'] += yolo_place_elapsed
                 file_timings['fit_loop'] = file_timings.get('fit_loop', 0.0) + yolo_place_elapsed
+                if _pf:
+                    for _k, _v in (
+                        ('place_prep', _pf_prep),
+                        ('place_fits', _pf_fits),
+                        ('place_select', _pf_select),
+                        ('place_blockers', _pf_blockers),
+                        ('place_maskfill', _pf_maskfill),
+                    ):
+                        timings[_k] += _v
+                        file_timings[_k] = file_timings.get(_k, 0.0) + _v
+                    _acc = _pf_select_acc or {}
+                    file_counts['place_select_calls'] = (
+                        file_counts.get('place_select_calls', 0) + int(_acc.get('calls', 0))
+                    )
+                    file_counts['place_cands_scanned'] = (
+                        file_counts.get('place_cands_scanned', 0) + int(_acc.get('seen', 0))
+                    )
+                    file_counts['place_cands_viable'] = (
+                        file_counts.get('place_cands_viable', 0) + int(_acc.get('viable', 0))
+                    )
+                    file_counts['place_cands_offered'] = (
+                        file_counts.get('place_cands_offered', 0) + int(_acc.get('entries', 0))
+                    )
 
             cell_h = img_h // grid_n
             cell_w = img_w // grid_n
