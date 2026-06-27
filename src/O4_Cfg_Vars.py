@@ -571,27 +571,47 @@ cfg_tile_vars = {
         "type": float,
         "default": 1.0,
         "short_name": "bld_yolo_outline_tol",
-        "hint": "Fraction of a 3D object's footprint area required to lie "
-                "inside the YOLO detection polygon. 1.0 = strict containment "
-                "(historical behavior). Values around 0.90-0.95 convert most "
-                "outline-rejected facade fallbacks into 3D object placements "
-                "at the cost of slight overhang past the detected outline.",
+        "hint": "DEPRECATED / no effect. Previously a fraction permitting a 3D object "
+                "to overhang its YOLO detection polygon. Containment is now strict "
+                "apart from a fixed ~2px quantisation margin, so objects always fully "
+                "fit. To admit smaller objects when none matches the polygon exactly, "
+                "use sfr_bld_yolo_min_coverage instead.",
+    },
+    "sfr_bld_yolo_min_coverage": {
+        "type": float,
+        "default": 0.80,
+        "short_name": "bld_yolo_min_cov",
+        "hint": "Minimum fraction of a YOLO detection polygon that a 3D object's "
+                "footprint must cover to be placed. Lower it to admit smaller objects "
+                "that fully fit when no near-detection-size object exists (small "
+                "residential classes already use lower per-class floors). Objects never "
+                "overhang the polygon regardless of this value.",
+    },
+    "sfr_bld_yolo_facade_fallback": {
+        "type": bool,
+        "default": False,
+        "short_name": "bld_yolo_facade_fb",
+        "hint": "When no 3D object fully fits a YOLO detection, stamp a facade building "
+                "over the detection polygon. Off by default (object-only placement): "
+                "detections that no object fits are left empty instead of being "
+                "backfilled with a facade covering the remaining polygon space.",
     },
     "sfr_bld_yolo_suppress_coverage": {
         "type": float,
-        "default": 0.35,
+        "default": 0.0,
         "short_name": "bld_yolo_supp_cov",
-        "hint": "Overlap-coverage threshold for the legacy 'drop' overlap removal. "
-                "A YOLO detection is dropped when its intersection with an already-kept "
-                "detection exceeds this fraction of the smaller footprint. 0 disables "
-                "overlap removal. Ignored when keep mode is 'marginal'.",
+        "hint": "Optional overlap-coverage threshold for 'drop' overlap removal. When > 0, a "
+                "detection is dropped only if its overlap with an already-kept detection "
+                "exceeds this fraction of the smaller footprint. Default 0 = drop on ANY "
+                "overlap (no fraction gate). Ignored when keep mode is 'marginal'.",
     },
     "sfr_bld_yolo_suppress_min_overlap_m2": {
         "type": float,
-        "default": 25.0,
+        "default": 0.0,
         "short_name": "bld_yolo_supp_min_m2",
-        "hint": "Minimum absolute overlap area in square metres before legacy 'drop' "
-                "overlap suppression applies to a pair of YOLO detections.",
+        "hint": "Minimum absolute overlap area in square metres before 'drop' overlap "
+                "suppression applies to a pair of YOLO detections. Default 0 = remove "
+                "overlaps with no minimum-area limit.",
     },
     "sfr_bld_yolo_keep_mode": {
         "type": str,
@@ -630,13 +650,13 @@ cfg_tile_vars = {
     },
     "sfr_bld_yolo_no_overlap_removal": {
         "type": bool,
-        "default": True,
+        "default": False,
         "short_name": "bld_yolo_no_overlap",
-        "hint": "Maximise building coverage: place every trained-YOLO detection with NO "
-                "overlap avoidance between detections and NO avoidance of roads or "
-                "railways. Water, OSM building footprints, scenery objects and stock-YOLO "
-                "placements are still avoided. Disable to restore legacy overlap removal "
-                "(keep mode / suppression / spacing).",
+        "hint": "Set True to maximise coverage: place every trained-YOLO detection with NO "
+                "overlap avoidance between detections and NO avoidance of roads or railways. "
+                "Default False = remove overlaps (drop overlapping detections smallest-first, "
+                "objects self-avoid, roads/railways avoided) so each building area keeps a "
+                "single non-overlapping object.",
     },
     # Other
     "custom_dem": {
@@ -779,6 +799,8 @@ list_sfr_bld_vars = [
     "sfr_bld_yolo_stride",
     "sfr_bld_yolo_max_det",
     "sfr_bld_yolo_outline_tolerance",
+    "sfr_bld_yolo_min_coverage",
+    "sfr_bld_yolo_facade_fallback",
     "sfr_bld_yolo_no_overlap_removal",
     "sfr_bld_yolo_suppress_coverage",
     "sfr_bld_yolo_suppress_min_overlap_m2",

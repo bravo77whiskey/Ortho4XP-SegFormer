@@ -665,6 +665,11 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, "Process aborted.\n")
             _LOGGER.exception(e)
             return 0
+        # tile_from_interface() only seeds defaults from globals(); load the
+        # saved global + per-tile config the same way the batch path does
+        # (O4_Tile_Utils) so Tile-config-tab overrides actually reach the build.
+        tile.read_from_config(use_global=True)
+        tile.read_from_config()
         SFR.sfr_veg_density       = tile.sfr_veg_density
         SFR.sfr_veg_close_m       = tile.sfr_veg_close_m
         SFR.sfr_veg_open_m        = tile.sfr_veg_open_m
@@ -701,6 +706,12 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, "Process aborted.\n")
             _LOGGER.exception(e)
             return 0
+        # tile_from_interface() only seeds defaults from globals(); load the
+        # saved global + per-tile config the same way the batch path does
+        # (O4_Tile_Utils) so Tile-config-tab overrides (e.g. the overlap-removal
+        # toggle) actually reach the build instead of staying at the default.
+        tile.read_from_config(use_global=True)
+        tile.read_from_config()
         SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
         SFR.sfr_bld_close_m     = tile.sfr_bld_close_m
         SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
@@ -715,6 +726,8 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
         SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
         SFR.sfr_bld_yolo_outline_tolerance = tile.sfr_bld_yolo_outline_tolerance
+        SFR.sfr_bld_yolo_min_coverage = tile.sfr_bld_yolo_min_coverage
+        SFR.sfr_bld_yolo_facade_fallback = tile.sfr_bld_yolo_facade_fallback
         SFR.sfr_bld_yolo_suppress_coverage = tile.sfr_bld_yolo_suppress_coverage
         SFR.sfr_bld_yolo_suppress_min_overlap_m2 = tile.sfr_bld_yolo_suppress_min_overlap_m2
         SFR.sfr_bld_yolo_keep_mode = tile.sfr_bld_yolo_keep_mode

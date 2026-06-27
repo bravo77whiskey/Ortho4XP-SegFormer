@@ -409,8 +409,8 @@ def parse_args():
                     help='YOLO OBB max detections per crop.')
     ap.add_argument('--yolo-suppress-coverage', type=float, default=0.0,
                     help='Drop lower-confidence YOLO OBBs whose overlap coverage exceeds this threshold. 0 disables.')
-    ap.add_argument('--yolo-suppress-min-overlap-m2', type=float, default=25.0,
-                    help='Minimum absolute YOLO OBB overlap area in m² before coverage suppression applies.')
+    ap.add_argument('--yolo-suppress-min-overlap-m2', type=float, default=0.0,
+                    help='Minimum absolute YOLO OBB overlap area in m² before drop suppression applies. 0 = remove overlaps with no minimum-area limit.')
     ap.add_argument('--yolo-keep-mode', choices=('drop', 'marginal'), default='drop',
                     help='Overlap removal strategy: "drop" (legacy greedy NMS) or "marginal" (set-cover keep that preserves coverage).')
     ap.add_argument('--yolo-keep-min-new-frac', type=float, default=0.25,
@@ -2798,12 +2798,17 @@ YOLO_OBJECT_MIN_COVERAGE_BY_CLASS = {
     BLD_CLASS_SMALL_RESIDENTIAL: 0.50,
     BLD_CLASS_COMPACT_RESIDENTIAL: 0.65,
 }
-# Fraction of an object's footprint area that must lie inside the YOLO
-# detection polygon. 1.0 keeps the historical strict all-vertices test;
-# values below 1.0 absorb the heading/anchor quantisation error that
-# otherwise rejects near-detection-size candidates (the dominant cause of
-# facade fallbacks on dense tiles). Overridable via run(yolo_outline_tolerance=...).
-YOLO_OBJECT_OUTLINE_MIN_INSIDE = 1.0
+# Object footprints must lie inside the YOLO detection polygon. Containment is
+# strict apart from a small real-world quantisation margin: a thin band of width
+# ``YOLO_OBJECT_OUTLINE_MARGIN_M`` *metres* around the footprint perimeter may fall
+# outside the polygon, absorbing integer pixel/anchor rounding. The margin is in
+# metres (not pixels) so it is resolution-independent -- a fixed pixel band would
+# be several metres of overhang at coarse analysis scales (~2 m/px at ZL16). An
+# object can never stick out by a real fraction of its area regardless of size.
+# The legitimate "fit a *smaller* object when none matches the polygon exactly"
+# behaviour is governed by ``YOLO_OBJECT_MIN_COVERAGE`` (see above), not by
+# relaxing containment.
+YOLO_OBJECT_OUTLINE_MARGIN_M = 0.5
 
 
 def _building_fill_modes(smart_gap_fill):
@@ -3243,6 +3248,38 @@ EXCLUDED_BUILDING_ASSETS = {
     # 60 m apartment slab: too wide for apartment-block placement and visually
     # unsuitable as a generated large-footprint fallback.
     "sfd_global/asia/apartment_2.obj",
+    # The user's "SFD Global Autogen" library.txt aliases many small simHeaven
+    # house/residential virtual paths to tall SFD Asia apartment meshes
+    # (Asia/Apartment_*.obj) — a library-author mistake. The overlay places these
+    # simHeaven OBJ paths, so X-Plane renders an oversized apartment dwarfing its
+    # spot. Blacklist every simHeaven virtual that resolves to an Asia apartment.
+    # (The 137 lib/g10/autogen/*.ags|.agb aliases to Asia/Apartments*.ags are
+    # native autogen strings the overlay never places, so they are not listed.)
+    "simheaven/houses/house_06x15x2.obj",
+    "simheaven/houses/house_12x30x2.obj",
+    "simheaven/houses/house_12x30x3.obj",
+    "simheaven/houses/house_15x20x3.obj",
+    "simheaven/houses/house_15x30x2.obj",
+    "simheaven/houses/house_15x30x3.obj",
+    "simheaven/houses/house_15x35x2.obj",
+    "simheaven/houses/house_15x35x3.obj",
+    "simheaven/residential/residential_10x20x4.obj",
+    "simheaven/residential/residential_10x20x5.obj",
+    "simheaven/residential/residential_12x30x2.obj",
+    "simheaven/residential/residential_12x30x3.obj",
+    "simheaven/residential/residential_15x20x3.obj",
+    "simheaven/residential/residential_15x20x5.obj",
+    "simheaven/residential/residential_15x20x6.obj",
+    "simheaven/residential/residential_15x30x3.obj",
+    "simheaven/residential/residential_15x30x5.obj",
+    "simheaven/residential/residential_15x30x6.obj",
+    "simheaven/residential/residential_15x50x5.obj",
+    "simheaven/residential/residential_16x12x4.obj",
+    "simheaven/residential/residential_18x12x3.obj",
+    "simheaven/residential/residential_20x12x3.obj",
+    "simheaven/residential/residential_20x20x3.obj",
+    "simheaven/residential/residential_20x20x5.obj",
+    "simheaven/residential/residential_20x50x5.obj",
 }
 
 SIMHEAVEN_REPEATABLE_ASSET_DIRS = (
@@ -4178,6 +4215,98 @@ def _measured_bounds_for_exports(exports, cache_dir=None):
         for export in exports
         if getattr(export, "resolved_path", None)
     )
+
+
+# Reject a library alias when the mesh it actually resolves to has a much larger
+# FOOTPRINT than the footprint its virtual-path name declares -- i.e. the library
+# author exported a small footprint to a big mesh (e.g. simHeaven residential ->
+# SFD Asia apartment slab). Height is intentionally ignored: a legit mid-rise can
+# be tall while its footprint still matches its name. The test is PER-VARIANT
+# (one virtual path can export many physical variants and X-Plane picks one at
+# random) and RELATIVE to the declared footprint, so a declared-large asset
+# (industrial) whose mesh is correspondingly large is kept, and a multi-variant
+# house with one oversized variant among many is kept. Only a *majority* of
+# variants being much larger than declared drops the alias.
+# A small-declared alias whose mesh max-side reaches this is an apartment-slab
+# scale footprint (SFD Asia Apartment_2 ~60 m). A relative ratio cannot be used:
+# tiny house names (5x5, 10x10) resolve to normal ~16-20 m suburban meshes and
+# would trip any ratio, while a legit large-declared asset (industrial) whose mesh
+# is correspondingly large must be kept. So the test is ABSOLUTE on the resolved
+# side, gated by a small DECLARED footprint.
+ALIAS_OVERSIZE_ABS_SIDE_M = 30.0   # resolved footprint max-side = apartment-slab scale
+ALIAS_OVERSIZE_VARIANT_FRAC = 0.5  # majority of variants must exceed to drop
+
+
+def _alias_oversized_footprint_fraction(declared_bounds, exports, cache_dir=None):
+    """Return ``(frac_oversized, n)``: variants resolving to an apartment-slab footprint.
+
+    Only small-declared aliases are considered (a legitimately large declared asset
+    whose mesh is correspondingly large is fine). Footprint-only; height ignored.
+    """
+    if declared_bounds is None:
+        return 0.0, 0
+    try:
+        _dec_area, dec_side = _footprint_metrics(declared_bounds)
+    except Exception:
+        return 0.0, 0
+    if dec_side <= 0.0 or dec_side >= ALIAS_OVERSIZE_ABS_SIDE_M:
+        return 0.0, 0
+    n = 0
+    over = 0
+    for export in exports:
+        rp = getattr(export, "resolved_path", None)
+        if not rp:
+            continue
+        bounds = _read_obj8_bounds(rp, cache_dir)
+        if bounds is None:
+            continue
+        n += 1
+        try:
+            _real_area, real_side = _footprint_metrics(bounds)
+        except Exception:
+            continue
+        if real_side > ALIAS_OVERSIZE_ABS_SIDE_M:
+            over += 1
+    if n == 0:
+        return 0.0, 0
+    return over / n, n
+
+
+def _drop_oversized_aliased_assets(asset_pools, library_exports, cache_dir=None):
+    """Drop object assets whose library alias resolves (mostly) to a bigger footprint.
+
+    Auto-catches third-party library mistakes (a small declared virtual footprint
+    exported to a large mesh) so they don't render as oversized buildings, without
+    hand-listing each one. Footprint-only: height is ignored. Assets with no library
+    export are kept; SFD scanned assets already carry measured bounds (declared ==
+    real) so they pass. Returns ``(asset_pools, dropped_count, dropped_paths)``.
+    """
+    grouped = _library_exports_by_virtual_path(library_exports)
+    if not grouped:
+        return asset_pools, 0, []
+    dropped = 0
+    dropped_paths = set()
+    for zone_class, pool in asset_pools.items():
+        kept = []
+        for asset in pool:
+            if asset.get('kind') != 'object':
+                kept.append(asset)
+                continue
+            path = asset.get('path')
+            exports = grouped.get(_norm_library_path(path or ""))
+            if not exports:
+                kept.append(asset)
+                continue
+            frac, n = _alias_oversized_footprint_fraction(
+                asset.get('bounds_m'), exports, cache_dir
+            )
+            if n > 0 and frac >= ALIAS_OVERSIZE_VARIANT_FRAC:
+                dropped += 1
+                dropped_paths.add(path)
+                continue
+            kept.append(asset)
+        asset_pools[zone_class] = kept
+    return asset_pools, dropped, sorted(dropped_paths)
 
 
 def _footprint_within_limits(bounds_m, *, max_area_m2=12_000.0, max_side_m=170.0):
@@ -6753,18 +6882,19 @@ def _poly_inside_poly(inner_poly: np.ndarray, outer_poly: np.ndarray) -> bool:
 
 
 def _footprint_inside_detection(inner_poly: np.ndarray,
-                                outer_poly: np.ndarray) -> bool:
+                                outer_poly: np.ndarray,
+                                m_per_px: float = 1.0) -> bool:
     """Containment test for object footprints inside YOLO detection polys.
 
-    With YOLO_OBJECT_OUTLINE_MIN_INSIDE >= 1.0 this is the strict
-    all-vertices test. Below 1.0 it accepts a footprint when at least that
-    fraction of its area lies inside the detection polygon (both polygons
-    are convex: rotated footprint rectangles and crop-clipped OBBs), which
-    converts most outline-rejected facade fallbacks into object placements.
+    The footprint must lie inside the detection polygon except for a thin
+    perimeter sliver: at most a band of width ``YOLO_OBJECT_OUTLINE_MARGIN_M``
+    *metres* around the footprint edge may fall outside (absorbing integer
+    pixel/anchor rounding). The allowance is a fixed real-world band scaled by
+    the footprint perimeter -- not a fraction of its area and not a fixed pixel
+    count -- so it is resolution-independent and an object can never stick out
+    by a real proportion of its size, regardless of how large it is. Both
+    polygons are convex (rotated footprint rectangles and crop-clipped OBBs).
     """
-    min_inside = float(YOLO_OBJECT_OUTLINE_MIN_INSIDE)
-    if min_inside >= 1.0 - 1e-9:
-        return _poly_inside_poly(inner_poly, outer_poly)
     if _poly_inside_poly(inner_poly, outer_poly):
         return True
     inner = np.asarray(inner_poly, dtype=np.float32)
@@ -6778,7 +6908,17 @@ def _footprint_inside_detection(inner_poly: np.ndarray,
         inter_area, _ = cv2.intersectConvexConvex(inner, outer)
     except cv2.error:
         return False
-    return float(inter_area) >= min_inside * inner_area - 1e-6
+    outside_area = inner_area - float(inter_area)
+    if outside_area <= 1e-6:
+        return True
+    # Allowed overhang: a fixed real-world band (metres) along the footprint
+    # perimeter. outside_area and perimeter are in pixels; a band of width
+    # MARGIN_M metres is (MARGIN_M / m_per_px) pixels wide, so the band area in
+    # px^2 is perimeter_px * (MARGIN_M / m_per_px).
+    perimeter_px = float(cv2.arcLength(inner, True))
+    mpp = max(float(m_per_px), 1e-6)
+    margin_area = perimeter_px * (float(YOLO_OBJECT_OUTLINE_MARGIN_M) / mpp)
+    return outside_area <= margin_area + 1e-6
 
 
 def _yolo_facade_class(detection_class):
@@ -7216,7 +7356,7 @@ def _select_yolo_object_candidate(
             footprint_poly = _footprint_poly(
                 int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
             )
-            if not _footprint_inside_detection(footprint_poly, yolo_poly):
+            if not _footprint_inside_detection(footprint_poly, yolo_poly, m_per_px):
                 continue
             return {
                 'asset': asset,
@@ -7367,7 +7507,7 @@ def _select_yolo_object_candidate(
         if cached is None:
             final_heading = (float(heading) + heading_delta) % 360.0
             footprint_poly = _footprint_poly(jxi, jyi, bounds_m, final_heading, m_per_px)
-            inside_ok = _footprint_inside_detection(footprint_poly, yolo_poly)
+            inside_ok = _footprint_inside_detection(footprint_poly, yolo_poly, m_per_px)
             occ_ok = True
             if inside_ok and _check_occupancy:
                 occ_ok = _direct_yolo_poly_fits(
@@ -7584,9 +7724,12 @@ def _suppress_overlapping_yolo_detections(
 ):
     """Greedily remove overlapping YOLO OBBs.
 
-    ``keep_mode="drop"`` (legacy): keep smaller detections first and drop any
-    whose intersection coverage with an already-kept detection exceeds
-    ``coverage_threshold``.
+    ``keep_mode="drop"``: keep smaller detections first and drop any later
+    detection that overlaps an already-kept one. The overlap must exceed
+    ``min_overlap_m2`` square metres (default 0 -> any positive overlap) and,
+    when ``coverage_threshold`` > 0, also cover more than that fraction of the
+    smaller footprint. With both at 0 (the default) any overlap at all drops the
+    larger detection.
 
     ``keep_mode="marginal"``: delegate to :func:`_suppress_overlapping_yolo_marginal`,
     which preserves coverage by keeping detections that add new ground area.
@@ -7601,7 +7744,7 @@ def _suppress_overlapping_yolo_detections(
             img_h=img_h,
         )
     coverage_threshold = float(coverage_threshold or 0.0)
-    if coverage_threshold <= 0.0 or not detections:
+    if not detections:
         return list(detections), 0
     min_overlap_px = float(min_overlap_m2 or 0.0) / max(float(m_per_px) ** 2, 1e-6)
     kept = []
@@ -7630,12 +7773,14 @@ def _suppress_overlapping_yolo_detections(
             kept_poly = kept_polys[kept_idx]
             kept_area = kept_areas[kept_idx]
             intersection = _convex_intersection_area(poly, kept_poly)
-            if intersection < min_overlap_px:
+            if intersection <= min_overlap_px:
                 continue
-            coverage = intersection / max(1e-6, min(area, kept_area))
-            if coverage > coverage_threshold:
-                blocked = True
-                break
+            if coverage_threshold > 0.0:
+                coverage = intersection / max(1e-6, min(area, kept_area))
+                if coverage <= coverage_threshold:
+                    continue
+            blocked = True
+            break
         if blocked:
             dropped += 1
             continue
@@ -7646,6 +7791,113 @@ def _suppress_overlapping_yolo_detections(
         for cell in _bbox_grid_cells(bbox, cell_size_px):
             grid.setdefault(cell, []).append(kept_idx)
     return kept, dropped
+
+
+def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg):
+    """Return an object's 4-point footprint polygon in local metres.
+
+    Matches the basis used by :func:`_footprint_poly_with_bbox` (right=(cos,sin),
+    forward=(sin,-cos)) but in metric space, so cross-tile placements can be
+    overlap-tested without a raster mask. ``bounds_m`` are local object bounds
+    (xmin, xmax, zmin, zmax) relative to the object origin placed at (x_m, y_m).
+    """
+    rad = math.radians(float(heading_deg))
+    c = math.cos(rad)
+    s = math.sin(rad)
+    xmin, xmax, zmin, zmax = (float(v) for v in bounds_m)
+    pts = np.empty((4, 2), dtype=np.float32)
+    for idx, (lx, lz) in enumerate(((xmin, zmin), (xmax, zmin), (xmax, zmax), (xmin, zmax))):
+        pts[idx, 0] = x_m + (lx * c + lz * s)
+        pts[idx, 1] = y_m + (lx * s - lz * c)
+    return pts
+
+
+def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
+    """Drop object placements whose footprints overlap an already-kept one.
+
+    Overlap removal during placement is scoped per DDS texture (each texture
+    rebuilds its own occupancy mask), so a building straddling the seam between
+    two textures is placed twice and never cross-deduplicated -- the dominant
+    source of overlaps on high-ZL tiles, which are split into many textures.
+    This final tile-wide pass works in vector (metre) space: smallest footprint
+    first, drop any later placement whose footprint overlaps a kept one (any
+    overlap, no minimum). It also removes cross-pass overlaps (stock vs trained).
+
+    ``placements`` is a list of ``(lon, lat, heading, path)`` tuples; returns the
+    kept list (original order preserved) and the number dropped.
+    """
+    if not placements:
+        return list(placements), 0
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(float(lat) + 0.5))
+    bounds_cache = {}
+
+    def _bounds(path):
+        if path in bounds_cache:
+            return bounds_cache[path]
+        b = _bounds_for_object_path(path)
+        if b is None:
+            dims = _default_object_dims(path) or _simheaven_object_dims(path)
+            b = _bounds_from_dimensions(dims[0], dims[1]) if dims else None
+        bounds_cache[path] = b
+        return b
+
+    n = len(placements)
+    polys = [None] * n
+    bboxes = [None] * n
+    areas = [0.0] * n
+    for i, (o_lon, o_lat, heading, path) in enumerate(placements):
+        b = _bounds(path)
+        if b is None:
+            continue  # unmeasurable -> always keep (area 0 sorts first)
+        x = (float(o_lon) - float(lon)) * mlon
+        y = (float(o_lat) - float(lat)) * mlat
+        poly = _footprint_poly_metres(x, y, b, heading)
+        polys[i] = poly
+        bboxes[i] = (
+            float(poly[:, 0].min()), float(poly[:, 1].min()),
+            float(poly[:, 0].max()), float(poly[:, 1].max()),
+        )
+        areas[i] = (float(b[1]) - float(b[0])) * (float(b[3]) - float(b[2]))
+
+    order = sorted(range(n), key=lambda i: areas[i])
+    grid = {}
+    keep = [False] * n
+    dropped = 0
+    for i in order:
+        poly = polys[i]
+        if poly is None:
+            keep[i] = True
+            continue
+        x1, y1, x2, y2 = bboxes[i]
+        cx0 = int(math.floor(x1 / cell_m)); cx1 = int(math.floor(x2 / cell_m))
+        cy0 = int(math.floor(y1 / cell_m)); cy1 = int(math.floor(y2 / cell_m))
+        blocked = False
+        seen = set()
+        for cxx in range(cx0, cx1 + 1):
+            for cyy in range(cy0, cy1 + 1):
+                for j in grid.get((cxx, cyy), ()):
+                    if j in seen:
+                        continue
+                    seen.add(j)
+                    bj = bboxes[j]
+                    if x2 < bj[0] or bj[2] < x1 or y2 < bj[1] or bj[3] < y1:
+                        continue  # bbox quick reject
+                    if _convex_intersection_area(poly, polys[j]) > 0.0:
+                        blocked = True
+                        break
+                if blocked:
+                    break
+            if blocked:
+                break
+        if blocked:
+            dropped += 1
+            continue
+        keep[i] = True
+        for cxx in range(cx0, cx1 + 1):
+            for cyy in range(cy0, cy1 + 1):
+                grid.setdefault((cxx, cyy), []).append(i)
+    return [placements[i] for i in range(n) if keep[i]], dropped
 
 
 def _integral_bbox_sum(integral: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> int:
@@ -8026,13 +8278,15 @@ def run(
     yolo_max_det=None,
     yolo_imgsz=DEFAULT_YOLO_OBB_IMGSZ,
     yolo_suppress_coverage=0.0,
-    yolo_suppress_min_overlap_m2=25.0,
+    yolo_suppress_min_overlap_m2=0.0,
     yolo_keep_mode="drop",
     yolo_keep_min_new_frac=0.25,
     yolo_freearea_downsize=False,
     yolo_facade_clip=False,
-    yolo_no_overlap_removal=True,
+    yolo_no_overlap_removal=False,
     yolo_outline_tolerance=None,
+    yolo_min_coverage=YOLO_OBJECT_MIN_COVERAGE,
+    yolo_facade_fallback=False,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
@@ -8396,6 +8650,46 @@ def run(
     yolo_freearea_downsize = bool(yolo_freearea_downsize)
     yolo_facade_clip = bool(yolo_facade_clip)
     yolo_no_overlap_removal = bool(yolo_no_overlap_removal)
+    # Overlap-free placement is the product behaviour: no two objects may overlap.
+    # The main-app config modules (O4_Cfg_Vars/O4_Config_Utils/O4_GUI_Utils/
+    # O4_Tile_Utils) are frozen in Ortho4XP.exe and still default this True
+    # (legacy max coverage), which can't be changed without rebuilding the exe.
+    # This module is loose, so force overlap removal on here regardless of the
+    # frozen default. Opt back into max coverage explicitly via the env var.
+    if yolo_no_overlap_removal and not _env_flag("O4_SFR_BLD_MAX_COVERAGE", False):
+        yolo_no_overlap_removal = False
+    if not yolo_no_overlap_removal:
+        # Remove overlaps with NO minimum limit: drop on ANY overlap, smallest-first.
+        # The frozen main-app config still passes the legacy thresholds (25 m^2 /
+        # 0.35 coverage), which let small overlaps survive -- visible mainly on
+        # higher-ZL tiles where detections (and thus their overlaps) are finer than
+        # those thresholds, while coarse ZL16 overlaps exceeded them and were
+        # dropped. Force the zero-threshold drop here in the loose module so the
+        # behaviour is consistent at every zoom level.
+        yolo_keep_mode = "drop"
+        yolo_suppress_coverage = 0.0
+        yolo_suppress_min_overlap_m2 = 0.0
+    # Per-candidate object self-avoidance (selector occupancy check + OBB dedup +
+    # spacing-mask marking + incremental integral rebuilds) is redundant now that
+    # inter-object overlaps are removed tile-wide after placement
+    # (_dedupe_overlapping_placements). Skip that per-texture work by default for
+    # speed: static obstacles (roads/water/OSM/scenery) are still enforced by the
+    # detection center gate + footprint containment, and detection suppression
+    # still drops overlapping detections. ``_obj_avoid`` therefore gates only the
+    # inter-object machinery; road avoidance and suppression stay on
+    # ``yolo_no_overlap_removal``. Restore per-candidate self-avoidance (which can
+    # substitute a smaller fitting object instead of dropping) via the env var.
+    yolo_skip_object_self_avoid = not _env_flag("O4_SFR_BLD_OBJECT_SELF_AVOID", False)
+    _obj_avoid = (not yolo_no_overlap_removal) and (not yolo_skip_object_self_avoid)
+    # Minimum fraction of a detection polygon an object must cover to be placed.
+    # Lower it to admit smaller objects when no near-detection-size object fits
+    # (the per-class floors in YOLO_OBJECT_MIN_COVERAGE_BY_CLASS still apply).
+    if yolo_min_coverage is None:
+        yolo_min_coverage = YOLO_OBJECT_MIN_COVERAGE
+    yolo_min_coverage = min(1.0, max(1e-6, float(yolo_min_coverage)))
+    # Object-only placement by default: when no object fully fits a detection,
+    # leave it empty instead of stamping a facade over the remaining polygon.
+    yolo_facade_fallback = bool(yolo_facade_fallback)
     # When inter-detection overlap avoidance is on, make dedup coverage-preserving:
     # clip every overlapping detection to the free area so each keeps its
     # non-overlapping ground, instead of dropping whole detections (which would
@@ -8404,19 +8698,13 @@ def run(
     # avoidance-off (max-coverage) path is untouched.
     if not yolo_no_overlap_removal:
         yolo_facade_clip = True
-    global YOLO_OBJECT_OUTLINE_MIN_INSIDE
-    _outline_tolerance = yolo_outline_tolerance
-    if "O4_SFR_BLD_YOLO_OUTLINE_TOL" in os.environ:
-        try:
-            _outline_tolerance = float(os.environ["O4_SFR_BLD_YOLO_OUTLINE_TOL"])
-        except ValueError:
-            pass
-    if _outline_tolerance is not None:
-        # Clamp to a sane band: below ~0.5 an object could sit mostly
-        # outside its detection, which defeats the footprint guarantee.
-        YOLO_OBJECT_OUTLINE_MIN_INSIDE = min(
-            1.0, max(0.5, float(_outline_tolerance))
-        )
+    # Deprecated: the fractional outline tolerance (run(yolo_outline_tolerance=...)
+    # / O4_SFR_BLD_YOLO_OUTLINE_TOL) permitted objects to overhang their detection
+    # polygon by a percentage of their area. Containment is now strict apart from a
+    # fixed quantisation margin (YOLO_OBJECT_OUTLINE_MARGIN_M), so this knob no
+    # longer has any effect. It is still accepted so existing configs do not error;
+    # use yolo_min_coverage to admit smaller objects instead.
+    del yolo_outline_tolerance  # accepted for back-compat, intentionally ignored
     if "O4_SFR_BLD_YOLO_ENABLED" in os.environ:
         yolo_enabled = _env_flag("O4_SFR_BLD_YOLO_ENABLED", bool(yolo_enabled))
     else:
@@ -8446,14 +8734,11 @@ def run(
             "YOLO OBB placement: direct detections only "
             f"(max asset height {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
         )
-        outline_mode = (
-            "strict containment"
-            if YOLO_OBJECT_OUTLINE_MIN_INSIDE >= 1.0 - 1e-9
-            else f"outline tolerance {YOLO_OBJECT_OUTLINE_MIN_INSIDE:.2f}"
-        )
         print(
-            "YOLO OBB placement: object-first mode with facade fallback "
-            f"({outline_mode})"
+            "YOLO OBB placement: "
+            + ("object-first mode with facade fallback" if yolo_facade_fallback
+               else "object-only mode (no facade fallback)")
+            + f" (strict containment, +{YOLO_OBJECT_OUTLINE_MARGIN_M:.2f}m quantisation margin)"
         )
         try:
             yolo_model = _load_yolo_obb_model(
@@ -8693,6 +8978,21 @@ def run(
     if any(extra_asset_pools.values()):
         enabled_asset_pools.append(extra_asset_pools)
     asset_pools = _merge_asset_pools(*enabled_asset_pools)
+    # Auto-reject library aliases whose resolved mesh is far larger/taller than the
+    # footprint their virtual-path name declares (third-party library_txt mistakes,
+    # e.g. a small simHeaven residential exported to a tall SFD apartment). This
+    # generalises the hand-maintained EXCLUDED_BUILDING_ASSETS list.
+    if not _env_flag("O4_SFR_BLD_ALLOW_OVERSIZED_ALIASES", False):
+        asset_pools, _alias_dropped, _alias_paths = _drop_oversized_aliased_assets(
+            asset_pools, runtime_library_exports, cache_dir
+        )
+        if _alias_dropped:
+            print(
+                f"[SFR Bld] Dropped {_alias_dropped} oversized library alias(es) "
+                f"(resolved mesh >> declared footprint): "
+                + ", ".join(_alias_paths[:8])
+                + (" ..." if len(_alias_paths) > 8 else "")
+            )
     smallest_asset_only = _env_flag("O4_SFR_BLD_SMALLEST_ASSET_ONLY")
     if smallest_asset_only:
         _keep_smallest_asset_per_class(asset_pools)
@@ -8870,13 +9170,20 @@ def run(
             bool(yolo_freearea_downsize),
             bool(yolo_facade_clip),
             bool(yolo_no_overlap_removal),
-            round(float(YOLO_OBJECT_OUTLINE_MIN_INSIDE), 6),
+            round(float(YOLO_OBJECT_OUTLINE_MARGIN_M), 6),
+            round(float(yolo_min_coverage), 6),
+            bool(yolo_facade_fallback),
             float(MAX_GENERATED_BUILDING_HEIGHT_M),
             # Bump on schema-breaking changes to per-DDS cache contents.
             # v14: invalidate v13 caches with native-ZL/RGB-interpreted YOLO detections.
             # v15: coverage-preserving overlap removal knobs (keep_mode/freearea/facade_clip).
             # v16: no_overlap_removal default on (roads/rail/self-overlap not avoided).
-            "schema=v16-yolo-no-overlap-default",
+            # v17: bounded-margin containment + configurable yolo_min_coverage.
+            # v18: metre-based outline margin + facade-fallback default off (objects only).
+            # v19: overlap removal default on (drop, smallest-first, no min-overlap area).
+            # v20: blacklist update + tile-wide cross-texture object dedup.
+            # v21: auto-drop library aliases whose resolved mesh >> declared footprint.
+            "schema=v21-alias-oversize-guard",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -9214,15 +9521,13 @@ def run(
             except Exception as exc:
                 print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
         raw_yolo_count = len(yolo_detections)
-        # Under avoidance, the detection stage must also preserve coverage: use
-        # marginal keep (drop only detections that add no new ground beyond what
-        # is already kept) rather than the lossy whole-detection 'drop', which
-        # would discard a large detection just because it overlaps a small one.
-        # Placement clip-to-free then fills each kept detection's free remainder.
-        _keep_mode = 'marginal' if not yolo_no_overlap_removal else yolo_keep_mode
-        _suppress_active = (not yolo_no_overlap_removal) and (
-            _keep_mode == 'marginal' or yolo_suppress_coverage > 0.0
-        )
+        # Under avoidance, remove overlapping detections so each building area
+        # keeps a single object. Honour the configured keep mode (default 'drop':
+        # smallest-first, drop any detection that overlaps an already-kept one,
+        # with no minimum-overlap area). 'marginal' remains available for the
+        # coverage-preserving keep. Suppression runs whenever avoidance is on.
+        _keep_mode = yolo_keep_mode
+        _suppress_active = not yolo_no_overlap_removal
         if _suppress_active and yolo_detections:
             _t = time.perf_counter()
             yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
@@ -9658,7 +9963,7 @@ def run(
                     if static_occ_mask[jy, jx]:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         continue
-                    if not yolo_no_overlap_removal and not _placed_yolo_poly_fits(
+                    if _obj_avoid and not _placed_yolo_poly_fits(
                         placed_yolo_mask,
                         yolo_poly,
                         fit_scratch,
@@ -9743,6 +10048,7 @@ def run(
                             heading,
                             m_per_px,
                             residential_context=residential_context,
+                            min_coverage=yolo_min_coverage,
                             enabled_assets_by_path=enabled_yolo_object_assets_by_path,
                             static_occ_mask=static_occ_mask,
                             building_spacing_mask=building_spacing_mask,
@@ -9751,7 +10057,7 @@ def run(
                             spacing_occ_integral=building_spacing_integral,
                             recent_spacing_mask=recent_spacing_mask,
                             freearea_downsize=yolo_freearea_downsize,
-                            skip_occupancy=yolo_no_overlap_removal,
+                            skip_occupancy=not _obj_avoid,
                             profile_out=_pf_select_acc,
                         )
                         if _pf:
@@ -9762,24 +10068,27 @@ def run(
                             footprint_poly = object_candidate['footprint_poly']
                             placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
                             placed_viz_polys.append((footprint_poly.copy(), facade_cls))
-                            _t_pf = time.perf_counter() if _pf else 0.0
-                            _mark_poly(building_spacing_mask, footprint_poly)
-                            cv2.fillPoly(recent_spacing_mask, [np.int32(footprint_poly)], 1)
-                            if _pf:
-                                _pf_maskfill += time.perf_counter() - _t_pf
-                            recent_spacing_marks += 1
-                            _t_pf = time.perf_counter() if _pf else 0.0
-                            _mark_dynamic_center_blockers(
-                                dynamic_center_block_masks,
-                                jx,
-                                jy,
-                                final_h,
-                                asset.get('mark_bounds_m'),
-                                m_per_px,
-                                class_min_fit_inradius_m,
-                            )
-                            if _pf:
-                                _pf_blockers += time.perf_counter() - _t_pf
+                            # Spacing/center-block marks only feed per-candidate
+                            # self-avoidance; skip them when relying on tile-wide dedup.
+                            if _obj_avoid:
+                                _t_pf = time.perf_counter() if _pf else 0.0
+                                _mark_poly(building_spacing_mask, footprint_poly)
+                                cv2.fillPoly(recent_spacing_mask, [np.int32(footprint_poly)], 1)
+                                if _pf:
+                                    _pf_maskfill += time.perf_counter() - _t_pf
+                                recent_spacing_marks += 1
+                                _t_pf = time.perf_counter() if _pf else 0.0
+                                _mark_dynamic_center_blockers(
+                                    dynamic_center_block_masks,
+                                    jx,
+                                    jy,
+                                    final_h,
+                                    asset.get('mark_bounds_m'),
+                                    m_per_px,
+                                    class_min_fit_inradius_m,
+                                )
+                                if _pf:
+                                    _pf_blockers += time.perf_counter() - _t_pf
                             pts_this.append((jx, jy, final_h, facade_cls))
                             file_counts['yolo_object_placed'] = (
                                 file_counts.get('yolo_object_placed', 0) + 1
@@ -9797,13 +10106,21 @@ def run(
                             }.get(object_status, 'yolo_object_lookup_miss')
                             file_counts[status_key] = file_counts.get(status_key, 0) + 1
                             final_h = heading
-                            facade_path = _facade_for_detection(
-                                facade_cls, veg_map, jx, jy, m_per_px,
-                                lat=float(o_lat), lon=float(o_lon),
-                                include_simheaven_assets=simheaven_assets_available,
+                            # Facade fallback: when no object fits, optionally stamp
+                            # a facade over the detection polygon. Disabled by default
+                            # (object-only placement) so detections that no object
+                            # fully fits are left empty rather than backfilled with a
+                            # facade covering the remaining polygon space.
+                            facade_path = (
+                                _facade_for_detection(
+                                    facade_cls, veg_map, jx, jy, m_per_px,
+                                    lat=float(o_lat), lon=float(o_lon),
+                                    include_simheaven_assets=simheaven_assets_available,
+                                )
+                                if yolo_facade_fallback else None
                             )
                             footprint_poly = yolo_poly
-                            place_facade = True
+                            place_facade = bool(yolo_facade_fallback)
                             if yolo_facade_clip and not yolo_no_overlap_removal:
                                 _min_free_px = max(
                                     1.0, 10.0 / max(float(m_per_px) ** 2, 1e-6)
@@ -9864,8 +10181,9 @@ def run(
                         # The placed-OBB mask and the incremental occupancy
                         # integrals are only consumed by the overlap-avoidance
                         # paths (OBB dedup + selector occupancy), both skipped
-                        # under no_overlap_removal — so don't pay to maintain them.
-                        if not yolo_no_overlap_removal:
+                        # unless per-candidate self-avoidance is on — so don't pay
+                        # to maintain them when relying on tile-wide dedup.
+                        if _obj_avoid:
                             cv2.fillPoly(placed_yolo_mask, [np.int32(yolo_poly)], 1)
                             cv2.fillPoly(recent_yolo_mask, [np.int32(yolo_poly)], 1)
                             recent_yolo_marks += 1
@@ -10873,6 +11191,24 @@ def run(
 
     if prefetch_executor is not None:
         prefetch_executor.shutdown(wait=True, cancel_futures=True)
+
+    # Tile-wide cross-texture / cross-pass object dedup. Per-DDS placement only
+    # avoids overlaps within a single texture; buildings on texture seams (far
+    # more numerous at high ZL) and stock-vs-trained coincidences slip through.
+    if not yolo_no_overlap_removal and placed_stock_objects:
+        _t = time.perf_counter()
+        _before = len(placed_stock_objects)
+        placed_stock_objects, _seam_dropped = _dedupe_overlapping_placements(
+            placed_stock_objects, lat, lon
+        )
+        timings['global_dedup'] = timings.get('global_dedup', 0.0) + (
+            time.perf_counter() - _t
+        )
+        if _seam_dropped:
+            print(
+                f"[SFR Bld] Cross-texture object dedup: dropped {_seam_dropped:,} "
+                f"overlapping objects ({_before:,} -> {len(placed_stock_objects):,})"
+            )
 
     total_time = time.time() - t_start
     total_placements = (

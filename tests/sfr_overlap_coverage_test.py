@@ -88,8 +88,9 @@ class MarginalKeepTests(unittest.TestCase):
         self.assertEqual(len(kept), 2)
         self.assertEqual(dropped, 0)
 
-    def test_drop_mode_is_unchanged_passthrough(self):
-        # coverage_threshold <= 0 in legacy drop mode keeps everything.
+    def test_drop_mode_no_min_drops_any_overlap(self):
+        # Default drop mode (coverage_threshold=0, min_overlap_m2=0) drops on ANY
+        # overlap: B sits almost on top of A, so the larger of the pair is dropped.
         dets = [
             _rect_detection(0, 0, 40, 40, det_id="A"),
             _rect_detection(1, 1, 41, 41, det_id="B"),
@@ -98,10 +99,148 @@ class MarginalKeepTests(unittest.TestCase):
             dets,
             keep_mode="drop",
             coverage_threshold=0.0,
+            min_overlap_m2=0.0,
+            m_per_px=1.0,
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, 1)
+
+    def test_drop_mode_non_overlapping_all_kept(self):
+        # Disjoint detections are all kept regardless of the zero thresholds.
+        dets = [
+            _rect_detection(0, 0, 40, 40, det_id="A"),
+            _rect_detection(100, 100, 140, 140, det_id="B"),
+        ]
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            dets,
+            keep_mode="drop",
+            coverage_threshold=0.0,
+            min_overlap_m2=0.0,
             m_per_px=1.0,
         )
         self.assertEqual(len(kept), 2)
         self.assertEqual(dropped, 0)
+
+    def test_drop_mode_smallest_first_keeps_small(self):
+        # Smallest-first: a small detection overlapping a large one survives and
+        # the large overlapper is dropped.
+        small = _rect_detection(20, 20, 30, 30, det_id="small")
+        large = _rect_detection(0, 0, 40, 40, det_id="large")
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            [large, small],
+            keep_mode="drop",
+            coverage_threshold=0.0,
+            min_overlap_m2=0.0,
+            m_per_px=1.0,
+        )
+        self.assertEqual([d["id"] for d in kept], ["small"])
+        self.assertEqual(dropped, 1)
+
+
+class MarginalKeepOrderTests(unittest.TestCase):
+    """Inter-detection overlap should prefer the smaller detection."""
+
+    def test_kept_returned_smallest_first(self):
+        dets = [
+            _rect_detection(0, 0, 60, 60, confidence=0.5, det_id="big"),
+            _rect_detection(200, 200, 220, 220, confidence=0.5, det_id="small"),
+            _rect_detection(400, 400, 440, 440, confidence=0.5, det_id="mid"),
+        ]
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            dets,
+            keep_mode="marginal",
+            keep_min_new_frac=0.25,
+            m_per_px=1.0,
+            img_w=512,
+            img_h=512,
+        )
+        self.assertEqual(dropped, 0)
+        kept_areas = [d["area_m2"] for d in kept]
+        self.assertEqual(kept_areas, sorted(kept_areas))
+        self.assertEqual([d["id"] for d in kept], ["small", "mid", "big"])
+
+    def test_small_inside_large_keeps_small_as_seed(self):
+        # A small detection fully inside a large one: processing smallest-first
+        # makes the SMALL one the kept seed (it survives the conflict). The old
+        # largest-first order dropped the small one as redundant.
+        small = _rect_detection(20, 20, 30, 30, confidence=0.5, det_id="small")
+        large = _rect_detection(0, 0, 40, 40, confidence=0.5, det_id="large")
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            [large, small],
+            keep_mode="marginal",
+            keep_min_new_frac=0.25,
+            m_per_px=1.0,
+            img_w=100,
+            img_h=100,
+        )
+        kept_ids = [d["id"] for d in kept]
+        self.assertEqual(kept_ids[0], "small")
+        self.assertIn("small", kept_ids)
+
+
+class CrossTextureDedupTests(unittest.TestCase):
+    """Tile-wide vector dedup removes overlaps that per-texture removal misses."""
+
+    def _obj(self, dlon, dlat, path="o4sfr/x/b.obj", heading=0.0):
+        # placements are (lon, lat, heading, path); tile origin (24,118).
+        return (118.0 + dlon, 24.0 + dlat, heading, path)
+
+    def test_seam_duplicate_dropped(self):
+        # Two identical ~10x10 m objects at the same spot (seam duplicate).
+        import O4_SFR_Building_Overlay as B
+        b = B
+        # 10x10 footprint via OBJ_DIMS fallback path: stub bounds resolver.
+        orig = b._bounds_for_object_path
+        b._bounds_for_object_path = lambda p: (-5.0, 5.0, -5.0, 5.0)
+        try:
+            a = self._obj(0.0010, 0.0010)
+            dup = self._obj(0.0010, 0.0010)  # exact same spot
+            far = self._obj(0.0050, 0.0050)  # ~hundreds of m away
+            kept, dropped = b._dedupe_overlapping_placements([a, dup, far], 24, 118)
+            self.assertEqual(dropped, 1)
+            self.assertEqual(len(kept), 2)
+        finally:
+            b._bounds_for_object_path = orig
+
+    def test_non_overlapping_all_kept(self):
+        import O4_SFR_Building_Overlay as b
+        orig = b._bounds_for_object_path
+        b._bounds_for_object_path = lambda p: (-5.0, 5.0, -5.0, 5.0)
+        try:
+            objs = [self._obj(0.0010, 0.0010), self._obj(0.0030, 0.0030),
+                    self._obj(0.0050, 0.0050)]
+            kept, dropped = b._dedupe_overlapping_placements(objs, 24, 118)
+            self.assertEqual(dropped, 0)
+            self.assertEqual(len(kept), 3)
+        finally:
+            b._bounds_for_object_path = orig
+
+
+class ConfigPropagationTests(unittest.TestCase):
+    """Guards the mechanism the GUI single-tile build fix relies on:
+    a per-tile config value must override the global default for the
+    overlap-removal toggle (a bool that round-trips through the config file)."""
+
+    def test_per_tile_cfg_overrides_global_default(self):
+        import tempfile, os
+        import O4_Config_Utils as CFG
+
+        old_global = CFG.global_sfr_bld_yolo_no_overlap_removal
+        try:
+            CFG.global_sfr_bld_yolo_no_overlap_removal = True
+            tile = CFG.Tile(12, 34, "")
+            self.assertTrue(tile.sfr_bld_yolo_no_overlap_removal)  # global default
+
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg_path = os.path.join(tmp, "tile.cfg")
+                with open(cfg_path, "w") as f:
+                    f.write("sfr_bld_yolo_no_overlap_removal=False\n")
+                tile.read_from_config(config_file=cfg_path)
+
+            self.assertIsInstance(tile.sfr_bld_yolo_no_overlap_removal, bool)
+            self.assertFalse(tile.sfr_bld_yolo_no_overlap_removal)
+        finally:
+            CFG.global_sfr_bld_yolo_no_overlap_removal = old_global
 
 
 class FacadeClipTests(unittest.TestCase):

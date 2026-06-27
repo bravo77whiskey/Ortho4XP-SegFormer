@@ -284,6 +284,83 @@ class SfdBuildingAssetTests(unittest.TestCase):
             PIPE.sfr_bld_yolo_outline_tolerance,
             CFG.cfg_tile_vars["sfr_bld_yolo_outline_tolerance"]["default"],
         )
+        self.assertEqual(
+            PIPE.sfr_bld_yolo_min_coverage,
+            CFG.cfg_tile_vars["sfr_bld_yolo_min_coverage"]["default"],
+        )
+        self.assertEqual(
+            PIPE.sfr_bld_yolo_facade_fallback,
+            CFG.cfg_tile_vars["sfr_bld_yolo_facade_fallback"]["default"],
+        )
+
+    def test_alias_oversized_footprint_fraction(self):
+        class Ex:
+            def __init__(self, rp):
+                self.resolved_path = rp
+        declared = BLD._bounds_from_dimensions(16.0, 12.0)  # max-side 16
+        bounds_map = {
+            "big1": BLD._bounds_from_dimensions(60.0, 10.0),   # 60 >> 16
+            "big2": BLD._bounds_from_dimensions(58.0, 10.0),
+            "small": BLD._bounds_from_dimensions(16.5, 12.2),
+        }
+        orig = BLD._read_obj8_bounds
+        BLD._read_obj8_bounds = lambda rp, cd=None: bounds_map.get(rp)
+        try:
+            # All variants resolve to a much bigger footprint -> frac 1.0 (drop).
+            frac, n = BLD._alias_oversized_footprint_fraction(
+                declared, [Ex("big1"), Ex("big2")], None)
+            self.assertEqual((frac, n), (1.0, 2))
+            # One oversized among three -> minority (kept).
+            frac, n = BLD._alias_oversized_footprint_fraction(
+                declared, [Ex("big1"), Ex("small"), Ex("small")], None)
+            self.assertEqual(n, 3)
+            self.assertLess(frac, 0.5)
+            # Declared-large (industrial) vs same-scale mesh -> not oversized.
+            big_declared = BLD._bounds_from_dimensions(60.0, 120.0)
+            frac, n = BLD._alias_oversized_footprint_fraction(
+                big_declared, [Ex("big1")], None)
+            self.assertEqual(frac, 0.0)
+        finally:
+            BLD._read_obj8_bounds = orig
+
+    def test_drop_oversized_aliased_assets_no_exports_keeps_all(self):
+        pools = {BLD.BLD_CLASS_MEDIUM: [
+            {'kind': 'object', 'path': 'simheaven/x/y.obj',
+             'bounds_m': BLD._bounds_from_dimensions(16.0, 12.0)},
+        ]}
+        out, dropped, paths = BLD._drop_oversized_aliased_assets(pools, [], None)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(out[BLD.BLD_CLASS_MEDIUM]), 1)
+
+    def test_footprint_containment_rejects_real_overhang_keeps_quant_slop(self):
+        # Detection polygon: 100x100 px square.
+        outer = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.float32)
+
+        def inside(inner):
+            return BLD._footprint_inside_detection(
+                np.asarray(inner, dtype=np.float32), outer
+            )
+
+        # Fully inside -> accepted.
+        self.assertTrue(inside([[10, 10], [90, 10], [90, 90], [10, 90]]))
+
+        # Sub-pixel overhang (1px sliver along one edge) within the quantisation
+        # margin -> accepted.
+        self.assertTrue(inside([[-1, 10], [90, 10], [90, 90], [-1, 90]]))
+
+        # Gross overhang (~30% of the footprint outside the polygon) -> rejected,
+        # regardless of the old fractional tolerance.
+        self.assertFalse(inside([[-30, 10], [70, 10], [70, 90], [-30, 90]]))
+
+        # The allowance is an absolute perimeter band, not a fraction of area:
+        # a large object overhanging by the same *fraction* is still rejected.
+        big_outer = np.array(
+            [[0, 0], [1000, 0], [1000, 1000], [0, 1000]], dtype=np.float32
+        )
+        big_inner = np.array(
+            [[-300, 100], [700, 100], [700, 900], [-300, 900]], dtype=np.float32
+        )
+        self.assertFalse(BLD._footprint_inside_detection(big_inner, big_outer))
 
     def test_osm_tile_peer_path_handles_all_road_sources(self):
         base = r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_big_roads.osm.bz2"
@@ -3156,6 +3233,37 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(assets[0]["bounds_m"], (-12.0, 18.0, -35.0, 35.0))
         self.assertIn("SFD_Global/Asia/Industry_30x70.obj", paths)
         self.assertNotIn("SFD_Global/Asia/Gas_Station.obj", paths)
+
+    def test_sfd_export_discovery_keeps_audited_exclusions_out(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            package = _write_library_package(
+                custom,
+                "SFD Global Autogen",
+                [
+                    "EXPORT SFD_Global/Asia/Apartment_2.obj Asia/Apartment_2.obj",
+                ],
+            )
+            _write_obj8(
+                package / "Asia" / "Apartment_2.obj",
+                [
+                    (-30.0, 0.0, -5.185),
+                    (30.0, 0.0, -5.185),
+                    (30.0, 0.0, 5.185),
+                    (-30.0, 0.0, 5.185),
+                ],
+            )
+            _activate_packages(custom, package)
+
+            pools = BLD._build_sfd_asset_pools(
+                35.0,
+                139.0,
+                "asia",
+                custom_scenery_dir=custom,
+            )
+            paths = _paths_for_classes(pools, BLD.BLD_PLACEMENT_CLASSES)
+
+        self.assertNotIn("SFD_Global/Asia/Apartment_2.obj", paths)
 
     def test_optional_library_classifier_maps_known_regional_assets(self):
         self.assertEqual(
