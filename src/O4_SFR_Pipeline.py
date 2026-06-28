@@ -29,8 +29,29 @@ def _sfr_cache_dir(lat, lon):
                             f'{int(lat):+03d}{int(lon):+04d}')
 
 
-def _delete_cache_files(cache_dir, patterns, label):
+# Persistent sidecar caches written under the per-tile SFR_cache dir by
+# PCACHE.load_or_build() / ensure_cached_dsf_text() (parsed OSM, mesh-water
+# index, disassembled DSF text, OBJ8 bounds). Unlike the per-DDS inference
+# files these ignore the overlay's disable_cache flag, so they must be purged
+# here when the cache is disabled — otherwise SFR_cache/<tile> is never empty.
+_SFR_PERSIST_NAMESPACES = (
+    "osm_parse",
+    "mesh_water",
+    "dsf_parse",
+    "dsf_disassembly",
+    "obj8_bounds",
+)
+
+
+def _purge_sfr_cache(cache_dir, patterns, label):
+    """Clear a tile's SFR cache when caching is disabled.
+
+    Removes the disabled overlay's per-DDS files (``patterns``) plus the shared
+    persistent sidecar namespaces, so the per-tile SFR_cache folder does not
+    retain inference maps or parsed OSM/mesh/DSF data between builds.
+    """
     import glob
+    import shutil
 
     removed = 0
     for pattern in patterns:
@@ -40,8 +61,16 @@ def _delete_cache_files(cache_dir, patterns, label):
                 removed += 1
             except OSError:
                 pass
+    for namespace in _SFR_PERSIST_NAMESPACES:
+        ns_dir = os.path.join(cache_dir, namespace)
+        if os.path.isdir(ns_dir):
+            try:
+                shutil.rmtree(ns_dir)
+                removed += 1
+            except OSError:
+                pass
     if removed:
-        print(f"[SFR] Removed {removed} {label} cache file(s).", flush=True)
+        print(f"[SFR] Cleared {label} cache (caching disabled).", flush=True)
 
 # ── Locate root dir and make overlay scripts importable ───────────────────────
 # In a frozen PyInstaller bundle sys.executable is Ortho4XP.exe and the
@@ -395,6 +424,12 @@ def process_veg_tile(lat, lon, build_dir):
     ret = _run_venv(code)
     if ret != 0:
         raise RuntimeError(f"SegFormer veg overlay subprocess failed (exit {ret})")
+    if sfr_veg_disable_cache:
+        _purge_sfr_cache(
+            cache_dir,
+            ['*_veg.npy', '*_vegaux.pkl', '*_vegpoly.pkl'],
+            'veg',
+        )
     print(f"[SFR Veg] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
@@ -489,6 +524,12 @@ def process_bld_tile(lat, lon, build_dir):
     ret = _run_venv(code)
     if ret != 0:
         raise RuntimeError(f"SegFormer bld overlay subprocess failed (exit {ret})")
+    if sfr_bld_disable_cache:
+        _purge_sfr_cache(
+            cache_dir,
+            ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl', '*_veg.npy'],
+            'bld',
+        )
     print(f"[SFR Bld] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
