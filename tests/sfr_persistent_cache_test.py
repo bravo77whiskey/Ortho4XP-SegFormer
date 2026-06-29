@@ -14,6 +14,38 @@ import O4_SFR_Persistent_Cache as PCACHE
 
 
 class PersistentCacheTests(unittest.TestCase):
+    def test_load_or_build_with_no_cache_dir_builds_without_writing(self):
+        builds = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.txt")
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write("v1")
+
+            def _builder():
+                builds.append(len(builds) + 1)
+                return {"build": builds[-1]}
+
+            first = PCACHE.load_or_build(
+                source_path,
+                None,
+                "unit",
+                _builder,
+                version="test-v1",
+            )
+            second = PCACHE.load_or_build(
+                source_path,
+                None,
+                "unit",
+                _builder,
+                version="test-v1",
+            )
+
+            self.assertEqual(first, {"build": 1})
+            self.assertEqual(second, {"build": 2})
+            self.assertEqual(builds, [1, 2])
+            self.assertEqual(os.listdir(tmpdir), ["source.txt"])
+
     def test_load_or_build_reuses_cached_payload_until_source_changes(self):
         builds = []
 

@@ -55,6 +55,7 @@ from O4_SFR_Building_Overlay import (
     _rasterize_mesh_water_mask,
     _rasterize_simheaven_objects,
     _simheaven_objects_for_bounds,
+    _transient_cache_peer_path,
 )
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
@@ -1191,6 +1192,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
                          _re.IGNORECASE)
+    _transient_cache_ctx = None
+    sidecar_cache_dir = cache_dir
+    if disable_cache:
+        import tempfile as _tempfile
+        _transient_cache_ctx = _tempfile.TemporaryDirectory(
+            prefix="sfr_veg_nocache_"
+        )
+        sidecar_cache_dir = _transient_cache_ctx.name
 
     def _collect_source_files():
         return SEGFORMER.collect_source_texture_files(tex_dir, lat, lon)
@@ -1350,7 +1359,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
 
-    osm_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
+    transient_peer_dir = sidecar_cache_dir if disable_cache else None
+    osm_roads = _load_osm_roads(osm_roads_path, cache_dir=sidecar_cache_dir)
     print(f"OSM roads: {len(osm_roads)} ways  ({osm_roads_path})")
     osm_roads = _prepare_roads(osm_roads)
 
@@ -1361,15 +1371,19 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     ]
     excl_cache = next((p for p in excl_cache_candidates if os.path.exists(p)), excl_cache_candidates[0])
     excl_rails, excl_residential = _parse_excl_context_cache(
-        excl_cache, cache_dir=cache_dir
+        excl_cache, cache_dir=sidecar_cache_dir
     )
     print(f"OSM railways: {len(excl_rails)} ways")
     excl_rails = _prepare_roads(excl_rails)
 
-    veg_context_osm_path = osm_roads_path.replace('_big_roads.osm.bz2', '_veg_context.osm.bz2')
+    veg_context_osm_path = _transient_cache_peer_path(
+        osm_roads_path,
+        '_veg_context.osm.bz2',
+        transient_peer_dir,
+    ) or osm_roads_path.replace('_big_roads.osm.bz2', '_veg_context.osm.bz2')
     if download_veg_context and not os.path.exists(veg_context_osm_path):
         _download_and_cache_veg_context_osm(lat, lon, veg_context_osm_path)
-    veg_context = _parse_veg_context_osm(veg_context_osm_path, cache_dir=cache_dir)
+    veg_context = _parse_veg_context_osm(veg_context_osm_path, cache_dir=sidecar_cache_dir)
     if excl_residential and not veg_context['residential_polys']:
         veg_context['residential_polys'] = excl_residential
     print(
@@ -1405,7 +1419,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     sh_network = []
     if use_simheaven and dsftool_path and os.path.exists(dsftool_path):
         _t = time.perf_counter()
-        sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, cache_dir)
+        sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
         timings['scenery_parse'] += time.perf_counter() - _t
         print(f"simHeaven network: {len(sh_network)} road segments")
     elif use_simheaven:
@@ -1448,7 +1462,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 print(f"{layer_name} forests: disabled")
                 continue
             _t = time.perf_counter()
-            polys = _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir)
+            polys = _load_forest_polygons(layer_name, dsf_matches, dsftool_path, sidecar_cache_dir)
             timings['scenery_parse'] += time.perf_counter() - _t
             prepared = _prepare_polygons(polys)
             if layer_name == "Global Forests v2":
@@ -1499,7 +1513,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             lat,
             lon,
             dsftool_path,
-            cache_dir,
+            sidecar_cache_dir,
         )
         timings['scenery_parse'] += time.perf_counter() - _t
         n_sh_bld_polys = len(sh_bld_polys)
@@ -1526,7 +1540,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     _t = time.perf_counter()
     mesh_water_path = _mesh_file_for_tile(tex_dir, lat, lon)
     mesh_water_sig = _mesh_water_signature(mesh_water_path)
-    mesh_water_index = _load_mesh_water_index(mesh_water_path, cache_dir)
+    mesh_water_index = _load_mesh_water_index(mesh_water_path, sidecar_cache_dir)
     timings['mesh_water'] += time.perf_counter() - _t
     if mesh_water_index:
         print(

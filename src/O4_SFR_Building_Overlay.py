@@ -510,6 +510,16 @@ def _osm_tile_peer_path(osm_roads_path, suffix):
     return None
 
 
+def _transient_cache_peer_path(osm_roads_path, suffix, transient_cache_dir=None):
+    """Return an OSM peer path, using transient storage for new no-cache peers."""
+    peer_path = _osm_tile_peer_path(osm_roads_path, suffix)
+    if not peer_path:
+        return None
+    if not transient_cache_dir or os.path.exists(peer_path):
+        return peer_path
+    return os.path.join(transient_cache_dir, os.path.basename(peer_path))
+
+
 def _rasterize_roads(roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
                      road_width_px=12):
     """Rasterize road polylines onto a uint8 mask in DDS-tile pixel space."""
@@ -8306,6 +8316,14 @@ def run(
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", _re.IGNORECASE)
+    _transient_cache_ctx = None
+    sidecar_cache_dir = cache_dir
+    if disable_cache:
+        import tempfile as _tempfile
+        _transient_cache_ctx = _tempfile.TemporaryDirectory(
+            prefix="sfr_bld_nocache_"
+        )
+        sidecar_cache_dir = _transient_cache_ctx.name
 
     def _collect_source_files():
         return SEGFORMER.collect_source_texture_files(tex_dir, lat, lon)
@@ -8447,18 +8465,23 @@ def run(
             f'{lat_g_str}{lon_g_str}',
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
-    osm_big_roads = _load_osm_roads(osm_roads_path, cache_dir=cache_dir)
+    transient_peer_dir = sidecar_cache_dir if disable_cache else None
+    osm_big_roads = _load_osm_roads(osm_roads_path, cache_dir=sidecar_cache_dir)
     osm_small_roads_path = _osm_tile_peer_path(osm_roads_path, "_small_roads.osm.bz2")
-    osm_all_roads_path = _osm_tile_peer_path(osm_roads_path, "_all_roads.osm.bz2")
+    osm_all_roads_path = _transient_cache_peer_path(
+        osm_roads_path,
+        "_all_roads.osm.bz2",
+        transient_peer_dir,
+    )
     osm_small_roads = (
-        _load_osm_roads(osm_small_roads_path, cache_dir=cache_dir)
+        _load_osm_roads(osm_small_roads_path, cache_dir=sidecar_cache_dir)
         if osm_small_roads_path else []
     )
     osm_all_roads = []
     if osm_all_roads_path:
         if not os.path.exists(osm_all_roads_path) and not skip_osm_excl_download:
             _download_and_cache_osm_roads(lat, lon, osm_all_roads_path)
-        osm_all_roads = _load_osm_roads(osm_all_roads_path, cache_dir=cache_dir)
+        osm_all_roads = _load_osm_roads(osm_all_roads_path, cache_dir=sidecar_cache_dir)
 
     if osm_all_roads:
         osm_roads = osm_all_roads
@@ -8481,11 +8504,13 @@ def run(
         p = _osm_tile_peer_path(osm_roads_path, suffix) or osm_roads_path.replace(
             '_big_roads.osm.bz2', suffix
         )
-        excl_polys.extend(_load_osm_closed_ways(p, cache_dir=cache_dir))
+        excl_polys.extend(_load_osm_closed_ways(p, cache_dir=sidecar_cache_dir))
     print(f"Exclusion polygons (water+airports): {len(excl_polys)}")
 
-    excl_cache = _osm_tile_peer_path(
-        osm_roads_path, '_excl_bld_rail_res.osm.bz2'
+    excl_cache = _transient_cache_peer_path(
+        osm_roads_path,
+        '_excl_bld_rail_res.osm.bz2',
+        transient_peer_dir,
     ) or osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2')
     if skip_osm_excl_download:
         ok = os.path.exists(excl_cache)
@@ -8494,7 +8519,7 @@ def run(
     residential_polys = []
     if ok:
         bld_polys, rail_ways, residential_polys = _parse_excl_osm(
-            excl_cache, cache_dir=cache_dir
+            excl_cache, cache_dir=sidecar_cache_dir
         )
         excl_rails.extend(rail_ways)
         print(
@@ -8784,7 +8809,7 @@ def run(
         dsftool_path = SEGFORMER._dsftool
 
     if dsftool_path and os.path.exists(dsftool_path):
-        sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, cache_dir)
+        sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
         timings['simheaven_parse'] += time.perf_counter() - _t
         print(f"simHeaven network: {len(sh_network)} road segments")
     else:
@@ -8799,7 +8824,7 @@ def run(
             lat,
             lon,
             dsftool_path,
-            cache_dir,
+            sidecar_cache_dir,
         )
     else:
         sh_bld_polys, sh_bld_objects = [], []
@@ -8820,7 +8845,7 @@ def run(
                 lon,
                 out_dsf,
                 dsftool_path,
-                cache_dir,
+                sidecar_cache_dir,
             )
         )
     else:
@@ -8957,7 +8982,7 @@ def run(
                 asset_lon,
                 effective_asset_region,
                 library_exports=runtime_library_exports,
-                cache_dir=cache_dir,
+                cache_dir=sidecar_cache_dir,
             )
         )
     if simheaven_assets_available:
@@ -8972,7 +8997,7 @@ def run(
         custom_scenery_dir=custom_scenery_dir,
         library_exports=runtime_library_exports,
         enabled_library_ids=enabled_extra_library_ids,
-        cache_dir=cache_dir,
+        cache_dir=sidecar_cache_dir,
         asset_region=effective_asset_region,
     )
     if any(extra_asset_pools.values()):
@@ -8984,7 +9009,7 @@ def run(
     # generalises the hand-maintained EXCLUDED_BUILDING_ASSETS list.
     if not _env_flag("O4_SFR_BLD_ALLOW_OVERSIZED_ALIASES", False):
         asset_pools, _alias_dropped, _alias_paths = _drop_oversized_aliased_assets(
-            asset_pools, runtime_library_exports, cache_dir
+            asset_pools, runtime_library_exports, sidecar_cache_dir
         )
         if _alias_dropped:
             print(
@@ -9075,7 +9100,7 @@ def run(
     _t = time.perf_counter()
     mesh_water_path = _mesh_file_for_tile(tex_dir, lat, lon)
     mesh_water_sig = _mesh_water_signature(mesh_water_path)
-    mesh_water_index = _load_mesh_water_index(mesh_water_path, cache_dir)
+    mesh_water_index = _load_mesh_water_index(mesh_water_path, sidecar_cache_dir)
     timings['mesh_water'] += time.perf_counter() - _t
     if mesh_water_index:
         print(
@@ -9422,7 +9447,7 @@ def run(
                             m.group(3),
                             zl,
                             yolo_analysis_target_zl,
-                            cache_dir,
+                            sidecar_cache_dir,
                             img,
                             _source_path,
                             (lat_n, lat_s, lon_w, lon_e),

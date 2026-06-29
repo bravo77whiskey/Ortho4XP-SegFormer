@@ -377,6 +377,41 @@ class SfdBuildingAssetTests(unittest.TestCase):
             r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_small_roads.osm.bz2",
         )
 
+    def test_transient_cache_peer_path_uses_temp_dir_for_missing_peer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = os.path.join(tmpdir, "+36+117_big_roads.osm.bz2")
+            transient = os.path.join(tmpdir, "run-cache")
+            os.makedirs(transient)
+            Path(base).write_bytes(b"x")
+
+            peer = BLD._transient_cache_peer_path(
+                base,
+                "_excl_bld_rail_res.osm.bz2",
+                transient,
+            )
+
+            self.assertEqual(
+                peer,
+                os.path.join(transient, "+36+117_excl_bld_rail_res.osm.bz2"),
+            )
+
+    def test_transient_cache_peer_path_keeps_existing_external_peer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = os.path.join(tmpdir, "+36+117_big_roads.osm.bz2")
+            existing_peer = os.path.join(tmpdir, "+36+117_all_roads.osm.bz2")
+            transient = os.path.join(tmpdir, "run-cache")
+            os.makedirs(transient)
+            Path(base).write_bytes(b"x")
+            Path(existing_peer).write_bytes(b"x")
+
+            peer = BLD._transient_cache_peer_path(
+                base,
+                "_all_roads.osm.bz2",
+                transient,
+            )
+
+            self.assertEqual(peer, existing_peer)
+
     def test_load_osm_roads_parses_generic_highway_extract(self):
         xml = b"""<?xml version="1.0" encoding="UTF-8"?>
 <osm>
