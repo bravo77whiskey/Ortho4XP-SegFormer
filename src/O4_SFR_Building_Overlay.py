@@ -8848,6 +8848,15 @@ def run(
     yolo_suppress_explain_frac = _env_float(
         "O4_SFR_BLD_SUPPRESS_EXPLAIN_FRAC", 0.60
     )
+    # Roads/railways do NOT block building placement by default. The footprint
+    # gate rejects a detection when ANY pixel of its OBB touches the static
+    # mask, and the road mask is a >=6px-wide lattice through every dense
+    # block, so road blocking killed most of a dense city texture (measured
+    # +22+120 57072_109328_Arc17: 8,544 of 10,900 kept detections blocked
+    # while full custom-scenery avoidance added only ~100 of that). Roads
+    # still street-divide the gap-fill zone; scenery/water/OSM avoidance is
+    # unaffected. Restore road+rail blocking with O4_SFR_BLD_ROAD_AVOIDANCE=1.
+    yolo_road_block = _env_flag("O4_SFR_BLD_ROAD_AVOIDANCE", False)
     # Per-candidate object self-avoidance (selector occupancy check + OBB dedup +
     # spacing-mask marking + incremental integral rebuilds) is redundant now that
     # inter-object overlaps are removed tile-wide after placement
@@ -9367,7 +9376,9 @@ def run(
             bool(yolo_pair_overlap_rule),
             round(float(yolo_suppress_containment_frac), 6),
             round(float(yolo_suppress_explain_frac), 6),
-            "schema=v22-pair-overlap-rule",
+            # v23: roads/railways no longer in static_occ_mask by default.
+            bool(yolo_road_block),
+            "schema=v23-roads-dont-block",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -10027,9 +10038,11 @@ def run(
                 file_counts['road_overlap_allowed'] = 1
             else:
                 # Roads always carve the gap-fill zone so it stays street-divided,
-                # but only block trained-YOLO placement when overlap avoidance is on.
+                # but only block trained-YOLO placement when road avoidance is
+                # explicitly restored (O4_SFR_BLD_ROAD_AVOIDANCE=1; see the
+                # yolo_road_block comment in run()).
                 bld_zone = bld_zone & (~road_mask)
-                if not yolo_no_overlap_removal:
+                if yolo_road_block and not yolo_no_overlap_removal:
                     static_occ_mask = road_mask.copy()
                     if sfr_road_dilated is not None and sfr_road_dilated.any():
                         static_occ_mask = static_occ_mask | sfr_road_dilated
@@ -10047,7 +10060,9 @@ def run(
 
             if rail_mask.any():
                 bld_zone  = bld_zone & (~rail_mask)
-                if not (yolo_no_overlap_removal or allow_road_overlap):
+                if yolo_road_block and not (
+                    yolo_no_overlap_removal or allow_road_overlap
+                ):
                     static_occ_mask  = static_occ_mask | rail_mask
 
             if sh_bld_mask is not None and sh_bld_mask.any():
