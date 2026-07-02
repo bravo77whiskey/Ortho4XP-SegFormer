@@ -1,0 +1,431 @@
+{
+  "version": 1,
+  "regions": {
+    "generic": {
+      "cues": [
+        "mixed fallback palette",
+        "conservative brick, stucco, siding, shingle, and metal roof use",
+        "moderate window rhythm and mild grime"
+      ],
+      "sources": [],
+      "weights": {
+        "families": {
+          "siding": 2,
+          "brick": 2,
+          "stucco": 2,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_shingle": 2,
+          "roof_tile": 2,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "grime": 0.25,
+        "streaks": 0.25
+      }
+    },
+    "europe": {
+      "cues": [
+        "brick and stucco town fabric",
+        "tall windows, restrained shutters, stone/plaster trim",
+        "clay tile or dark roof surfaces"
+      ],
+      "sources": [
+        "https://urbanomnibus.net/2017/02/at-face-value/",
+        "https://www.slcdocs.com/Planning/HLC/MFDGCompleteweb.pdf"
+      ],
+      "weights": {
+        "families": {
+          "stucco": 3,
+          "brick": 3,
+          "siding": 1,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_tile": 4,
+          "roof_shingle": 1,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "transom": true,
+        "window_h": 1.75,
+        "grime": 0.35
+      }
+    },
+    "north_america": {
+      "cues": [
+        "clapboard or fiber-cement siding mixed with red brick",
+        "sash windows, porches implied through trim and doors",
+        "asphalt shingle roofs and storefront strips"
+      ],
+      "sources": [
+        "https://nhpt.org/gable-fronted-single-family-houses",
+        "https://media.villagepreservation.org/wp-content/uploads/2020/04/15074011/Report_-The-Federal-Era-Row-House-of-Lower-Manhattan.pdf"
+      ],
+      "weights": {
+        "families": {
+          "siding": 4,
+          "brick": 2,
+          "stucco": 1,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_shingle": 4,
+          "roof_metal": 1,
+          "roof_tile": 1
+        }
+      },
+      "pattern_overrides": {
+        "mullion": "sash",
+        "shutters": true,
+        "grime": 0.18
+      }
+    },
+    "mediterranean": {
+      "cues": [
+        "pale stucco and whitewash",
+        "terracotta roofs, arched windows, shutters, wrought iron rails",
+        "warm sun-faded doors and awnings"
+      ],
+      "sources": [
+        "https://www.thespruce.com/what-is-mediterranean-architecture-5072822"
+      ],
+      "weights": {
+        "families": {
+          "stucco": 5,
+          "brick": 1,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_tile": 5,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "arch": true,
+        "shutters": true,
+        "louvered": true,
+        "awning_stripes": true,
+        "grime": 0.3
+      }
+    },
+    "asia": {
+      "cues": [
+        "concrete and stucco shophouse facades",
+        "signage, sliding windows, balconies, security grilles, AC units",
+        "metal and dark tile roofs"
+      ],
+      "sources": [
+        "https://www.archdaily.com/320233/lucky-shophouse-chang-architects"
+      ],
+      "weights": {
+        "families": {
+          "concrete": 3,
+          "stucco": 2,
+          "brick": 1
+        },
+        "roofs": {
+          "roof_metal": 3,
+          "roof_tile": 2,
+          "roof_shingle": 1
+        }
+      },
+      "pattern_overrides": {
+        "mullion": "slider",
+        "rail": true,
+        "ac_prob": 0.55,
+        "streaks": 0.85,
+        "grime": 0.55
+      }
+    },
+    "africa": {
+      "cues": [
+        "warm render, earth and laterite tones",
+        "concrete block, metal windows, corrugated metal roofs",
+        "grilles, rust, strong weathering"
+      ],
+      "sources": [
+        "https://www.unep.org/news-and-stories/story/traditional-building-practices-offer-sustainable-solutions-african-cities",
+        "https://www.oneplanetnetwork.org/sites/default/files/from-crm/Africa_responsibly%2520sourced%2520materials.pdf"
+      ],
+      "weights": {
+        "families": {
+          "stucco": 4,
+          "concrete": 2,
+          "brick": 1
+        },
+        "roofs": {
+          "roof_metal": 5,
+          "roof_tile": 1
+        }
+      },
+      "pattern_overrides": {
+        "bars_prob": 0.85,
+        "rust": true,
+        "grime": 0.7,
+        "streaks": 0.7
+      }
+    },
+    "south_america": {
+      "cues": [
+        "exposed brick, raw concrete, stucco, and painted accents",
+        "barred windows, balconies, roof tanks implied by flat roofs",
+        "clay tile and corrugated metal roofs"
+      ],
+      "sources": [
+        "https://www.archdaily.com/1024259/unpolished-narratives-exposed-materials-in-latin-american-affordable-housing"
+      ],
+      "weights": {
+        "families": {
+          "stucco": 3,
+          "brick": 3,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_tile": 3,
+          "roof_metal": 3
+        }
+      },
+      "pattern_overrides": {
+        "bars_prob": 0.55,
+        "rail": true,
+        "rust": true,
+        "grime": 0.45
+      }
+    },
+    "australia_oceania": {
+      "cues": [
+        "brick, weatherboard, and rendered suburban facades",
+        "corrugated metal roofs, deep eave/verandah cues",
+        "light metal frames and restrained grime"
+      ],
+      "sources": [
+        "https://en.wikipedia.org/wiki/Australian_residential_architectural_styles"
+      ],
+      "weights": {
+        "families": {
+          "brick": 3,
+          "siding": 3,
+          "stucco": 1,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_metal": 4,
+          "roof_tile": 1,
+          "roof_shingle": 1
+        }
+      },
+      "pattern_overrides": {
+        "mullion": "slider",
+        "window_w": 1.55,
+        "grime": 0.15
+      }
+    }
+  },
+  "class_profiles": {
+    "tiny_residential": {
+      "class": 1,
+      "cues": [
+        "sparse small-house facade",
+        "one door and simple roof wear"
+      ],
+      "weights": {
+        "families": {
+          "siding": 2,
+          "stucco": 2,
+          "brick": 1
+        },
+        "roofs": {
+          "roof_shingle": 2,
+          "roof_tile": 2,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "period": 3.2,
+        "window_w": 1.05,
+        "window_h": 1.25,
+        "grime": 0.15
+      }
+    },
+    "small_residential": {
+      "class": 2,
+      "cues": [
+        "bungalow or detached-house rhythm",
+        "shutters, trim, and stronger roof material detail"
+      ],
+      "weights": {
+        "families": {
+          "siding": 2,
+          "stucco": 2,
+          "brick": 2
+        },
+        "roofs": {
+          "roof_shingle": 2,
+          "roof_tile": 2,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "period": 2.8,
+        "window_w": 1.2,
+        "window_h": 1.4
+      }
+    },
+    "compact_residential": {
+      "class": 3,
+      "cues": [
+        "compact low-rise or rowhouse fabric",
+        "repeated bays and occasional balcony/rail cues"
+      ],
+      "weights": {
+        "families": {
+          "brick": 3,
+          "stucco": 2,
+          "siding": 1,
+          "concrete": 1
+        },
+        "roofs": {
+          "roof_tile": 2,
+          "roof_shingle": 2,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "period": 2.45,
+        "rail": true,
+        "grime": 0.3
+      }
+    },
+    "medium": {
+      "class": 4,
+      "cues": [
+        "rowhouse, shophouse, or low-rise mixed-use facade",
+        "storefront or heavier plinth at grade"
+      ],
+      "weights": {
+        "families": {
+          "brick": 2,
+          "stucco": 2,
+          "concrete": 2
+        },
+        "roofs": {
+          "roof_flat": 2,
+          "roof_tile": 1,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "period": 2.35,
+        "transom": true,
+        "grime": 0.4
+      }
+    },
+    "small_apartment": {
+      "class": 5,
+      "cues": [
+        "three to five floor walk-up",
+        "repetitive windows, rails, and vertical accent columns"
+      ],
+      "weights": {
+        "families": {
+          "concrete": 3,
+          "brick": 2,
+          "stucco": 1
+        },
+        "roofs": {
+          "roof_flat": 3,
+          "roof_tile": 1,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "period": 2.2,
+        "rail": true,
+        "window_h": 1.35,
+        "grime": 0.45
+      }
+    },
+    "apartment_block": {
+      "class": 6,
+      "cues": [
+        "slab or block facade",
+        "balconies, concrete or brick panels, roof equipment language"
+      ],
+      "weights": {
+        "families": {
+          "concrete": 4,
+          "brick": 2,
+          "stucco": 1
+        },
+        "roofs": {
+          "roof_flat": 4,
+          "roof_metal": 1
+        }
+      },
+      "pattern_overrides": {
+        "period": 2.15,
+        "rail": true,
+        "ac_prob": 0.25,
+        "streaks": 0.55,
+        "grime": 0.55
+      }
+    },
+    "large": {
+      "class": 7,
+      "cues": [
+        "warehouse, big-box, or large commercial shell",
+        "roller doors, loading bays, vents, metal/concrete panels"
+      ],
+      "sources": [
+        "https://steelconstruction.info/Single_storey_industrial_buildings"
+      ],
+      "weights": {
+        "families": {
+          "concrete": 5,
+          "brick": 1,
+          "stucco": 1
+        },
+        "roofs": {
+          "roof_metal": 4,
+          "roof_flat": 2
+        }
+      },
+      "pattern_overrides": {
+        "period": 3.6,
+        "window_w": 1.0,
+        "window_h": 0.9,
+        "grime": 0.6
+      }
+    },
+    "extra_large": {
+      "class": 8,
+      "cues": [
+        "distribution center, mall, or large industrial shell",
+        "wide loading patterns and repetitive facade panels"
+      ],
+      "sources": [
+        "https://steelconstruction.info/Single_storey_industrial_buildings"
+      ],
+      "weights": {
+        "families": {
+          "concrete": 5,
+          "brick": 1
+        },
+        "roofs": {
+          "roof_metal": 4,
+          "roof_flat": 3
+        }
+      },
+      "pattern_overrides": {
+        "period": 4.2,
+        "window_w": 0.9,
+        "window_h": 0.8,
+        "grime": 0.65
+      }
+    }
+  }
+}

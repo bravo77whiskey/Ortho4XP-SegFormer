@@ -12,7 +12,8 @@ import random
 from .common import MeshSpec, StripUV, parapet_flat_roof, \
     set_shell_meta, validate_spec, walls_with_floors
 from .house import _hip_roof
-from .styles import flavor_massing, flavor_style, weighted_choice
+from .styles import flavor_massing, profile_for_asset, style_for_profile, \
+    weighted_choice
 
 FLOOR_H = 3.2
 PARAPET_H = 0.7
@@ -23,10 +24,11 @@ MAX_BALCONIES = 6  # vertex-budget cap; balconies read as texture at range
 WALL_SHADES = ("a", "b")
 
 
-def _apt_style(rng: random.Random, layout: dict, flavor: str = "generic"):
+def _apt_style(rng: random.Random, layout: dict, flavor: str = "generic",
+               profile: str | None = None):
     # Apartments skew to concrete everywhere; bias the regional weights.
-    weights = flavor_style(flavor)
-    families = tuple(weights["families"]) + (("concrete", 3),)
+    weights = style_for_profile(flavor, profile, apartment_bias=True)
+    families = weights["families"]
     family = weighted_choice(rng, families)
     shade = rng.choice(WALL_SHADES)
     return {
@@ -41,7 +43,10 @@ def _apt_style(rng: random.Random, layout: dict, flavor: str = "generic"):
 def build_aptslab(length_m: float, width_m: float, floors: int, seed: int,
                   layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    style = _apt_style(rng, layout, flavor)
+    profile = profile_for_asset(
+        length_m, width_m, bucket="apartments", archetype="aptslab"
+    )
+    style = _apt_style(rng, layout, flavor, profile)
     hx, hy = length_m / 2.0, width_m / 2.0
     inset = min(BALCONY_DEPTH_M, 0.08 * width_m)
     wy = hy - inset
@@ -99,9 +104,20 @@ def build_aptslab(length_m: float, width_m: float, floors: int, seed: int,
 def build_aptblock(length_m: float, width_m: float, floors: int, seed: int,
                    layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    style = _apt_style(rng, layout, flavor)
+    profile = profile_for_asset(
+        length_m, width_m, bucket="apartments", archetype="aptblock"
+    )
+    style = _apt_style(rng, layout, flavor, profile)
+    roof_choices = tuple(
+        (name, weight) for name, weight in style_for_profile(
+            flavor, profile
+        )["roofs"] if name != "roof_flat"
+    )
     roof = StripUV(
-        layout, weighted_choice(rng, flavor_style(flavor)["roofs"])
+        layout, weighted_choice(
+            rng,
+            roof_choices or style_for_profile(flavor, profile)["roofs"],
+        )
     )
     hx, hy = length_m / 2.0, width_m / 2.0
     overhang = min(0.4, 0.05 * min(length_m, width_m))

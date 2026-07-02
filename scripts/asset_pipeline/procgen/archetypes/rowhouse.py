@@ -12,7 +12,8 @@ import random
 
 from .common import MeshSpec, StripUV, box, set_shell_meta, validate_spec, \
     wall_quad
-from .styles import flavor_massing, flavor_style, weighted_choice
+from .styles import flavor_massing, profile_for_asset, style_for_profile, \
+    weighted_choice
 
 FLOOR_H = 3.2
 PITCH_DEG = 33.0
@@ -24,13 +25,18 @@ BAY_TARGET_W_M = 7.0  # wider bays = fewer facade quads (vertex budget)
 def build_rowhouse(length_m: float, width_m: float, floors: int, seed: int,
                    layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    weights = flavor_style(flavor)
+    profile = profile_for_asset(length_m, width_m, archetype="rowhouse")
+    weights = style_for_profile(flavor, profile)
     family = weighted_choice(rng, weights["families"])
     wall_a = StripUV(layout, f"wall_{family}_a")
     wall_b = StripUV(layout, f"wall_{family}_b")
     ground = StripUV(layout, f"ground_{family}")
     plain = StripUV(layout, f"plain_{family}")
-    roof = StripUV(layout, weighted_choice(rng, weights["roofs"]))
+    roof_choices = tuple(
+        (name, weight) for name, weight in weights["roofs"]
+        if name != "roof_flat"
+    ) or weights["roofs"]
+    roof = StripUV(layout, weighted_choice(rng, roof_choices))
     trim = StripUV(layout, "trim_dark")
 
     massing = flavor_massing(flavor)

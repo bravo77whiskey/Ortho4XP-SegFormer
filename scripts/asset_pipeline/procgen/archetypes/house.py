@@ -17,7 +17,8 @@ import random
 
 from .common import MeshSpec, StripUV, box, set_shell_meta, validate_spec, \
     wall_quad, walls_with_floors
-from .styles import flavor_massing, flavor_style, weighted_choice
+from .styles import flavor_massing, profile_for_asset, style_for_profile, \
+    weighted_choice
 
 FLOOR_H = 3.2
 ROOF_PITCH_DEG = 40.0
@@ -29,9 +30,10 @@ FASCIA_DROP_M = 0.18
 WALL_SHADES = ("a", "b")
 
 
-def _house_style(rng: random.Random, layout: dict, flavor: str = "generic"):
+def _house_style(rng: random.Random, layout: dict, flavor: str = "generic",
+                 profile: str | None = None):
     """Pick region-weighted wall/ground/plain strips plus a roof strip."""
-    weights = flavor_style(flavor)
+    weights = style_for_profile(flavor, profile)
     family = weighted_choice(rng, weights["families"])
     shade = rng.choice(WALL_SHADES)
     return {
@@ -39,7 +41,11 @@ def _house_style(rng: random.Random, layout: dict, flavor: str = "generic"):
         "wall": StripUV(layout, f"wall_{family}_{shade}"),
         "ground": StripUV(layout, f"ground_{family}"),
         "plain": StripUV(layout, f"plain_{family}"),
-        "roof": StripUV(layout, weighted_choice(rng, weights["roofs"])),
+        "roof": StripUV(layout, weighted_choice(
+            rng,
+            tuple((name, weight) for name, weight in weights["roofs"]
+                  if name != "roof_flat") or weights["roofs"],
+        )),
         "trim": StripUV(layout, "trim_dark"),
     }
 
@@ -140,7 +146,8 @@ def _roof_chimney(spec, rng, style, cx, cy, geo, axis="x"):
 def build_gable(length_m: float, width_m: float, floors: int, seed: int,
                 layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    style = _house_style(rng, layout, flavor)
+    profile = profile_for_asset(length_m, width_m, archetype="gable")
+    style = _house_style(rng, layout, flavor, profile)
     massing = flavor_massing(flavor)
     pitch = rng.uniform(*massing["pitch"])
     spec = MeshSpec()
@@ -216,7 +223,8 @@ def _hip_roof(spec: MeshSpec, hx: float, hy: float, overhang: float,
 def build_hip(length_m: float, width_m: float, floors: int, seed: int,
               layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    style = _house_style(rng, layout, flavor)
+    profile = profile_for_asset(length_m, width_m, archetype="hip")
+    style = _house_style(rng, layout, flavor, profile)
     massing = flavor_massing(flavor)
     hx, hy = length_m / 2.0, width_m / 2.0
     overhang = min(0.45 * max(massing["overhang"], 0.5),
@@ -252,7 +260,8 @@ def build_lshape(length_m: float, width_m: float, floors: int, seed: int,
     full declared footprint.
     """
     rng = random.Random(seed)
-    style = _house_style(rng, layout, flavor)
+    profile = profile_for_asset(length_m, width_m, archetype="lshape")
+    style = _house_style(rng, layout, flavor, profile)
     massing = flavor_massing(flavor)
     pitch = rng.uniform(*massing["pitch"])
     hx, hy = length_m / 2.0, width_m / 2.0

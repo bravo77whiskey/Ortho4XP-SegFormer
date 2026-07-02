@@ -12,6 +12,7 @@ import random
 
 from .common import MeshSpec, StripUV, parapet_flat_roof, \
     set_shell_meta, validate_spec, walls_with_floors
+from .styles import profile_for_asset, style_for_profile, weighted_choice
 
 FLOOR_H = 3.2
 PARAPET_H = 0.8
@@ -24,7 +25,16 @@ WALL_SHADES = ("a", "b")
 def build_flatcom(length_m: float, width_m: float, floors: int, seed: int,
                   layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    family = rng.choice(WALL_FAMILIES)
+    profile = profile_for_asset(
+        length_m, width_m, bucket="commercial", archetype="flatcom"
+    )
+    weights = style_for_profile(flavor, profile)
+    families = tuple(
+        (family, weight)
+        for family, weight in weights["families"]
+        if family in WALL_FAMILIES
+    ) or tuple((family, 1) for family in WALL_FAMILIES)
+    family = weighted_choice(rng, families)
     shade = rng.choice(WALL_SHADES)
     wall = StripUV(layout, f"wall_{family}_{shade}")
     plain = StripUV(layout, f"plain_{family}")

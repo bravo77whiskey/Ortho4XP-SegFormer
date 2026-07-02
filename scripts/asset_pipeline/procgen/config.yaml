@@ -129,6 +129,19 @@ bands:
     min_area_m2: 1320.0           # 1650 * 0.8
     max_area_m2: 7000.0
     max_aspect: 5.5
+    max_side_m: 100.0
+    bucket: industrial
+    archetypes: [warehouse, bigbox]
+    floors: [2, 3, 4]
+    variants: 2
+    regions: [generic, europe, north_america, mediterranean, asia, africa,
+              south_america, australia_oceania]
+  - name: extra_large             # class 8 within optional-library limits
+    ladder: tier_b
+    min_area_m2: 1320.0
+    max_area_m2: 7000.0
+    min_side_m: 100.1
+    max_aspect: 5.5
     bucket: industrial
     archetypes: [warehouse, bigbox]
     floors: [2, 3, 4]

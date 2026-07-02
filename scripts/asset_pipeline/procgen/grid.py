@@ -70,7 +70,8 @@ BUCKET_STEMS = {
 
 
 def _footprint_keys(ladder: list[float], *, min_area: float, max_area: float,
-                    max_aspect: float, max_side: float) -> list[tuple[float, float]]:
+                    max_aspect: float, max_side: float,
+                    min_side: float = 0.0) -> list[tuple[float, float]]:
     keys = []
     for length in ladder:
         for width in ladder:
@@ -82,6 +83,8 @@ def _footprint_keys(ladder: list[float], *, min_area: float, max_area: float,
             if length / width > max_aspect + 1e-9:
                 continue
             if length > max_side:
+                continue
+            if max(length, width) < min_side:
                 continue
             keys.append((length, width))
     return keys
@@ -110,7 +113,11 @@ def build_manifest(config: dict) -> dict:
             min_area=float(band["min_area_m2"]),
             max_area=min(float(band["max_area_m2"]), float(limits["max_area_m2"])),
             max_aspect=max_aspect,
-            max_side=float(limits["max_side_m"]),
+            max_side=min(
+                float(band.get("max_side_m", limits["max_side_m"])),
+                float(limits["max_side_m"]),
+            ),
+            min_side=float(band.get("min_side_m", 0.0)),
         )
         # Group the band's archetypes by their effective bucket so each
         # virtual path stays semantically pure (residential-context flags

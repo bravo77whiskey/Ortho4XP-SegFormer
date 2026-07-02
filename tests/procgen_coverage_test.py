@@ -57,6 +57,10 @@ CLASS_AREA_BANDS = {
     5: (450.0, 850.0),
     6: (850.0, 1650.0),
     7: (1650.0, 7000.0),
+    # Class 8 generated objects intentionally cover the runtime's
+    # extra-large-within-library-gate domain: area <= 7000 m2, but at least
+    # one side exceeds the class-7 max side of 100 m.
+    8: (1320.0, 7000.0),
 }
 
 
@@ -89,6 +93,17 @@ def candidates():
 
 def _sample_detection(rng, zone_class):
     area_lo, area_hi = CLASS_AREA_BANDS[zone_class]
+    if zone_class == 8:
+        for _ in range(100):
+            length = rng.uniform(104.9, MAX_SIDE_M)
+            width = rng.uniform(
+                max(20.7, area_lo / length),
+                min(length, area_hi / length),
+            )
+            area = length * width
+            if area_lo <= area <= area_hi:
+                return length, width
+        return None
     max_aspect = (
         TIER_A_MAX_ASPECT if area_hi <= TIER_SPLIT_AREA_M2
         else TIER_B_MAX_ASPECT

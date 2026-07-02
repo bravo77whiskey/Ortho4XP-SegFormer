@@ -9,6 +9,29 @@
   "north_america": "textures/o4sfr_procgen_atlas_north_america.png",
   "south_america": "textures/o4sfr_procgen_atlas_south_america.png"
  },
+ "reference_styles": {
+  "class_profiles": [
+   "apartment_block",
+   "compact_residential",
+   "extra_large",
+   "large",
+   "medium",
+   "small_apartment",
+   "small_residential",
+   "tiny_residential"
+  ],
+  "regions": [
+   "africa",
+   "asia",
+   "australia_oceania",
+   "europe",
+   "generic",
+   "mediterranean",
+   "north_america",
+   "south_america"
+  ],
+  "version": 1
+ },
  "size": 2048,
  "strips": {
   "ground_brick": {

@@ -16,15 +16,20 @@ import random
 
 from .common import MeshSpec, StripUV, parapet_flat_roof, \
     set_shell_meta, validate_spec, wall_quad, walls_with_floors
-from .styles import flavor_style, weighted_choice
+from .styles import profile_for_asset, style_for_profile, weighted_choice
 
 FLOOR_H = 3.2
 WALL_SHADES = ("a", "b")
 BAY_TARGET_W_M = 6.5  # wider bays = fewer facade quads (vertex budget)
 
 
-def _flat_style(rng: random.Random, layout: dict, flavor: str):
-    weights = flavor_style(flavor)
+def _flat_style(rng: random.Random, layout: dict, flavor: str,
+                profile: str | None = None, bucket: str = "residential"):
+    weights = style_for_profile(
+        flavor,
+        profile,
+        apartment_bias=bucket == "apartments",
+    )
     family = weighted_choice(rng, weights["families"])
     shade = rng.choice(WALL_SHADES)
     return {
@@ -43,7 +48,8 @@ def _flat_style(rng: random.Random, layout: dict, flavor: str):
 def build_flatres(length_m: float, width_m: float, floors: int, seed: int,
                   layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    style = _flat_style(rng, layout, flavor)
+    profile = profile_for_asset(length_m, width_m, archetype="flatres")
+    style = _flat_style(rng, layout, flavor, profile)
     hx, hy = length_m / 2.0, width_m / 2.0
     top_z = floors * FLOOR_H
 
@@ -63,10 +69,13 @@ def build_flatres(length_m: float, width_m: float, floors: int, seed: int,
 def build_shophouse(length_m: float, width_m: float, floors: int, seed: int,
                     layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    style = _flat_style(rng, layout, flavor)
+    profile = profile_for_asset(
+        length_m, width_m, bucket="commercial", archetype="shophouse"
+    )
+    style = _flat_style(rng, layout, flavor, profile)
     storefront = StripUV(layout, "ground_storefront")
     wall_b = style["wall"]
-    weights = flavor_style(flavor)
+    weights = style_for_profile(flavor, profile)
     alt_family = weighted_choice(rng, weights["families"])
     wall_a = StripUV(layout, f"wall_{alt_family}_a")
 

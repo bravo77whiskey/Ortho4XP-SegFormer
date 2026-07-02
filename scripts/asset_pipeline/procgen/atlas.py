@@ -332,6 +332,19 @@ FLAVOR_PATTERNS = {
 }
 
 
+def _load_reference_styles(path=None):
+    path = path or os.path.join(HERE, "reference_styles.yaml")
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
+def _pattern_for_flavor(flavor: str, references: dict) -> dict:
+    pattern = dict(FLAVOR_PATTERNS.get(flavor, FLAVOR_PATTERNS["generic"]))
+    region = (references.get("regions") or {}).get(flavor, {})
+    pattern.update(region.get("pattern_overrides") or {})
+    return pattern
+
+
 def _S(px_scale, px):
     """Scale a 2048px-authored pixel constant to the actual atlas size."""
     return max(1, int(round(px * px_scale)))
@@ -946,9 +959,11 @@ def build_layout(size: int) -> dict:
     return {"size": size, "window_period_m": WINDOW_PERIOD_M, "strips": strips}
 
 
-def paint_atlas(flavor: str, layout: dict, seed: int) -> Image.Image:
+def paint_atlas(flavor: str, layout: dict, seed: int,
+                references: dict | None = None) -> Image.Image:
     palette = PALETTES[flavor]
-    pattern = dict(FLAVOR_PATTERNS.get(flavor, FLAVOR_PATTERNS["generic"]))
+    references = references or _load_reference_styles()
+    pattern = _pattern_for_flavor(flavor, references)
     size = layout["size"]
     # Roof row/pitch constants are authored in 2048px units; rescale so the
     # painted feature size in world metres is resolution-independent.
@@ -1009,11 +1024,17 @@ def main(argv=None) -> int:
 
     with open(args.config, "r", encoding="utf-8") as fh:
         config = yaml.safe_load(fh)
+    references = _load_reference_styles()
     atlas_cfg = config["atlas"]
     layout = build_layout(int(atlas_cfg["size"]))
     layout["flavors"] = {
         flavor: f"textures/{texture_name(flavor)}"
         for flavor in atlas_cfg["flavors"]
+    }
+    layout["reference_styles"] = {
+        "version": references.get("version"),
+        "regions": sorted((references.get("regions") or {}).keys()),
+        "class_profiles": sorted((references.get("class_profiles") or {}).keys()),
     }
     with open(args.layout_out, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(layout, fh, indent=1, sort_keys=True)
@@ -1027,7 +1048,7 @@ def main(argv=None) -> int:
     # turned out to be hue-jittered roof rows in the PNG itself (_shade vs
     # _jitter), not mip bleed.
     for flavor in atlas_cfg["flavors"]:
-        img = paint_atlas(flavor, layout, int(atlas_cfg["seed"]))
+        img = paint_atlas(flavor, layout, int(atlas_cfg["seed"]), references)
         path = os.path.join(textures_dir, texture_name(flavor))
         img.save(path, optimize=True)
         print(f"wrote {path}")

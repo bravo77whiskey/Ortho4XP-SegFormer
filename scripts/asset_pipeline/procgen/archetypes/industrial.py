@@ -13,6 +13,7 @@ import random
 
 from .common import MeshSpec, StripUV, box, parapet_flat_roof, \
     set_shell_meta, validate_spec, wall_quad
+from .styles import profile_for_asset, style_for_profile, weighted_choice
 
 FLOOR_H = 3.2
 WAREHOUSE_PITCH_DEG = 6.0
@@ -23,8 +24,20 @@ def build_warehouse(length_m: float, width_m: float, floors: int, seed: int,
                     layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
     shade = rng.choice(("a", "b"))
-    wall = StripUV(layout, f"wall_concrete_{shade}")
-    plain = StripUV(layout, "plain_concrete")
+    profile = profile_for_asset(
+        length_m, width_m, bucket="industrial", archetype="warehouse"
+    )
+    weights = style_for_profile(flavor, profile, industrial_bias=True)
+    family = weighted_choice(
+        rng,
+        tuple(
+            (candidate, weight)
+            for candidate, weight in weights["families"]
+            if candidate in {"concrete", "brick", "stucco"}
+        ) or (("concrete", 1),),
+    )
+    wall = StripUV(layout, f"wall_{family}_{shade}")
+    plain = StripUV(layout, f"plain_{family}")
     roller = StripUV(layout, "ground_roller")
     roof = StripUV(layout, "roof_metal")
     trim = StripUV(layout, "trim_dark")
@@ -101,8 +114,20 @@ def build_bigbox(length_m: float, width_m: float, floors: int, seed: int,
                  layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
     shade = rng.choice(("a", "b"))
-    wall = StripUV(layout, f"wall_concrete_{shade}")
-    plain = StripUV(layout, "plain_concrete")
+    profile = profile_for_asset(
+        length_m, width_m, bucket="commercial", archetype="bigbox"
+    )
+    weights = style_for_profile(flavor, profile, industrial_bias=True)
+    family = weighted_choice(
+        rng,
+        tuple(
+            (candidate, weight)
+            for candidate, weight in weights["families"]
+            if candidate in {"concrete", "brick", "stucco"}
+        ) or (("concrete", 1),),
+    )
+    wall = StripUV(layout, f"wall_{family}_{shade}")
+    plain = StripUV(layout, f"plain_{family}")
     storefront = StripUV(layout, "ground_storefront")
     roof = StripUV(layout, "roof_flat")
     trim = StripUV(layout, "trim_dark")
