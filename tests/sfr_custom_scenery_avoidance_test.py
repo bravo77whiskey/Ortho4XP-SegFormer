@@ -178,6 +178,68 @@ class CustomSceneryAvoidanceTests(unittest.TestCase):
         self.assertEqual(polys[0][0], (22.1, 120.1))
         self.assertEqual(skipped, 1)
 
+    def test_generic_custom_dsf_parser_skips_street_light_clutter(self):
+        # Name-token matches (street lights, lamps, lanterns, light poles).
+        self.assertTrue(BLD._is_nonblocking_clutter_object("objects/Street_Light_3.obj"))
+        self.assertTrue(BLD._is_nonblocking_clutter_object("props/streetlight.obj"))
+        self.assertTrue(BLD._is_nonblocking_clutter_object("lib/lamppost_01.obj"))
+        # Real-world names seen in installed packs (ChudobaDesign, aericaps, MisterX).
+        self.assertTrue(BLD._is_nonblocking_clutter_object("ChudobaDesign_Library/lampa.obj"))
+        self.assertTrue(BLD._is_nonblocking_clutter_object("aericaps_collection/Street/street_lamp_single-11m.obj"))
+        self.assertTrue(BLD._is_nonblocking_clutter_object("aericaps_collection/Building/lightpole.obj"))
+        self.assertTrue(BLD._is_nonblocking_clutter_object("ruscenery/houses/lantern.obj"))
+        # Dedicated lighting folders catch whole packs (default X-Plane g10 set,
+        # MisterX airport lights) regardless of the per-object filename.
+        self.assertTrue(BLD._is_nonblocking_clutter_object("lib/g10/streetlights/ResLt1.obj"))
+        self.assertTrue(BLD._is_nonblocking_clutter_object("MisterX_Library/Airport/Lights/Airport_Light_1.obj"))
+        # A lighthouse is a real landmark building, not street furniture.
+        self.assertFalse(BLD._is_nonblocking_clutter_object("landmarks/Lighthouse.obj"))
+        self.assertFalse(BLD._is_nonblocking_clutter_object("objects/building.obj"))
+        # A place name in a parent folder must not trigger the "lamp" token.
+        self.assertFalse(BLD._is_nonblocking_clutter_object("Lampedusa/objects/terminal.obj"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            package = tmp / "Custom Scenery" / "Active Pack"
+            _write_obj(package / "objects" / "building.obj")
+            dsf = package / "Earth nav data" / "+20+120" / "+22+120.dsf"
+            dsf.parent.mkdir(parents=True)
+            dsf.write_text("", encoding="utf-8")
+            text = tmp / "source.txt"
+            text.write_text(
+                "\n".join(
+                    [
+                        "OBJECT_DEF objects/building.obj",
+                        "OBJECT_DEF props/Street_Light_3.obj",
+                        "OBJECT 0 120.5000000 22.5000000 45.0",
+                        "OBJECT 1 120.6000000 22.6000000 0.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(BLD, "ensure_cached_dsf_text", return_value=str(text)), \
+                    mock.patch.object(
+                        BLD,
+                        "find_active_custom_scenery_dsfs",
+                        return_value=[("Active Pack", str(dsf), str(package))],
+                    ), \
+                    mock.patch.object(BLD, "_active_custom_library_index", return_value={}):
+                polys, objects, skipped, layers = BLD._load_custom_scenery_building_exclusions(
+                    str(tmp / "Custom Scenery"),
+                    22,
+                    120,
+                    str(tmp / "out.dsf"),
+                    "DSFTool.exe",
+                    tmpdir,
+                )
+
+        # Only the building is kept as an occupancy blocker; the street light is
+        # dropped (and not counted as a parse failure).
+        self.assertEqual(len(objects), 1)
+        self.assertEqual(objects[0]["path"], "objects/building.obj")
+        self.assertEqual(skipped, 0)
+
     def test_custom_object_mask_rejects_overlapping_yolo_footprint(self):
         custom_objects = {
             "lat": BLD.np.array([0.5], dtype=BLD.np.float32),

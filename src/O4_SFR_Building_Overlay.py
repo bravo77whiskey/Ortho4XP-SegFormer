@@ -1659,6 +1659,48 @@ def _is_simheaven_building_object(path):
     return False
 
 
+# Street-furniture / lighting prop indicators. These are point props (street
+# lights, lamp posts, lanterns, apron/parking floodlights) that sit between
+# buildings in other custom scenery; they must not be treated as occupancy
+# blockers or building placement loses coverage around every light.
+#
+# Matching is on the object's virtual library path. A dedicated lighting folder
+# segment catches whole packs at once (e.g. the default X-Plane
+# "lib/g10/streetlights/*" set, MisterX "Airport/Lights/*"), while the basename
+# tokens catch lights filed under generic/building folders (e.g.
+# "aericaps_collection/Building/lightpole.obj"). Folder tokens are matched
+# against the full path; name tokens only against the basename, so place names
+# in parent folders (Lampedusa, Lampang) cannot trigger a false match.
+# "lighthouse" is a real landmark building and is explicitly excluded.
+NONBLOCKING_CLUTTER_DIR_TOKENS = (
+    "/streetlights/",
+    "/lights/",
+)
+NONBLOCKING_CLUTTER_NAME_TOKENS = (
+    "streetlight",
+    "street_light",
+    "street-light",
+    "lamp",        # lamppost, lamp_post, street_lamp, lampa, *_lamp_*
+    "lantern",
+    "lightpole",
+    "light_pole",
+    "light-pole",
+)
+
+
+def _is_nonblocking_clutter_object(path):
+    """True for street-furniture props (street lights, lamp posts, lanterns)
+    that must not block building placement when present in other custom scenery.
+    """
+    p = (path or '').replace('\\', '/').lower()
+    if not p or 'lighthouse' in p:
+        return False
+    if any(token in p for token in NONBLOCKING_CLUTTER_DIR_TOKENS):
+        return True
+    name = p.rsplit('/', 1)[-1]
+    return any(token in name for token in NONBLOCKING_CLUTTER_NAME_TOKENS)
+
+
 def _is_simheaven_building_polygon(path):
     """Return True for simHeaven facade defs that occupy building footprints."""
     p = (path or '').replace('\\', '/').lower()
@@ -1990,6 +2032,7 @@ def _load_custom_scenery_building_exclusions(
     objects = []
     polys = []
     skipped_objects = 0
+    skipped_clutter = 0
     dsf_name = os.path.basename(out_dsf or _tile_name_for_latlon(tile_lat, tile_lon))
     library_index = _active_custom_library_index(custom_scenery_dir)
     dsf_matches = find_active_custom_scenery_dsfs(
@@ -2002,6 +2045,7 @@ def _load_custom_scenery_building_exclusions(
         n_obj0 = len(objects)
         n_poly0 = len(polys)
         skipped0 = skipped_objects
+        skipped_clutter0 = skipped_clutter
         try:
             cached_text_path = ensure_cached_dsf_text(
                 dsf_path,
@@ -2031,6 +2075,11 @@ def _load_custom_scenery_building_exclusions(
                             object_heading = float(parts[4]) if len(parts) > 4 else 0.0
                         except (IndexError, ValueError):
                             skipped_objects += 1
+                            continue
+                        if _is_nonblocking_clutter_object(object_path):
+                            # Street lights and similar point props must not
+                            # block building placement in other scenery.
+                            skipped_clutter += 1
                             continue
                         dims = _custom_object_dims(
                             object_path,
@@ -2084,7 +2133,8 @@ def _load_custom_scenery_building_exclusions(
                 f"  [custom scenery bld] {folder_name}: "
                 f"+{len(objects) - n_obj0} objects  "
                 f"+{len(polys) - n_poly0} facade polys  "
-                f"skipped_objects={skipped_objects - skipped0}"
+                f"skipped_objects={skipped_objects - skipped0}  "
+                f"skipped_clutter={skipped_clutter - skipped_clutter0}"
             )
         except Exception as exc:
             print(f"  [custom scenery bld] failed {dsf_path}: {exc}")
