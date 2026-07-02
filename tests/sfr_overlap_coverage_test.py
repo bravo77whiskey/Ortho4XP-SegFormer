@@ -215,6 +215,32 @@ class CrossTextureDedupTests(unittest.TestCase):
         finally:
             b._bounds_for_object_path = orig
 
+    def test_corner_graze_survives_partial_stack_drops(self):
+        # Adjacent distinct buildings whose 10x10 footprints clip by ~1 m2
+        # (1% of the smaller) survive the graze tolerance; a 60% partial
+        # stack still drops. frac=0 restores drop-on-any-overlap.
+        import O4_SFR_Building_Overlay as b
+        orig = b._bounds_for_object_path
+        b._bounds_for_object_path = lambda p: (-5.0, 5.0, -5.0, 5.0)
+        try:
+            mlat = 110540.0
+            import math
+            mlon = 111320.0 * math.cos(math.radians(24.5))
+            base = self._obj(0.0010, 0.0010)
+            graze = self._obj(0.0010 + 9.0 / mlon, 0.0010 + 9.0 / mlat)
+            kept, dropped = b._dedupe_overlapping_placements(
+                [base, graze], 24, 118, overlap_frac=0.20)
+            self.assertEqual(dropped, 0)
+            stack = self._obj(0.0010 + 4.0 / mlon, 0.0010)  # 60% overlap
+            kept, dropped = b._dedupe_overlapping_placements(
+                [base, stack], 24, 118, overlap_frac=0.20)
+            self.assertEqual(dropped, 1)
+            kept, dropped = b._dedupe_overlapping_placements(
+                [base, graze], 24, 118, overlap_frac=0.0)
+            self.assertEqual(dropped, 1)
+        finally:
+            b._bounds_for_object_path = orig
+
 
 class ConfigPropagationTests(unittest.TestCase):
     """Guards the mechanism the GUI single-tile build fix relies on:

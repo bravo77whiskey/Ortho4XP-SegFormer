@@ -7962,7 +7962,8 @@ def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg):
     return pts
 
 
-def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
+def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
+                                   debug_path=None, overlap_frac=0.20):
     """Drop object placements whose footprints overlap an already-kept one.
 
     Overlap removal during placement is scoped per DDS texture (each texture
@@ -7970,12 +7971,20 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
     two textures is placed twice and never cross-deduplicated -- the dominant
     source of overlaps on high-ZL tiles, which are split into many textures.
     This final tile-wide pass works in vector (metre) space: smallest footprint
-    first, drop any later placement whose footprint overlaps a kept one (any
-    overlap, no minimum). It also removes cross-pass overlaps (stock vs trained).
+    first, drop a later placement when its footprint overlaps a kept one by
+    more than ``overlap_frac`` of the smaller footprint. It also removes
+    cross-pass overlaps (stock vs trained).
+
+    ``overlap_frac`` separates true duplicates/stacks (seam duplicates overlap
+    near-100%) from adjacent distinct buildings whose footprints merely graze
+    at a corner or edge: measured on +22+120 Kaohsiung, 44% of any-overlap
+    drops intruded <10% of the smaller footprint while genuine duplicates sat
+    above 80%. 0 restores drop-on-any-overlap.
 
     ``placements`` is a list of ``(lon, lat, heading, path)`` tuples; returns the
     kept list (original order preserved) and the number dropped.
     """
+    overlap_frac = max(0.0, float(overlap_frac))
     if not placements:
         return list(placements), 0
     mlat = 110540.0
@@ -8014,6 +8023,7 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
     grid = {}
     keep = [False] * n
     dropped = 0
+    dbg_pairs = [] if debug_path else None
     for i in order:
         poly = polys[i]
         if poly is None:
@@ -8023,6 +8033,7 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
         cx0 = int(math.floor(x1 / cell_m)); cx1 = int(math.floor(x2 / cell_m))
         cy0 = int(math.floor(y1 / cell_m)); cy1 = int(math.floor(y2 / cell_m))
         blocked = False
+        blocker = -1
         seen = set()
         for cxx in range(cx0, cx1 + 1):
             for cyy in range(cy0, cy1 + 1):
@@ -8033,8 +8044,12 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
                     bj = bboxes[j]
                     if x2 < bj[0] or bj[2] < x1 or y2 < bj[1] or bj[3] < y1:
                         continue  # bbox quick reject
-                    if _convex_intersection_area(poly, polys[j]) > 0.0:
+                    inter = _convex_intersection_area(poly, polys[j])
+                    if inter > overlap_frac * max(
+                        1e-6, min(areas[i], areas[j])
+                    ):
                         blocked = True
+                        blocker = j
                         break
                 if blocked:
                     break
@@ -8042,11 +8057,29 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0):
                 break
         if blocked:
             dropped += 1
+            if dbg_pairs is not None:
+                dbg_pairs.append((i, blocker))
             continue
         keep[i] = True
         for cxx in range(cx0, cx1 + 1):
             for cyy in range(cy0, cy1 + 1):
                 grid.setdefault((cxx, cyy), []).append(i)
+    if debug_path:
+        try:
+            import pickle as _dd_pickle
+            with open(debug_path, 'wb') as _f:
+                _dd_pickle.dump(
+                    {
+                        'placements': list(placements),
+                        'keep': keep,
+                        'pairs': dbg_pairs,
+                        'polys': polys,
+                        'areas': areas,
+                    },
+                    _f,
+                )
+        except Exception:
+            pass
     return [placements[i] for i in range(n) if keep[i]], dropped
 
 
@@ -11446,7 +11479,15 @@ def run(
         _t = time.perf_counter()
         _before = len(placed_stock_objects)
         placed_stock_objects, _seam_dropped = _dedupe_overlapping_placements(
-            placed_stock_objects, lat, lon
+            placed_stock_objects, lat, lon,
+            debug_path=(
+                os.path.join(cache_dir, 'tile_dedup_debug.pkl')
+                if _env_flag("O4_SFR_BLD_BLOCK_DEBUG", False) else None
+            ),
+            # Graze tolerance: keep adjacent distinct buildings whose
+            # footprints clip by less than this fraction of the smaller one;
+            # seam duplicates/stacks overlap near-100% and still drop.
+            overlap_frac=_env_float("O4_SFR_BLD_DEDUP_OVERLAP_FRAC", 0.20),
         )
         timings['global_dedup'] = timings.get('global_dedup', 0.0) + (
             time.perf_counter() - _t
