@@ -10144,6 +10144,13 @@ def run(
                             -float(d.get('confidence', 0.0)),
                         ),
                     )
+                # O4_SFR_BLD_BLOCK_DEBUG=1: record why each detection did not
+                # place (reason, center px, OBB quad) plus the stock-YOLO
+                # occupancy quads, dumped per DDS as <stem>_blockdebug.pkl for
+                # offline blocker overlays. Off by default: zero overhead.
+                _blkdbg = (
+                    [] if _env_flag("O4_SFR_BLD_BLOCK_DEBUG", False) else None
+                )
                 for detection in yolo_detections:
                     if _pf:
                         _t_pf = time.perf_counter()
@@ -10155,15 +10162,23 @@ def run(
                     yolo_bbox = prepared_yolo['bbox']
                     if not prepared_yolo['valid']:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        if _blkdbg is not None:
+                            _blkdbg.append(
+                                ('invalid', None, None, detection.get('points'))
+                            )
                         continue
                     yolo_viz_polys.append((yolo_poly.copy(), False))
                     jx = int(prepared_yolo['jx'])
                     jy = int(prepared_yolo['jy'])
                     if not (0 <= jx < img_w and 0 <= jy < img_h):
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        if _blkdbg is not None:
+                            _blkdbg.append(('outside', jx, jy, yolo_poly))
                         continue
                     if static_occ_mask[jy, jx]:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        if _blkdbg is not None:
+                            _blkdbg.append(('static_center', jx, jy, yolo_poly))
                         continue
                     if _obj_avoid and not _placed_yolo_poly_fits(
                         placed_yolo_mask,
@@ -10208,6 +10223,8 @@ def run(
                         _pf_fits += time.perf_counter() - _t_pf
                     if not footprint_clear:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                        if _blkdbg is not None:
+                            _blkdbg.append(('static_footprint', jx, jy, yolo_poly))
                         continue
 
                     heading = float(detection['heading'])
@@ -10234,6 +10251,8 @@ def run(
                                                     lat_n, lat_s, lon_w, lon_e)
                         if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
                             file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                            if _blkdbg is not None:
+                                _blkdbg.append(('out_of_tile', jx, jy, yolo_poly))
                             continue
 
                         residential_context = (
@@ -10307,6 +10326,10 @@ def run(
                                 'miss': 'yolo_object_lookup_miss',
                             }.get(object_status, 'yolo_object_lookup_miss')
                             file_counts[status_key] = file_counts.get(status_key, 0) + 1
+                            if _blkdbg is not None:
+                                _blkdbg.append(
+                                    ('sel_' + str(object_status), jx, jy, yolo_poly)
+                                )
                             final_h = heading
                             # Facade fallback: when no object fits, optionally stamp
                             # a facade over the detection polygon. Disabled by default
@@ -10405,6 +10428,28 @@ def run(
                         placed_direct = True
                     if not placed_direct:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
+                if _blkdbg is not None:
+                    try:
+                        import pickle as _blk_pickle
+                        with open(
+                            os.path.join(
+                                cache_dir,
+                                fname.replace('.dds', '_blockdebug.pkl'),
+                            ),
+                            'wb',
+                        ) as _f:
+                            _blk_pickle.dump(
+                                {
+                                    'outcomes': _blkdbg,
+                                    'stock_quads': [
+                                        np.asarray(q)
+                                        for q in stock_yolo_occupied_polys
+                                    ],
+                                },
+                                _f,
+                            )
+                    except Exception:
+                        pass
                 yolo_place_elapsed = time.perf_counter() - _t_yolo_place
                 timings['placement'] += yolo_place_elapsed
                 file_timings['fit_loop'] = file_timings.get('fit_loop', 0.0) + yolo_place_elapsed
