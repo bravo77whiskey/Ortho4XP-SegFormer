@@ -43,3 +43,8 @@ scripts/asset_pipeline/*
 !scripts/asset_pipeline/procgen/
 scripts/asset_pipeline/procgen/*
 !scripts/asset_pipeline/procgen/reference_styles.yaml
+
+# large local artifacts / session config
+*.pt
+polyworld_backbone
+.agents/
