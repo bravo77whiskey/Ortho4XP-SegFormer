@@ -361,5 +361,77 @@ class FreeAreaDownsizeTests(unittest.TestCase):
         self.assertEqual(selected["asset"]["path"], "big.obj")
 
 
+class PairOverlapRuleTests(unittest.TestCase):
+    """Per-overlap containment rule (pair_rule=True) in drop mode."""
+
+    KW = dict(
+        keep_mode="drop",
+        coverage_threshold=0.0,
+        min_overlap_m2=0.0,
+        m_per_px=1.0,
+        pair_rule=True,
+        containment_frac=0.35,
+        explain_frac=0.60,
+    )
+
+    def test_big_survives_and_evicts_low_conf_contained_small(self):
+        big = _rect_detection(0, 0, 60, 60, confidence=0.6, det_id="big")
+        # Small box inside the big one explains only ~3% of its ground and
+        # does not beat its confidence -> roof furniture, evicted.
+        small = _rect_detection(5, 5, 15, 15, confidence=0.4, det_id="small")
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            [big, small], **self.KW
+        )
+        self.assertEqual({d["id"] for d in kept}, {"big"})
+        self.assertEqual(dropped, 1)
+
+    def test_contained_small_with_higher_conf_survives_alongside(self):
+        big = _rect_detection(0, 0, 60, 60, confidence=0.6, det_id="big")
+        small = _rect_detection(5, 5, 15, 15, confidence=0.9, det_id="small")
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            [big, small], **self.KW
+        )
+        self.assertEqual({d["id"] for d in kept}, {"big", "small"})
+        self.assertEqual(dropped, 0)
+
+    def test_cluster_explaining_big_still_drops_big(self):
+        # Four smalls tile the big box completely -> they ARE the buildings,
+        # the big merged box is dropped exactly as before.
+        smalls = [
+            _rect_detection(0, 0, 20, 20, confidence=0.5, det_id="s1"),
+            _rect_detection(20, 0, 40, 20, confidence=0.5, det_id="s2"),
+            _rect_detection(0, 20, 20, 40, confidence=0.5, det_id="s3"),
+            _rect_detection(20, 20, 40, 40, confidence=0.5, det_id="s4"),
+        ]
+        big = _rect_detection(0, 0, 40, 40, confidence=0.9, det_id="big")
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            smalls + [big], **self.KW
+        )
+        self.assertEqual({d["id"] for d in kept}, {"s1", "s2", "s3", "s4"})
+        self.assertEqual(dropped, 1)
+
+    def test_sliver_contact_keeps_smaller_wins(self):
+        # Adjacent buildings whose OBBs overlap by a thin strip: the earlier
+        # (smaller) detection still wins, the later one is dropped.
+        det_a = _rect_detection(0, 0, 40, 40, confidence=0.5, det_id="A")
+        det_b = _rect_detection(38, 0, 80, 42, confidence=0.9, det_id="B")
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            [det_a, det_b], **self.KW
+        )
+        self.assertEqual({d["id"] for d in kept}, {"A"})
+        self.assertEqual(dropped, 1)
+
+    def test_pair_rule_off_restores_blanket_smaller_wins(self):
+        big = _rect_detection(0, 0, 60, 60, confidence=0.6, det_id="big")
+        small = _rect_detection(5, 5, 15, 15, confidence=0.4, det_id="small")
+        kw = dict(self.KW)
+        kw["pair_rule"] = False
+        kept, dropped = BLD._suppress_overlapping_yolo_detections(
+            [big, small], **kw
+        )
+        self.assertEqual({d["id"] for d in kept}, {"small"})
+        self.assertEqual(dropped, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

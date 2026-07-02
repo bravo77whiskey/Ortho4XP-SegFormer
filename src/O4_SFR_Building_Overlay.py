@@ -7731,6 +7731,9 @@ def _suppress_overlapping_yolo_detections(
     keep_min_new_frac=0.25,
     img_w=None,
     img_h=None,
+    pair_rule=False,
+    containment_frac=0.35,
+    explain_frac=0.60,
 ):
     """Greedily remove overlapping YOLO OBBs.
 
@@ -7740,6 +7743,17 @@ def _suppress_overlapping_yolo_detections(
     when ``coverage_threshold`` > 0, also cover more than that fraction of the
     smaller footprint. With both at 0 (the default) any overlap at all drops the
     larger detection.
+
+    ``pair_rule=True`` refines the drop decision per overlap instead of the
+    blanket smaller-always-wins: when the already-kept detections overlapping a
+    bigger detection are substantially INSIDE it (intersection >=
+    ``containment_frac`` of the smaller footprint) the bigger one survives
+    unless those contained detections collectively explain >= ``explain_frac``
+    of its ground area (then they are the real per-building boxes and the big
+    merged box is dropped, as before). A surviving bigger detection evicts the
+    contained detections whose confidence does not beat its own -- they are
+    roof furniture / sub-structure boxes of the same building. Mere sliver
+    contact (below ``containment_frac``) keeps the smallest-first drop.
 
     ``keep_mode="marginal"``: delegate to :func:`_suppress_overlapping_yolo_marginal`,
     which preserves coverage by keeping detections that add new ground area.
@@ -7780,6 +7794,96 @@ def _suppress_overlapping_yolo_detections(
             -float(detections[i].get('confidence', 0.0)),
         ),
     )
+    if pair_rule:
+        containment_frac = min(1.0, max(0.0, float(containment_frac)))
+        explain_frac = min(1.0, max(0.0, float(explain_frac)))
+        confs = [float(det.get('confidence', 0.0)) for det in detections]
+        entries = []        # detection index per kept slot
+        alive = []          # eviction tombstones, parallel to entries
+        entry_areas = []
+        entry_bboxes = []
+        grid = {}
+        for i in order:
+            poly = polys[i]
+            if poly is None:
+                continue
+            area = abs(float(cv2.contourArea(poly)))
+            if area <= 1.0:
+                continue
+            fx1 = float(fmins[i, 0])
+            fy1 = float(fmins[i, 1])
+            fx2 = float(fmaxs[i, 0])
+            fy2 = float(fmaxs[i, 1])
+            gb = (
+                int(math.floor(fx1)), int(math.floor(fy1)),
+                int(math.ceil(fx2)), int(math.ceil(fy2)),
+            )
+            candidate_slots = set()
+            for cell in _bbox_grid_cells(gb, cell_size_px):
+                candidate_slots.update(grid.get(cell, ()))
+            contained = []
+            blocked = False
+            for slot in candidate_slots:
+                if not alive[slot]:
+                    continue
+                kbx1, kby1, kbx2, kby2 = entry_bboxes[slot]
+                if fx1 > kbx2 or fx2 < kbx1 or fy1 > kby2 or fy2 < kby1:
+                    continue
+                inter = _convex_intersection_area(poly, polys[entries[slot]])
+                if inter <= min_overlap_px:
+                    continue
+                if inter / max(1e-6, min(area, entry_areas[slot])) >= containment_frac:
+                    contained.append(slot)
+                else:
+                    # Sliver contact: two distinct buildings whose loose OBBs
+                    # touch -- the earlier (smaller) one wins, as before.
+                    blocked = True
+                    break
+            if not blocked and contained:
+                # Containment conflict: do the kept detections inside me
+                # collectively explain my ground? Rasterise them in my bbox.
+                ox, oy = gb[0], gb[1]
+                bw = max(1, gb[2] - ox)
+                bh = max(1, gb[3] - oy)
+                scale = max(1, int(math.ceil(max(bw, bh) / 512.0)))
+                acc_w = max(1, bw // scale)
+                acc_h = max(1, bh // scale)
+                own = np.zeros((acc_h, acc_w), dtype=np.uint8)
+                cv2.fillPoly(own, [np.round(
+                    (poly - (ox, oy)) / scale).astype(np.int32)], 1)
+                keep_mask = np.zeros_like(own)
+                for slot in contained:
+                    cv2.fillPoly(keep_mask, [np.round(
+                        (polys[entries[slot]] - (ox, oy)) / scale
+                    ).astype(np.int32)], 1)
+                own_cells = int(np.count_nonzero(own))
+                explained = (
+                    int(np.count_nonzero(own & keep_mask)) / own_cells
+                    if own_cells else 1.0
+                )
+                if explained >= explain_frac:
+                    blocked = True  # the smalls ARE the buildings; I am a merge
+                else:
+                    # I am the real building: evict contained boxes that do not
+                    # beat my confidence (roof furniture / sub-structures).
+                    conf_i = confs[i]
+                    for slot in contained:
+                        if confs[entries[slot]] <= conf_i:
+                            alive[slot] = False
+            if blocked:
+                continue
+            slot = len(entries)
+            entries.append(i)
+            alive.append(True)
+            entry_areas.append(area)
+            entry_bboxes.append((fx1, fy1, fx2, fy2))
+            for cell in _bbox_grid_cells(gb, cell_size_px):
+                grid.setdefault(cell, []).append(slot)
+        kept = [
+            detections[entries[s]] for s in range(len(entries)) if alive[s]
+        ]
+        return kept, len(detections) - len(kept)
+
     kept = []
     kept_polys = []
     kept_areas = []
@@ -8730,6 +8834,20 @@ def run(
         yolo_keep_mode = "drop"
         yolo_suppress_coverage = 0.0
         yolo_suppress_min_overlap_m2 = 0.0
+    # Per-overlap containment rule for the zero-threshold drop: a bigger
+    # detection survives when the smaller kept detections inside it explain
+    # less than yolo_suppress_explain_frac of its ground area (it then evicts
+    # the contained ones that do not beat its confidence); sliver contacts
+    # keep the smallest-first drop. Chosen from a 9-variant overlay A/B on
+    # +22+113 28512_53472_BI16 (sliver=smaller, evict=conf). Disable with
+    # O4_SFR_BLD_PAIR_OVERLAP_RULE=0 to restore the blanket smaller-wins drop.
+    yolo_pair_overlap_rule = _env_flag("O4_SFR_BLD_PAIR_OVERLAP_RULE", True)
+    yolo_suppress_containment_frac = _env_float(
+        "O4_SFR_BLD_SUPPRESS_CONTAINMENT_FRAC", 0.35
+    )
+    yolo_suppress_explain_frac = _env_float(
+        "O4_SFR_BLD_SUPPRESS_EXPLAIN_FRAC", 0.60
+    )
     # Per-candidate object self-avoidance (selector occupancy check + OBB dedup +
     # spacing-mask marking + incremental integral rebuilds) is redundant now that
     # inter-object overlaps are removed tile-wide after placement
@@ -9244,7 +9362,12 @@ def run(
             # v19: overlap removal default on (drop, smallest-first, no min-overlap area).
             # v20: blacklist update + tile-wide cross-texture object dedup.
             # v21: auto-drop library aliases whose resolved mesh >> declared footprint.
-            "schema=v21-alias-oversize-guard",
+            # v22: per-overlap containment rule (big survives when contained
+            #      smalls explain < explain_frac; conf-gated eviction).
+            bool(yolo_pair_overlap_rule),
+            round(float(yolo_suppress_containment_frac), 6),
+            round(float(yolo_suppress_explain_frac), 6),
+            "schema=v22-pair-overlap-rule",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -9600,6 +9723,9 @@ def run(
                 keep_min_new_frac=yolo_keep_min_new_frac,
                 img_w=img_w,
                 img_h=img_h,
+                pair_rule=yolo_pair_overlap_rule,
+                containment_frac=yolo_suppress_containment_frac,
+                explain_frac=yolo_suppress_explain_frac,
             )
             _rec('yolo_suppress', _t)
             file_counts['yolo_raw_detections'] = raw_yolo_count
