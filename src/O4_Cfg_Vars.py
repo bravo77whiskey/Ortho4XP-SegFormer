@@ -489,6 +489,12 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_no_cache",
         "hint": "Disable persistent per-DDS building cache files for this tile. When enabled, building cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
+    "sfr_bld_verbose_log": {
+        "type": bool,
+        "default": False,
+        "short_name": "bld_verbose_log",
+        "hint": "Verbose per-texture building-overlay logging (placement class counts, YOLO accept/block statistics, coverage percentages). When disabled, each texture logs a single summary line like the vegetation overlay.",
+    },
     "sfr_bld_avoid_custom_scenery": {
         "type": bool,
         "default": True,
@@ -675,6 +681,7 @@ list_sfr_bld_vars = [
     "sfr_bld_min_zone_m2",
     "sfr_bld_grid_n",
     "sfr_bld_disable_cache",
+    "sfr_bld_verbose_log",
     "sfr_bld_avoid_custom_scenery",
     "sfr_bld_yolo_enabled",
     "sfr_bld_yolo_checkpoint",

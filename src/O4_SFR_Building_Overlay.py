@@ -386,6 +386,9 @@ def parse_args():
     ap.add_argument('--debug-image-only', action='store_true', dest='debug_image_only',
                     help='Generate overview/footprint PNGs then exit — no DSF written.')
     ap.add_argument('--cache-dir', default=None)
+    ap.add_argument('--verbose-log', action='store_true', dest='verbose_log',
+                    help='Verbose per-texture logging (placement/YOLO statistics). '
+                         'Off by default: each texture logs a single summary line.')
     ap.add_argument('--grid-n',    type=int,   default=HEADING_GRID_N, dest='grid_n')
     ap.add_argument('--osm-roads', default=None,
                     help='Path to *_big_roads.osm.bz2 (auto-discovered if omitted)')
@@ -8704,6 +8707,7 @@ def run(
     make_viz=False,
     cache_dir=None,
     disable_cache=False,
+    verbose_log=False,
     grid_n=HEADING_GRID_N,
     osm_roads_path=None,
     dsftool_path=None,
@@ -10046,12 +10050,13 @@ def run(
                 if _stock_batch_fell_back:
                     file_counts['stock_yolo_batch_fallback'] = 1
                 if stock_res.counts_by_class:
-                    _summary = " ".join(
-                        f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
-                        for c, n in sorted(stock_res.counts_by_class.items())
-                    )
                     file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
-                    print(f"    [Bld stage] {fname} stock YOLO: {_summary}", flush=True)
+                    if verbose_log:
+                        _summary = " ".join(
+                            f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
+                            for c, n in sorted(stock_res.counts_by_class.items())
+                        )
+                        print(f"    [Bld stage] {fname} stock YOLO: {_summary}", flush=True)
             except Exception as exc:
                 print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
         # Cross-ZL coverage: everything inside a covered region is detected and
@@ -10149,7 +10154,8 @@ def run(
         file_t0 = time.perf_counter()
 
         try:
-            print(f"  [{fi:3d}/{n_files}] {fname}  (starting)", flush=True)
+            if verbose_log:
+                print(f"  [{fi:3d}/{n_files}] {fname}  (starting)", flush=True)
             _prep_future = _prefetch_futures.pop(fi, None)
             if _prep_future is None and prefetch_executor is not None:
                 # Not prefetched yet (first DDS): still run it on the worker
@@ -10256,14 +10262,17 @@ def run(
             if not bld_zone.any() and not yolo_detections and not _stock_has_placements:
                 file_counts['candidates'] = 0
                 file_counts['placed'] = 0
-                bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
-                spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
-                class_counts = {cls: 0 for cls in BLD_PLACEMENT_CLASSES}
-                print(
-                    f"  [{fi:3d}/{n_files}] {fname}  "
-                    f"{_describe_placement_summary(class_counts, bld_pct, 0, grid_n, spacing_label, file_counts)}"
-                    f"  small-house areas=unavailable"
-                )
+                if verbose_log:
+                    bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
+                    spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
+                    class_counts = {cls: 0 for cls in BLD_PLACEMENT_CLASSES}
+                    print(
+                        f"  [{fi:3d}/{n_files}] {fname}  "
+                        f"{_describe_placement_summary(class_counts, bld_pct, 0, grid_n, spacing_label, file_counts)}"
+                        f"  small-house areas=unavailable"
+                    )
+                else:
+                    print(f"  [{fi:3d}/{n_files}] {fname}  (0 placements)", flush=True)
                 if not disable_cache and not ignore_placement_cache:
                     try:
                         _t = time.perf_counter()
@@ -11385,12 +11394,25 @@ def run(
                 for cls in BLD_PLACEMENT_CLASSES
             }
             spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
-            print(
-                f"  [{fi:3d}/{n_files}] {fname}  "
-                f"{_describe_placement_summary(class_counts, bld_pct, n_osm_cells, grid_n, spacing_label, file_counts)}"
-                f"  placed%={placed_pct:.1f}"
-                f"  small-house areas={residential_area_source}"
-            )
+            if verbose_log:
+                print(
+                    f"  [{fi:3d}/{n_files}] {fname}  "
+                    f"{_describe_placement_summary(class_counts, bld_pct, n_osm_cells, grid_n, spacing_label, file_counts)}"
+                    f"  placed%={placed_pct:.1f}"
+                    f"  small-house areas={residential_area_source}"
+                )
+            else:
+                # Same accounting as the cached-replay line: objects + facades
+                # appended for this texture.
+                _n_tex_placed = (
+                    (len(placed_stock_objects) - _start_object_idx) +
+                    (len(placed_facades) - _start_facade_idx)
+                )
+                print(
+                    f"  [{fi:3d}/{n_files}] {fname}  "
+                    f"({_n_tex_placed} placements)",
+                    flush=True,
+                )
 
             if not disable_cache and not ignore_placement_cache:
                 try:
@@ -11812,6 +11834,7 @@ def main():
         make_viz   = not args.no_viz,
         debug_image_only = args.debug_image_only,
         cache_dir  = cache_dir,
+        verbose_log = args.verbose_log,
         grid_n          = args.grid_n,
         osm_roads_path  = args.osm_roads,
         custom_scenery_dir = args.custom_scenery_dir,
