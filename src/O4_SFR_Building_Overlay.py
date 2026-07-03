@@ -7412,18 +7412,87 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
     cov_area = np.empty(n, dtype=np.float64)
     req_l = np.empty(n, dtype=np.float64)
     req_w = np.empty(n, dtype=np.float64)
+    aspect = np.empty(n, dtype=np.float64)
     for i, (_rank, _cls, cand) in enumerate(entries):
         cov_area[i] = float(cand['coverage_area_m2'])
-        req_l[i] = float(cand['required_length_m'])
-        req_w[i] = float(cand['required_width_m'])
+        rl = float(cand['required_length_m'])
+        rw = float(cand['required_width_m'])
+        req_l[i] = rl
+        req_w[i] = rw
+        # Same expression the selector's score used per candidate:
+        # max(required_length / max(required_width, 1e-6), 1e-6).
+        aspect[i] = max(rl / max(rw, 1e-6), 1e-6)
     bundle = {
         'entries': entries,
         'cov_area': cov_area,
         'req_l': req_l,
         'req_w': req_w,
+        'aspect': aspect,
+        # Python-float copy for the scan loop (tolist preserves the exact
+        # doubles; skips a numpy scalar extraction per candidate).
+        'aspect_list': aspect.tolist(),
+        # Ascending copy for the binary-search coverage cutoff (cov_area is
+        # sorted descending, so the >=-threshold set is always a prefix).
+        'cov_asc': np.ascontiguousarray(cov_area[::-1]),
+        'enabled_view': None,
     }
     cache[cache_key] = bundle
     return bundle
+
+
+def _bundle_enabled_view(bundle, enabled_assets_by_path, zone_class):
+    """Resolve a merged bundle against an enabled-asset map, once per map.
+
+    Returns aligned per-entry data the selector scan needs: the resolved asset
+    (``None`` when the enabled map filters it out), its residential-context
+    requirement, and ``static_rank`` — the entry's position under the static
+    tail of the selection score ``(abs(class - zone), class_rank, source,
+    path, heading_delta)``, computed from the *resolved* assets (the score
+    reads source/path from the enabled asset). ``sorted`` is stable, so equal
+    static keys preserve entries order, matching the old first-scanned-wins
+    tie behaviour. Cached on the bundle keyed by map identity (a strong ref is
+    kept, so the id cannot be recycled while cached).
+    """
+    view = bundle.get('enabled_view')
+    if view is not None and view['map_ref'] is enabled_assets_by_path:
+        return view
+    entries = bundle['entries']
+    n = len(entries)
+    resolved = [None] * n
+    requires_res = [False] * n
+    for i, (_rank, _cls, cand) in enumerate(entries):
+        asset = cand['asset']
+        if enabled_assets_by_path is not None:
+            asset = enabled_assets_by_path.get(asset.get('path'))
+            if asset is None:
+                continue
+        resolved[i] = asset
+        requires_res[i] = _asset_requires_residential_context(asset)
+    try:
+        zone_int = int(zone_class)
+    except (TypeError, ValueError):
+        zone_int = BLD_CLASS_MEDIUM
+    order = sorted(
+        range(n),
+        key=lambda i: (
+            abs(int(entries[i][1]) - zone_int),
+            int(entries[i][0]),
+            (resolved[i] or entries[i][2]['asset']).get('source', ''),
+            (resolved[i] or entries[i][2]['asset']).get('path', ''),
+            float(entries[i][2]['heading_delta']),
+        ),
+    )
+    static_rank = [0] * n
+    for pos, i in enumerate(order):
+        static_rank[i] = pos
+    view = {
+        'map_ref': enabled_assets_by_path,
+        'assets': resolved,
+        'requires_res': requires_res,
+        'static_rank': static_rank,
+    }
+    bundle['enabled_view'] = view
+    return view
 
 
 _GLOBAL_YOLO_OBJECT_FIT_TABLE = None
@@ -7530,7 +7599,9 @@ def _select_yolo_object_candidate(
     When ``profile_out`` is a dict it is used as an accumulator to attribute
     placement cost: ``calls`` (selector invocations), ``entries`` (candidate
     pool size offered), ``viable`` (survivors of the vectorised size/coverage
-    prefilter) and ``seen`` (candidates actually scanned in Python). Used by the
+    prefilter) and ``seen`` (viable candidates walked in Python — for the
+    scored path that is every member of the equal-coverage groups visited up
+    to and including the winner's group). Used by the
     ``O4_SFR_BLD_PLACE_PROFILE`` diagnostic; ``None`` keeps the hot path free of
     bookkeeping.
     """
@@ -7625,7 +7696,6 @@ def _select_yolo_object_candidate(
     zone_class = int(detection.get('placement_class') or BLD_CLASS_MEDIUM)
     min_coverage = _yolo_object_min_coverage_for_class(zone_class, min_coverage)
     det_aspect = detection_length_m / max(detection_width_m, 1e-6)
-    best = None
     counters = {
         'context_skipped': 0,
         'size_reject': 0,
@@ -7635,124 +7705,148 @@ def _select_yolo_object_candidate(
         'seen': 0,
     }
 
-    best_cov_area_m2 = -1.0
     merged_bundle = _merged_yolo_candidates_by_zone(fit_table, zone_class)
     entries = merged_bundle['entries']
     if not entries:
         return None, 'no_candidates'
-    # Vectorised size + coverage pre-filter: avoids per-candidate Python checks
-    # for every clearly-too-big or below-min-coverage asset. The min_coverage
-    # bound also enforces the down-stream cov_area / det_area comparison.
+    n = len(entries)
+    # Coverage cutoff: cov_area is sorted descending, so the candidates with
+    # cov_area >= threshold form a prefix — binary search for its length
+    # instead of comparing the whole pool (selects the exact same set as the
+    # old full-array `cov_area >= min_cov_area_m2 - 1e-12`).
     min_cov_area_m2 = float(min_coverage) * detection_area_m2
-    size_ok = (
-        (merged_bundle['req_l'] <= detection_length_m + 1e-6) &
-        (merged_bundle['req_w'] <= detection_width_m + 1e-6)
-    )
-    cov_ok = merged_bundle['cov_area'] >= min_cov_area_m2 - 1e-12
-    viable_mask = size_ok & cov_ok
-    viable_idx = np.flatnonzero(viable_mask)
+    prefix_n = n - int(np.searchsorted(
+        merged_bundle['cov_asc'], min_cov_area_m2 - 1e-12, side='left'
+    ))
     jxi = int(jx)
     jyi = int(jy)
     _check_occupancy = (
         not skip_occupancy and
         static_occ_mask is not None and building_spacing_mask is not None
     )
+    # Selection = the minimum-score viable candidate that passes the filters
+    # (enabled map, residential context, inside-detection, occupancy). The
+    # score tuple (-coverage, aspect_error, class distance, class_rank,
+    # source, path, heading_delta) needs NO geometry, and the filters do not
+    # affect the ordering — so walk candidates in score order and return the
+    # first one that passes, instead of paying a cv2 containment test per
+    # scanned candidate just to feed the score comparison. Candidates are
+    # already coverage-descending; only runs of exactly-equal cov_area need
+    # the secondary ordering (a strictly smaller coverage always loses on the
+    # exact -coverage comparison, so the winner sits in the first equal-cov
+    # group that yields any passer — identical to the old best/break scan).
+    view = _bundle_enabled_view(merged_bundle, enabled_assets_by_path, zone_class)
+    resolved_assets = view['assets']
+    requires_res = view['requires_res']
+    static_rank = view['static_rank']
+    aspect_list = merged_bundle['aspect_list']
+    det_aspect_c = max(det_aspect, 1e-6)
     # The footprint polygon, its inside-detection test and the occupancy test
     # depend only on (bounds_m, heading_delta) for this call (jx/jy/heading/
-    # m_per_px and the masks are fixed). Many ProcGen assets share dimensions
-    # and sit adjacent in the coverage-sorted scan (notably the equal-coverage
-    # ties the loop must walk), so memoise the geometry to avoid recomputing the
-    # same cv2 footprint/intersection dozens of times per detection. Pure
-    # function of the key -> result is byte-identical to recomputing.
+    # m_per_px and the masks are fixed); memoise them across equal-dimension
+    # candidates. Pure function of the key -> byte-identical to recomputing.
     _geom_cache = {}
-    for idx in viable_idx:
-        idx = int(idx)
-        class_rank, asset_class, candidate = entries[idx]
-        candidate_cov_area_m2 = float(merged_bundle['cov_area'][idx])
-        if best is not None and candidate_cov_area_m2 < best_cov_area_m2 - 1e-9:
-            break  # remaining candidates have strictly smaller coverage; cannot beat best on score
-        counters['seen'] += 1
-        candidate_asset = candidate['asset']
-        path = candidate_asset.get('path')
-        if enabled_assets_by_path is not None:
-            asset = enabled_assets_by_path.get(path)
+    # Vectorised size pre-filter over the coverage prefix only. (A lazy
+    # blockwise variant was measured slower: the winner's equal-coverage group
+    # typically spans most of the prefix, so per-block Python bookkeeping cost
+    # more than the saved comparisons.)
+    viable_idx = np.flatnonzero(
+        (merged_bundle['req_l'][:prefix_n] <= detection_length_m + 1e-6) &
+        (merged_bundle['req_w'][:prefix_n] <= detection_width_m + 1e-6)
+    )
+    viable_list = viable_idx.tolist()
+    # Group ties on the *coverage quotient* (cov_area / detection_area), not
+    # raw cov_area: the score's -coverage term compares the quotient, and two
+    # distinct cov_areas can round to the same quotient. Division by a
+    # positive constant is monotonic, so equal-quotient runs stay contiguous.
+    viable_cov = (merged_bundle['cov_area'][viable_idx] / detection_area_m2).tolist()
+    nv = len(viable_list)
+    winner = None
+    i = 0
+    while i < nv:
+        group_cov = viable_cov[i]
+        j = i + 1
+        while j < nv and viable_cov[j] == group_cov:
+            j += 1
+        group = []
+        for t in range(i, j):
+            idx = viable_list[t]
+            asset = resolved_assets[idx]
             if asset is None:
                 continue
-        else:
-            asset = candidate_asset
-        if not residential_context and _asset_requires_residential_context(asset):
-            counters['context_skipped'] += 1
-            continue
-
-        coverage = candidate_cov_area_m2 / detection_area_m2
-
-        heading_delta = float(candidate['heading_delta'])
-        bounds_m = asset['bounds_m']
-        geom_key = (
-            bounds_m if type(bounds_m) is tuple else tuple(bounds_m),
-            heading_delta,
-        )
-        cached = _geom_cache.get(geom_key)
-        if cached is None:
-            final_heading = (float(heading) + heading_delta) % 360.0
-            footprint_poly = _footprint_poly(jxi, jyi, bounds_m, final_heading, m_per_px)
-            inside_ok = _footprint_inside_detection(footprint_poly, yolo_poly, m_per_px)
-            occ_ok = True
-            if inside_ok and _check_occupancy:
-                occ_ok = _direct_yolo_poly_fits(
-                    static_occ_mask,
-                    building_spacing_mask,
-                    footprint_poly,
-                    scratch_mask=scratch_mask,
-                    static_occ_integral=static_occ_integral,
-                    spacing_occ_integral=spacing_occ_integral,
-                    recent_spacing_mask=recent_spacing_mask,
-                )
-            cached = (footprint_poly, final_heading, inside_ok, occ_ok)
-            _geom_cache[geom_key] = cached
-        footprint_poly, final_heading, inside_ok, occ_ok = cached
-        if not inside_ok:
-            counters['outline_reject'] += 1
-            continue
-        if not occ_ok:
-            counters['occupancy_reject'] += 1
-            continue
-
-        cand_aspect = (
-            float(candidate['required_length_m']) /
-            max(float(candidate['required_width_m']), 1e-6)
-        )
-        aspect_error = abs(math.log(max(cand_aspect, 1e-6) / max(det_aspect, 1e-6)))
-        score = (
-            -float(coverage),
-            float(aspect_error),
-            abs(int(asset_class) - zone_class),
-            int(class_rank),
-            asset.get('source', ''),
-            asset.get('path', ''),
-            float(candidate['heading_delta']),
-        )
-        selected = {
-            'asset': asset,
-            'heading': final_heading,
-            'footprint_poly': footprint_poly,
-        }
-        if best is None or score < best[0]:
-            best = (score, selected)
-            best_cov_area_m2 = candidate_cov_area_m2
+            if not residential_context and requires_res[idx]:
+                counters['context_skipped'] += 1
+                continue
+            group.append((
+                abs(math.log(aspect_list[idx] / det_aspect_c)),
+                static_rank[idx],
+                idx,
+                asset,
+            ))
+        counters['seen'] += j - i
+        # (aspect_error, static_rank) is a total order (static_rank unique),
+        # so the sort never reaches the trailing idx/asset elements.
+        group.sort()
+        for _aspect_error, _srank, idx, asset in group:
+            candidate = entries[idx][2]
+            heading_delta = float(candidate['heading_delta'])
+            bounds_m = asset['bounds_m']
+            geom_key = (
+                bounds_m if type(bounds_m) is tuple else tuple(bounds_m),
+                heading_delta,
+            )
+            cached = _geom_cache.get(geom_key)
+            if cached is None:
+                final_heading = (float(heading) + heading_delta) % 360.0
+                footprint_poly = _footprint_poly(jxi, jyi, bounds_m, final_heading, m_per_px)
+                inside_ok = _footprint_inside_detection(footprint_poly, yolo_poly, m_per_px)
+                occ_ok = True
+                if inside_ok and _check_occupancy:
+                    occ_ok = _direct_yolo_poly_fits(
+                        static_occ_mask,
+                        building_spacing_mask,
+                        footprint_poly,
+                        scratch_mask=scratch_mask,
+                        static_occ_integral=static_occ_integral,
+                        spacing_occ_integral=spacing_occ_integral,
+                        recent_spacing_mask=recent_spacing_mask,
+                    )
+                cached = (footprint_poly, final_heading, inside_ok, occ_ok)
+                _geom_cache[geom_key] = cached
+            footprint_poly, final_heading, inside_ok, occ_ok = cached
+            if not inside_ok:
+                counters['outline_reject'] += 1
+                continue
+            if not occ_ok:
+                counters['occupancy_reject'] += 1
+                continue
+            winner = {
+                'asset': asset,
+                'heading': final_heading,
+                'footprint_poly': footprint_poly,
+            }
+            break
+        if winner is not None:
+            break
+        i = j
 
     if profile_out is not None:
-        profile_out['entries'] = profile_out.get('entries', 0) + len(entries)
-        profile_out['viable'] = profile_out.get('viable', 0) + int(viable_idx.size)
+        profile_out['entries'] = profile_out.get('entries', 0) + n
+        profile_out['viable'] = profile_out.get('viable', 0) + nv
         profile_out['seen'] = profile_out.get('seen', 0) + int(counters['seen'])
 
-    if best is not None:
-        return best[1], 'selected'
+    if winner is not None:
+        return winner, 'selected'
     # No placement: compute the size/coverage reject tallies now (only needed to
     # pick the no-result status; deferred out of the hot path above).
     if not counters['size_reject'] and not counters['coverage_reject']:
+        size_ok = (
+            (merged_bundle['req_l'] <= detection_length_m + 1e-6) &
+            (merged_bundle['req_w'] <= detection_width_m + 1e-6)
+        )
         counters['size_reject'] = int((~size_ok).sum())
-        counters['coverage_reject'] = int(np.count_nonzero(size_ok & ~cov_ok))
+        # ~cov_ok is exactly the suffix beyond the coverage prefix.
+        counters['coverage_reject'] = int(np.count_nonzero(size_ok[prefix_n:]))
     for status in (
         'context_skipped',
         'occupancy_reject',
