@@ -378,7 +378,7 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "sfr_veg_simh",
-        "hint": "Use simHeaven X-World network roads for road-width tree exclusion. This setting is only for road masks; simHeaven forest/building overlap is controlled separately by the simh_f / simh_b and simh_bd / simh_bd_b settings.",
+        "hint": "Use simHeaven X-World network roads for road-width tree exclusion. This setting is only for road masks; simHeaven building overlap is controlled separately by the simh_bd / simh_bd_b settings.",
     },
     "sfr_veg_avoid_simheaven_buildings": {
         "type": bool,
@@ -409,30 +409,6 @@ cfg_tile_vars = {
         "default": False,
         "short_name": "sfr_veg_gfv2_typ",
         "hint": "Choose generated tree asset types from Global Forests v2 coverage: each polygon inherits the nearest tree-type GFv2 polygon's asset family (tile-most-common as fallback; cropland never drives tree types). Density still follows the polygon's own canopy. Disabled = climate-based asset selection.",
-    },
-    "sfr_veg_avoid_simheaven_forests": {
-        "type": bool,
-        "default": True,
-        "short_name": "sfr_veg_simh_f",
-        "hint": "Avoid overlapping forest polygons found in simHeaven scenery layers. Used after Global Forests v2 and before the default overlay source.",
-    },
-    "sfr_veg_simheaven_buffer_m": {
-        "type": float,
-        "default": 0.0,
-        "short_name": "sfr_veg_simh_b",
-        "hint": "Extra exclusion buffer in metres around simHeaven forest polygons.",
-    },
-    "sfr_veg_avoid_default_forests": {
-        "type": bool,
-        "default": True,
-        "short_name": "sfr_veg_def_f",
-        "hint": "Avoid overlapping forest polygons from the configured default overlay source. This is the fallback layer after Global Forests v2 and simHeaven.",
-    },
-    "sfr_veg_default_buffer_m": {
-        "type": float,
-        "default": 0.0,
-        "short_name": "sfr_veg_def_b",
-        "hint": "Extra exclusion buffer in metres around default-overlay forest polygons.",
     },
     "sfr_veg_res_m": {
         "type": float,
@@ -507,12 +483,6 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_grid",
         "hint": "Heading-grid resolution per texture tile. Higher values follow street direction changes more closely but can make orientation noisier.",
     },
-    "sfr_bld_smart_gap_fill": {
-        "type": bool,
-        "default": True,
-        "short_name": "bld_gap_fill",
-        "hint": "Allow inferred building fill beyond direct YOLO OBB detections, including YOLO-template clones and SegFormer/procedural gap placements. When disabled, only direct YOLO footprints are placed.",
-    },
     "sfr_bld_disable_cache": {
         "type": bool,
         "default": False,
@@ -567,16 +537,6 @@ cfg_tile_vars = {
         "short_name": "bld_yolo_max",
         "hint": "YOLO OBB maximum detections per inference crop.",
     },
-    "sfr_bld_yolo_outline_tolerance": {
-        "type": float,
-        "default": 1.0,
-        "short_name": "bld_yolo_outline_tol",
-        "hint": "DEPRECATED / no effect. Previously a fraction permitting a 3D object "
-                "to overhang its YOLO detection polygon. Containment is now strict "
-                "apart from a fixed ~2px quantisation margin, so objects always fully "
-                "fit. To admit smaller objects when none matches the polygon exactly, "
-                "use sfr_bld_yolo_min_coverage instead.",
-    },
     "sfr_bld_yolo_min_coverage": {
         "type": float,
         "default": 0.80,
@@ -586,77 +546,6 @@ cfg_tile_vars = {
                 "that fully fit when no near-detection-size object exists (small "
                 "residential classes already use lower per-class floors). Objects never "
                 "overhang the polygon regardless of this value.",
-    },
-    "sfr_bld_yolo_facade_fallback": {
-        "type": bool,
-        "default": False,
-        "short_name": "bld_yolo_facade_fb",
-        "hint": "When no 3D object fully fits a YOLO detection, stamp a facade building "
-                "over the detection polygon. Off by default (object-only placement): "
-                "detections that no object fits are left empty instead of being "
-                "backfilled with a facade covering the remaining polygon space.",
-    },
-    "sfr_bld_yolo_suppress_coverage": {
-        "type": float,
-        "default": 0.0,
-        "short_name": "bld_yolo_supp_cov",
-        "hint": "Optional overlap-coverage threshold for 'drop' overlap removal. When > 0, a "
-                "detection is dropped only if its overlap with an already-kept detection "
-                "exceeds this fraction of the smaller footprint. Default 0 = drop on ANY "
-                "overlap (no fraction gate). Ignored when keep mode is 'marginal'.",
-    },
-    "sfr_bld_yolo_suppress_min_overlap_m2": {
-        "type": float,
-        "default": 0.0,
-        "short_name": "bld_yolo_supp_min_m2",
-        "hint": "Minimum absolute overlap area in square metres before 'drop' overlap "
-                "suppression applies to a pair of YOLO detections. Default 0 = remove "
-                "overlaps with no minimum-area limit.",
-    },
-    "sfr_bld_yolo_keep_mode": {
-        "type": str,
-        "default": "drop",
-        "values": ["drop", "marginal"],
-        "short_name": "bld_yolo_keep_mode",
-        "hint": "Overlap removal strategy. 'drop' = legacy greedy NMS (removes "
-                "overlapping detections, which can thin out densely covered blocks). "
-                "'marginal' = set-cover keep that retains a detection whenever it adds "
-                "new ground area, preserving coverage while still removing redundant "
-                "overlap. Pair 'marginal' with free-area downsizing and facade clip.",
-    },
-    "sfr_bld_yolo_keep_min_new_frac": {
-        "type": float,
-        "default": 0.25,
-        "short_name": "bld_yolo_keep_frac",
-        "hint": "Marginal keep mode only: a detection is kept when at least this "
-                "fraction of its footprint is new ground not already covered by a "
-                "kept detection. Lower values keep more overlapping detections.",
-    },
-    "sfr_bld_yolo_freearea_downsize": {
-        "type": bool,
-        "default": False,
-        "short_name": "bld_yolo_freearea",
-        "hint": "Allow a smaller building asset into a partially-occupied detection by "
-                "gating minimum coverage against the remaining FREE area instead of the "
-                "full detection area, so gaps left by larger neighbours still get filled.",
-    },
-    "sfr_bld_yolo_facade_clip": {
-        "type": bool,
-        "default": False,
-        "short_name": "bld_yolo_facade_clip",
-        "hint": "Clip fallback facades to the occupancy-free region of their detection "
-                "instead of stamping the full detection polygon, so kept overlapping "
-                "detections tile instead of stacking flat facades on each other.",
-    },
-    "sfr_bld_yolo_no_overlap_removal": {
-        "type": bool,
-        "default": False,
-        "short_name": "bld_yolo_no_overlap",
-        "hint": "Set True to maximise coverage: place every trained-YOLO detection with NO "
-                "overlap avoidance between detections and NO avoidance of roads or railways. "
-                "Default False = remove overlaps (drop overlapping detections smallest-first, "
-                "objects self-avoid, roads/railways avoided) so each building area keeps a "
-                "single non-overlapping object.",
     },
     # Other
     "custom_dem": {
@@ -772,10 +661,6 @@ list_sfr_veg_vars = [
     "sfr_veg_avoid_gfv2",
     "sfr_veg_gfv2_buffer_m",
     "sfr_veg_use_gfv2_asset_proximity",
-    "sfr_veg_avoid_simheaven_forests",
-    "sfr_veg_simheaven_buffer_m",
-    "sfr_veg_avoid_default_forests",
-    "sfr_veg_default_buffer_m",
     "sfr_veg_res_m",
     "sfr_veg_disable_cache",
     "sfr_patch_size",
@@ -789,7 +674,6 @@ list_sfr_bld_vars = [
     "sfr_bld_open_m",
     "sfr_bld_min_zone_m2",
     "sfr_bld_grid_n",
-    "sfr_bld_smart_gap_fill",
     "sfr_bld_disable_cache",
     "sfr_bld_avoid_custom_scenery",
     "sfr_bld_yolo_enabled",
@@ -798,16 +682,7 @@ list_sfr_bld_vars = [
     "sfr_bld_yolo_iou",
     "sfr_bld_yolo_stride",
     "sfr_bld_yolo_max_det",
-    "sfr_bld_yolo_outline_tolerance",
     "sfr_bld_yolo_min_coverage",
-    "sfr_bld_yolo_facade_fallback",
-    "sfr_bld_yolo_no_overlap_removal",
-    "sfr_bld_yolo_suppress_coverage",
-    "sfr_bld_yolo_suppress_min_overlap_m2",
-    "sfr_bld_yolo_keep_mode",
-    "sfr_bld_yolo_keep_min_new_frac",
-    "sfr_bld_yolo_freearea_downsize",
-    "sfr_bld_yolo_facade_clip",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars

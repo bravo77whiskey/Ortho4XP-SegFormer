@@ -62,10 +62,8 @@ from O4_SFR_Building_Overlay import (
 )
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
-    find_default_overlay_dsfs,
     find_global_forests_dsfs,
     find_simheaven_network_dsfs,
-    find_simheaven_vegetation_dsfs,
 )
 from O4_SFR_Region_Boundaries import asset_region_for_latlon
 
@@ -1258,13 +1256,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         bld_excl_m=10.0,
         osm_roads_path=None, use_simheaven=True, dsftool_path=None,
         download_veg_context=True,
-        custom_scenery_dir=None, custom_overlay_src=None,
-        custom_overlay_src_alternate=None,
+        custom_scenery_dir=None,
         avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
         avoid_gfv2=True, gfv2_buffer_m=0.0,
-        use_gfv2_asset_proximity=False,
-        avoid_simheaven_forests=True, simheaven_buffer_m=0.0,
-        avoid_default_forests=True, default_buffer_m=0.0):
+        use_gfv2_asset_proximity=False):
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
@@ -1401,9 +1396,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
           f"simplify={simplify_m}m  density={dens_str}  excl_buffer={excl_buffer_m}m")
     print(
         "forest overlap avoid:"
-        f" GFv2={'on' if avoid_gfv2 else 'off'} ({gfv2_buffer_m}m),"
-        f" simHeaven={'on' if avoid_simheaven_forests else 'off'} ({simheaven_buffer_m}m),"
-        f" default={'on' if avoid_default_forests else 'off'} ({default_buffer_m}m)"
+        f" GFv2={'on' if avoid_gfv2 else 'off'} ({gfv2_buffer_m}m)"
     )
     print(
         "vegetation asset selection:"
@@ -1553,20 +1546,6 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 find_global_forests_dsfs(custom_scenery_dir, lat, lon),
                 gfv2_buffer_m,
             ),
-            (
-                "simHeaven",
-                avoid_simheaven_forests,
-                find_simheaven_vegetation_dsfs(custom_scenery_dir, lat, lon),
-                simheaven_buffer_m,
-            ),
-            (
-                "default",
-                avoid_default_forests,
-                find_default_overlay_dsfs(
-                    custom_overlay_src, lat, lon, custom_overlay_src_alternate
-                ),
-                default_buffer_m,
-            ),
         ]
         for layer_name, enabled, dsf_matches, buffer_m in layer_specs:
             is_gfv2_layer = layer_name == "Global Forests v2"
@@ -1610,7 +1589,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 )
                 print(f"{layer_name} forests: {len(prepared)} polygons")
     else:
-        if any((avoid_gfv2, avoid_simheaven_forests, avoid_default_forests)):
+        if avoid_gfv2:
             print(f"Forest overlap layers: skipped (DSFTool unavailable at {dsftool_path})")
     forest_layer_sigs = tuple(
         (layer['name'], round(float(layer['buffer_m']), 4), _polys_signature(layer['polys']))
@@ -2234,10 +2213,6 @@ def parse_args():
                     help='Do not download OSM vegetation context when the cache is missing.')
     ap.add_argument('--custom-scenery-dir', default=None,
                     help='Configured X-Plane Custom Scenery directory used to locate simHeaven.')
-    ap.add_argument('--custom-overlay-src', default=None,
-                    help='Configured overlay source root used to locate default forest DSFs.')
-    ap.add_argument('--custom-overlay-src-alternate', default=None,
-                    help='Alternate overlay source root used if the main default overlay source is missing.')
     ap.add_argument('--no-simheaven', action='store_true', dest='no_simheaven',
                     help='Skip simHeaven X-World network road exclusion')
     ap.add_argument('--no-avoid-simheaven-buildings', action='store_true',
@@ -2253,16 +2228,6 @@ def parse_args():
     ap.add_argument('--gfv2-asset-proximity', action='store_true',
                     dest='gfv2_asset_proximity',
                     help='Use the tile-dominant Global Forests v2 polygon type to choose generated vegetation asset types.')
-    ap.add_argument('--no-avoid-simheaven-forests', action='store_true',
-                    dest='no_avoid_simheaven_forests',
-                    help='Do not exclude simHeaven forest polygons from generated vegetation.')
-    ap.add_argument('--simheaven-buffer-m', type=float, default=0.0, dest='simheaven_buffer_m',
-                    help='Extra exclusion buffer in metres around simHeaven forest polygons.')
-    ap.add_argument('--no-avoid-default-forests', action='store_true',
-                    dest='no_avoid_default_forests',
-                    help='Do not exclude default-overlay forest polygons from generated vegetation.')
-    ap.add_argument('--default-buffer-m', type=float, default=0.0, dest='default_buffer_m',
-                    help='Extra exclusion buffer in metres around default-overlay forest polygons.')
     ap.add_argument('--no-viz',     action='store_true')
     return ap.parse_args()
 
@@ -2313,17 +2278,11 @@ def main():
         use_simheaven    = not args.no_simheaven,
         download_veg_context = not args.no_download_veg_context,
         custom_scenery_dir = args.custom_scenery_dir,
-        custom_overlay_src = args.custom_overlay_src,
-        custom_overlay_src_alternate = args.custom_overlay_src_alternate,
         avoid_simheaven_buildings = not args.no_avoid_simheaven_buildings,
         simheaven_building_buffer_m = args.simheaven_building_buffer_m,
         avoid_gfv2       = not args.no_avoid_gfv2,
         gfv2_buffer_m    = args.gfv2_buffer_m,
         use_gfv2_asset_proximity = args.gfv2_asset_proximity,
-        avoid_simheaven_forests = not args.no_avoid_simheaven_forests,
-        simheaven_buffer_m = args.simheaven_buffer_m,
-        avoid_default_forests = not args.no_avoid_default_forests,
-        default_buffer_m = args.default_buffer_m,
     )
     print(f"\nDone: {n} vegetation polygons in {(time.time()-t0)/60:.1f}min")
     return n

@@ -400,7 +400,6 @@ def build_tile_list(
             SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
             SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
             SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
-            SFR.sfr_bld_smart_gap_fill = tile.sfr_bld_smart_gap_fill
             SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
             SFR.sfr_bld_avoid_custom_scenery = tile.sfr_bld_avoid_custom_scenery
             SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
@@ -409,19 +408,7 @@ def build_tile_list(
             SFR.sfr_bld_yolo_iou = tile.sfr_bld_yolo_iou
             SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
             SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
-            SFR.sfr_bld_yolo_outline_tolerance = tile.sfr_bld_yolo_outline_tolerance
             SFR.sfr_bld_yolo_min_coverage = tile.sfr_bld_yolo_min_coverage
-            SFR.sfr_bld_yolo_facade_fallback = tile.sfr_bld_yolo_facade_fallback
-            # Overlap-avoidance / coverage settings — must mirror O4_GUI_Utils.build_sfr_bld,
-            # otherwise the batch path leaves them at the pipeline module defaults
-            # (no_overlap_removal=True => max-coverage with no inter-detection avoidance).
-            SFR.sfr_bld_yolo_suppress_coverage = tile.sfr_bld_yolo_suppress_coverage
-            SFR.sfr_bld_yolo_suppress_min_overlap_m2 = tile.sfr_bld_yolo_suppress_min_overlap_m2
-            SFR.sfr_bld_yolo_keep_mode = tile.sfr_bld_yolo_keep_mode
-            SFR.sfr_bld_yolo_keep_min_new_frac = tile.sfr_bld_yolo_keep_min_new_frac
-            SFR.sfr_bld_yolo_freearea_downsize = tile.sfr_bld_yolo_freearea_downsize
-            SFR.sfr_bld_yolo_facade_clip = tile.sfr_bld_yolo_facade_clip
-            SFR.sfr_bld_yolo_no_overlap_removal = tile.sfr_bld_yolo_no_overlap_removal
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap
             SFR.sfr_batch_size      = tile.sfr_batch_size
@@ -448,10 +435,6 @@ def build_tile_list(
             SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
             SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
             SFR.sfr_veg_use_gfv2_asset_proximity = tile.sfr_veg_use_gfv2_asset_proximity
-            SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
-            SFR.sfr_veg_simheaven_buffer_m = tile.sfr_veg_simheaven_buffer_m
-            SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
-            SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
             SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
             SFR.sfr_veg_disable_cache = tile.sfr_veg_disable_cache
             SFR.sfr_patch_size        = tile.sfr_patch_size

@@ -395,16 +395,8 @@ class SfdBuildingAssetTests(unittest.TestCase):
             CFG.cfg_tile_vars["sfr_bld_yolo_max_det"]["default"],
         )
         self.assertEqual(
-            PIPE.sfr_bld_yolo_outline_tolerance,
-            CFG.cfg_tile_vars["sfr_bld_yolo_outline_tolerance"]["default"],
-        )
-        self.assertEqual(
             PIPE.sfr_bld_yolo_min_coverage,
             CFG.cfg_tile_vars["sfr_bld_yolo_min_coverage"]["default"],
-        )
-        self.assertEqual(
-            PIPE.sfr_bld_yolo_facade_fallback,
-            CFG.cfg_tile_vars["sfr_bld_yolo_facade_fallback"]["default"],
         )
 
     def test_alias_oversized_footprint_fraction(self):
@@ -1141,15 +1133,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertLess(metrics["long_len"], 30.0)
         self.assertGreaterEqual(metrics["short_len"], 11.0)
 
-    def test_smart_gap_fill_is_retired(self):
-        self.assertFalse(BLD.BLD_SMART_GAP_FILL_ENABLED)
-
-    def test_bld_gap_fill_false_disables_inferred_fill_only(self):
-        allow_inferred_fill, run_legacy_gap_fill = BLD._building_fill_modes(False)
-
-        self.assertFalse(allow_inferred_fill)
-        self.assertFalse(run_legacy_gap_fill)
-
+    def test_direct_yolo_poly_fits_clear_mask(self):
         static_occ_mask = np.zeros((32, 32), dtype=np.uint8)
         spacing_mask = np.zeros_like(static_occ_mask)
         scratch = np.zeros_like(static_occ_mask)
@@ -1167,13 +1151,6 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
             )
         )
-
-    def test_bld_gap_fill_true_allows_inferred_fill_but_not_legacy_gap_pass(self):
-        allow_inferred_fill, run_legacy_gap_fill = BLD._building_fill_modes(True)
-
-        self.assertTrue(allow_inferred_fill)
-        self.assertEqual(run_legacy_gap_fill, BLD.BLD_SMART_GAP_FILL_ENABLED)
-        self.assertFalse(run_legacy_gap_fill)
 
     def test_prepared_direct_yolo_bbox_matches_standard_fit(self):
         detection = {

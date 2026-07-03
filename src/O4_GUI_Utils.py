@@ -571,7 +571,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception(e)
             return 0
         self.working_thread = threading.Thread(
-            target=VMAP.build_poly_file, args=[tile]
+            target=VMAP.build_poly_file, args=[tile], daemon=True
         )
         self.working_thread.start()
 
@@ -587,7 +587,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception("Exception on build_mesh")
             return 0
         self.working_thread = threading.Thread(
-            target=MESH.build_mesh, args=[tile]
+            target=MESH.build_mesh, args=[tile], daemon=True
         )
         self.working_thread.start()
 
@@ -603,7 +603,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception("Exception on sort_mesh")
             return 0
         self.working_thread = threading.Thread(
-            target=MESH.sort_mesh, args=[tile]
+            target=MESH.sort_mesh, args=[tile], daemon=True
         )
         self.working_thread.start()
 
@@ -619,7 +619,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception("Exception on community_mesh")
             return 0
         self.working_thread = threading.Thread(
-            target=MESH.community_mesh, args=[tile]
+            target=MESH.community_mesh, args=[tile], daemon=True
         )
         self.working_thread.start()
 
@@ -636,7 +636,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception(e)
             return 0
         self.working_thread = threading.Thread(
-            target=MASK.build_masks, args=[tile, for_imagery]
+            target=MASK.build_masks, args=[tile, for_imagery], daemon=True
         )
         self.working_thread.start()
 
@@ -652,7 +652,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception(e)
             return 0
         self.working_thread = threading.Thread(
-            target=TILE.build_tile, args=[tile]
+            target=TILE.build_tile, args=[tile], daemon=True
         )
         self.working_thread.start()
 
@@ -682,10 +682,6 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
         SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
         SFR.sfr_veg_use_gfv2_asset_proximity = tile.sfr_veg_use_gfv2_asset_proximity
-        SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
-        SFR.sfr_veg_simheaven_buffer_m = tile.sfr_veg_simheaven_buffer_m
-        SFR.sfr_veg_avoid_default_forests = tile.sfr_veg_avoid_default_forests
-        SFR.sfr_veg_default_buffer_m = tile.sfr_veg_default_buffer_m
         SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
         SFR.sfr_veg_disable_cache = tile.sfr_veg_disable_cache
         SFR.sfr_patch_size        = tile.sfr_patch_size
@@ -694,6 +690,7 @@ class Ortho4XP_GUI(tk.Tk):
         self.working_thread = threading.Thread(
             target=SFR.process_veg_tile,
             args=[tile.lat, tile.lon, tile.build_dir],
+            daemon=True,
         )
         self.working_thread.start()
 
@@ -717,7 +714,6 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
         SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
         SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
-        SFR.sfr_bld_smart_gap_fill = tile.sfr_bld_smart_gap_fill
         SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
         SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
         SFR.sfr_bld_yolo_checkpoint = tile.sfr_bld_yolo_checkpoint
@@ -725,28 +721,22 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_yolo_iou = tile.sfr_bld_yolo_iou
         SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
         SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
-        SFR.sfr_bld_yolo_outline_tolerance = tile.sfr_bld_yolo_outline_tolerance
         SFR.sfr_bld_yolo_min_coverage = tile.sfr_bld_yolo_min_coverage
-        SFR.sfr_bld_yolo_facade_fallback = tile.sfr_bld_yolo_facade_fallback
-        SFR.sfr_bld_yolo_suppress_coverage = tile.sfr_bld_yolo_suppress_coverage
-        SFR.sfr_bld_yolo_suppress_min_overlap_m2 = tile.sfr_bld_yolo_suppress_min_overlap_m2
-        SFR.sfr_bld_yolo_keep_mode = tile.sfr_bld_yolo_keep_mode
-        SFR.sfr_bld_yolo_keep_min_new_frac = tile.sfr_bld_yolo_keep_min_new_frac
-        SFR.sfr_bld_yolo_freearea_downsize = tile.sfr_bld_yolo_freearea_downsize
-        SFR.sfr_bld_yolo_facade_clip = tile.sfr_bld_yolo_facade_clip
-        SFR.sfr_bld_yolo_no_overlap_removal = tile.sfr_bld_yolo_no_overlap_removal
         SFR.sfr_patch_size      = tile.sfr_patch_size
         SFR.sfr_overlap         = tile.sfr_overlap
         SFR.sfr_batch_size      = tile.sfr_batch_size
         self.working_thread = threading.Thread(
             target=SFR.process_bld_tile,
             args=[tile.lat, tile.lon, tile.build_dir],
+            daemon=True,
         )
         self.working_thread.start()
 
     def setup_sfr_models(self):
         """Download SegFormer model weights and check/install dependencies."""
-        self.working_thread = threading.Thread(target=SFR.setup_sfr_models)
+        self.working_thread = threading.Thread(
+            target=SFR.setup_sfr_models, daemon=True
+        )
         self.working_thread.start()
 
     def build_all(self):
@@ -769,7 +759,7 @@ class Ortho4XP_GUI(tk.Tk):
             _LOGGER.exception(e)
             return 0
         self.working_thread = threading.Thread(
-            target=TILE.build_all, args=[tile]
+            target=TILE.build_all, args=[tile], daemon=True
         )
         self.working_thread.start()
 
@@ -818,6 +808,9 @@ class Ortho4XP_GUI(tk.Tk):
 
     def set_red_flag(self):
         UI.red_flag = True
+        # External workers (SFR .venv python, Triangle4XP, DSFTool) never see
+        # red_flag — kill them (and their children) directly.
+        UI.kill_all_subprocesses()
 
     def exit_prg(self) -> None:
         """Close the Ortho4XP application."""
@@ -845,6 +838,10 @@ class Ortho4XP_GUI(tk.Tk):
             f.close()
         except:
             pass
+        # Abort any running build: workers are daemon threads (they die with
+        # the process) but external subprocesses must be killed explicitly.
+        UI.red_flag = True
+        UI.kill_all_subprocesses()
         self.after_cancel(self.callback_pgrb)
         self.after_cancel(self.callback_console)
         sys.stdout = self.stdout_orig
@@ -1107,12 +1104,12 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
         if os.path.isfile(filepreview) != True:
             fargs_ctp = [lat, lon, zoomlevel, provider_code]
             self.ctp_thread = threading.Thread(
-                target=IMG.create_tile_preview, args=fargs_ctp
+                target=IMG.create_tile_preview, args=fargs_ctp, daemon=True
             )
             self.ctp_thread.start()
             fargs_dispp = [filepreview, lat, lon]
             dispp_thread = threading.Thread(
-                target=self.show_tile_preview, args=fargs_dispp
+                target=self.show_tile_preview, args=fargs_dispp, daemon=True
             )
             dispp_thread.start()
         else:
@@ -1378,7 +1375,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
         IMG.initialize_local_combined_providers_dict(tile)
         fargs_build_geotiffs = [tile, texture_attributes_list]
         build_geotiffs_thread = threading.Thread(
-            target=IMG.build_geotiffs, args=fargs_build_geotiffs
+            target=IMG.build_geotiffs, args=fargs_build_geotiffs, daemon=True
         )
         build_geotiffs_thread.start()
         return
@@ -1412,7 +1409,8 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             provider_code,
         ]
         extract_mesh_thread = threading.Thread(
-            target=MESH.extract_mesh_to_obj, args=fargs_extract_mesh
+            target=MESH.extract_mesh_to_obj, args=fargs_extract_mesh,
+            daemon=True,
         )
         extract_mesh_thread.start()
         return
@@ -1790,7 +1788,9 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         return
 
     def threaded_preview(self):
-        threading.Thread(target=self.preview_existing_tiles).start()
+        threading.Thread(
+            target=self.preview_existing_tiles, daemon=True
+        ).start()
 
     def preview_existing_tiles(self):
         try:
@@ -2295,7 +2295,9 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.v_["SegFormer Veg"].get(),
             self.v_["Override tile configs"].get(),
         ]
-        threading.Thread(target=TILE.build_tile_list, args=args).start()
+        threading.Thread(
+            target=TILE.build_tile_list, args=args, daemon=True
+        ).start()
         return
 
     def scroll_start(self, event):
@@ -2339,7 +2341,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 pass
             fargs_rc = [nx0, ny0]
             self.rc_thread = threading.Thread(
-                target=self.draw_canvas, args=fargs_rc
+                target=self.draw_canvas, args=fargs_rc, daemon=True
             )
             self.rc_thread.start()
             return

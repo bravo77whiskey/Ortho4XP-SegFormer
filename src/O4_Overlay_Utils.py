@@ -99,12 +99,17 @@ def build_overlay(lat, lon):
         dsfconvertcmd, stdout=subprocess.PIPE, bufsize=0,
         creationflags=_CREATE_NO_WINDOW,
     )
+    UI.register_subprocess(fingers_crossed)
     while True:
         line = fingers_crossed.stdout.readline()
         if not line:
             break
         else:
             UI.vprint(1, "     " + line.decode("utf-8")[:-1])
+    UI.unregister_subprocess(fingers_crossed)
+    if UI.red_flag:
+        UI.exit_message_and_bottom_line()
+        return 0
     if fingers_crossed.returncode:
         UI.exit_message_and_bottom_line("   ERROR: DSFTool crashed.")
         return 0
@@ -200,12 +205,17 @@ def build_overlay(lat, lon):
         dsfconvertcmd, stdout=subprocess.PIPE, bufsize=0,
         creationflags=_CREATE_NO_WINDOW,
     )
+    UI.register_subprocess(fingers_crossed)
     while True:
         line = fingers_crossed.stdout.readline()
         if not line:
             break
         else:
             print("     " + line.decode("utf-8")[:-1])
+    UI.unregister_subprocess(fingers_crossed)
+    if UI.red_flag:
+        UI.exit_message_and_bottom_line()
+        return 0
     dest_dir = os.path.join(
         FNAMES.Overlay_dir, "Earth nav data", FNAMES.round_latlon(lat, lon)
     )

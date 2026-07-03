@@ -696,6 +696,7 @@ def build_mesh(tile):
         mesh_cmd, stdout=subprocess.PIPE, bufsize=0,
         creationflags=_CREATE_NO_WINDOW,
     )
+    UI.register_subprocess(fingers_crossed)
     while True:
         line = fingers_crossed.stdout.readline()
         if not line:
@@ -707,6 +708,10 @@ def build_mesh(tile):
                 pass
     time.sleep(0.3)
     fingers_crossed.poll()
+    UI.unregister_subprocess(fingers_crossed)
+    if UI.red_flag:
+        UI.exit_message_and_bottom_line()
+        return 0
     if fingers_crossed.returncode:
         min_angles = [8, 6, 4, 2, 0]
         for min_angle in min_angles:
@@ -732,6 +737,7 @@ def build_mesh(tile):
                 mesh_cmd, stdout=subprocess.PIPE, bufsize=0,
                 creationflags=_CREATE_NO_WINDOW,
             )
+            UI.register_subprocess(fingers_crossed)
             while True:
                 line = fingers_crossed.stdout.readline()
                 if not line:
@@ -743,6 +749,10 @@ def build_mesh(tile):
                         pass
             time.sleep(0.3)
             fingers_crossed.poll()
+            UI.unregister_subprocess(fingers_crossed)
+            if UI.red_flag:
+                UI.exit_message_and_bottom_line()
+                return 0
             if fingers_crossed.returncode == 0:
                 break
         else:
@@ -824,12 +834,14 @@ def sort_mesh(tile):
         sort_mesh_cmd_list, stdout=subprocess.PIPE, bufsize=0,
         creationflags=_CREATE_NO_WINDOW,
     )
+    UI.register_subprocess(moulinette)
     while True:
         line = moulinette.stdout.readline()
         if not line:
             break
         else:
             print(line.decode("utf-8")[:-1])
+    UI.unregister_subprocess(moulinette)
     UI.timings_and_bottom_line(timer)
     UI.logprint(
         "Moulinette applied for tile lat=",

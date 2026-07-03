@@ -9,8 +9,8 @@ launching the build:
 
 If a new ``sfr_bld_yolo_*`` setting is wired into one but not the other, the
 missing path silently uses the pipeline module default. That is exactly how
-``sfr_bld_yolo_no_overlap_removal`` (max-coverage default) got ignored on the
-batch path, producing tiles with no inter-detection overlap avoidance.
+a retired overlap toggle once got ignored on the batch path, producing tiles
+with no inter-detection overlap avoidance.
 
 This test fails if the batch path does not assign every ``SFR.sfr_bld_*`` that
 the GUI path assigns.
@@ -34,8 +34,8 @@ class SfrBldSettingsPropagationTests(unittest.TestCase):
     def test_batch_path_copies_every_gui_sfr_bld_setting(self):
         gui_vars = _assigned_sfr_bld_vars("O4_GUI_Utils.py")
         batch_vars = _assigned_sfr_bld_vars("O4_Tile_Utils.py")
-        # Sanity: the GUI path must actually wire the overlap toggle.
-        self.assertIn("sfr_bld_yolo_no_overlap_removal", gui_vars)
+        # Sanity: the GUI path must actually wire the YOLO settings.
+        self.assertIn("sfr_bld_yolo_enabled", gui_vars)
         missing = gui_vars - batch_vars
         self.assertEqual(
             missing,

@@ -1,9 +1,8 @@
-"""Tests for coverage-preserving YOLO overlap removal.
+"""Tests for YOLO overlap removal.
 
-Covers the three levers added to keep ground coverage while removing overlaps:
-  * marginal-coverage greedy keep  (_suppress_overlapping_yolo_marginal)
-  * occupancy-aware facade clipping (_clip_facade_to_free)
-  * free-area downsizing at placement (_select_yolo_object_candidate)
+Covers the zero-threshold smallest-first drop (_suppress_overlapping_yolo_detections),
+the per-overlap containment rule (pair_rule), the tile-wide cross-texture dedup,
+and object selection over occupied detections.
 """
 
 import sys
@@ -36,60 +35,9 @@ def _rect_detection(x1, y1, x2, y2, confidence=0.5, det_id=None):
     return det
 
 
-class MarginalKeepTests(unittest.TestCase):
-    def test_redundant_overlap_dropped_distinct_kept(self):
-        det_a = _rect_detection(0, 0, 40, 40, confidence=0.9, det_id="A")
-        # B sits almost entirely on top of A -> adds little new ground.
-        det_b = _rect_detection(2, 2, 42, 42, confidence=0.8, det_id="B")
-        # C covers a separate block -> must be kept.
-        det_c = _rect_detection(100, 0, 140, 40, confidence=0.7, det_id="C")
-
-        kept, dropped = BLD._suppress_overlapping_yolo_detections(
-            [det_a, det_b, det_c],
-            keep_mode="marginal",
-            keep_min_new_frac=0.25,
-            m_per_px=1.0,
-            img_w=200,
-            img_h=200,
-        )
-        kept_ids = {d["id"] for d in kept}
-        self.assertEqual(kept_ids, {"A", "C"})
-        self.assertEqual(dropped, 1)
-
-    def test_half_overlap_gap_filler_kept(self):
-        det_a = _rect_detection(0, 0, 40, 40, confidence=0.9, det_id="A")
-        # D overlaps A by ~half -> still adds ~50% new ground, keep it.
-        det_d = _rect_detection(20, 0, 60, 40, confidence=0.8, det_id="D")
-
-        kept, dropped = BLD._suppress_overlapping_yolo_detections(
-            [det_a, det_d],
-            keep_mode="marginal",
-            keep_min_new_frac=0.25,
-            m_per_px=1.0,
-            img_w=200,
-            img_h=200,
-        )
-        self.assertEqual({d["id"] for d in kept}, {"A", "D"})
-        self.assertEqual(dropped, 0)
-
-    def test_zero_threshold_keeps_everything(self):
-        dets = [
-            _rect_detection(0, 0, 40, 40, det_id="A"),
-            _rect_detection(1, 1, 41, 41, det_id="B"),
-        ]
-        kept, dropped = BLD._suppress_overlapping_yolo_detections(
-            dets,
-            keep_mode="marginal",
-            keep_min_new_frac=0.0,
-            m_per_px=1.0,
-            img_w=100,
-            img_h=100,
-        )
-        self.assertEqual(len(kept), 2)
-        self.assertEqual(dropped, 0)
-
-    def test_drop_mode_no_min_drops_any_overlap(self):
-        # Default drop mode (coverage_threshold=0, min_overlap_m2=0) drops on ANY
+class DropModeTests(unittest.TestCase):
+    def test_no_min_drops_any_overlap(self):
+        # Zero thresholds (coverage_threshold=0, min_overlap_m2=0) drop on ANY
         # overlap: B sits almost on top of A, so the larger of the pair is dropped.
         dets = [
             _rect_detection(0, 0, 40, 40, det_id="A"),
@@ -97,7 +45,6 @@ class MarginalKeepTests(unittest.TestCase):
         ]
         kept, dropped = BLD._suppress_overlapping_yolo_detections(
             dets,
-            keep_mode="drop",
             coverage_threshold=0.0,
             min_overlap_m2=0.0,
             m_per_px=1.0,
@@ -105,7 +52,7 @@ class MarginalKeepTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertEqual(dropped, 1)
 
-    def test_drop_mode_non_overlapping_all_kept(self):
+    def test_non_overlapping_all_kept(self):
         # Disjoint detections are all kept regardless of the zero thresholds.
         dets = [
             _rect_detection(0, 0, 40, 40, det_id="A"),
@@ -113,7 +60,6 @@ class MarginalKeepTests(unittest.TestCase):
         ]
         kept, dropped = BLD._suppress_overlapping_yolo_detections(
             dets,
-            keep_mode="drop",
             coverage_threshold=0.0,
             min_overlap_m2=0.0,
             m_per_px=1.0,
@@ -121,61 +67,19 @@ class MarginalKeepTests(unittest.TestCase):
         self.assertEqual(len(kept), 2)
         self.assertEqual(dropped, 0)
 
-    def test_drop_mode_smallest_first_keeps_small(self):
+    def test_smallest_first_keeps_small(self):
         # Smallest-first: a small detection overlapping a large one survives and
         # the large overlapper is dropped.
         small = _rect_detection(20, 20, 30, 30, det_id="small")
         large = _rect_detection(0, 0, 40, 40, det_id="large")
         kept, dropped = BLD._suppress_overlapping_yolo_detections(
             [large, small],
-            keep_mode="drop",
             coverage_threshold=0.0,
             min_overlap_m2=0.0,
             m_per_px=1.0,
         )
         self.assertEqual([d["id"] for d in kept], ["small"])
         self.assertEqual(dropped, 1)
-
-
-class MarginalKeepOrderTests(unittest.TestCase):
-    """Inter-detection overlap should prefer the smaller detection."""
-
-    def test_kept_returned_smallest_first(self):
-        dets = [
-            _rect_detection(0, 0, 60, 60, confidence=0.5, det_id="big"),
-            _rect_detection(200, 200, 220, 220, confidence=0.5, det_id="small"),
-            _rect_detection(400, 400, 440, 440, confidence=0.5, det_id="mid"),
-        ]
-        kept, dropped = BLD._suppress_overlapping_yolo_detections(
-            dets,
-            keep_mode="marginal",
-            keep_min_new_frac=0.25,
-            m_per_px=1.0,
-            img_w=512,
-            img_h=512,
-        )
-        self.assertEqual(dropped, 0)
-        kept_areas = [d["area_m2"] for d in kept]
-        self.assertEqual(kept_areas, sorted(kept_areas))
-        self.assertEqual([d["id"] for d in kept], ["small", "mid", "big"])
-
-    def test_small_inside_large_keeps_small_as_seed(self):
-        # A small detection fully inside a large one: processing smallest-first
-        # makes the SMALL one the kept seed (it survives the conflict). The old
-        # largest-first order dropped the small one as redundant.
-        small = _rect_detection(20, 20, 30, 30, confidence=0.5, det_id="small")
-        large = _rect_detection(0, 0, 40, 40, confidence=0.5, det_id="large")
-        kept, dropped = BLD._suppress_overlapping_yolo_detections(
-            [large, small],
-            keep_mode="marginal",
-            keep_min_new_frac=0.25,
-            m_per_px=1.0,
-            img_w=100,
-            img_h=100,
-        )
-        kept_ids = [d["id"] for d in kept]
-        self.assertEqual(kept_ids[0], "small")
-        self.assertIn("small", kept_ids)
 
 
 class CrossTextureDedupTests(unittest.TestCase):
@@ -244,61 +148,32 @@ class CrossTextureDedupTests(unittest.TestCase):
 
 class ConfigPropagationTests(unittest.TestCase):
     """Guards the mechanism the GUI single-tile build fix relies on:
-    a per-tile config value must override the global default for the
-    overlap-removal toggle (a bool that round-trips through the config file)."""
+    a per-tile config value must override the global default for a bool
+    that round-trips through the config file."""
 
     def test_per_tile_cfg_overrides_global_default(self):
         import tempfile, os
         import O4_Config_Utils as CFG
 
-        old_global = CFG.global_sfr_bld_yolo_no_overlap_removal
+        old_global = CFG.global_sfr_bld_yolo_enabled
         try:
-            CFG.global_sfr_bld_yolo_no_overlap_removal = True
+            CFG.global_sfr_bld_yolo_enabled = True
             tile = CFG.Tile(12, 34, "")
-            self.assertTrue(tile.sfr_bld_yolo_no_overlap_removal)  # global default
+            self.assertTrue(tile.sfr_bld_yolo_enabled)  # global default
 
             with tempfile.TemporaryDirectory() as tmp:
                 cfg_path = os.path.join(tmp, "tile.cfg")
                 with open(cfg_path, "w") as f:
-                    f.write("sfr_bld_yolo_no_overlap_removal=False\n")
+                    f.write("sfr_bld_yolo_enabled=False\n")
                 tile.read_from_config(config_file=cfg_path)
 
-            self.assertIsInstance(tile.sfr_bld_yolo_no_overlap_removal, bool)
-            self.assertFalse(tile.sfr_bld_yolo_no_overlap_removal)
+            self.assertIsInstance(tile.sfr_bld_yolo_enabled, bool)
+            self.assertFalse(tile.sfr_bld_yolo_enabled)
         finally:
-            CFG.global_sfr_bld_yolo_no_overlap_removal = old_global
+            CFG.global_sfr_bld_yolo_enabled = old_global
 
 
-class FacadeClipTests(unittest.TestCase):
-    def test_clip_excludes_occupied_region(self):
-        # Detection covers x[0,40] y[0,40]; left half x[0,20] already occupied.
-        yolo_poly = np.array(
-            [[0, 0], [40, 0], [40, 40], [0, 40]], dtype=np.int32
-        )
-        occ = np.zeros((100, 100), dtype=np.uint8)
-        occ[0:40, 0:20] = 1  # rows, cols -> left half occupied
-
-        ring = BLD._clip_facade_to_free(yolo_poly, (None, occ), min_free_px=10.0)
-        self.assertIsNotNone(ring)
-
-        # Rasterise the clipped ring and confirm it does not touch occupancy.
-        clip_mask = np.zeros((100, 100), dtype=np.uint8)
-        cv2.fillPoly(clip_mask, [np.int32(ring)], 1)
-        self.assertEqual(int(cv2.countNonZero(cv2.bitwise_and(clip_mask, occ))), 0)
-        # And it still covers a meaningful chunk of the free right half.
-        self.assertGreater(int(cv2.countNonZero(clip_mask)), 200)
-
-    def test_fully_occupied_returns_none(self):
-        yolo_poly = np.array(
-            [[0, 0], [40, 0], [40, 40], [0, 40]], dtype=np.int32
-        )
-        occ = np.zeros((100, 100), dtype=np.uint8)
-        occ[0:41, 0:41] = 1  # whole detection occupied
-        ring = BLD._clip_facade_to_free(yolo_poly, (None, occ), min_free_px=10.0)
-        self.assertIsNone(ring)
-
-
-class FreeAreaDownsizeTests(unittest.TestCase):
+class ObjectSelectionOccupancyTests(unittest.TestCase):
     def _setup(self):
         big = {
             "kind": "object",
@@ -337,7 +212,9 @@ class FreeAreaDownsizeTests(unittest.TestCase):
         return (table, detection, yolo_poly, static, spacing, scratch,
                 static_int, spacing_int)
 
-    def test_downsize_off_places_nothing(self):
+    def test_occupied_detection_places_nothing(self):
+        # Min coverage is gated against the full detection area: an occupied
+        # detection admits no smaller stand-in.
         (table, detection, yolo_poly, static, spacing, scratch,
          static_int, spacing_int) = self._setup()
         selected, status = BLD._select_yolo_object_candidate(
@@ -347,31 +224,15 @@ class FreeAreaDownsizeTests(unittest.TestCase):
             scratch_mask=scratch,
             static_occ_integral=static_int,
             spacing_occ_integral=spacing_int,
-            freearea_downsize=False,
         )
         self.assertIsNone(selected)
         self.assertNotEqual(status, "selected")
-
-    def test_downsize_on_places_small_asset(self):
-        (table, detection, yolo_poly, static, spacing, scratch,
-         static_int, spacing_int) = self._setup()
-        selected, status = BLD._select_yolo_object_candidate(
-            table, detection, yolo_poly, 50, 50, 0.0, 1.0,
-            static_occ_mask=static,
-            building_spacing_mask=spacing,
-            scratch_mask=scratch,
-            static_occ_integral=static_int,
-            spacing_occ_integral=spacing_int,
-            freearea_downsize=True,
-        )
-        self.assertEqual(status, "selected")
-        self.assertEqual(selected["asset"]["path"], "small.obj")
 
     def test_skip_occupancy_ignores_occupied_mask(self):
         # With skip_occupancy the dense occupancy mask is ignored entirely, so
         # the highest-coverage asset that fits the detection outline wins even
         # though its footprint overlaps already-placed buildings. This is the
-        # fast path used under no_overlap_removal (no per-candidate fillPoly).
+        # default fast path; tile-wide dedup resolves the overlaps afterwards.
         (table, detection, yolo_poly, static, spacing, scratch,
          static_int, spacing_int) = self._setup()
         selected, status = BLD._select_yolo_object_candidate(
@@ -388,10 +249,9 @@ class FreeAreaDownsizeTests(unittest.TestCase):
 
 
 class PairOverlapRuleTests(unittest.TestCase):
-    """Per-overlap containment rule (pair_rule=True) in drop mode."""
+    """Per-overlap containment rule (pair_rule=True)."""
 
     KW = dict(
-        keep_mode="drop",
         coverage_threshold=0.0,
         min_overlap_m2=0.0,
         m_per_px=1.0,

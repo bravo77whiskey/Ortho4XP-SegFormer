@@ -16,6 +16,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 
 # O4_File_Names is only available inside the main process (frozen or source).
 # Imported lazily in process_*_tile() so venv subprocesses are unaffected.
@@ -183,6 +185,25 @@ def _no_window():
 # scripts.generate_veg_overlay / scripts.generate_bld_overlay are run as .venv subprocesses,
 # never imported into the frozen exe process.
 
+# ── Subprocess kill-switch ────────────────────────────────────────────────────
+# The heavy lifting happens in a detached .venv python; UI.red_flag alone can't
+# stop it. Every live Popen is registered with O4_UI_Utils so the GUI Stop
+# button and window close can terminate the whole tree immediately.
+# O4_UI_Utils is imported lazily: this module must stay importable in contexts
+# where the main-process helpers are unavailable (see _sfr_cache_dir above).
+
+def _ui():
+    try:
+        import O4_UI_Utils as UI
+        return UI
+    except Exception:
+        return None
+
+
+def _red_flag_set():
+    UI = _ui()
+    return bool(UI.red_flag) if UI else False
+
 # ── Module-level config vars — synced from Tile before each call ──────────────
 sfr_veg_density       = -1.0    # -1 = auto; 0.0–1.0 = override
 sfr_veg_close_m       = 10.0
@@ -196,10 +217,6 @@ sfr_veg_simheaven_building_buffer_m = 10.0
 sfr_veg_avoid_gfv2    = True
 sfr_veg_gfv2_buffer_m = 0.0
 sfr_veg_use_gfv2_asset_proximity = False
-sfr_veg_avoid_simheaven_forests = True
-sfr_veg_simheaven_buffer_m = 0.0
-sfr_veg_avoid_default_forests = True
-sfr_veg_default_buffer_m = 0.0
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
 sfr_veg_disable_cache = False
 
@@ -208,25 +225,15 @@ sfr_bld_close_m       = 30.0
 sfr_bld_open_m        = 10.0
 sfr_bld_min_zone_m2   = 200.0
 sfr_bld_grid_n        = 16
-sfr_bld_smart_gap_fill = True
 sfr_bld_disable_cache = False
 sfr_bld_avoid_custom_scenery = True
 sfr_bld_yolo_enabled = True
 sfr_bld_yolo_checkpoint = r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
 sfr_bld_yolo_conf = 0.18
-sfr_bld_yolo_outline_tolerance = 1.0  # deprecated / no effect (see O4_Cfg_Vars)
 sfr_bld_yolo_min_coverage = 0.80
-sfr_bld_yolo_facade_fallback = False
 sfr_bld_yolo_iou = 0.5
 sfr_bld_yolo_stride = 512
 sfr_bld_yolo_max_det = 100000
-sfr_bld_yolo_suppress_coverage = 0.0
-sfr_bld_yolo_suppress_min_overlap_m2 = 0.0
-sfr_bld_yolo_keep_mode = "drop"
-sfr_bld_yolo_keep_min_new_frac = 0.25
-sfr_bld_yolo_freearea_downsize = False
-sfr_bld_yolo_facade_clip = False
-sfr_bld_yolo_no_overlap_removal = False
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -302,9 +309,29 @@ def _run_venv(code):
         env=env,
         **_no_window(),
     )
-    for line in proc.stdout:
-        print(line, end='', flush=True)
-    proc.wait()
+    UI = _ui()
+    if UI:
+        UI.register_subprocess(proc)
+
+    # Watchdog: the stdout loop below blocks between lines, so poll red_flag
+    # from the side and kill the tree as soon as the user hits Stop.
+    def _watchdog():
+        while proc.poll() is None:
+            if _red_flag_set():
+                _ui().kill_subprocess(proc)
+                break
+            time.sleep(0.5)
+
+    if UI:
+        threading.Thread(target=_watchdog, daemon=True).start()
+
+    try:
+        for line in proc.stdout:
+            print(line, end='', flush=True)
+        proc.wait()
+    finally:
+        if UI:
+            UI.unregister_subprocess(proc)
     return proc.returncode
 
 
@@ -371,22 +398,14 @@ def _check_tile_imagery(tex_dir, lat, lon, step_name):
 
 
 def _scenery_paths():
-    """Return configured scenery roots needed by the SFR overlay subprocesses."""
+    """Return the configured Custom Scenery root needed by the SFR overlay subprocesses."""
     custom_scenery_dir = ""
-    custom_overlay_src = ""
-    custom_overlay_src_alternate = ""
     try:
         import O4_Config_Utils as CFG
         custom_scenery_dir = getattr(CFG, "custom_scenery_dir", "") or ""
     except Exception:
         pass
-    try:
-        import O4_Overlay_Utils as OVL
-        custom_overlay_src = getattr(OVL, "custom_overlay_src", "") or ""
-        custom_overlay_src_alternate = getattr(OVL, "custom_overlay_src_alternate", "") or ""
-    except Exception:
-        pass
-    return custom_scenery_dir, custom_overlay_src, custom_overlay_src_alternate
+    return custom_scenery_dir
 
 
 def _deps_ready():
@@ -442,7 +461,7 @@ def process_veg_tile(lat, lon, build_dir):
     res_m            = None if sfr_veg_res_m <= 0 else sfr_veg_res_m
     dsftool          = _dsftool_path()
     out_dsf          = _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
-    custom_scenery_dir, custom_overlay_src, custom_overlay_src_alternate = _scenery_paths()
+    custom_scenery_dir = _scenery_paths()
 
     code = (
         f"import O4_SFR_Inference as SEG\n"
@@ -472,21 +491,18 @@ def process_veg_tile(lat, lon, build_dir):
         f"    avoid_gfv2       = {sfr_veg_avoid_gfv2!r},\n"
         f"    gfv2_buffer_m    = {sfr_veg_gfv2_buffer_m!r},\n"
         f"    use_gfv2_asset_proximity = {sfr_veg_use_gfv2_asset_proximity!r},\n"
-        f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"
-        f"    simheaven_buffer_m = {sfr_veg_simheaven_buffer_m!r},\n"
-        f"    avoid_default_forests = {sfr_veg_avoid_default_forests!r},\n"
-        f"    default_buffer_m = {sfr_veg_default_buffer_m!r},\n"
         f"    bld_excl_m       = {0.0 if sfr_veg_disable_cache else 10.0!r},\n"
         f"    dsftool_path     = {dsftool!r},\n"
         f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
-        f"    custom_overlay_src = {custom_overlay_src!r},\n"
-        f"    custom_overlay_src_alternate = {custom_overlay_src_alternate!r},\n"
         f")\n"
     )
     ret = None
     try:
         ret = _run_venv(code)
         if ret != 0:
+            if _red_flag_set():
+                print("[SFR Veg] Interrupted by user.", flush=True)
+                return
             raise RuntimeError(f"SegFormer veg overlay subprocess failed (exit {ret})")
     finally:
         if sfr_veg_disable_cache:
@@ -520,7 +536,7 @@ def process_bld_tile(lat, lon, build_dir):
     open_k = max(1, int(round(sfr_bld_open_m / native_zl16_m_per_px)))
     dsftool     = _dsftool_path()
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Bld_Overlays')
-    custom_scenery_dir, _, _ = _scenery_paths()
+    custom_scenery_dir = _scenery_paths()
     print(
         "[SFR Bld] Effective settings: "
         f"yolo_enabled={sfr_bld_yolo_enabled!r} "
@@ -528,8 +544,6 @@ def process_bld_tile(lat, lon, build_dir):
         f"conf={sfr_bld_yolo_conf!r} iou={sfr_bld_yolo_iou!r} "
         f"stride={sfr_bld_yolo_stride!r} max_det={sfr_bld_yolo_max_det!r} "
         f"min_coverage={sfr_bld_yolo_min_coverage!r} "
-        f"facade_fallback={sfr_bld_yolo_facade_fallback!r} "
-        f"smart_gap_fill={sfr_bld_smart_gap_fill!r} "
         f"disable_cache={sfr_bld_disable_cache!r} "
         f"out_dsf={out_dsf!r}",
         flush=True,
@@ -562,7 +576,6 @@ def process_bld_tile(lat, lon, build_dir):
         f"    open_k       = {open_k!r},\n"
         f"    min_zone_m2  = {sfr_bld_min_zone_m2!r},\n"
         f"    make_viz                 = False,\n"
-        f"    smart_gap_fill           = {sfr_bld_smart_gap_fill!r},\n"
         f"    disable_cache            = {sfr_bld_disable_cache!r},\n"
         f"    avoid_custom_scenery     = {sfr_bld_avoid_custom_scenery!r},\n"
         f"    cache_dir                = {cache_dir!r},\n"
@@ -576,22 +589,16 @@ def process_bld_tile(lat, lon, build_dir):
         f"    yolo_iou                 = {sfr_bld_yolo_iou!r},\n"
         f"    yolo_stride              = {sfr_bld_yolo_stride!r},\n"
         f"    yolo_max_det             = {sfr_bld_yolo_max_det!r},\n"
-        f"    yolo_suppress_coverage   = {sfr_bld_yolo_suppress_coverage!r},\n"
-        f"    yolo_suppress_min_overlap_m2 = {sfr_bld_yolo_suppress_min_overlap_m2!r},\n"
-        f"    yolo_keep_mode           = {sfr_bld_yolo_keep_mode!r},\n"
-        f"    yolo_keep_min_new_frac   = {sfr_bld_yolo_keep_min_new_frac!r},\n"
-        f"    yolo_freearea_downsize   = {sfr_bld_yolo_freearea_downsize!r},\n"
-        f"    yolo_facade_clip         = {sfr_bld_yolo_facade_clip!r},\n"
-        f"    yolo_no_overlap_removal  = {sfr_bld_yolo_no_overlap_removal!r},\n"
-        f"    yolo_outline_tolerance   = {sfr_bld_yolo_outline_tolerance!r},\n"
         f"    yolo_min_coverage        = {sfr_bld_yolo_min_coverage!r},\n"
-        f"    yolo_facade_fallback     = {sfr_bld_yolo_facade_fallback!r},\n"
         f")\n"
     )
     ret = None
     try:
         ret = _run_venv(code)
         if ret != 0:
+            if _red_flag_set():
+                print("[SFR Bld] Interrupted by user.", flush=True)
+                return
             raise RuntimeError(f"SegFormer bld overlay subprocess failed (exit {ret})")
     finally:
         if sfr_bld_disable_cache:
