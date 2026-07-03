@@ -237,6 +237,20 @@ def is_acceptable_gfv2_type_source(path: str) -> bool:
     return not any(token in searchable for token in GFV2_TYPE_EXCLUDE_TOKENS)
 
 
+def is_tree_gfv2_type_source(path: str) -> bool:
+    """Return True when a GFv2 polygon may drive generated TREE asset type.
+
+    Cropland windbreak rows routinely outnumber woodland polygons in
+    agricultural tiles; letting them win the tile vote turned every generated
+    forest into near-empty cropland assets, so tree polygons only accept
+    tree-like families as type sources.
+    """
+    if not is_acceptable_gfv2_type_source(path):
+        return False
+    metadata = parse_gfv2_path(path)
+    return metadata is not None and metadata["family"].lower() != "cropland"
+
+
 def _role_for_gfv2_family(family: str) -> str:
     family = (family or "").lower()
     if family == "cropland":
@@ -249,20 +263,32 @@ def _role_for_gfv2_family(family: str) -> str:
 def gfv2_type_hint_candidates(
     source_path: str,
     fallback_region: str,
-    fallback_dlevel: int,
+    dlevel: int,
 ) -> tuple[str, ...]:
-    """Map a nearby acceptable GFv2 source path to approved generated assets."""
+    """Map a nearby acceptable GFv2 source path to approved generated assets.
+
+    The source path fixes the region and family (species look) so generated
+    forests blend with the surrounding GFv2 coverage, while the polygon's own
+    measured density level is kept (snapped to the closest allowed level for
+    the role) — inheriting the source polygon's density flattened every
+    forest in a tile to one density regardless of actual canopy fill.
+    """
     metadata = parse_gfv2_path(source_path)
     if metadata is None or not is_acceptable_gfv2_type_source(source_path):
-        return gfv2_tree_candidates(fallback_region, fallback_dlevel)
+        return gfv2_tree_candidates(fallback_region, dlevel)
 
     region = metadata["region"]
     role = _role_for_gfv2_family(metadata["family"])
-    dlevel = metadata["dlevel"]
+    allowed_dlevels = GFV2_ROLE_DLEVELS.get(role, ())
+    use_dlevel = (
+        dlevel if dlevel in allowed_dlevels
+        else min(allowed_dlevels, key=lambda d: abs(d - int(dlevel)))
+        if allowed_dlevels else dlevel
+    )
     try:
-        return short_gfv2_candidates(region, role, dlevel)
+        return short_gfv2_candidates(region, role, use_dlevel)
     except (KeyError, ValueError):
-        return gfv2_tree_candidates(fallback_region, fallback_dlevel)
+        return gfv2_tree_candidates(fallback_region, dlevel)
 
 
 def all_approved_generated_forest_paths() -> tuple[str, ...]:

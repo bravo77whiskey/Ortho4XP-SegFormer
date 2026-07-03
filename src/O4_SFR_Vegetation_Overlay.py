@@ -56,6 +56,9 @@ from O4_SFR_Building_Overlay import (
     _rasterize_simheaven_objects,
     _simheaven_objects_for_bounds,
     _transient_cache_peer_path,
+    compute_covered_fractions,
+    covered_rects_to_px,
+    mask_covered_regions,
 )
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
@@ -703,9 +706,13 @@ def _dds_polygon_cache_key(
     climate_code=None,
     asset_selection_mode="climate",
     gfv2_type_source_path=None,
+    gfv2_type_sig=None,
+    covered_fracs=None,
 ):
     return {
-        'version': 4,
+        'version': 5,
+        'gfv2_type_sig': gfv2_type_sig,
+        'covered_fracs': covered_fracs,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -843,18 +850,81 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
 
 
 def _dominant_acceptable_gfv2_path(records):
-    """Return the most common acceptable GFv2 source path in a tile."""
+    """Return the most common tree-type GFv2 source path in a tile.
+
+    Only tree-like families vote: cropland windbreaks dominate the raw polygon
+    count in agricultural tiles and previously turned every generated forest
+    into near-empty cropland assets.
+    """
     counts = {}
     for record in records or ():
         path = record.get('path') if isinstance(record, dict) else None
         metadata = FOREST_ASSETS.parse_gfv2_path(path)
-        if metadata is None or not FOREST_ASSETS.is_acceptable_gfv2_type_source(path):
+        if metadata is None or not FOREST_ASSETS.is_tree_gfv2_type_source(path):
             continue
         normalized = metadata['path']
         counts[normalized] = counts.get(normalized, 0) + 1
     if not counts:
         return None
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+class _GFv2TypeResolver:
+    """Per-polygon GFv2 type source: nearest tree-type GFv2 polygon.
+
+    ``resolve(lon, lat)`` returns the source path of the nearest acceptable
+    tree-type GFv2 polygon within ``max_radius_m`` (bbox distance), falling
+    back to the tile-dominant path when none is close enough. Lookups are
+    vectorised over all candidate bboxes and memoised on a ~250 m grid, so the
+    per-polygon cost is effectively zero at tile scale.
+    """
+
+    def __init__(self, records, dominant_path, tile_lat,
+                 max_radius_m=3000.0, cell_deg=0.0025):
+        self.dominant_path = dominant_path
+        self.max_radius_m = float(max_radius_m)
+        self.cell_deg = float(cell_deg)
+        self._memo = {}
+        self._m_lat = 110540.0
+        self._m_lon = 111320.0 * max(0.05, math.cos(math.radians(tile_lat + 0.5)))
+        souths, norths, wests, easts, paths = [], [], [], [], []
+        for record in records or ():
+            if not isinstance(record, dict):
+                continue
+            path = record.get('path')
+            bounds = record.get('_bounds')
+            if bounds is None or not FOREST_ASSETS.is_tree_gfv2_type_source(path):
+                continue
+            metadata = FOREST_ASSETS.parse_gfv2_path(path)
+            south, north, west, east = bounds
+            souths.append(float(south)); norths.append(float(north))
+            wests.append(float(west)); easts.append(float(east))
+            paths.append(metadata['path'])
+        self.n = len(paths)
+        if self.n:
+            self._south = np.asarray(souths)
+            self._north = np.asarray(norths)
+            self._west = np.asarray(wests)
+            self._east = np.asarray(easts)
+            self._paths = paths
+
+    def resolve(self, lon, lat):
+        if not self.n:
+            return self.dominant_path
+        key = (int(lon / self.cell_deg), int(lat / self.cell_deg))
+        cached = self._memo.get(key)
+        if cached is not None:
+            return cached[0]
+        dx = np.maximum(0.0, np.maximum(self._west - lon, lon - self._east))
+        dy = np.maximum(0.0, np.maximum(self._south - lat, lat - self._north))
+        dist2 = (dx * self._m_lon) ** 2 + (dy * self._m_lat) ** 2
+        idx = int(np.argmin(dist2))
+        if dist2[idx] <= self.max_radius_m ** 2:
+            result = self._paths[idx]
+        else:
+            result = self.dominant_path
+        self._memo[key] = (result,)
+        return result
 
 
 # ── .for file selection ───────────────────────────────────────────────────────
@@ -1119,7 +1189,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       m_per_px, min_area_px, simplify_px,
                       region, rng, density_override,
                       context_masks=None, type_counts=None,
-                      gfv2_type_path=None):
+                      gfv2_type_path=None, gfv2_type_resolver=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring)."""
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
@@ -1162,10 +1232,17 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         else:
             frac = _polygon_fill_frac(mask, cnt)
 
+        poly_gfv2_type_path = gfv2_type_path
+        if veg_cls == SEGFORMER.CLASS_TREE and gfv2_type_resolver is not None:
+            c_lon = sum(p[0] for p in ring) / len(ring)
+            c_lat = sum(p[1] for p in ring) / len(ring)
+            poly_gfv2_type_path = (
+                gfv2_type_resolver.resolve(c_lon, c_lat) or gfv2_type_path
+            )
         fpath, dsf_den = _for_entry(
             veg_cls, frac, shape, region, rng, density_override,
             veg_type=veg_type,
-            gfv2_type_path=gfv2_type_path,
+            gfv2_type_path=poly_gfv2_type_path,
         )
         if not fpath:
             continue
@@ -1257,7 +1334,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 pass
 
     # Collect all DDS files; resolve overlapping zoom levels.
-    # Each ZL tile maps to exactly 4 children at ZL+1, 16 at ZL+2, etc.
+    # Texture names use raw web-mercator tile indices in steps of 16 (one DDS
+    # spans 16x16 tiles), so the 4 children of texture (y,x) at ZL+1 sit at
+    # (2y,2x), (2y,2x+16), (2y+16,2x), (2y+16,2x+16).
     # A lower-ZL tile is skipped only when ALL 4 of its ZL+1 children are present
     # or themselves fully covered — otherwise it is kept to fill the missing area.
     _by_zl = {}
@@ -1281,7 +1360,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             _fc_memo[key] = False; return False
         result = all(
             (cy, cx) in _tiles_at_zl.get(zl + 1, set()) or _fully_covered(cy, cx, zl + 1)
-            for cy, cx in ((2*y, 2*x), (2*y, 2*x+1), (2*y+1, 2*x), (2*y+1, 2*x+1))
+            for cy, cx in ((2*y, 2*x), (2*y, 2*x+16), (2*y+16, 2*x), (2*y+16, 2*x+16))
         )
         _fc_memo[key] = result; return result
     files = sorted(
@@ -1291,6 +1370,28 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     )
     if not files:
         print("No DDS files found."); return 0
+    _n_skipped_covered = sum(len(v) for v in _by_zl.values()) - len(files)
+    if _n_skipped_covered:
+        print(
+            f"Zoom-level coverage: skipped {_n_skipped_covered} lower-ZL texture(s) "
+            "fully covered by higher-ZL textures"
+        )
+    # Sub-regions of kept lower-ZL textures that are covered by kept higher-ZL
+    # textures generate their forest polygons at the higher ZL; blank them out
+    # of the lower-ZL masks so forests are not emitted twice (double density).
+    _covered_fracs_by_file = compute_covered_fractions(
+        (
+            (int(_m.group(1)), int(_m.group(2)), int(_m.group(4)), _f)
+            for _f in files
+            for _m in (STD_RE.match(_f),)
+            if _m
+        ),
+    )
+    if _covered_fracs_by_file:
+        print(
+            f"Zoom-level coverage: {len(_covered_fracs_by_file)} partially covered "
+            "lower-ZL texture(s); covered regions excluded from vegetation masks"
+        )
     _used_zls = sorted(set(int(STD_RE.match(_f).group(4)) for _f in files))
     _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
 
@@ -1306,7 +1407,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     )
     print(
         "vegetation asset selection:"
-        f" {'GFv2 tile-dominant' if use_gfv2_asset_proximity else 'climate default'}"
+        f" {'GFv2-derived' if use_gfv2_asset_proximity else 'climate default'}"
     )
     print(
         f"building overlap avoid: SFR cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
@@ -1434,6 +1535,16 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     forest_layers = []
     gfv2_type_path = None
+    gfv2_type_resolver = None
+    gfv2_type_sig = None
+    # Per-polygon nearest-GFv2 type selection ("closest") vs one tile-dominant
+    # path for every polygon ("dominant"). Closest is the default: the lookup
+    # is a memoised vectorised bbox scan, measured ~free at tile scale.
+    gfv2_type_mode = (
+        os.environ.get("O4_SFR_VEG_GFV2_TYPE_MODE", "closest").strip().lower()
+    )
+    if gfv2_type_mode not in ("closest", "dominant"):
+        gfv2_type_mode = "closest"
     if dsftool_path and os.path.exists(dsftool_path):
         layer_specs = [
             (
@@ -1458,31 +1569,46 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             ),
         ]
         for layer_name, enabled, dsf_matches, buffer_m in layer_specs:
-            if not enabled:
+            is_gfv2_layer = layer_name == "Global Forests v2"
+            # GFv2 polygons are parsed for asset-type selection even when the
+            # avoidance layer itself is disabled.
+            need_for_types = is_gfv2_layer and use_gfv2_asset_proximity
+            if not enabled and not need_for_types:
                 print(f"{layer_name} forests: disabled")
                 continue
             _t = time.perf_counter()
             polys = _load_forest_polygons(layer_name, dsf_matches, dsftool_path, sidecar_cache_dir)
             timings['scenery_parse'] += time.perf_counter() - _t
             prepared = _prepare_polygons(polys)
-            if layer_name == "Global Forests v2":
+            if is_gfv2_layer:
                 if use_gfv2_asset_proximity:
                     gfv2_type_path = _dominant_acceptable_gfv2_path(prepared)
+                    gfv2_type_sig = _polys_signature(prepared)
                     if gfv2_type_path:
                         print(f"{layer_name} tile-dominant type source: {gfv2_type_path}")
                     else:
-                        print(f"{layer_name} type sources: no acceptable polygons")
+                        print(f"{layer_name} type sources: no acceptable tree-type polygons")
+                    if gfv2_type_mode == "closest":
+                        gfv2_type_resolver = _GFv2TypeResolver(
+                            prepared, gfv2_type_path, lat
+                        )
+                        print(
+                            "GFv2 type selection: per-polygon closest "
+                            f"({gfv2_type_resolver.n} tree-type source polygons, "
+                            "tile-dominant fallback)"
+                        )
                 else:
                     print(f"{layer_name} type sources: disabled (climate asset selection)")
-            forest_layers.append(
-                {
-                    'name': layer_name,
-                    'buffer_m': max(0.0, float(buffer_m)),
-                    'polys': prepared,
-                    'index': BBOX.build_bounds_index(prepared),
-                }
-            )
-            print(f"{layer_name} forests: {len(prepared)} polygons")
+            if enabled:
+                forest_layers.append(
+                    {
+                        'name': layer_name,
+                        'buffer_m': max(0.0, float(buffer_m)),
+                        'polys': prepared,
+                        'index': BBOX.build_bounds_index(prepared),
+                    }
+                )
+                print(f"{layer_name} forests: {len(prepared)} polygons")
     else:
         if any((avoid_gfv2, avoid_simheaven_forests, avoid_default_forests)):
             print(f"Forest overlap layers: skipped (DSFTool unavailable at {dsftool_path})")
@@ -1916,7 +2042,21 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
 
+        # Regions covered by kept higher-ZL textures emit their forests at the
+        # higher ZL; blank them here so trees are not generated twice.
+        _covered_fracs = _covered_fracs_by_file.get(fname)
+        if _covered_fracs:
+            mask_covered_regions(
+                tree_mask, covered_rects_to_px(_covered_fracs, img_w, img_h)
+            )
+
         _poly_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_vegpoly.pkl'))
+        if not use_gfv2_asset_proximity:
+            _asset_mode = 'climate'
+        elif gfv2_type_resolver is not None:
+            _asset_mode = 'gfv2_closest'
+        else:
+            _asset_mode = 'gfv2_tile_dominant'
         _poly_cache_key = _dds_polygon_cache_key(
             fname,
             lat_n,
@@ -1935,8 +2075,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             excl_buffer_m,
             region,
             koppen_code,
-            'gfv2_tile_dominant' if use_gfv2_asset_proximity else 'climate',
+            _asset_mode,
             gfv2_type_source_path,
+            gfv2_type_sig=gfv2_type_sig,
+            covered_fracs=_covered_fracs,
         )
         _poly_cached = None
         if not disable_cache:
@@ -1971,6 +2113,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       type_counts=None)
         if gfv2_type_source_path:
             kwargs['gfv2_type_path'] = gfv2_type_source_path
+        if gfv2_type_resolver is not None:
+            kwargs['gfv2_type_resolver'] = gfv2_type_resolver
 
         dds_seed = int.from_bytes(
             hashlib.sha1(f"veg-poly:{fname}".encode("utf-8")).digest()[:8],

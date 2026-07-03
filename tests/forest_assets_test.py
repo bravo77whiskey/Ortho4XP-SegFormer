@@ -443,9 +443,89 @@ class ForestAssetPolicyTests(unittest.TestCase):
             gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
         )
 
+        closest_key = SFR_VEG._dds_polygon_cache_key(
+            *base_args,
+            asset_selection_mode="gfv2_closest",
+            gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y1.for",
+            gfv2_type_sig=(12, 34, 5.6, 78),
+        )
+        covered_key = SFR_VEG._dds_polygon_cache_key(
+            *base_args,
+            asset_selection_mode="climate",
+            gfv2_type_source_path=None,
+            covered_fracs=((0.5, 0.5, 1.0, 1.0),),
+        )
+
         self.assertNotEqual(climate_key, dominant_key)
         self.assertNotEqual(dominant_key, other_dominant_key)
-        self.assertEqual(climate_key["version"], 4)
+        self.assertNotEqual(dominant_key, closest_key)
+        self.assertNotEqual(climate_key, covered_key)
+        self.assertEqual(climate_key["version"], 5)
+
+    def test_dominant_gfv2_path_ignores_cropland_votes(self):
+        records = [
+            {"path": "forests/northsouth/cropland/northsouth_cropland_25_y2.for"},
+        ] * 50 + [
+            {"path": "forests/northsouth/woodland/northsouth_woodland_50_y2.for"},
+        ] * 3 + [
+            {"path": "forests/northsouth/woodland/northsouth_woodland_25_y2.for"},
+        ] * 2
+        self.assertEqual(
+            SFR_VEG._dominant_acceptable_gfv2_path(records),
+            "forests/northsouth/woodland/northsouth_woodland_50_y2.for",
+        )
+
+    def test_dominant_gfv2_path_none_when_only_cropland(self):
+        records = [
+            {"path": "forests/northsouth/cropland/northsouth_cropland_25_y2.for"},
+        ] * 10
+        self.assertIsNone(SFR_VEG._dominant_acceptable_gfv2_path(records))
+
+    def test_gfv2_type_resolver_prefers_nearest_tree_polygon(self):
+        records = [
+            {   # woodland bbox around (119.10, 23.10)
+                "path": "forests/subtropical/woodland/subtropical_woodland_75_y1.for",
+                "_bounds": (23.09, 23.11, 119.09, 119.11),
+            },
+            {   # different woodland far away
+                "path": "forests/subtropical/woodland/subtropical_woodland_25_y2.for",
+                "_bounds": (23.49, 23.51, 119.49, 119.51),
+            },
+            {   # cropland right on top of the query point: must be ignored
+                "path": "forests/subtropical/cropland/subtropical_cropland_25_y1.for",
+                "_bounds": (23.0, 23.3, 119.0, 119.3),
+            },
+        ]
+        resolver = SFR_VEG._GFv2TypeResolver(
+            records, dominant_path="dominant.for", tile_lat=23
+        )
+        self.assertEqual(resolver.n, 2)
+        self.assertEqual(
+            resolver.resolve(119.10, 23.10),
+            "forests/subtropical/woodland/subtropical_woodland_75_y1.for",
+        )
+        self.assertEqual(
+            resolver.resolve(119.50, 23.50),
+            "forests/subtropical/woodland/subtropical_woodland_25_y2.for",
+        )
+
+    def test_gfv2_type_resolver_falls_back_to_dominant_beyond_radius(self):
+        records = [
+            {
+                "path": "forests/subtropical/woodland/subtropical_woodland_75_y1.for",
+                "_bounds": (23.0, 23.001, 119.0, 119.001),
+            },
+        ]
+        resolver = SFR_VEG._GFv2TypeResolver(
+            records, dominant_path="dominant.for", tile_lat=23,
+            max_radius_m=1000.0,
+        )
+        # ~50 km away -> dominant fallback
+        self.assertEqual(resolver.resolve(119.5, 23.5), "dominant.for")
+
+    def test_gfv2_type_resolver_empty_records_returns_dominant(self):
+        resolver = SFR_VEG._GFv2TypeResolver([], "dominant.for", tile_lat=23)
+        self.assertEqual(resolver.resolve(119.1, 23.1), "dominant.for")
 
     def test_vegetation_optional_mask_or_handles_missing_masks(self):
         lhs = None
