@@ -132,6 +132,120 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(scaled[0]["center"], [4.0, 6.0])
         self.assertEqual(scaled[0]["area_m2"], 42.0)
 
+    def test_covered_fractions_full_parent_coverage(self):
+        # ZL16 parent (28320, 54528) with all 4 ZL17 children present: the
+        # children's rects union to the whole parent footprint.
+        entries = [
+            (28320, 54528, 16, "28320_54528_Arc16.dds"),
+            (56640, 109056, 17, "56640_109056_BI17.dds"),
+            (56640, 109072, 17, "56640_109072_BI17.dds"),
+            (56656, 109056, 17, "56656_109056_BI17.dds"),
+            (56656, 109072, 17, "56656_109072_BI17.dds"),
+        ]
+        covered = BLD.compute_covered_fractions(entries)
+        rects = covered["28320_54528_Arc16.dds"]
+        self.assertEqual(len(rects), 4)
+        self.assertEqual(
+            set(rects),
+            {
+                (0.0, 0.0, 0.5, 0.5),
+                (0.5, 0.0, 1.0, 0.5),
+                (0.0, 0.5, 0.5, 1.0),
+                (0.5, 0.5, 1.0, 1.0),
+            },
+        )
+        # children themselves are never marked covered
+        self.assertNotIn("56640_109056_BI17.dds", covered)
+
+    def test_covered_fractions_partial_and_multi_level(self):
+        # One ZL18 grandchild inside the ZL16 parent's NW ZL17 quadrant.
+        entries = [
+            (28320, 54528, 16, "28320_54528_Arc16.dds"),
+            (113280, 218112, 18, "113280_218112_BI18.dds"),
+        ]
+        covered = BLD.compute_covered_fractions(entries)
+        rects = covered["28320_54528_Arc16.dds"]
+        self.assertEqual(rects, ((0.0, 0.0, 0.25, 0.25),))
+
+    def test_covered_rects_px_and_detection_filter(self):
+        rects_px = BLD.covered_rects_to_px(((0.5, 0.5, 1.0, 1.0),), 4096, 4096)
+        self.assertEqual(rects_px, ((2048, 2048, 4096, 4096),))
+        detections = [
+            {"points": [], "center": [2100.0, 2100.0]},
+            {"points": [], "center": [100.0, 100.0]},
+        ]
+        kept, dropped = BLD.filter_detections_by_coverage(detections, rects_px)
+        self.assertEqual(dropped, 1)
+        self.assertEqual(kept[0]["center"], [100.0, 100.0])
+
+    def test_yolo_crops_skip_fully_covered_windows(self):
+        image = np.zeros((1024, 1024, 3), dtype=np.uint8)
+        rects_px = ((512, 512, 1024, 1024),)
+        offsets = [
+            (x, y) for x, y, _ in BLD._iter_yolo_crops(
+                image, 512, skip_rects_px=rects_px
+            )
+        ]
+        self.assertEqual(offsets, [(0, 0), (512, 0), (0, 512)])
+        # no skip rects: all 4 crops
+        self.assertEqual(
+            len(list(BLD._iter_yolo_crops(image, 512))), 4
+        )
+
+    def test_geo_boxes_and_stock_coverage_filter(self):
+        rects_px = ((2048, 2048, 4096, 4096),)
+        geo = BLD.geo_boxes_from_covered_px(
+            rects_px, 4096, 4096,
+            lat_n=23.5, lat_s=23.0, lon_w=119.0, lon_e=119.5,
+        )
+        self.assertEqual(len(geo), 1)
+        west, south, east, north = geo[0]
+        self.assertAlmostEqual(west, 119.25)
+        self.assertAlmostEqual(east, 119.5)
+        self.assertAlmostEqual(north, 23.25)
+        self.assertAlmostEqual(south, 23.0)
+
+        stock = type("StockRes", (), {})()
+        stock.placed_objects = [
+            (119.3, 23.1, 0.0, "a.obj"),   # inside covered box -> dropped
+            (119.1, 23.4, 0.0, "b.obj"),   # outside -> kept
+        ]
+        stock.placed_facades = [
+            ([(119.3, 23.05), (119.31, 23.05), (119.31, 23.06)], "f.fac", 8.0),
+        ]
+        stock.placed_draped = []
+        stock.occupied_px_polys = [
+            np.array([[2100, 2100], [2200, 2100], [2200, 2200], [2100, 2200]]),
+            np.array([[10, 10], [20, 10], [20, 20], [10, 20]]),
+        ]
+        dropped = BLD.filter_stock_results_by_coverage(stock, rects_px, geo)
+        self.assertEqual(dropped, 2)
+        self.assertEqual([p[3] for p in stock.placed_objects], ["b.obj"])
+        self.assertEqual(stock.placed_facades, [])
+        self.assertEqual(len(stock.occupied_px_polys), 1)
+
+    def test_mask_covered_regions_blanks_rects(self):
+        mask = np.ones((8, 8), dtype=np.uint8)
+        BLD.mask_covered_regions(mask, ((4, 4, 8, 8),))
+        self.assertEqual(int(mask.sum()), 64 - 16)
+
+    def test_yolo_cache_key_tracks_coverage_and_native_mode(self):
+        base = dict(
+            fname="f.dds", img_w=4096, img_h=4096, checkpoint=None,
+            imgsz=512, stride=512, conf=0.18, iou=0.5, max_det=3000,
+        )
+        native_key = BLD._yolo_obb_cache_key(**base)
+        covered_key = BLD._yolo_obb_cache_key(
+            **base, covered_rects=((2048, 2048, 4096, 4096),)
+        )
+        analysis_key = BLD._yolo_obb_cache_key(
+            **base, analysis_target_zl=16, analysis_signature={"x": 1}
+        )
+        self.assertNotEqual(native_key, covered_key)
+        self.assertNotEqual(native_key, analysis_key)
+        self.assertIsNone(native_key["analysis_target_zl"])
+        self.assertIsNone(native_key["covered_rects"])
+
     def test_stock_yolo_batch_default_tolerates_legacy_module(self):
         legacy_stock = type("LegacyStockYolo", (), {})()
 

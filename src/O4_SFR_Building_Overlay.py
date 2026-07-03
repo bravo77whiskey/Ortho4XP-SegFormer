@@ -2835,7 +2835,7 @@ OPTIONAL_ASSET_REGION_ALIASES = {
     "australia_oceania": {"australia_oceania"},
 }
 
-YOLO_OBB_CACHE_VERSION = 3
+YOLO_OBB_CACHE_VERSION = 4
 YOLO_ANALYSIS_CACHE_VERSION = 1
 YOLO_ANALYSIS_TARGET_ZL = 16
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -5376,9 +5376,14 @@ def _checkpoint_signature(path):
 def _yolo_obb_cache_key(
     fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det,
     batch_size=1, fused=False, analysis_signature=None, analysis_target_zl=None,
+    covered_rects=None,
 ):
     return {
         'version': YOLO_OBB_CACHE_VERSION,
+        'covered_rects': (
+            None if not covered_rects
+            else [[int(v) for v in rect] for rect in covered_rects]
+        ),
         'fname': str(fname),
         'image_size': (int(img_w), int(img_h)),
         'checkpoint': _checkpoint_signature(checkpoint),
@@ -5616,10 +5621,184 @@ def _scale_yolo_detections_to_image(detections, scale_x, scale_y, img_w, img_h):
     return scaled
 
 
-def _iter_yolo_crops(image, stride):
+# ── Cross-ZL texture coverage ────────────────────────────────────────────────
+# On mixed-ZL tiles a lower-ZL texture image spans its full footprint even
+# where the scenery actually renders kept higher-ZL textures. Those covered
+# sub-regions must be skipped at the lower ZL or everything in them would be
+# detected and placed twice (once per ZL). Shared with the vegetation overlay.
+
+def compute_covered_fractions(entries):
+    """Map texture filename -> regions covered by kept higher-ZL textures.
+
+    ``entries`` yields ``(til_y_top, til_x_left, zl, fname)`` for every KEPT
+    texture. Returns ``{fname: ((fx0, fy0, fx1, fy1), ...)}`` where the rects
+    are fractions of the texture footprint (x right, y down, matching image
+    pixel orientation). Textures with no covered region are absent.
+    """
+    kept = [tuple(entry) for entry in entries]
+    by_zl = {}
+    for til_y, til_x, zl, fname in kept:
+        by_zl.setdefault(int(zl), []).append((int(til_y), int(til_x), fname))
+    covered = {}
+    for zl, tiles in by_zl.items():
+        higher = [
+            (czl, ctiles) for czl, ctiles in by_zl.items() if czl > zl
+        ]
+        if not higher:
+            continue
+        for til_y, til_x, fname in tiles:
+            rects = []
+            for czl, ctiles in higher:
+                scale = float(2 ** (czl - zl))
+                for c_y, c_x, _cf in ctiles:
+                    fy = (c_y / scale - til_y) / 16.0
+                    fx = (c_x / scale - til_x) / 16.0
+                    fs = 1.0 / scale
+                    if fx >= 1.0 or fy >= 1.0 or fx + fs <= 0.0 or fy + fs <= 0.0:
+                        continue
+                    rects.append((
+                        max(0.0, fx), max(0.0, fy),
+                        min(1.0, fx + fs), min(1.0, fy + fs),
+                    ))
+            if rects:
+                covered[fname] = tuple(sorted(rects))
+    return covered
+
+
+def covered_rects_to_px(fracs, img_w, img_h):
+    """Convert fractional covered rects to integer pixel rects (x0,y0,x1,y1)."""
+    if not fracs:
+        return ()
+    rects = []
+    for fx0, fy0, fx1, fy1 in fracs:
+        x0 = int(round(fx0 * img_w))
+        y0 = int(round(fy0 * img_h))
+        x1 = int(round(fx1 * img_w))
+        y1 = int(round(fy1 * img_h))
+        if x1 > x0 and y1 > y0:
+            rects.append((x0, y0, x1, y1))
+    return tuple(rects)
+
+
+def point_in_covered_rects(x, y, rects_px):
+    for x0, y0, x1, y1 in rects_px:
+        if x0 <= x < x1 and y0 <= y < y1:
+            return True
+    return False
+
+
+def filter_detections_by_coverage(detections, rects_px):
+    """Drop detections whose center falls in a higher-ZL covered region."""
+    if not detections or not rects_px:
+        return detections, 0
+    kept = []
+    dropped = 0
+    for detection in detections:
+        center = detection.get('center') if isinstance(detection, dict) else None
+        if center is None:
+            pts = np.asarray(detection.get('points', ()), dtype=np.float32).reshape(-1, 2)
+            if not pts.size:
+                kept.append(detection)
+                continue
+            cx = float(pts[:, 0].mean())
+            cy = float(pts[:, 1].mean())
+        else:
+            cx = float(center[0])
+            cy = float(center[1])
+        if point_in_covered_rects(cx, cy, rects_px):
+            dropped += 1
+        else:
+            kept.append(detection)
+    return kept, dropped
+
+
+def geo_boxes_from_covered_px(rects_px, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
+    """Convert covered pixel rects to (west, south, east, north) lon/lat boxes."""
+    boxes = []
+    for x0, y0, x1, y1 in rects_px or ():
+        west = lon_w + (x0 / float(img_w)) * (lon_e - lon_w)
+        east = lon_w + (x1 / float(img_w)) * (lon_e - lon_w)
+        north = lat_n - (y0 / float(img_h)) * (lat_n - lat_s)
+        south = lat_n - (y1 / float(img_h)) * (lat_n - lat_s)
+        boxes.append((west, south, east, north))
+    return tuple(boxes)
+
+
+def point_in_geo_boxes(lon, lat, boxes):
+    for west, south, east, north in boxes:
+        if west <= lon < east and south <= lat < north:
+            return True
+    return False
+
+
+def _ring_centroid(ring):
+    pts = np.asarray([(p[0], p[1]) for p in ring], dtype=np.float64)
+    if not pts.size:
+        return None
+    return float(pts[:, 0].mean()), float(pts[:, 1].mean())
+
+
+def filter_stock_results_by_coverage(stock_res, rects_px, geo_boxes):
+    """Drop stock-YOLO placements whose center lies in a covered region."""
+    if stock_res is None or not rects_px:
+        return 0
+    dropped = 0
+    kept_objects = []
+    for entry in stock_res.placed_objects:
+        o_lon, o_lat = float(entry[0]), float(entry[1])
+        if point_in_geo_boxes(o_lon, o_lat, geo_boxes):
+            dropped += 1
+        else:
+            kept_objects.append(entry)
+    stock_res.placed_objects = kept_objects
+    for attr in ('placed_facades', 'placed_draped'):
+        kept = []
+        for entry in getattr(stock_res, attr):
+            centroid = _ring_centroid(entry[0])
+            if centroid is not None and point_in_geo_boxes(
+                centroid[0], centroid[1], geo_boxes
+            ):
+                dropped += 1
+            else:
+                kept.append(entry)
+        setattr(stock_res, attr, kept)
+    kept_polys = []
+    for quad in stock_res.occupied_px_polys:
+        arr = np.asarray(quad, dtype=np.float64).reshape(-1, 2)
+        if arr.size and point_in_covered_rects(
+            float(arr[:, 0].mean()), float(arr[:, 1].mean()), rects_px
+        ):
+            continue
+        kept_polys.append(quad)
+    stock_res.occupied_px_polys = kept_polys
+    return dropped
+
+
+def crop_fully_covered(x, y, stride, img_w, img_h, rects_px):
+    """True when the crop window lies entirely inside one covered rect."""
+    cx1 = min(x + stride, img_w)
+    cy1 = min(y + stride, img_h)
+    for x0, y0, x1, y1 in rects_px:
+        if x >= x0 and y >= y0 and cx1 <= x1 and cy1 <= y1:
+            return True
+    return False
+
+
+def mask_covered_regions(mask, rects_px, value=0):
+    """Set covered rects of a 2D map to ``value`` (in place) and return it."""
+    for x0, y0, x1, y1 in rects_px:
+        mask[y0:y1, x0:x1] = value
+    return mask
+
+
+def _iter_yolo_crops(image, stride, skip_rects_px=()):
     img_h, img_w = image.shape[:2]
     for y in range(0, img_h, stride):
         for x in range(0, img_w, stride):
+            if skip_rects_px and crop_fully_covered(
+                x, y, stride, img_w, img_h, skip_rects_px
+            ):
+                continue
             crop = image[y:min(y + stride, img_h), x:min(x + stride, img_w)]
             if crop.shape[0] != stride or crop.shape[1] != stride:
                 padded = np.zeros((stride, stride, 3), dtype=image.dtype)
@@ -5628,9 +5807,9 @@ def _iter_yolo_crops(image, stride):
             yield x, y, crop
 
 
-def _iter_yolo_crop_batches(image, stride, batch_size):
+def _iter_yolo_crop_batches(image, stride, batch_size, skip_rects_px=()):
     batch = []
-    for item in _iter_yolo_crops(image, stride):
+    for item in _iter_yolo_crops(image, stride, skip_rects_px=skip_rects_px):
         batch.append(item)
         if len(batch) >= batch_size:
             yield batch
@@ -5803,14 +5982,17 @@ def _append_yolo_result_detections(
 
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                             device=None, m_per_px=1.0, batch_size=1,
-                            return_metadata=False):
+                            return_metadata=False, skip_rects_px=()):
     img_h, img_w = image.shape[:2]
     model_class_count = _yolo_model_class_count(model)
+    skip_rects_px = tuple(skip_rects_px or ())
 
     def _detect(effective_batch):
         detections = []
         if effective_batch <= 1:
-            for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+            for ox, oy, crop in _iter_yolo_crops(
+                image, int(stride), skip_rects_px=skip_rects_px
+            ):
                 crop_bgr = np.ascontiguousarray(crop[..., ::-1])
                 with torch.inference_mode():
                     results = model.predict(
@@ -5832,7 +6014,9 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                     del results
                 del crop_bgr
         else:
-            for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch):
+            for batch in _iter_yolo_crop_batches(
+                image, int(stride), effective_batch, skip_rects_px=skip_rects_px
+            ):
                 offsets = [(ox, oy) for ox, oy, _ in batch]
                 crops = [np.ascontiguousarray(crop[..., ::-1]) for _, _, crop in batch]
                 with torch.inference_mode():
@@ -8610,7 +8794,9 @@ def run(
                 pass
 
     # Collect all DDS files; resolve overlapping zoom levels.
-    # Each ZL tile maps to exactly 4 children at ZL+1, 16 at ZL+2, etc.
+    # Texture names use raw web-mercator tile indices in steps of 16 (one DDS
+    # spans 16x16 tiles), so the 4 children of texture (y,x) at ZL+1 sit at
+    # (2y,2x), (2y,2x+16), (2y+16,2x), (2y+16,2x+16).
     # A lower-ZL tile is skipped only when ALL 4 of its ZL+1 children are present
     # or themselves fully covered — otherwise it is kept to fill the missing area.
     _by_zl = {}
@@ -8634,7 +8820,7 @@ def run(
             _fc_memo[key] = False; return False
         result = all(
             (cy, cx) in _tiles_at_zl.get(zl + 1, set()) or _fully_covered(cy, cx, zl + 1)
-            for cy, cx in ((2*y, 2*x), (2*y, 2*x+1), (2*y+1, 2*x), (2*y+1, 2*x+1))
+            for cy, cx in ((2*y, 2*x), (2*y, 2*x+16), (2*y+16, 2*x), (2*y+16, 2*x+16))
         )
         _fc_memo[key] = result; return result
     files = sorted(
@@ -8642,6 +8828,32 @@ def run(
         for _y, _x, _f in _by_zl[_zl]
         if not _fully_covered(_y, _x, _zl)
     )
+    _n_skipped_covered = sum(len(v) for v in _by_zl.values()) - len(files)
+    if _n_skipped_covered:
+        print(
+            f"Zoom-level coverage: skipped {_n_skipped_covered} lower-ZL texture(s) "
+            "fully covered by higher-ZL textures"
+        )
+    # Partially covered lower-ZL textures stay in the list, but the sub-regions
+    # that ARE covered by kept higher-ZL textures must not be inferenced/placed
+    # again at the lower ZL — that double coverage was the dominant source of
+    # duplicate placements that the tile-wide dedup pass had to mop up.
+    # Record those regions as (x0,y0,x1,y1) fractions of each texture footprint.
+    # Computed from the pre-filter kept set so debug/benchmark file filters see
+    # the same per-texture behaviour as a full production run.
+    _covered_fracs_by_file = compute_covered_fractions(
+        (
+            (int(_m.group(1)), int(_m.group(2)), int(_m.group(4)), _f)
+            for _f in files
+            for _m in (STD_RE.match(_f),)
+            if _m
+        ),
+    )
+    if _covered_fracs_by_file:
+        print(
+            f"Zoom-level coverage: {len(_covered_fracs_by_file)} partially covered "
+            "lower-ZL texture(s); covered regions excluded from detection/placement"
+        )
     file_filter = _env_patterns("O4_SFR_FILE_FILTER")
     if dds_filter:
         dds_filter = [os.path.basename(str(name)) for name in dds_filter]
@@ -8868,9 +9080,13 @@ def run(
         else yolo_max_det
     )
     yolo_imgsz = int(yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
+    # Trained-YOLO inference runs on the native-resolution texture at every
+    # zoom level. The legacy ZL16-analysis downsample (build a target-ZL PNG,
+    # infer on it, scale detections back up) is kept only as an env opt-in for
+    # A/B comparisons: O4_SFR_BLD_YOLO_ANALYSIS_ZL=<zl> (0 = native, default).
     yolo_analysis_target_zl = max(
-        1,
-        _env_int("O4_SFR_BLD_YOLO_ANALYSIS_ZL", YOLO_ANALYSIS_TARGET_ZL),
+        0,
+        _env_int("O4_SFR_BLD_YOLO_ANALYSIS_ZL", 0),
     )
     # Batch stays 1 by default: the scripts/*_batch_autotune.py harnesses
     # showed batch>1 changes borderline detections on dense tiles (not
@@ -8999,7 +9215,8 @@ def run(
             f"YOLO OBB placement: enabled checkpoint={yolo_checkpoint} "
             f"conf={yolo_conf} iou={yolo_iou} stride={yolo_stride} "
             f"max_det={yolo_max_det} batch={yolo_batch_size} "
-            f"analysis_zl={yolo_analysis_target_zl} fuse={yolo_fuse_model}"
+            f"analysis_zl={yolo_analysis_target_zl or 'native'} "
+            f"fuse={yolo_fuse_model}"
         )
         print(
             "YOLO OBB placement: direct detections only "
@@ -9461,7 +9678,9 @@ def run(
             round(float(yolo_suppress_explain_frac), 6),
             # v23: roads/railways no longer in static_occ_mask by default.
             bool(yolo_road_block),
-            "schema=v23-roads-dont-block",
+            # v24: native-ZL YOLO inference (no ZL16 analysis downsample) +
+            #      cross-ZL covered regions excluded from detection/placement.
+            "schema=v24-native-zl-coverage-clip",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -9526,7 +9745,10 @@ def run(
             try:
                 with open(_bld_cache_file, 'rb') as _f:
                     _cd = _pickle.load(_f)
-                if _cd.get('params') == _requested_bld_params:
+                if (
+                    _cd.get('params') == _requested_bld_params and
+                    _cd.get('covered') == _covered_fracs_by_file.get(fname)
+                ):
                     if _cd.get('source') == 'direct_yolo':
                         _placements = _cd.get('placements') or {}
                         _bad_simheaven = _count_unexported_simheaven_object_placements(
@@ -9654,10 +9876,25 @@ def run(
 
         yolo_detections = []
         yolo_guidance = None
+        # Regions of this texture covered by kept higher-ZL textures: those are
+        # detected/placed at the higher ZL, so exclude them here entirely.
+        _covered_rects_px = covered_rects_to_px(
+            _covered_fracs_by_file.get(fname), img_w, img_h
+        )
+        if _covered_rects_px:
+            file_counts['covered_rects'] = len(_covered_rects_px)
         if yolo_enabled:
             _source_path = _source_image_path(fname, _source_mode, _orthophoto_dir)
-            _analysis_signature = _yolo_analysis_signature(
-                fname, _source_path, img_w, img_h, zl, yolo_analysis_target_zl
+            # Native-ZL inference is the default; the ZL16-analysis downsample
+            # survives only behind O4_SFR_BLD_YOLO_ANALYSIS_ZL for A/B runs.
+            _use_analysis = (
+                yolo_analysis_target_zl > 0 and zl > yolo_analysis_target_zl
+            )
+            _analysis_signature = (
+                _yolo_analysis_signature(
+                    fname, _source_path, img_w, img_h, zl, yolo_analysis_target_zl
+                )
+                if _use_analysis else None
             )
             _yolo_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_yolo_obb.pkl'))
             _yolo_key = _yolo_obb_cache_key(
@@ -9666,7 +9903,14 @@ def run(
                 batch_size=yolo_batch_size,
                 fused=yolo_fuse_model,
                 analysis_signature=_analysis_signature,
-                analysis_target_zl=yolo_analysis_target_zl,
+                analysis_target_zl=(
+                    yolo_analysis_target_zl if _use_analysis else None
+                ),
+                # Fully covered crops are skipped at inference time on the
+                # native path, so the raw detection set depends on coverage.
+                covered_rects=(
+                    None if _use_analysis else (_covered_rects_px or None)
+                ),
             )
             if not disable_cache:
                 _t = time.perf_counter()
@@ -9692,48 +9936,65 @@ def run(
                                     file_counts['yolo_cuda_reserved_before_mb'],
                                 ) = _cuda_counts
                         _t = time.perf_counter()
-                        yolo_analysis = _load_yolo_analysis_image(
-                            tex_dir,
-                            fname,
-                            til_y_top,
-                            til_x_left,
-                            m.group(3),
-                            zl,
-                            yolo_analysis_target_zl,
-                            sidecar_cache_dir,
-                            img,
-                            _source_path,
-                            (lat_n, lat_s, lon_w, lon_e),
-                        )
-                        analysis_scale_x = float(yolo_analysis['scale_x'])
-                        analysis_scale_y = float(yolo_analysis['scale_y'])
-                        analysis_m_per_px = (
-                            float(m_per_px) * (analysis_scale_x + analysis_scale_y) / 2.0
-                        )
-                        file_counts['yolo_analysis_zl'] = int(yolo_analysis_target_zl)
-                        file_counts['yolo_analysis_scale_x1000'] = int(
-                            round(((analysis_scale_x + analysis_scale_y) / 2.0) * 1000)
-                        )
-                        yolo_result = _run_yolo_obb_inference(
-                            yolo_model,
-                            yolo_analysis['image'],
-                            imgsz=yolo_imgsz,
-                            stride=yolo_stride,
-                            conf=yolo_conf,
-                            iou=yolo_iou,
-                            max_det=yolo_max_det,
-                            device=("0" if torch.cuda.is_available() else "cpu"),
-                            m_per_px=analysis_m_per_px,
-                            batch_size=yolo_batch_size,
-                            return_metadata=True,
-                        )
-                        yolo_detections = _scale_yolo_detections_to_image(
-                            yolo_result['detections'],
-                            analysis_scale_x,
-                            analysis_scale_y,
-                            img_w,
-                            img_h,
-                        )
+                        if _use_analysis:
+                            yolo_analysis = _load_yolo_analysis_image(
+                                tex_dir,
+                                fname,
+                                til_y_top,
+                                til_x_left,
+                                m.group(3),
+                                zl,
+                                yolo_analysis_target_zl,
+                                sidecar_cache_dir,
+                                img,
+                                _source_path,
+                                (lat_n, lat_s, lon_w, lon_e),
+                            )
+                            analysis_scale_x = float(yolo_analysis['scale_x'])
+                            analysis_scale_y = float(yolo_analysis['scale_y'])
+                            analysis_m_per_px = (
+                                float(m_per_px) * (analysis_scale_x + analysis_scale_y) / 2.0
+                            )
+                            file_counts['yolo_analysis_zl'] = int(yolo_analysis_target_zl)
+                            file_counts['yolo_analysis_scale_x1000'] = int(
+                                round(((analysis_scale_x + analysis_scale_y) / 2.0) * 1000)
+                            )
+                            yolo_result = _run_yolo_obb_inference(
+                                yolo_model,
+                                yolo_analysis['image'],
+                                imgsz=yolo_imgsz,
+                                stride=yolo_stride,
+                                conf=yolo_conf,
+                                iou=yolo_iou,
+                                max_det=yolo_max_det,
+                                device=("0" if torch.cuda.is_available() else "cpu"),
+                                m_per_px=analysis_m_per_px,
+                                batch_size=yolo_batch_size,
+                                return_metadata=True,
+                            )
+                            yolo_detections = _scale_yolo_detections_to_image(
+                                yolo_result['detections'],
+                                analysis_scale_x,
+                                analysis_scale_y,
+                                img_w,
+                                img_h,
+                            )
+                        else:
+                            yolo_result = _run_yolo_obb_inference(
+                                yolo_model,
+                                img,
+                                imgsz=yolo_imgsz,
+                                stride=yolo_stride,
+                                conf=yolo_conf,
+                                iou=yolo_iou,
+                                max_det=yolo_max_det,
+                                device=("0" if torch.cuda.is_available() else "cpu"),
+                                m_per_px=m_per_px,
+                                batch_size=yolo_batch_size,
+                                return_metadata=True,
+                                skip_rects_px=_covered_rects_px,
+                            )
+                            yolo_detections = yolo_result['detections']
                         prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
                         prep['yolo_batch_fell_back'] = yolo_result['fell_back']
                         if yolo_result['fell_back']:
@@ -9755,7 +10016,13 @@ def run(
                                     batch_size=yolo_result['effective_batch'],
                                     fused=yolo_fuse_model,
                                     analysis_signature=_analysis_signature,
-                                    analysis_target_zl=yolo_analysis_target_zl,
+                                    analysis_target_zl=(
+                                        yolo_analysis_target_zl if _use_analysis else None
+                                    ),
+                                    covered_rects=(
+                                        None if _use_analysis
+                                        else (_covered_rects_px or None)
+                                    ),
                                 ),
                                 yolo_detections,
                             )
@@ -9798,6 +10065,30 @@ def run(
                     print(f"    [Bld stage] {fname} stock YOLO: {_summary}", flush=True)
             except Exception as exc:
                 print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
+        # Cross-ZL coverage: everything inside a covered region is detected and
+        # placed at the higher ZL instead, so drop it here (trained YOLO,
+        # stock YOLO, and — via the veg-map wipe — SegFormer zones/gap fill).
+        if _covered_rects_px:
+            yolo_detections, _cov_dropped = filter_detections_by_coverage(
+                yolo_detections, _covered_rects_px
+            )
+            _cov_geo_boxes = geo_boxes_from_covered_px(
+                _covered_rects_px, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+            )
+            _cov_dropped += filter_stock_results_by_coverage(
+                prep.get('stock_res'), _covered_rects_px, _cov_geo_boxes
+            )
+            if _cov_dropped:
+                file_counts['covered_dropped'] = int(_cov_dropped)
+            if veg_map is not None and not mesh_water_full:
+                # Copy: the array also backs the shared _veg.npy inference
+                # cache, which must stay whole for the vegetation overlay.
+                veg_map = veg_map.copy()
+                mask_covered_regions(
+                    veg_map,
+                    _covered_rects_px,
+                    value=getattr(SEGFORMER, 'CLASS_BACKGROUND', 0),
+                )
         raw_yolo_count = len(yolo_detections)
         # Under avoidance, remove overlapping detections so each building area
         # keeps a single object. Honour the configured keep mode (default 'drop':
@@ -9992,6 +10283,7 @@ def run(
                         with open(_bld_cache_file, 'wb') as _f:
                             _pickle.dump({
                                 'params': _effective_bld_params,
+                                'covered': _covered_fracs_by_file.get(fname),
                                 'source': 'direct_yolo',
                                 'placements': {'objects': (), 'facades': ()},
                             }, _f)
@@ -11328,6 +11620,7 @@ def run(
                     with open(_bld_cache_file, 'wb') as _f:
                         _pickle.dump({
                             'params': _effective_bld_params,
+                            'covered': _covered_fracs_by_file.get(fname),
                             'source': 'direct_yolo',
                             'placements': {
                                 'objects': placed_stock_objects[_start_object_idx:],
@@ -11522,10 +11815,15 @@ def run(
     if prefetch_executor is not None:
         prefetch_executor.shutdown(wait=True, cancel_futures=True)
 
-    # Tile-wide cross-texture / cross-pass object dedup. Per-DDS placement only
-    # avoids overlaps within a single texture; buildings on texture seams (far
-    # more numerous at high ZL) and stock-vs-trained coincidences slip through.
-    if not yolo_no_overlap_removal and placed_stock_objects:
+    # Tile-wide cross-texture / cross-pass object dedup — DEPRECATED as a
+    # required stage: cross-ZL double coverage (its dominant feed) is now
+    # removed at the source, so this pass only mops up rare coverage-boundary
+    # straddlers and stock-vs-trained coincidences. Kept as a cheap safety net;
+    # disable with O4_SFR_BLD_TILE_DEDUP=0.
+    if (
+        not yolo_no_overlap_removal and placed_stock_objects and
+        _env_flag("O4_SFR_BLD_TILE_DEDUP", True)
+    ):
         _t = time.perf_counter()
         _before = len(placed_stock_objects)
         placed_stock_objects, _seam_dropped = _dedupe_overlapping_placements(

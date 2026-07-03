@@ -2,6 +2,14 @@
 
 Created: 2026-06-25
 
+> **Status 2026-07-02: reverted to native-ZL inference by default.** The
+> ZL16-analysis downsample is no longer the default path; trained YOLO runs on
+> the native-resolution texture at every zoom level. The downsample machinery
+> is kept behind `O4_SFR_BLD_YOLO_ANALYSIS_ZL=<zl>` for A/B comparisons. In the
+> same change, cross-ZL double coverage (lower-ZL textures also covered by
+> higher-ZL textures) is excluded at the source, which removes the dominant
+> feed of the tile-wide placement dedup pass.
+
 ## Goal
 
 Make Ortho4XP-SegFormer run the building YOLO OBB model on consistent ZL16-scale imagery, even when the scenery tile itself uses higher zoom textures such as ZL17/ZL18/ZL19.
