@@ -308,14 +308,18 @@ class Ortho4XP_GUI(tk.Tk):
         ).grid(row=0, column=6, padx=5, pady=0, sticky=N + S + E + W)
         # Session-only choice (deliberately not a config setting): offload
         # SegFormer/YOLO inference to the remote GPU host while it is online.
+        # Classic tk.Checkbutton like the rest of the app — the custom ttk
+        # theme does not render the ttk.Checkbutton indicator state.
         self.use_remote_gpu = tk.BooleanVar(value=False)
         self.remote_gpu_last_host = ""   # remembered for this session only
-        ttk.Checkbutton(
+        tk.Checkbutton(
             self.frame_steps,
             text="Remote GPU",
+            anchor=W,
             variable=self.use_remote_gpu,
             command=self.toggle_remote_gpu,
             takefocus=False,
+            **THEME.checkbutton_options(),
         ).grid(row=0, column=7, padx=5, pady=0)
 
         # Fourth row (Progress bars and controls)
