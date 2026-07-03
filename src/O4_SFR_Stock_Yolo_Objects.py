@@ -300,8 +300,16 @@ def load_stock_yolo_model(checkpoint: str = DEFAULT_STOCK_YOLO_CHECKPOINT):
     """Load the stock DOTAv1 YOLO-OBB model, fetching the checkpoint from
     `ultralytics/assets` if it's not already on disk. Caller is responsible
     for caching the returned model across DDS files within a tile."""
+    path = ensure_stock_yolo_checkpoint(checkpoint)
+    try:
+        import O4_SFR_Remote as REMOTE
+        remote = REMOTE.active_client()
+    except Exception:
+        remote = None
+    if remote is not None:
+        return remote.remote_yolo(path)
     from ultralytics import YOLO  # local import keeps module-load light
-    return YOLO(ensure_stock_yolo_checkpoint(checkpoint))
+    return YOLO(path)
 
 
 def _iter_yolo_crops(image: np.ndarray, stride: int):

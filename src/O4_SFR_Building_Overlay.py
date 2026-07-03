@@ -5411,11 +5411,24 @@ def _save_yolo_obb_cache(cache_path, key, detections):
 
 
 def _load_yolo_obb_model(checkpoint, *, fuse=False):
+    remote = _sfr_remote_client()
+    if remote is not None:
+        # Predicts run on the remote GPU; the proxy has no .fuse so the
+        # hasattr guard below is skipped naturally.
+        return remote.remote_yolo(str(checkpoint))
     from ultralytics import YOLO
     model = YOLO(str(checkpoint))
     if fuse and hasattr(model, 'fuse'):
         model.fuse()
     return model
+
+
+def _sfr_remote_client():
+    try:
+        import O4_SFR_Remote as REMOTE
+        return REMOTE.active_client()
+    except Exception:
+        return None
 
 
 def _image_resampling_lanczos():

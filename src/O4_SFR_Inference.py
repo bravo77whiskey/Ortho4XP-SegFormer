@@ -174,6 +174,23 @@ _SIMPLIFY_TOL       = 1e-4    # Douglas-Peucker tolerance (degrees, ~11 m at mid
 _MAX_RING_PTS       = 16000   # hard vertex cap per DSF winding (DSFTool limit ~65535 intervals)
 _MAX_HOLES          = 100     # max interior rings kept per polygon
 
+# ── Remote inference offload (optional, session-scoped) ──────────────────────
+# Set by O4_SFR_Remote.activate() when the user opted to run model inference
+# on a remote GPU host for this run. When set, the loaders hand back a
+# lightweight marker instead of loading torch models locally, and
+# run_inference() ships the image to the remote worker (which executes this
+# very same run_inference code on its own GPU). None = fully local, the
+# default — every remote branch below is a no-op then.
+remote_client = None
+
+
+class RemoteModelHandle:
+    """Marker returned by the model loaders when inference is offloaded."""
+
+    def __init__(self, kind):
+        self.kind = kind
+
+
 # ── Lazy model handles ────────────────────────────────────────────────────────
 _model_veg     = None
 _processor_veg = None
@@ -583,6 +600,8 @@ def load_vegetation_model(device=None):
     Returns (model, processor, device).
     """
     global _model_veg, _processor_veg, _model, _processor
+    if remote_client is not None:
+        return RemoteModelHandle('veg'), None, device
     from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
     device = _get_device(device)
@@ -615,6 +634,8 @@ def load_building_model(device=None):
     Returns (model, processor, device).
     """
     global _model_bld, _processor_bld
+    if remote_client is not None:
+        return RemoteModelHandle('bld'), None, device
     from transformers import SegformerForSemanticSegmentation, AutoImageProcessor
 
     device = _get_device(device)
@@ -697,6 +718,8 @@ def run_inference(model, device, img_rgb, processor=None):
 
     Returns a (H, W) class-index array.
     """
+    if remote_client is not None and isinstance(model, RemoteModelHandle):
+        return remote_client.segformer_infer(model.kind, img_rgb)
     import torch
     import torch.nn.functional as F
     from PIL import Image as _Image

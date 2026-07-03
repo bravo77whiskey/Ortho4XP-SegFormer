@@ -43,6 +43,7 @@ import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME
 import O4_Config_Utils as CFG
 import O4_SFR_Pipeline as SFR
+import O4_SFR_Remote as SFR_REMOTE
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
@@ -305,6 +306,17 @@ class Ortho4XP_GUI(tk.Tk):
         ttk.Button(
             self.frame_steps, text="    All in one     ", command=self.build_all
         ).grid(row=0, column=6, padx=5, pady=0, sticky=N + S + E + W)
+        # Session-only choice (deliberately not a config setting): offload
+        # SegFormer/YOLO inference to the remote GPU host while it is online.
+        self.use_remote_gpu = tk.BooleanVar(value=False)
+        self.remote_gpu_last_host = ""   # remembered for this session only
+        ttk.Checkbutton(
+            self.frame_steps,
+            text="Remote GPU",
+            variable=self.use_remote_gpu,
+            command=self.toggle_remote_gpu,
+            takefocus=False,
+        ).grid(row=0, column=7, padx=5, pady=0)
 
         # Fourth row (Progress bars and controls)
         # Label(self.frame_left,anchor=W,text="DSF/Masks progress",
@@ -739,6 +751,25 @@ class Ortho4XP_GUI(tk.Tk):
         )
         self.working_thread.start()
 
+    def toggle_remote_gpu(self):
+        """Session-only remote-GPU choice for SegFormer/YOLO inference.
+
+        Ticking the box opens a host picker that lists SSH machines found on
+        the local network; the box only stays ticked once a host has been
+        selected and its key-based SSH login verified. Sets
+        SFR.sfr_remote_host for every subsequent build started from this
+        window (single steps, All in one, and batch builds). Never persisted:
+        the checkbox resets on restart, and each tile re-probes the host so a
+        box that goes offline mid-batch just means local inference resumes.
+        """
+        if not self.use_remote_gpu.get():
+            SFR.sfr_remote_host = ""
+            print("Remote GPU off — SFR model inference runs locally.")
+            return
+        # Stay unticked until the picker validates a host.
+        self.use_remote_gpu.set(False)
+        Ortho4XP_Remote_GPU_Picker(self)
+
     def build_all(self):
         # Check for unsaved changes
         if (
@@ -846,6 +877,255 @@ class Ortho4XP_GUI(tk.Tk):
         self.after_cancel(self.callback_console)
         sys.stdout = self.stdout_orig
         self.destroy()
+
+################################################################################
+class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
+    """Pick the machine that runs SegFormer/YOLO inference for this session.
+
+    Lists concrete Host entries from ~/.ssh/config immediately, then fills in
+    machines found by a background scan of the local subnet(s) for open SSH
+    ports (with reverse-resolved name and SSH banner as identifiable info).
+    The main-window checkbox is only ticked once a host has been selected and
+    its key-based SSH login verified. Nothing here is persisted.
+    """
+
+    def __init__(self, parent):
+        tk.Toplevel.__init__(self)
+        self.parent = parent
+        self.title("Remote GPU host")
+        self.transient(parent)
+        self.configure(**THEME.frame_options())
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        self._queue = queue.Queue()
+        self._row_hosts = []        # listbox row index -> host string to ssh to
+        self._alias_map = {}        # ip -> ssh-config alias (resolved async)
+        self._scanning = False
+        self._probing = False
+        self._closed = False
+
+        colors = THEME.palette()
+        pad = {"padx": 8, "pady": 4}
+
+        tk.Label(
+            self,
+            anchor=W,
+            text="Select the machine that will run SegFormer/YOLO inference\n"
+                 "(needs key-based SSH login; prefix user@ if the remote "
+                 "username differs):",
+            **THEME.label_options(),
+        ).grid(row=0, column=0, columnspan=3, sticky=E + W, **pad)
+
+        self.listbox = tk.Listbox(
+            self,
+            width=86,
+            height=10,
+            activestyle="dotbox",
+            bg=colors["entry_background"],
+            fg=colors["foreground"],
+            selectbackground=colors["select_background"],
+            selectforeground=colors["select_foreground"],
+        )
+        self.listbox.grid(row=1, column=0, columnspan=2, sticky=N + S + E + W, **pad)
+        scrollbar = ttk.Scrollbar(self, command=self.listbox.yview)
+        scrollbar.grid(row=1, column=2, sticky=N + S + W)
+        self.listbox.config(yscrollcommand=scrollbar.set)
+        self.listbox.bind("<<ListboxSelect>>", self.on_select)
+        self.listbox.bind("<Double-Button-1>", lambda _e: self.use_host())
+
+        tk.Label(self, anchor=W, text="Host:", **THEME.label_options()).grid(
+            row=2, column=0, sticky=W, **pad
+        )
+        self.host_var = tk.StringVar(
+            value=parent.remote_gpu_last_host or SFR_REMOTE.default_host()
+        )
+        self.host_entry = tk.Entry(
+            self, width=40, textvariable=self.host_var, **THEME.entry_options()
+        )
+        self.host_entry.grid(row=2, column=1, columnspan=2, sticky=W, **pad)
+        self.host_entry.bind("<Return>", lambda _e: self.use_host())
+
+        self.status_var = tk.StringVar(value="")
+        tk.Label(
+            self, anchor=W, textvariable=self.status_var, **THEME.label_options()
+        ).grid(row=3, column=0, columnspan=3, sticky=E + W, **pad)
+
+        button_row = tk.Frame(self, **THEME.frame_options())
+        button_row.grid(row=4, column=0, columnspan=3, sticky=E + W, **pad)
+        self.rescan_button = ttk.Button(
+            button_row, text="Rescan", command=self.start_scan
+        )
+        self.rescan_button.grid(row=0, column=0, padx=4)
+        self.ok_button = ttk.Button(
+            button_row, text="Use this host", command=self.use_host
+        )
+        self.ok_button.grid(row=0, column=1, padx=4)
+        ttk.Button(button_row, text="Cancel", command=self.cancel).grid(
+            row=0, column=2, padx=4
+        )
+
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        self._add_ssh_config_rows()
+        self._n_static_rows = len(self._row_hosts)
+        self.start_scan()
+        self._poll()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.host_entry.focus_set()
+
+    # ── Row management ────────────────────────────────────────────────────────
+
+    def _add_row(self, host, description):
+        self._row_hosts.append(host)
+        self.listbox.insert(END, description)
+
+    def _add_ssh_config_rows(self):
+        default = SFR_REMOTE.default_host()
+        seen_default = False
+        for entry in SFR_REMOTE.parse_ssh_config_hosts():
+            alias = entry["alias"]
+            details = entry["hostname"] or "?"
+            if entry["user"]:
+                details += f", user {entry['user']}"
+            marker = "  «default»" if alias == default else ""
+            self._add_row(alias, f"{alias:<24} {details}  [ssh config]{marker}")
+            if alias == default:
+                seen_default = True
+        if default and not seen_default:
+            self._add_row(default, f"{default:<24} [configured default]")
+
+    def on_select(self, _event):
+        selection = self.listbox.curselection()
+        if selection:
+            self.host_var.set(self._row_hosts[selection[0]])
+
+    # ── Network scan ──────────────────────────────────────────────────────────
+
+    def start_scan(self):
+        if self._scanning:
+            return
+        self._scanning = True
+        self.rescan_button.state(["disabled"])
+        self.status_var.set("Scanning local network for SSH hosts …")
+        # Drop rows from a previous scan (they follow the ssh-config rows).
+        while len(self._row_hosts) > self._n_static_rows:
+            self._row_hosts.pop()
+            self.listbox.delete(END)
+
+        def _scan():
+            # Resolve ssh-config hostnames first so scanned IPs can be tagged
+            # with the alias they belong to (queued before any 'found' event).
+            import socket as _socket
+            alias_map = {}
+            for entry in SFR_REMOTE.parse_ssh_config_hosts():
+                target = entry["hostname"] or entry["alias"]
+                try:
+                    for info in _socket.getaddrinfo(
+                        target, None, _socket.AF_INET
+                    ):
+                        alias_map[info[4][0]] = entry["alias"]
+                except OSError:
+                    pass
+            self._queue.put(("alias_map", alias_map))
+            try:
+                SFR_REMOTE.discover_ssh_hosts(
+                    progress_cb=lambda entry: self._queue.put(("found", entry))
+                )
+            except Exception as exc:
+                self._queue.put(("scan_error", str(exc)))
+            self._queue.put(("scan_done", None))
+
+        threading.Thread(target=_scan, daemon=True).start()
+
+    # ── Selection / probing ───────────────────────────────────────────────────
+
+    def use_host(self):
+        if self._probing:
+            return
+        host = self.host_var.get().strip()
+        if not host:
+            self.status_var.set("Enter or select a host first.")
+            return
+        self._probing = True
+        self.ok_button.state(["disabled"])
+        self.status_var.set(f"Checking key-based SSH login to {host} …")
+
+        def _probe():
+            ok = SFR_REMOTE.probe(host)
+            self._queue.put(("probe_ok" if ok else "probe_fail", host))
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def cancel(self):
+        self._closed = True
+        SFR.sfr_remote_host = ""
+        self.parent.use_remote_gpu.set(False)
+        self.destroy()
+
+    # ── Queue polling (worker threads never touch tk directly) ───────────────
+
+    def _poll(self):
+        if self._closed:
+            return
+        try:
+            while True:
+                kind, payload = self._queue.get_nowait()
+                if kind == "alias_map":
+                    self._alias_map = payload
+                elif kind == "found":
+                    alias = self._alias_map.get(payload["ip"], "")
+                    name = payload["name"] or ""
+                    if alias:
+                        name = (f"{name}  " if name else "") + \
+                            f"= {alias} [ssh config]"
+                    banner = payload["banner"] or ""
+                    self._add_row(
+                        payload["ip"],
+                        f"{payload['ip']:<24} {name:<28} {banner}",
+                    )
+                elif kind == "scan_done":
+                    self._scanning = False
+                    self.rescan_button.state(["!disabled"])
+                    n_found = len(self._row_hosts) - self._n_static_rows
+                    self.status_var.set(
+                        f"Scan finished — {n_found} SSH host(s) found on the "
+                        "local network."
+                    )
+                elif kind == "scan_error":
+                    self._scanning = False
+                    self.rescan_button.state(["!disabled"])
+                    self.status_var.set(f"Network scan failed: {payload}")
+                elif kind == "probe_ok":
+                    SFR.sfr_remote_host = payload
+                    self.parent.remote_gpu_last_host = payload
+                    self.parent.use_remote_gpu.set(True)
+                    print(
+                        f"Remote GPU host {payload} selected — SegFormer/YOLO "
+                        "inference will run there for builds started while it "
+                        "stays reachable (session-only, not saved)."
+                    )
+                    self._closed = True
+                    self.destroy()
+                    return
+                elif kind == "probe_fail":
+                    self._probing = False
+                    self.ok_button.state(["!disabled"])
+                    self.status_var.set(
+                        f"Could not log in to {payload} via SSH. Check that "
+                        "the machine is on and reachable and that key-based "
+                        "login works (try: ssh {0} true).".format(payload)
+                    )
+        except queue.Empty:
+            pass
+        try:
+            self.after(120, self._poll)
+        except tk.TclError:
+            pass
+
 
 ################################################################################
 class Ortho4XP_Custom_ZL(tk.Toplevel):

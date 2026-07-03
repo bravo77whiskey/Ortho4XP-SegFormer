@@ -240,6 +240,45 @@ sfr_patch_size        = 512
 sfr_overlap           = 64
 sfr_batch_size        = 0      # 0 = recommended default in O4_SFR_Inference
 
+# ── Remote GPU offload (session-only, NOT a config setting) ──────────────────
+# Set by the GUI "Remote GPU" checkbox (or O4_SFR_REMOTE=1 for headless runs)
+# right before a build starts; never persisted. When set, SegFormer and YOLO
+# forward passes for this run execute on the remote host — everything else
+# stays local. Probed per tile: if the host is offline the build silently
+# continues with local inference.
+sfr_remote_host       = ""
+
+
+def _resolve_remote_host():
+    """Return a prepared remote host for this build step, or '' for local."""
+    host = (sfr_remote_host or "").strip()
+    if not host and os.environ.get("O4_SFR_REMOTE", "").strip() == "1":
+        import O4_SFR_Remote as REMOTE
+        host = REMOTE.default_host()
+    if not host:
+        return ""
+    import O4_SFR_Remote as REMOTE
+    print(f"[SFR] Remote GPU requested — checking {host} …", flush=True)
+    if REMOTE.prepare_remote(host):
+        print(f"[SFR] Model inference will run on {host}.", flush=True)
+        return host
+    print(
+        f"[SFR] Remote host {host} is offline or not ready — "
+        "running inference locally.",
+        flush=True,
+    )
+    return ""
+
+
+def _remote_activation_code(remote_host):
+    """Lines injected into the overlay subprocess to route inference remotely."""
+    if not remote_host:
+        return ""
+    return (
+        f"import O4_SFR_Remote as _SFR_REMOTE\n"
+        f"_SFR_REMOTE.activate({remote_host!r})\n"
+    )
+
 
 def _dsf_output_path(lat, lon, folder):
     """Compute X-Plane DSF output path rooted at the runtime data directory.
@@ -462,6 +501,7 @@ def process_veg_tile(lat, lon, build_dir):
     dsftool          = _dsftool_path()
     out_dsf          = _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
     custom_scenery_dir = _scenery_paths()
+    remote_host      = _resolve_remote_host()
 
     code = (
         f"import O4_SFR_Inference as SEG\n"
@@ -469,6 +509,7 @@ def process_veg_tile(lat, lon, build_dir):
         f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
         f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"
         f"SEG._dsftool     = {dsftool!r}\n"
+        + _remote_activation_code(remote_host) +
         f"import O4_SFR_Vegetation_Overlay as veg_overlay\n"
         f"veg_overlay.run(\n"
         f"    tex_dir          = {tex_dir!r},\n"
@@ -537,6 +578,7 @@ def process_bld_tile(lat, lon, build_dir):
     dsftool     = _dsftool_path()
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Bld_Overlays')
     custom_scenery_dir = _scenery_paths()
+    remote_host = _resolve_remote_host()
     print(
         "[SFR Bld] Effective settings: "
         f"yolo_enabled={sfr_bld_yolo_enabled!r} "
@@ -556,6 +598,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"SEG.segformer_overlap    = {sfr_overlap!r}\n"
         f"SEG.segformer_batch_size = {sfr_batch_size!r}\n"
         f"SEG._dsftool     = {dsftool!r}\n"
+        + _remote_activation_code(remote_host) +
         f"import O4_SFR_Building_Overlay as bld_overlay\n"
         f"_bld_path = os.path.abspath(getattr(bld_overlay, '__file__', ''))\n"
         f"print(f'[SFR Bld] bld_overlay.__file__={{_bld_path}}', flush=True)\n"
