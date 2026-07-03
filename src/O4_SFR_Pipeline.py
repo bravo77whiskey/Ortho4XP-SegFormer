@@ -264,8 +264,9 @@ def _resolve_remote_host():
         print(f"[SFR] Model inference will run on {host}.", flush=True)
         return host
     print(
-        f"[SFR] Remote host {host} is offline or not ready — "
-        "running inference locally.",
+        f"[SFR] WARNING: remote host {host} is offline or not ready "
+        "(after connection retries) — ALL inference for this step will "
+        "run locally.",
         flush=True,
     )
     return ""

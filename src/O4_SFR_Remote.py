@@ -52,6 +52,14 @@ _COMPRESS_THRESHOLD = 1 << 20
 
 _PROBE_TIMEOUT_S = 5
 
+# A fresh ssh connection to a LAN host can transiently stall well past its
+# ConnectTimeout: .local hostnames resolve through mDNS (not covered by
+# ConnectTimeout) and Wi-Fi power save adds multi-second spikes — measured
+# 0.3 s to >15 s for the same healthy host. A single attempt therefore
+# misreads a reachable host as offline and silently degrades the whole
+# build step to local inference. Every fresh-connection site retries.
+_CONNECT_ATTEMPTS = 3
+
 
 def _no_window():
     if sys.platform.startswith("win"):
@@ -258,21 +266,34 @@ def discover_ssh_hosts(port=22, timeout=0.35, progress_cb=None):
 # Host availability + one-time remote environment preparation (main process)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def probe(host, timeout=_PROBE_TIMEOUT_S):
-    """Return True when the host accepts a key-based SSH login right now."""
+def probe(host, timeout=_PROBE_TIMEOUT_S, attempts=_CONNECT_ATTEMPTS):
+    """Return True when the host accepts a key-based SSH login right now.
+
+    Retries transient connection stalls (see _CONNECT_ATTEMPTS) so a healthy
+    host is not misdiagnosed as offline by one slow mDNS lookup.
+    """
     if not host:
         return False
-    try:
-        ret = subprocess.call(
-            _ssh_base(timeout) + [host, "true"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout + 10,
-            **_no_window(),
-        )
-        return ret == 0
-    except Exception:
-        return False
+    for attempt in range(1, attempts + 1):
+        try:
+            ret = subprocess.call(
+                _ssh_base(timeout) + [host, "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout + 10,
+                **_no_window(),
+            )
+            if ret == 0:
+                return True
+        except Exception:
+            pass
+        if attempt < attempts:
+            print(
+                f"[SFR Remote] SSH probe of {host} stalled or failed "
+                f"(attempt {attempt}/{attempts}) — retrying …",
+                flush=True,
+            )
+    return False
 
 
 def _run_ssh_streamed(host, command, label="[SFR Remote]"):
@@ -358,19 +379,24 @@ def _sync_code(host):
     )
 
 
-def _env_ok(host):
-    try:
-        ret = subprocess.call(
-            _ssh_base()
-            + [host, f"{_REMOTE_VENV_PY} -c '{_REMOTE_IMPORT_CHECK}'"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=90,
-            **_no_window(),
-        )
-        return ret == 0
-    except Exception:
-        return False
+def _env_ok(host, attempts=2):
+    # One retry: a transient connection stall must not be mistaken for a
+    # missing venv (that would kick off the long one-time setup path).
+    for attempt in range(attempts):
+        try:
+            ret = subprocess.call(
+                _ssh_base()
+                + [host, f"{_REMOTE_VENV_PY} -c '{_REMOTE_IMPORT_CHECK}'"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=90,
+                **_no_window(),
+            )
+            if ret == 0:
+                return True
+        except Exception:
+            pass
+    return False
 
 
 # Like O4_SFR_Pipeline._CUDA_WHEEL_MAP but extended upward: modern Python on
@@ -451,11 +477,23 @@ def prepare_remote(host):
     """
     if not probe(host):
         return False
-    try:
-        _sync_code(host)
-    except Exception as exc:
-        print(f"[SFR Remote] Code sync to {host} failed: {exc}", flush=True)
-        return False
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+        try:
+            _sync_code(host)
+            break
+        except Exception as exc:
+            if attempt < _CONNECT_ATTEMPTS:
+                print(
+                    f"[SFR Remote] Code sync to {host} failed ({exc}) — "
+                    f"retrying ({attempt}/{_CONNECT_ATTEMPTS}) …",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[SFR Remote] Code sync to {host} failed: {exc}",
+                    flush=True,
+                )
+                return False
     with _ready_lock:
         ready = host in _ready_hosts
     if ready:
@@ -570,14 +608,19 @@ class RemoteYOLO:
 # Client (lives in the .venv overlay subprocess)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _TransportError(RuntimeError):
+    """SSH/worker channel failure (as opposed to a remote inference error)."""
+
+
 class RemoteInferenceClient:
     def __init__(self, host):
         self.host = host
         self._proc = None
         self._lock = threading.Lock()
         self._yolo_proxies = {}
+        self._atexit_registered = False
 
-    def start(self):
+    def _spawn(self):
         self._proc = subprocess.Popen(
             _ssh_base() + [self.host, f"{_REMOTE_VENV_PY} -u {_REMOTE_WORKER}"],
             stdin=subprocess.PIPE,
@@ -585,8 +628,15 @@ class RemoteInferenceClient:
             stderr=subprocess.PIPE,
             **_no_window(),
         )
-        threading.Thread(target=self._pump_stderr, daemon=True).start()
-        atexit.register(self.close)
+        threading.Thread(
+            target=self._pump_stderr, args=(self._proc,), daemon=True
+        ).start()
+
+    def start(self):
+        self._spawn()
+        if not self._atexit_registered:
+            atexit.register(self.close)
+            self._atexit_registered = True
         info = self.call({"op": "ping"})
         gpu = info.get("device_name") or "CPU"
         print(
@@ -596,34 +646,76 @@ class RemoteInferenceClient:
             flush=True,
         )
 
-    def _pump_stderr(self):
+    def _pump_stderr(self, proc):
         try:
-            for raw in self._proc.stderr:
+            for raw in proc.stderr:
                 line = raw.decode(errors="replace").rstrip()
                 if line:
                     print(f"[SFR Remote] {line}", flush=True)
         except Exception:
             pass
 
-    def call(self, request):
-        with self._lock:
-            if self._proc is None or self._proc.poll() is not None:
-                raise RuntimeError(
-                    f"remote inference worker on {self.host} is not running"
-                )
-            send_msg(self._proc.stdin, request)
-            response = recv_msg(self._proc.stdout)
+    def _send_recv(self, request):
+        """One request/response on the wire. Raises _TransportError when the
+        channel is gone (caller may reconnect and retry — requests are pure
+        inference, so re-issuing is safe)."""
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            raise _TransportError(
+                f"remote inference worker on {self.host} is not running"
+            )
+        try:
+            send_msg(proc.stdin, request)
+        except Exception as exc:
+            raise _TransportError(
+                f"lost connection to remote inference worker on {self.host} "
+                f"({exc})"
+            )
+        response = recv_msg(proc.stdout)
         if response is None:
-            raise RuntimeError(
+            raise _TransportError(
                 f"lost connection to remote inference worker on {self.host}"
             )
+        return response
+
+    def _restart_locked(self):
+        """Tear down the dead channel and bring up a fresh worker (lock held).
+
+        Uploaded YOLO checkpoints persist on the remote disk and SegFormer
+        settings travel with every request, so a restarted worker serves the
+        next request identically.
+        """
+        self._close_proc()
+        self._spawn()
+        response = self._send_recv({"op": "ping"})
+        if not response.get("ok"):
+            raise _TransportError(
+                f"worker on {self.host} failed its post-reconnect ping"
+            )
+        print(f"[SFR Remote] Reconnected to {self.host}.", flush=True)
+
+    def call(self, request):
+        with self._lock:
+            try:
+                response = self._send_recv(request)
+            except _TransportError as exc:
+                if request.get("op") == "ping":
+                    # Initial connection — activate() owns retry policy here.
+                    raise
+                print(
+                    f"[SFR Remote] {exc} — restarting remote worker and "
+                    "retrying the request …",
+                    flush=True,
+                )
+                self._restart_locked()
+                response = self._send_recv(request)
         if not response.get("ok"):
             raise RuntimeError(
                 response.get("error", "remote inference failed")
             )
         return response
 
-    def close(self):
+    def _close_proc(self):
         proc, self._proc = self._proc, None
         if proc is None:
             return
@@ -639,6 +731,9 @@ class RemoteInferenceClient:
                     proc.kill()
         except Exception:
             pass
+
+    def close(self):
+        self._close_proc()
 
     # ── SegFormer ────────────────────────────────────────────────────────────
 
@@ -718,19 +813,32 @@ def activate(host):
     global _client
     if not host:
         return False
-    client = RemoteInferenceClient(host)
-    try:
-        client.start()
-    except Exception as exc:
-        print(
-            f"[SFR Remote] Could not connect to {host} ({exc}) — "
-            "running inference locally.",
-            flush=True,
-        )
+    client = None
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+        client = RemoteInferenceClient(host)
         try:
-            client.close()
-        except Exception:
-            pass
+            client.start()
+            break
+        except Exception as exc:
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = None
+            if attempt < _CONNECT_ATTEMPTS:
+                print(
+                    f"[SFR Remote] Could not connect to {host} ({exc}) — "
+                    f"retrying ({attempt}/{_CONNECT_ATTEMPTS}) …",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[SFR Remote] WARNING: could not connect to {host} "
+                    f"after {_CONNECT_ATTEMPTS} attempts ({exc}) — "
+                    "running ALL inference for this step locally.",
+                    flush=True,
+                )
+    if client is None:
         return False
     _client = client
     import O4_SFR_Inference as SEG
