@@ -3289,6 +3289,9 @@ EXCLUDED_BUILDING_ASSETS = {
     # 60 m apartment slab: too wide for apartment-block placement and visually
     # unsuitable as a generated large-footprint fallback.
     "sfd_global/asia/apartment_2.obj",
+    # Unresolved by current simHeaven/X-Plane library setups; do not emit a DSF
+    # OBJECT_DEF that leaves X-Plane with a missing scenery resource.
+    "simheaven/houses/house_05x05x1.obj",
     # The user's "SFD Global Autogen" library.txt aliases many small simHeaven
     # house/residential virtual paths to tall SFD Asia apartment meshes
     # (Asia/Apartment_*.obj) — a library-author mistake. The overlay places these

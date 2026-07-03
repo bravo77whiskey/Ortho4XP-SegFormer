@@ -2883,6 +2883,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertNotIn("SFD_Global/Asia/Carport_1.obj", asia_paths)
         self.assertNotIn("SFD_Global/Asia/Carport_2.obj", asia_paths)
         self.assertNotIn("SFD_Global/Asia/Shed_1.obj", asia_paths)
+        self.assertNotIn("simheaven/houses/house_05x05x1.obj", simheaven_paths)
         self.assertNotIn("simheaven/sheds/shed_02x03x1.obj", simheaven_paths)
 
     def test_small_accessory_building_classes_are_included_when_reasonable(self):
@@ -3180,6 +3181,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 [
                     "EXPORT simheaven/houses/house_04x06x1.obj objects/a.obj",
                     "EXPORT_BACKUP simheaven/houses/house_04x06x1.obj objects/b.obj",
+                    "EXPORT simheaven/houses/house_05x05x1.obj objects/missing.obj",
                     "EXPORT simheaven/houses/house_09x12x3.obj objects/c.obj",
                     "EXPORT simheaven/residential/residential_20x20x8.obj objects/tall.obj",
                     "EXPORT simheaven/sheds/shed_02x03x1.obj objects/shed.obj",
@@ -3199,6 +3201,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertIn("simheaven/houses/house_04x06x1.obj", paths)
         self.assertIn("simheaven/houses/house_09x12x3.obj", paths)
+        self.assertNotIn("simheaven/houses/house_05x05x1.obj", paths)
         self.assertNotIn("simheaven/residential/residential_20x20x8.obj", paths)
         self.assertNotIn("simheaven/sheds/shed_02x03x1.obj", paths)
         self.assertNotIn("simheaven/commercial/school_30x40.obj", paths)
@@ -3217,7 +3220,16 @@ class SfdBuildingAssetTests(unittest.TestCase):
             "virtual_path": "simheaven/houses/house_04x06x1.obj",
             "resolved_path": None,
         })()
+        excluded_export = type("Export", (), {
+            "virtual_path": "simheaven/houses/house_05x05x1.obj",
+            "resolved_path": None,
+        })()
         simheaven_objects = [
+            {
+                "path": "simheaven/houses/house_05x05x1.obj",
+                "w_m": 5.0,
+                "h_m": 5.0,
+            },
             {
                 "path": "simheaven/houses/house_05x06x1.obj",
                 "w_m": 5.0,
@@ -3235,11 +3247,12 @@ class SfdBuildingAssetTests(unittest.TestCase):
             0.0,
             0.0,
             "africa",
-            library_exports=[export],
+            library_exports=[export, excluded_export],
         )
         paths = _paths_for_classes(pools, BLD.BLD_PLACEMENT_CLASSES)
 
         self.assertIn("simheaven/houses/house_04x06x1.obj", paths)
+        self.assertNotIn("simheaven/houses/house_05x05x1.obj", paths)
         self.assertNotIn("simheaven/houses/house_05x06x1.obj", paths)
 
     def test_unexported_simheaven_object_placements_are_filtered(self):
