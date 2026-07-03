@@ -4209,14 +4209,16 @@ def _exported_virtual_library_paths(library_exports, suffixes=(".obj", ".fac")):
 
 
 def _stock_yolo_asset_path_available(path, exported_paths):
-    """Return True when a stock-YOLO library path can be emitted safely."""
+    """Return True when a stock-YOLO library path can be emitted safely.
+
+    XP12-default ``lib/`` paths are always resolvable; any other path is kept
+    only when a scanned installed library (simHeaven, SFD Global, or one of
+    the curated extra libraries) actually exports it on this tile.
+    """
     norm_path = _norm_library_path(path)
-    lower_path = norm_path.lower()
-    if lower_path.startswith("lib/"):
+    if norm_path.startswith("lib/"):
         return True
-    if lower_path.startswith("simheaven/") or lower_path.startswith("sfd_global/"):
-        return norm_path in exported_paths
-    return False
+    return norm_path in exported_paths
 
 
 def _filter_stock_yolo_asset_map(asset_map, exported_paths):
@@ -5719,10 +5721,73 @@ def _ring_centroid(ring):
     return float(pts[:, 0].mean()), float(pts[:, 1].mean())
 
 
+def _stock_owner_records(stock_res):
+    """Yield (kind, placement_entry, quad) triples for a stock-YOLO result.
+
+    Uses the ``occupied_owner`` list emitted alongside every occupancy quad so
+    a detection's placement and quad are always dropped together. Returns
+    None when owner tracking is absent or inconsistent (legacy result object).
+    """
+    owners = list(getattr(stock_res, 'occupied_owner', ()) or ())
+    if len(owners) != len(stock_res.occupied_px_polys):
+        return None
+    src = {
+        'object': stock_res.placed_objects,
+        'facade': stock_res.placed_facades,
+        'draped': stock_res.placed_draped,
+    }
+    records = []
+    for (kind, idx), quad in zip(owners, stock_res.occupied_px_polys):
+        if kind not in src or not (0 <= idx < len(src[kind])):
+            return None
+        records.append((kind, src[kind][idx], quad))
+    return records
+
+
+def _store_stock_records(stock_res, records):
+    kept = {'object': [], 'facade': [], 'draped': []}
+    kept_polys = []
+    kept_owners = []
+    for kind, entry, quad in records:
+        kept_owners.append((kind, len(kept[kind])))
+        kept[kind].append(entry)
+        kept_polys.append(quad)
+    stock_res.placed_objects = kept['object']
+    stock_res.placed_facades = kept['facade']
+    stock_res.placed_draped = kept['draped']
+    stock_res.occupied_px_polys = kept_polys
+    stock_res.occupied_owner = kept_owners
+
+
 def filter_stock_results_by_coverage(stock_res, rects_px, geo_boxes):
     """Drop stock-YOLO placements whose center lies in a covered region."""
     if stock_res is None or not rects_px:
         return 0
+    records = _stock_owner_records(stock_res)
+    if records is None:
+        return _filter_stock_results_by_coverage_legacy(
+            stock_res, rects_px, geo_boxes
+        )
+    kept = []
+    dropped = 0
+    for kind, entry, quad in records:
+        if kind == 'object':
+            centroid = (float(entry[0]), float(entry[1]))
+        else:
+            centroid = _ring_centroid(entry[0])
+        if centroid is not None and point_in_geo_boxes(
+            centroid[0], centroid[1], geo_boxes
+        ):
+            dropped += 1
+        else:
+            kept.append((kind, entry, quad))
+    if dropped:
+        _store_stock_records(stock_res, kept)
+    return dropped
+
+
+def _filter_stock_results_by_coverage_legacy(stock_res, rects_px, geo_boxes):
+    """Per-list coverage filter for results without owner tracking."""
     dropped = 0
     kept_objects = []
     for entry in stock_res.placed_objects:
@@ -5752,6 +5817,82 @@ def filter_stock_results_by_coverage(stock_res, rects_px, geo_boxes):
             continue
         kept_polys.append(quad)
     stock_res.occupied_px_polys = kept_polys
+    return dropped
+
+
+# Stock-YOLO placements must not sit on top of scenery objects that other
+# installed addons (simHeaven, custom overlays) already place, nor on known
+# existing-building footprints. Facades extrude around the whole detection
+# ring, so any meaningful footprint overlap disqualifies them; 'object'
+# placements only occupy the OBB centre, so just a blocker near the centre
+# disqualifies those.
+STOCK_YOLO_BLOCKER_FACADE_OVERLAP_FRAC = 0.10
+STOCK_YOLO_BLOCKER_CENTER_RADIUS_FRAC = 0.25
+STOCK_YOLO_BLOCKER_CENTER_RADIUS_MIN_PX = 3
+
+
+def _stock_quad_blocked(quad, kind, blocker_mask):
+    """True when a stock-YOLO occupancy poly conflicts with blocker pixels."""
+    pts = np.asarray(quad, dtype=np.float32).reshape(-1, 2)
+    if pts.shape[0] < 3:
+        return False
+    h, w = blocker_mask.shape[:2]
+    x0 = max(0, int(np.floor(pts[:, 0].min())))
+    y0 = max(0, int(np.floor(pts[:, 1].min())))
+    x1 = min(w, int(np.ceil(pts[:, 0].max())) + 1)
+    y1 = min(h, int(np.ceil(pts[:, 1].max())) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return False
+    sub = blocker_mask[y0:y1, x0:x1]
+    if not sub.any():
+        return False
+    scratch = np.zeros(sub.shape, dtype=np.uint8)
+    if kind == 'object':
+        short_px = float(min(x1 - x0, y1 - y0))
+        if pts.shape[0] >= 4:
+            edges = np.roll(pts[:4], -1, axis=0) - pts[:4]
+            edge_lens = np.linalg.norm(edges, axis=1)
+            if float(edge_lens.max()) > 0.0:
+                short_px = float(edge_lens.min())
+        radius = max(
+            STOCK_YOLO_BLOCKER_CENTER_RADIUS_MIN_PX,
+            int(round(short_px * STOCK_YOLO_BLOCKER_CENTER_RADIUS_FRAC)),
+        )
+        cx = int(round(float(pts[:, 0].mean()) - x0))
+        cy = int(round(float(pts[:, 1].mean()) - y0))
+        cv2.circle(scratch, (cx, cy), radius, 1, thickness=-1)
+        return bool(np.any(scratch & (sub > 0)))
+    shifted = np.round(pts - (x0, y0)).astype(np.int32)
+    cv2.fillPoly(scratch, [shifted], 1)
+    ring_px = int(np.count_nonzero(scratch))
+    if ring_px <= 0:
+        return False
+    overlap_px = int(np.count_nonzero(scratch & (sub > 0)))
+    return (overlap_px / ring_px) >= STOCK_YOLO_BLOCKER_FACADE_OVERLAP_FRAC
+
+
+def _filter_stock_results_by_blockers(stock_res, blocker_mask):
+    """Drop stock-YOLO placements overlapping existing scenery-addon objects.
+
+    Returns the number of detections dropped. Legacy result objects without
+    owner tracking are left untouched (no consistent way to drop a placement
+    and its occupancy quad together).
+    """
+    if (stock_res is None or blocker_mask is None
+            or not stock_res.occupied_px_polys or not blocker_mask.any()):
+        return 0
+    records = _stock_owner_records(stock_res)
+    if records is None:
+        return 0
+    kept = []
+    dropped = 0
+    for kind, entry, quad in records:
+        if _stock_quad_blocked(quad, kind, blocker_mask):
+            dropped += 1
+        else:
+            kept.append((kind, entry, quad))
+    if dropped:
+        _store_stock_records(stock_res, kept)
     return dropped
 
 
@@ -6881,6 +7022,10 @@ def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_co
         if yolo_counts.get('yolo_suppressed_overlap', 0):
             yolo_bits += (
                 f"suppressed={int(yolo_counts.get('yolo_suppressed_overlap', 0))}  "
+            )
+        if yolo_counts.get('stock_yolo_blocked', 0):
+            yolo_bits += (
+                f"stock_blocked={int(yolo_counts.get('stock_yolo_blocked', 0))}  "
             )
     return (
         f"placed={total_count:4d}  "
@@ -9179,6 +9324,7 @@ def run(
             custom_scenery_dir,
             include_sfd=sfd_assets_available,
             include_simheaven=simheaven_assets_available,
+            extra_library_ids=enabled_extra_library_ids,
             suffixes=(".obj", ".fac"),
         ),
         _tile_natural_region,
@@ -9495,7 +9641,19 @@ def run(
             #      keep mode, suppress thresholds, freearea downsize, facade
             #      clip/fallback, no_overlap_removal); behaviour fixed to the
             #      zero-threshold drop with detection free-area clipping.
-            "schema=v25-retired-knobs-removed",
+            # v26: stock-YOLO asset pool widened to curated extra libraries,
+            #      OBB heading for directional classes, and placements now
+            #      filtered against addon scenery-object masks; the effective
+            #      (availability-filtered) asset map keys the cache so
+            #      library installs/removals invalidate stale placements.
+            tuple(sorted(
+                (
+                    int(cls), str(ptype), tuple(paths),
+                    None if height_m is None else round(float(height_m), 3),
+                )
+                for cls, (ptype, paths, height_m) in stock_yolo_asset_map.items()
+            )),
+            "schema=v26-stock-asset-pool-addon-overlap",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -10060,13 +10218,15 @@ def run(
             k_road = cv2.getStructuringElement(
                 cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
 
-            # Merge the stock YOLO pre-step placements in file order.
+            # Stock YOLO pre-step placements are merged AFTER the road/mask
+            # section below: they must first be checked against scenery
+            # objects other addons already place (simHeaven / custom overlay
+            # objects, existing building footprints).
             stock_res = _prep['stock_res']
-            if stock_res is not None:
-                placed_stock_objects.extend(stock_res.placed_objects)
-                placed_facades.extend(stock_res.placed_facades)
-                placed_draped.extend(stock_res.placed_draped)
-                stock_yolo_occupied_polys = list(stock_res.occupied_px_polys)
+            _stock_has_placements = stock_res is not None and bool(
+                stock_res.placed_objects or stock_res.placed_facades
+                or stock_res.placed_draped
+            )
 
             # Zone cleanup
             _t = time.perf_counter()
@@ -10075,7 +10235,9 @@ def run(
             sfr_road_dilated = None
             _record_elapsed(timings, file_timings, 'zone_cleanup', _t)
 
-            if not bld_zone.any() and not yolo_detections:
+            # Stock placements force the full path: the blocker filter below
+            # needs the rasterized addon-object masks before they can merge.
+            if not bld_zone.any() and not yolo_detections and not _stock_has_placements:
                 file_counts['candidates'] = 0
                 file_counts['placed'] = 0
                 bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
@@ -10209,6 +10371,29 @@ def run(
                         img_h, img_w, m_per_px
                     )
                     _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
+
+            # Merge the stock YOLO pre-step placements in file order, after
+            # dropping detections that overlap scenery objects other addons
+            # already place (simHeaven / custom overlay objects, existing
+            # building footprints).
+            if stock_res is not None:
+                _addon_blocker_mask = None
+                for _m in (sh_bld_mask, custom_bld_mask, existing_bld_mask):
+                    if _m is not None and _m.any():
+                        _addon_blocker_mask = (
+                            _m.copy() if _addon_blocker_mask is None
+                            else (_addon_blocker_mask | _m)
+                        )
+                if _addon_blocker_mask is not None:
+                    _stock_blocked = _filter_stock_results_by_blockers(
+                        stock_res, _addon_blocker_mask
+                    )
+                    if _stock_blocked:
+                        file_counts['stock_yolo_blocked'] = int(_stock_blocked)
+                placed_stock_objects.extend(stock_res.placed_objects)
+                placed_facades.extend(stock_res.placed_facades)
+                placed_draped.extend(stock_res.placed_draped)
+                stock_yolo_occupied_polys = list(stock_res.occupied_px_polys)
 
             _t = time.perf_counter()
             # static_occ_mask collects everything a trained-YOLO building must

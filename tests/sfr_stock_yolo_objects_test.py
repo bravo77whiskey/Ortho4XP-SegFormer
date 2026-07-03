@@ -64,9 +64,16 @@ class StockYoloAssetMapTests(unittest.TestCase):
         # has a chance of resolving it. Catches typos like "simhaven/..." or
         # forgotten "lib/" prefixes.
         allowed_prefixes = (
-            "simheaven/",       # simHeaven X-World
-            "lib/",             # X-Plane 12 default
-            "SFD_Global/",      # SFD Global
+            "simheaven/",         # simHeaven X-World
+            "lib/",               # X-Plane 12 default
+            "SFD_Global/",        # SFD Global
+            # Curated extra libraries (see CURATED_EXTRA_BUILDING_LIBRARIES
+            # in O4_SFR_Building_Overlay): the building overlay keeps these
+            # only when the installed library set actually exports them.
+            "handyobjects/",      # The Handy Objects Library
+            "opensceneryx/",      # OpenSceneryX
+            "MisterX_Library/",   # MisterX Library
+            "objects/",           # world-models
         )
         for cls, (_kind, paths, _h) in STOCK.STOCK_YOLO_ASSET_MAP.items():
             for p in paths:

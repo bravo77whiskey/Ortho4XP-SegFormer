@@ -113,6 +113,12 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
 
     exports = []
     current_region = None
+    # Regions whose REGION_DEFINE block carries a geographic constraint
+    # (REGION_RECT / REGION_BITMAP). Regions defined only through REGION_ALL
+    # and runtime REGION_DREF conditions (e.g. MisterX weather variants)
+    # resolve at every location, so their exports are treated as global.
+    geographic_regions = set()
+    defining_region = None
     with handle:
         for raw_line in handle:
             line = raw_line.strip()
@@ -122,9 +128,19 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
             if not parts:
                 continue
             command = parts[0].upper()
+            if command == "REGION_DEFINE" and len(parts) >= 2:
+                defining_region = parts[1].strip().lower()
+                continue
+            if command in ("REGION_RECT", "REGION_BITMAP"):
+                if defining_region:
+                    geographic_regions.add(defining_region)
+                continue
             if command == "REGION" and len(parts) >= 2:
                 name = parts[1].strip().lower()
-                current_region = None if name in ("world", "all") else name
+                if name in ("world", "all") or name not in geographic_regions:
+                    current_region = None
+                else:
+                    current_region = name
                 continue
             virtual_path = physical_path = None
             if command in {"EXPORT", "EXPORT_BACKUP", "EXPORT_EXCLUDE"} and len(parts) >= 3:

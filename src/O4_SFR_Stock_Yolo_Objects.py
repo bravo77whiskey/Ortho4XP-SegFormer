@@ -34,7 +34,11 @@ Asset mapping is in `STOCK_YOLO_ASSET_MAP` — easy to edit. Each entry is
   - asset_paths is a tuple of library-virtual path strings. When more than one
     path is given, the picker selects one deterministically per detection via
     a stable hash of (lat, lon, jx, jy) — same approach as the building
-    overlay's context-facade picker.
+    overlay's context-facade picker. Paths may reference any installed
+    library (simHeaven, SFD Global, OpenSceneryX, Handy Objects, MisterX,
+    world-models, …): the building overlay filters the map down to paths the
+    installed library set actually exports before the pass runs, so missing
+    libraries simply shrink the pool instead of producing dangling DSF refs.
   - 'object' placements emit DSF `OBJECT path lon lat heading` at the OBB
     center. Heading is taken from the OBB only when the class is marked
     directional in `_USE_OBB_HEADING_PER_CLASS`.
@@ -123,19 +127,27 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
         'simheaven/facades/grandstand.fac',
     ), 10.0),
 
-    # Tennis court — small (~24×11 m). No XP-default tennis-court OBJ exists
-    # as a full surface; use the tennis-net accessory OBJ at the OBB center.
+    # Tennis court — small (~24×11 m). Full-court OBJs from Handy Objects /
+    # OpenSceneryX / MisterX when those libraries are installed; XP-default
+    # net / judge-chair accessories keep the class alive without them.
     4:  ('object', (
         'lib/public_area/sports/tennis_net.obj',
         'lib/public_area/sports/tennis_judge_chair.obj',
+        'handyobjects/sports/tennis_court.obj',
+        'handyobjects/sports/tennis_court_no_surround.obj',
+        'opensceneryx/objects/buildings/recreational/tennis_courts/1.obj',
+        'MisterX_Library/Objects/General/Tennis_Court_Double.obj',
     ), None),
 
-    # Basketball court — small (~28×15 m). Same story as tennis: only an
-    # accessory hoop is available as an OBJ. Use one hoop at the OBB center.
+    # Basketball court — small (~28×15 m). Full-court OBJs from Handy
+    # Objects when installed; XP-default hoop accessories as fallback.
     5:  ('object', (
         'lib/public_area/sports/basketball_hoop.obj',
         'lib/public_area/sports/basketball_hoop_01.obj',
         'lib/public_area/sports/basketball_hoop_02.obj',
+        'handyobjects/sports/basketball_court.obj',
+        'handyobjects/sports/basketball_court_asphalt.obj',
+        'handyobjects/sports/basketball_hoop_with_stand.obj',
     ), None),
 
     # Ground track field — stadium-scale (~120×80 m). Use stadium facade
@@ -148,8 +160,19 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
         'simheaven/facades/sports_hall.fac',
     ), 12.0),
 
-    # Harbor — placed as a gantry crane OBJ at the OBB center.
-    7:  ('object', ('simheaven/landmarks/gantry-crane.obj',), None),
+    # Harbor — placed as one crane OBJ at the OBB center. simHeaven ships
+    # three crane flavours; MisterX / OpenSceneryX / world-models add
+    # container-quay and industrial variants when installed.
+    7:  ('object', (
+        'simheaven/landmarks/gantry-crane.obj',
+        'simheaven/landmarks/crane.obj',
+        'simheaven/landmarks/portal-crane.obj',
+        'MisterX_Library/Harbor/Cranes/Crane_Blue.obj',
+        'MisterX_Library/Harbor/Cranes/Crane_White.obj',
+        'MisterX_Library/Harbor/Cranes/Crane_White_2.obj',
+        'opensceneryx/objects/buildings/industrial/cranes/1.obj',
+        'objects/decorations/gantry_crane.obj',
+    ), None),
 
     # Soccer ball field — stadium-scale (~105×68 m). Stadium facade.
     13: ('facade', (
@@ -167,14 +190,15 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
 }
 
 # Heading clamp: for 'object' placements, OBB rotation is meaningful only for
-# directional assets. The accessory OBJs (hoops, nets, pools) are essentially
-# symmetric or have no meaningful "front" given how small they are relative
-# to the OBB, so we use heading=0 to avoid arbitrary rotation. Cranes and
-# tanks are also non-directional. Flip an entry to True if a future asset
-# benefits from following the OBB long-axis.
+# directional assets. Full-surface courts (tennis, basketball), rectangular
+# pools and quay cranes should follow the OBB long axis so the 3D asset lines
+# up with the feature painted in the ortho (180° ambiguity is harmless — the
+# assets are end-symmetric). Tanks are rotationally symmetric and the stadium
+# classes are facades (the ring itself carries the orientation), so heading
+# stays 0 there.
 _USE_OBB_HEADING_PER_CLASS = {
-    2: False, 3: False, 4: False, 5: False,
-    6: False, 7: False, 13: False, 14: False,
+    2: False, 3: False, 4: True, 5: True,
+    6: False, 7: True, 13: False, 14: True,
 }
 
 # Per-class footprint sanity limits (metres), long-side. Filters detections
@@ -228,6 +252,10 @@ class StockYoloResults:
     placed_facades:   list = field(default_factory=list)
     placed_draped:    list = field(default_factory=list)
     occupied_px_polys: list = field(default_factory=list)
+    # Parallel to occupied_px_polys: ('object'|'facade', index-into-that-list)
+    # so downstream filters can drop a detection's placement and occupancy
+    # quad together without guessing correspondence by centroid.
+    occupied_owner:   list = field(default_factory=list)
     counts_by_class:  dict = field(default_factory=dict)
     inference_time_s: float = 0.0
     requested_batch_size: int = 1
@@ -447,6 +475,7 @@ def run_stock_yolo_pass(
             placement_heading = float(heading_deg) if use_heading else 0.0
             occupied_poly = quad
             if placement_type == 'object':
+                owner = ('object', len(res.placed_objects))
                 res.placed_objects.append(
                     (float(o_lon), float(o_lat), placement_heading, asset_path)
                 )
@@ -461,6 +490,7 @@ def run_stock_yolo_pass(
                 ring = _pixel_quad_to_lonlat(facade_poly, img_w, img_h,
                                              lat_n, lat_s, lon_w, lon_e)
                 h_m = float(default_height_m if default_height_m else 6.0)
+                owner = ('facade', len(res.placed_facades))
                 res.placed_facades.append((ring, asset_path, h_m))
             else:
                 # Draped .pol polygons are not supported by design.
@@ -468,6 +498,7 @@ def run_stock_yolo_pass(
                     f"Unsupported placement_type {placement_type!r} for DOTA class {cls_i}"
                 )
             res.occupied_px_polys.append(occupied_poly.astype(np.int32))
+            res.occupied_owner.append(owner)
             res.counts_by_class[cls_i] = res.counts_by_class.get(cls_i, 0) + 1
 
     def _detect(effective_batch):
