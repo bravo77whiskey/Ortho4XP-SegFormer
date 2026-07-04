@@ -1,5 +1,5 @@
 """Stock YOLO-OBB pre-step: detect static real-world objects (sports fields,
-tanks, pools, harbor cranes) using the DOTAv1-trained `yolo26x-obb.pt` model,
+tanks, pools) using the DOTAv1-trained `yolo26x-obb.pt` model,
 map them to SFD Global / simHeaven / X-Plane default asset library paths, and
 produce DSF placements that the building-overlay facade pass treats as overlap
 blockers.
@@ -97,7 +97,12 @@ DOTA_CLASS_NAMES = {
 #   Excluded as moving:           plane (0), ship (1), large vehicle (9),
 #                                 small vehicle (10), helicopter (11)
 #   Excluded as already-rendered: bridge (8), roundabout (12)
-STATIC_DOTA_CLASSES = (2, 3, 4, 5, 6, 7, 13, 14)
+#   Excluded as asset mismatch:   harbor (7) — DOTA 'harbor' mostly fires on
+#                                 small-boat marinas, but every available
+#                                 crane asset is big-port scale, so the
+#                                 placements looked wrong far more often
+#                                 than right.
+STATIC_DOTA_CLASSES = (2, 3, 4, 5, 6, 13, 14)
 
 # ── Asset mapping ────────────────────────────────────────────────────────────
 # Each entry: (placement_type, asset_paths, default_height_m_or_None)
@@ -160,20 +165,6 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
         'simheaven/facades/sports_hall.fac',
     ), 12.0),
 
-    # Harbor — placed as one crane OBJ at the OBB center. simHeaven ships
-    # three crane flavours; MisterX / OpenSceneryX / world-models add
-    # container-quay and industrial variants when installed.
-    7:  ('object', (
-        'simheaven/landmarks/gantry-crane.obj',
-        'simheaven/landmarks/crane.obj',
-        'simheaven/landmarks/portal-crane.obj',
-        'MisterX_Library/Harbor/Cranes/Crane_Blue.obj',
-        'MisterX_Library/Harbor/Cranes/Crane_White.obj',
-        'MisterX_Library/Harbor/Cranes/Crane_White_2.obj',
-        'opensceneryx/objects/buildings/industrial/cranes/1.obj',
-        'objects/decorations/gantry_crane.obj',
-    ), None),
-
     # Soccer ball field — stadium-scale (~105×68 m). Stadium facade.
     13: ('facade', (
         'simheaven/facades/stadium_01.fac',
@@ -190,15 +181,15 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
 }
 
 # Heading clamp: for 'object' placements, OBB rotation is meaningful only for
-# directional assets. Full-surface courts (tennis, basketball), rectangular
-# pools and quay cranes should follow the OBB long axis so the 3D asset lines
+# directional assets. Full-surface courts (tennis, basketball) and
+# rectangular pools should follow the OBB long axis so the 3D asset lines
 # up with the feature painted in the ortho (180° ambiguity is harmless — the
 # assets are end-symmetric). Tanks are rotationally symmetric and the stadium
 # classes are facades (the ring itself carries the orientation), so heading
 # stays 0 there.
 _USE_OBB_HEADING_PER_CLASS = {
     2: False, 3: False, 4: True, 5: True,
-    6: False, 7: True, 13: False, 14: True,
+    6: False, 13: False, 14: True,
 }
 
 # Per-class footprint sanity limits (metres), long-side. Filters detections
@@ -211,7 +202,6 @@ _MAX_LONG_SIDE_M = {
     4:  50.0,    # tennis court
     5:  50.0,    # basketball court
     6:  200.0,   # ground track field (full 400 m track is ~150 m long axis)
-    7:  200.0,   # harbor crane
     13: 150.0,   # soccer ball field
     14: 60.0,    # swimming pool (Olympic ≤ 50 m)
 }
@@ -222,7 +212,6 @@ _MIN_LONG_SIDE_M = {
     4:  15.0,
     5:  15.0,
     6:  80.0,
-    7:  8.0,
     13: 60.0,
     14: 5.0,
 }

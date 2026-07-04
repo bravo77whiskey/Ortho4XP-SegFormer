@@ -9234,7 +9234,7 @@ def run(
                 ) from exc
 
     # ── Stock YOLO-OBB (DOTAv1) for static objects pre-step ───────────────────
-    # Detects storage tanks, sports fields, harbor cranes, pools etc. BEFORE
+    # Detects storage tanks, sports fields, pools etc. BEFORE
     # the trained-YOLO facade pass so their footprints can occupy static_occ_mask.
     # The loader downloads the checkpoint from ultralytics/assets when it is
     # absent locally, so first-run installs don't need a manual sync step.
@@ -10468,9 +10468,9 @@ def run(
             if lat_s <= lat     + DEGREE_TOL:   static_occ_mask[-edge_px:, :]  = 1
             if lon_w <= lon     + DEGREE_TOL:   static_occ_mask[:,  :edge_px]  = 1
             if lon_e >= lon + 1 - DEGREE_TOL:   static_occ_mask[:, -edge_px:]  = 1
-            # Mark stock-YOLO OBBs (storage tanks, sports fields, pools, harbor
-            # cranes) into both static_occ_mask and building_spacing_mask BEFORE
-            # the trained-YOLO facade loop runs, so building facades don't
+            # Mark stock-YOLO OBBs (storage tanks, sports fields, pools) into
+            # both static_occ_mask and building_spacing_mask BEFORE the
+            # trained-YOLO facade loop runs, so building facades don't
             # overlap the static objects we just placed.
             if stock_yolo_occupied_polys:
                 for _quad in stock_yolo_occupied_polys:
