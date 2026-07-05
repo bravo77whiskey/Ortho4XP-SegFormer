@@ -1,4 +1,46 @@
 {
+ "flavor_pages": {
+  "africa": [
+   "textures/o4sfr_procgen_atlas_africa.png",
+   "textures/o4sfr_procgen_atlas_africa_p2.png",
+   "textures/o4sfr_procgen_atlas_africa_p3.png"
+  ],
+  "asia": [
+   "textures/o4sfr_procgen_atlas_asia.png",
+   "textures/o4sfr_procgen_atlas_asia_p2.png",
+   "textures/o4sfr_procgen_atlas_asia_p3.png"
+  ],
+  "australia_oceania": [
+   "textures/o4sfr_procgen_atlas_australia_oceania.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_p2.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_p3.png"
+  ],
+  "europe": [
+   "textures/o4sfr_procgen_atlas_europe.png",
+   "textures/o4sfr_procgen_atlas_europe_p2.png",
+   "textures/o4sfr_procgen_atlas_europe_p3.png"
+  ],
+  "generic": [
+   "textures/o4sfr_procgen_atlas_generic.png",
+   "textures/o4sfr_procgen_atlas_generic_p2.png",
+   "textures/o4sfr_procgen_atlas_generic_p3.png"
+  ],
+  "mediterranean": [
+   "textures/o4sfr_procgen_atlas_mediterranean.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_p2.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_p3.png"
+  ],
+  "north_america": [
+   "textures/o4sfr_procgen_atlas_north_america.png",
+   "textures/o4sfr_procgen_atlas_north_america_p2.png",
+   "textures/o4sfr_procgen_atlas_north_america_p3.png"
+  ],
+  "south_america": [
+   "textures/o4sfr_procgen_atlas_south_america.png",
+   "textures/o4sfr_procgen_atlas_south_america_p2.png",
+   "textures/o4sfr_procgen_atlas_south_america_p3.png"
+  ]
+ },
  "flavors": {
   "africa": "textures/o4sfr_procgen_atlas_africa.png",
   "asia": "textures/o4sfr_procgen_atlas_asia.png",
@@ -9,6 +51,7 @@
   "north_america": "textures/o4sfr_procgen_atlas_north_america.png",
   "south_america": "textures/o4sfr_procgen_atlas_south_america.png"
  },
+ "pages": 3,
  "reference_styles": {
   "class_profiles": [
    "apartment_block",

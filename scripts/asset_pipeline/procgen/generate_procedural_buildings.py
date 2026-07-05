@@ -88,10 +88,18 @@ def _run_chunk(blender: str, chunk_path: str, output_root: str,
     return int(match.group(1)), int(match.group(2)), output
 
 
-def _expected_texture_line(physical_path: str, flavor: str) -> str:
+def _texture_page(seed: int, pages: int) -> int:
+    """Deterministic page pick for a variant: same seed, same page."""
+    return int(seed) % max(1, int(pages))
+
+
+def _expected_texture_line(physical_path: str, flavor: str, seed: int = 0,
+                           pages: int = 1) -> str:
+    from atlas import texture_name
     depth = physical_path.replace("\\", "/").count("/")
     up = "../" * depth
-    return f"TEXTURE {up}textures/o4sfr_procgen_atlas_{flavor}.png"
+    name = texture_name(flavor, _texture_page(seed, pages))
+    return f"TEXTURE {up}textures/{name}"
 
 
 def _normalize_texture_directive(obj_path: str, texture_line: str) -> None:
@@ -176,15 +184,18 @@ def main(argv=None) -> int:
         pending = pending[: args.limit]
         flavors = {row["flavor"] for row in pending}
 
+    pages = max(1, int((manifest.get("atlas") or {}).get("pages", 1)))
+    from atlas import texture_name
     for flavor in sorted(flavors):
-        texture = os.path.join(
-            args.output, "textures", f"o4sfr_procgen_atlas_{flavor}.png"
-        )
-        if not os.path.isfile(texture):
-            raise SystemExit(
-                f"atlas texture missing: {texture}; run atlas.py --output "
-                f"{args.output} first"
+        for page in range(pages):
+            texture = os.path.join(
+                args.output, "textures", texture_name(flavor, page)
             )
+            if not os.path.isfile(texture):
+                raise SystemExit(
+                    f"atlas texture missing: {texture}; run atlas.py "
+                    f"--output {args.output} first"
+                )
 
     total = len(rows)
     print(f"{total} obj files in scope, {len(pending)} to generate")
@@ -239,7 +250,8 @@ def main(argv=None) -> int:
                 continue
             _normalize_texture_directive(
                 obj_path,
-                _expected_texture_line(row["physical_path"], row["flavor"]),
+                _expected_texture_line(row["physical_path"], row["flavor"],
+                                       row["seed"], pages),
             )
             if layout is not None:
                 patch_shell(

@@ -18,7 +18,15 @@ atlas:
   # ~5.6 MB DXT per flavor and only 1-2 flavors load per tile.
   size: 2048
   seed: 101
-  # Flavors map 1:1 to a texture PNG; region dirs pick their flavor below.
+  # Painted page permutations per flavor: same strip layout/UVs, different
+  # sub-palette + paint seed (page 0 base, 1 weathered, 2 fresh -- see
+  # atlas.py PAGE_OVERRIDES).  A variant's seed picks its page in the
+  # TEXTURE directive, so identical geometry no longer means identical
+  # texture.  Texture-only: changing this never requires a Blender rebuild
+  # (retarget_texture_pages.py rewrites installed OBJ headers).
+  pages: 3
+  # Flavors map 1:1 to a texture PNG per page; region dirs pick their
+  # flavor below.
   flavors: [generic, europe, north_america, mediterranean, asia, africa,
             south_america, australia_oceania]
 

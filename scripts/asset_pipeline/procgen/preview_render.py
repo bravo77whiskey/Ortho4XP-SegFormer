@@ -62,15 +62,21 @@ def _blender_main() -> int:
     scene.camera = cam
 
     materials = {}
+    pages = max(1, int(layout.get("pages", 1)))
 
-    def _material(flavor):
-        if flavor in materials:
-            return materials[flavor]
-        material = bpy.data.materials.new(name=f"preview_{flavor}")
+    def _material(flavor, page):
+        # Mirrors atlas.texture_name (not importable here: Blender's
+        # bundled Python has no PIL/yaml).
+        suffix = "" if page <= 0 else f"_p{page + 1}"
+        key = (flavor, page)
+        if key in materials:
+            return materials[key]
+        material = bpy.data.materials.new(name=f"preview_{flavor}_p{page}")
         material.use_nodes = True
         bsdf = material.node_tree.nodes.get("Principled BSDF")
         image_path = os.path.join(
-            output_root, "textures", f"o4sfr_procgen_atlas_{flavor}.png"
+            output_root, "textures",
+            f"o4sfr_procgen_atlas_{flavor}{suffix}.png"
         )
         if bsdf is not None and os.path.isfile(image_path):
             image = bpy.data.images.load(image_path, check_existing=True)
@@ -79,7 +85,7 @@ def _blender_main() -> int:
             material.node_tree.links.new(
                 node.outputs["Color"], bsdf.inputs["Base Color"]
             )
-        materials[flavor] = material
+        materials[key] = material
         return material
 
     os.makedirs(render_dir, exist_ok=True)
@@ -97,7 +103,8 @@ def _blender_main() -> int:
             for uv in face_uvs:
                 uv_layer.data[loop_index].uv = uv
                 loop_index += 1
-        mesh.materials.append(_material(row["flavor"]))
+        mesh.materials.append(
+            _material(row["flavor"], int(row["seed"]) % pages))
         obj = bpy.data.objects.new(row["stem"], mesh)
         scene.collection.objects.link(obj)
 

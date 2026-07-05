@@ -1,10 +1,14 @@
 """Generate the shared procedural facade/roof texture atlases (PIL).
 
-One 2048x2048 PNG per region flavor; every generated OBJ references exactly
-one atlas, so the whole library costs eight textures.  The atlas is a stack
-of full-width horizontal strips: U tiles freely (GL wrap) while V stays
-inside a strip's band, so a wall of any length is a single quad whose
-windows never stretch.
+One 2048x2048 PNG per region flavor PER PAGE; every generated OBJ references
+exactly one atlas page.  Pages share the strip layout (identical UVs) but
+differ in sub-palette and paint seed, so two buildings with the same geometry
+can still look different: the variant seed picks the page in the TEXTURE
+directive.  Page identities are reference-derived (see PAGE_OVERRIDES):
+page 0 = the base look, page 1 = the weathered population, page 2 = the
+fresh/repainted population.  The atlas is a stack of full-width horizontal
+strips: U tiles freely (GL wrap) while V stays inside a strip's band, so a
+wall of any length is a single quad whose windows never stretch.
 
 Paint rules (learned the hard way -- see the rainbow/banding history):
   * NOTHING may be painted as a full-width line in a per-line random color.
@@ -87,10 +91,13 @@ PALETTES = {
         "brick":    ((150, 96, 78),   (132, 84, 70)),
         "stucco":   ((205, 198, 182), (186, 178, 164)),
         "concrete": ((168, 168, 166), (150, 150, 148)),
-        "roof_shingle": (88, 86, 84),
-        "roof_tile":    (158, 88, 64),
+        "roof_shingle": (84, 82, 82),
+        "roof_tile":    (168, 92, 60),
         "roof_metal":   (130, 134, 138),
         "roof_flat":    (142, 140, 136),
+        "roof_tile_alt":    (122, 74, 56),
+        "roof_shingle_alt": (126, 120, 112),
+        "roof_metal_alt":   (108, 96, 84),
         "trim": (62, 58, 54),
         "frame": (225, 222, 214),
         "glass": (96, 112, 126),
@@ -101,16 +108,23 @@ PALETTES = {
         "sign_pool": ((150, 60, 52), (62, 86, 110), (190, 170, 120),
                       (90, 110, 90)),
         "shutter_pool": ((62, 58, 54),),
+        "unit_pool": ((208, 200, 184), (196, 186, 162), (186, 190, 178),
+                      (204, 190, 170)),
     },
     "europe": {
         "siding":   ((196, 188, 168), (176, 168, 150)),
-        "brick":    ((146, 88, 68),   (126, 76, 60)),
+        # UK terrace red-orange stock brick (refs: Norfolk/Chorley terraces).
+        "brick":    ((162, 84, 58),   (140, 72, 52)),
         "stucco":   ((222, 210, 184), (206, 192, 168)),
         "concrete": ((176, 174, 168), (158, 156, 152)),
-        "roof_shingle": (94, 88, 82),
-        "roof_tile":    (172, 92, 58),
+        # Shingle doubles as slate on European stock: cool dark gray.
+        "roof_shingle": (74, 74, 80),
+        "roof_tile":    (184, 96, 52),
         "roof_metal":   (122, 126, 130),
         "roof_flat":    (148, 146, 140),
+        "roof_tile_alt":    (130, 76, 54),
+        "roof_shingle_alt": (104, 104, 112),
+        "roof_metal_alt":   (96, 100, 104),
         "trim": (70, 62, 54),
         "frame": (235, 232, 224),
         "glass": (92, 106, 120),
@@ -120,16 +134,23 @@ PALETTES = {
         "awning_pool": ((52, 78, 58), (110, 48, 52), (46, 58, 84)),
         "sign_pool": ((120, 96, 72), (60, 72, 96), (140, 52, 48)),
         "shutter_pool": ((90, 96, 88), (74, 68, 60)),
+        "unit_pool": ((224, 212, 188), (208, 190, 160), (196, 200, 188),
+                      (216, 198, 172)),
     },
     "north_america": {
         "siding":   ((202, 198, 188), (172, 178, 184)),
         "brick":    ((142, 84, 66),   (120, 74, 62)),
         "stucco":   ((212, 200, 178), (192, 182, 162)),
         "concrete": ((170, 170, 168), (152, 152, 150)),
-        "roof_shingle": (78, 76, 74),
+        # 1970s EPA subdivision aerials: shingle roofs read near-charcoal
+        # with a strong roof-to-roof value spread (see PAGE_OVERRIDES).
+        "roof_shingle": (66, 65, 66),
         "roof_tile":    (150, 94, 72),
         "roof_metal":   (134, 138, 142),
         "roof_flat":    (138, 136, 132),
+        "roof_shingle_alt": (98, 94, 90),
+        "roof_tile_alt":    (118, 76, 60),
+        "roof_metal_alt":   (110, 112, 114),
         "trim": (58, 54, 50),
         "frame": (238, 236, 230),
         "glass": (100, 116, 130),
@@ -139,16 +160,22 @@ PALETTES = {
         "awning_pool": ((48, 74, 54), (44, 56, 82), (48, 48, 50)),
         "sign_pool": ((148, 52, 46), (52, 70, 98), (170, 150, 110)),
         "shutter_pool": ((52, 60, 52), (40, 44, 52), (60, 50, 42)),
+        "unit_pool": ((210, 206, 196), (190, 196, 200), (206, 196, 176)),
     },
     "mediterranean": {
         "siding":   ((216, 208, 192), (200, 190, 172)),
         "brick":    ((176, 124, 92),  (158, 110, 82)),
-        "stucco":   ((238, 230, 212), (224, 210, 186)),  # whitewash / cream
+        # Andalusia refs: whitewash is near-white in full sun.
+        "stucco":   ((242, 236, 220), (228, 216, 194)),
         "concrete": ((196, 190, 178), (180, 174, 162)),
         "roof_shingle": (110, 96, 86),
-        "roof_tile":    (188, 102, 62),  # bright clay
+        # Dubrovnik new-tile population; weathered lives on page 1.
+        "roof_tile":    (196, 108, 60),
         "roof_metal":   (150, 148, 142),
-        "roof_flat":    (188, 182, 170),  # pale terraces
+        "roof_flat":    (192, 186, 172),  # pale terraces
+        "roof_tile_alt":    (152, 92, 66),
+        "roof_shingle_alt": (134, 118, 106),
+        "roof_metal_alt":   (128, 124, 116),
         "trim": (88, 78, 66),
         "frame": (232, 226, 210),
         "glass": (88, 104, 116),
@@ -157,16 +184,21 @@ PALETTES = {
         "awning_pool": ((176, 98, 66), (224, 216, 200), (160, 76, 60)),
         "sign_pool": ((170, 90, 60), (96, 110, 120), (180, 160, 130)),
         "shutter_pool": ((74, 96, 72), (88, 118, 134), (104, 78, 56)),
+        "unit_pool": ((244, 238, 224), (232, 214, 176), (226, 202, 160),
+                      (206, 214, 206)),
     },
     "asia": {
         "siding":   ((184, 180, 172), (164, 162, 156)),
         "brick":    ((148, 104, 88),  (130, 92, 78)),
         "stucco":   ((208, 204, 194), (190, 186, 176)),
-        "concrete": ((178, 178, 174), (158, 158, 154)),  # weathered gray
+        "concrete": ((184, 184, 180), (164, 164, 160)),  # weathered gray
         "roof_shingle": (72, 70, 68),
         "roof_tile":    (96, 84, 92),    # dark glazed tile
         "roof_metal":   (104, 118, 128), # blue-gray corrugated
         "roof_flat":    (150, 148, 144),
+        "roof_tile_alt":    (70, 62, 66),
+        "roof_shingle_alt": (100, 96, 92),
+        "roof_metal_alt":   (84, 96, 104),
         "trim": (60, 58, 56),
         "frame": (70, 74, 78),           # dark aluminum
         "glass": (78, 92, 104),
@@ -176,16 +208,23 @@ PALETTES = {
         "sign_pool": ((168, 52, 44), (196, 164, 60), (54, 88, 140),
                       (60, 118, 84)),
         "shutter_pool": ((88, 90, 92),),
+        # Penang shophouse pastels: mint / cream / aqua / mustard units.
+        "unit_pool": ((198, 214, 198), (214, 206, 176), (186, 202, 206),
+                      (222, 214, 196), (208, 186, 152)),
     },
     "africa": {
         "siding":   ((198, 184, 162), (182, 168, 146)),
         "brick":    ((164, 112, 82),  (146, 100, 74)),
-        "stucco":   ((226, 208, 178), (208, 188, 156)),  # warm render / adobe
+        # Wembezi township ref: warm tan render with white surrounds.
+        "stucco":   ((220, 198, 166), (204, 180, 146)),
         "concrete": ((186, 178, 164), (168, 160, 146)),
         "roof_shingle": (96, 88, 78),
         "roof_tile":    (166, 96, 64),
-        "roof_metal":   (146, 134, 118),  # sun-bleached, rusty corrugated
+        "roof_metal":   (148, 142, 130),  # weathered zinc
         "roof_flat":    (172, 162, 144),
+        "roof_tile_alt":    (128, 76, 52),
+        "roof_shingle_alt": (122, 110, 96),
+        "roof_metal_alt":   (124, 82, 56),  # rust population
         "trim": (78, 68, 56),
         "frame": (104, 100, 92),
         "glass": (90, 102, 110),
@@ -196,16 +235,22 @@ PALETTES = {
         "sign_pool": ((170, 70, 50), (70, 110, 140), (190, 160, 80),
                       (90, 130, 90)),
         "shutter_pool": ((98, 92, 82),),
+        "unit_pool": ((226, 204, 168), (208, 172, 128), (186, 196, 186),
+                      (214, 196, 176)),
     },
     "south_america": {
         "siding":   ((204, 192, 174), (186, 174, 156)),
-        "brick":    ((158, 96, 70),   (140, 86, 64)),   # exposed ladrillo
+        # Rocinha ref: raw ladrillo red-brown with gray slab frames.
+        "brick":    ((156, 88, 58),   (138, 78, 52)),
         "stucco":   ((222, 206, 182), (204, 188, 164)),
-        "concrete": ((180, 176, 168), (162, 158, 150)),
+        "concrete": ((172, 168, 162), (154, 150, 144)),
         "roof_shingle": (90, 84, 78),
         "roof_tile":    (172, 90, 56),
         "roof_metal":   (138, 132, 122),
         "roof_flat":    (160, 154, 142),
+        "roof_tile_alt":    (138, 76, 50),
+        "roof_shingle_alt": (118, 108, 98),
+        "roof_metal_alt":   (116, 102, 88),
         "trim": (72, 64, 54),
         "frame": (220, 214, 202),
         "glass": (92, 106, 118),
@@ -216,6 +261,9 @@ PALETTES = {
         "sign_pool": ((172, 64, 48), (64, 96, 134), (196, 168, 84),
                       (84, 128, 92)),
         "shutter_pool": ((86, 76, 64),),
+        # Caminito-adjacent painted render pool (muted, not tourist-bright).
+        "unit_pool": ((216, 186, 140), (196, 170, 150), (176, 190, 176),
+                      (210, 200, 184), (188, 156, 120)),
     },
     "australia_oceania": {
         "siding":   ((206, 200, 186), (188, 184, 174)),
@@ -224,8 +272,11 @@ PALETTES = {
         "concrete": ((176, 174, 168), (158, 156, 150)),
         "roof_shingle": (84, 80, 76),
         "roof_tile":    (140, 82, 64),
-        "roof_metal":   (158, 162, 166),  # Colorbond-style light metal
+        "roof_metal":   (170, 172, 174),  # Colorbond-style light metal
         "roof_flat":    (150, 146, 138),
+        "roof_tile_alt":    (112, 68, 56),
+        "roof_shingle_alt": (112, 106, 100),
+        "roof_metal_alt":   (128, 130, 132),
         "trim": (64, 60, 56),
         "frame": (212, 212, 208),
         "glass": (100, 114, 126),
@@ -234,8 +285,76 @@ PALETTES = {
         "awning_pool": ((220, 218, 212), (70, 72, 74)),
         "sign_pool": ((96, 104, 110), (150, 70, 56), (70, 96, 120)),
         "shutter_pool": ((110, 114, 116),),
+        "unit_pool": ((214, 208, 194), (198, 194, 184), (206, 196, 176)),
     },
 }
+
+# Explicit per-page palette identities, derived from the reference photo
+# populations (scratchpad refs/ + reference_styles.yaml sources): Dubrovnik
+# splits into new-orange vs weathered-brown tile roofs, SA townships into
+# zinc vs painted red-oxide vs sun-bleached metal, US suburbs into charcoal
+# vs mid-gray shingle, and so on.  Keys not listed here fall back to the
+# deterministic _page_tone() drift so every page still reads distinct.
+PAGE_OVERRIDES = {
+    "generic": {
+        1: {"roof_tile": (152, 86, 60), "roof_shingle": (72, 70, 70)},
+        2: {"roof_tile": (188, 104, 66)},
+    },
+    "europe": {
+        1: {"roof_tile": (150, 82, 56), "roof_shingle": (66, 66, 72),
+            "brick": ((138, 70, 52), (120, 62, 46))},
+        2: {"roof_tile": (200, 116, 72),
+            "stucco": ((228, 218, 196), (212, 200, 178))},
+    },
+    "north_america": {
+        1: {"roof_shingle": (52, 52, 56),
+            "siding": ((172, 178, 184), (150, 158, 166))},
+        2: {"roof_shingle": (104, 98, 92),
+            "siding": ((214, 208, 194), (196, 188, 172))},
+    },
+    "mediterranean": {
+        1: {"roof_tile": (156, 96, 70),
+            "stucco": ((232, 222, 202), (216, 204, 182))},
+        2: {"roof_tile": (206, 122, 74)},
+    },
+    "asia": {
+        1: {"concrete": ((196, 196, 192), (178, 178, 174)),
+            "roof_metal": (88, 104, 118)},
+        2: {"concrete": ((162, 160, 154), (144, 142, 136)),
+            "roof_tile": (110, 90, 78)},
+    },
+    "africa": {
+        1: {"roof_metal": (150, 66, 48)},    # painted red-oxide steel
+        2: {"roof_metal": (176, 178, 174)},  # new / sun-bleached zinc
+    },
+    "south_america": {
+        1: {"brick": ((140, 78, 52), (124, 68, 46)),
+            "roof_metal": (124, 110, 94)},
+        2: {"stucco": ((214, 190, 150), (198, 172, 132)),
+            "roof_tile": (188, 102, 62)},
+    },
+    "australia_oceania": {
+        1: {"roof_metal": (96, 100, 98)},    # Colorbond woodland grey
+        2: {"roof_metal": (134, 70, 58)},    # Colorbond manor red
+    },
+}
+
+
+def page_palette(flavor: str, page: int = 0) -> dict:
+    """Palette for one atlas page: explicit reference-derived overrides
+    first, deterministic _page_tone drift for everything else."""
+    base = PALETTES[flavor]
+    if page <= 0:
+        return base
+    overrides = (PAGE_OVERRIDES.get(flavor) or {}).get(page) or {}
+    palette = {}
+    for key, value in base.items():
+        if key in overrides:
+            palette[key] = overrides[key]
+        else:
+            palette[key] = _map_palette_colors(
+                value, lambda color: _page_tone(color, page))
+    return palette
 
 WINDOW_PERIOD_M = 2.5
 
@@ -332,16 +451,61 @@ FLAVOR_PATTERNS = {
 }
 
 
+# Defaults for the reference-derived pattern knobs added after the photo
+# study (June 2026 refs).  All are paint-side only.
+#   tile_mix / shingle_mix: probability a roof cell comes from the alt
+#     population (weathered pans / bleached tabs) instead of the base.
+#   roof_streaks: per-column eave wash-streak probability on roofs.
+#   repair_patches: count of repaired-cell clusters on tile roofs.
+#   unit_banding: probability a stucco/concrete strip splits into per-unit
+#     paint colors (Penang shophouse / painted-render streetscape look).
+#   stone_lintels: draw a stone block over windows instead of a shadow line.
+#   win_jitter: per-window width/height jitter fraction.
+_PATTERN_DEFAULTS = {
+    "tile_mix": 0.16, "shingle_mix": 0.12, "roof_streaks": 0.3,
+    "repair_patches": 2, "unit_banding": 0.0, "unit_w_m": 5.0,
+    "stone_lintels": False, "win_jitter": 0.08,
+}
+
+_FLAVOR_PATTERN_EXTRAS = {
+    "generic": {"unit_banding": 0.25},
+    "europe": {"unit_banding": 0.3, "stone_lintels": True},
+    "north_america": {"unit_banding": 0.1},
+    "mediterranean": {"unit_banding": 0.4, "repair_patches": 3,
+                      "tile_mix": 0.22},
+    "asia": {"unit_banding": 0.85, "tile_mix": 0.25, "roof_streaks": 0.5},
+    "africa": {"unit_banding": 0.45, "roof_streaks": 0.5,
+               "repair_patches": 3},
+    "south_america": {"unit_banding": 0.6, "repair_patches": 3,
+                      "tile_mix": 0.22},
+    "australia_oceania": {"unit_banding": 0.15},
+}
+
+# Page pattern drift: the weathered page carries more grime/streaks/mixing,
+# the fresh page less.  Additive on 0..1 knobs, clamped in place.
+_PAGE_PATTERN_TWEAKS = {
+    1: {"grime": 0.12, "streaks": 0.15, "roof_streaks": 0.2,
+        "tile_mix": 0.1, "shingle_mix": 0.08},
+    2: {"grime": -0.08, "streaks": -0.1, "roof_streaks": -0.12,
+        "tile_mix": -0.06, "shingle_mix": -0.04},
+}
+
+
 def _load_reference_styles(path=None):
     path = path or os.path.join(HERE, "reference_styles.yaml")
     with open(path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 
 
-def _pattern_for_flavor(flavor: str, references: dict) -> dict:
-    pattern = dict(FLAVOR_PATTERNS.get(flavor, FLAVOR_PATTERNS["generic"]))
+def _pattern_for_flavor(flavor: str, references: dict,
+                        page: int = 0) -> dict:
+    pattern = dict(_PATTERN_DEFAULTS)
+    pattern.update(FLAVOR_PATTERNS.get(flavor, FLAVOR_PATTERNS["generic"]))
+    pattern.update(_FLAVOR_PATTERN_EXTRAS.get(flavor) or {})
     region = (references.get("regions") or {}).get(flavor, {})
     pattern.update(region.get("pattern_overrides") or {})
+    for key, delta in (_PAGE_PATTERN_TWEAKS.get(page) or {}).items():
+        pattern[key] = min(1.0, max(0.0, float(pattern.get(key, 0.0)) + delta))
     return pattern
 
 
@@ -376,6 +540,33 @@ def _adjust(color, delta):
     return tuple(max(0, min(255, c + delta)) for c in color)
 
 
+def _warm(color, delta):
+    """DETERMINISTIC warmth shift: +delta pushes toward red/amber."""
+    r, g, b = color
+    return (max(0, min(255, r + delta)),
+            max(0, min(255, g + delta // 3)),
+            max(0, min(255, b - delta)))
+
+
+def _page_tone(color, page):
+    """Generic per-page tone for palette entries without an explicit
+    PAGE_OVERRIDES entry: page 1 reads weathered (darker, warmer), page 2
+    reads repainted/fresh (lighter).  Deterministic by design."""
+    if page == 1:
+        return _adjust(_warm(color, 3), -10)
+    if page == 2:
+        return _adjust(color, 8)
+    return tuple(color)
+
+
+def _map_palette_colors(value, fn):
+    """Apply fn to every RGB triple in a palette value (triple, shade pair,
+    or color pool)."""
+    if isinstance(value[0], int):
+        return fn(value)
+    return tuple(fn(color) for color in value)
+
+
 def _speckle(draw, rng, box, base, amount, count):
     x0, y0, x1, y1 = box
     for _ in range(count):
@@ -390,16 +581,19 @@ def _area_count(box, divisor):
     return max(1, ((x1 - x0) * (y1 - y0)) // divisor)
 
 
-def _row_cells(draw, x0, x1, ya, yb, n, off_frac, color_fn):
+def _row_cells(draw, x0, x1, ya, yb, n, off_frac, color_fn, indices=None):
     """Paint one course of n cells exactly tiling x0..x1 (wrap-continuous).
 
     Cells sit on float edges of period (x1-x0)/n, shifted by ``off_frac``
     cells; a cell crossing the right edge is split and its remainder drawn
     at the left edge in the SAME color, so the strip tiles seamlessly in U.
+    ``indices`` restricts painting to those cell indices (repair patches).
     """
     w = x1 - x0
     cw = w / float(n)
     for i in range(n):
+        if indices is not None and i not in indices:
+            continue
         e0 = x0 + ((i + off_frac) * cw) % w
         e1 = e0 + cw
         color = color_fn(i)
@@ -441,8 +635,45 @@ def _pick_weighted(rng, choices, weights):
     return choices[-1]
 
 
+def _paint_unit_bands(draw, rng, box, family, palette, pattern,
+                      world_w, px_scale):
+    """Per-unit paint colors on a render strip (Penang shophouse rows,
+    painted Latin-American streetscapes): ~unit_w_m wide color fields with
+    pale pilaster/party-wall edges.  Cell-based, so wrap stays seamless
+    (off_frac 0 keeps every unit inside the strip)."""
+    pool = palette.get("unit_pool")
+    if not pool:
+        return False
+    x0, y0, x1, y1 = box
+    n_units = max(2, int(round(world_w / float(pattern.get("unit_w_m",
+                                                           5.0)))))
+    colors = [_shade(rng, rng.choice(pool), 6) for _ in range(n_units)]
+    cw = (x1 - x0) / float(n_units)
+    for i in range(n_units):
+        xa = x0 + int(round(i * cw))
+        xb = min(x1 - 1, x0 + int(round((i + 1) * cw)) - 1)
+        color = colors[i]
+        draw.rectangle((xa, y0, xb, y1 - 1), fill=color)
+        if family == "stucco":
+            for _ in range(3):
+                bw = rng.randint(max(6, int(cw) // 8), max(10, int(cw) // 3))
+                bh = rng.randint(max(4, (y1 - y0) // 6),
+                                 max(6, (y1 - y0) // 2))
+                bx = rng.randint(xa, max(xa, xb - bw))
+                by = rng.randint(y0, y1 - 2)
+                draw.ellipse((bx, by, min(bx + bw, xb), min(by + bh, y1 - 1)),
+                             fill=_shade(rng, color, 5))
+        seg = (xa, y0, xb + 1, y1)
+        _speckle(draw, rng, seg, color, 8, _area_count(seg, 72))
+        draw.rectangle((xa, y0, xa + _S(px_scale, 2), y1 - 1),
+                       fill=_adjust(color, 24))  # pilaster / party wall
+    return True
+
+
 def _material_base(draw, rng, box, family, palette, shade_index,
                    pattern=None, px_scale=1.0, world_w=20.0):
+    """Paint the material ground for a strip.  Returns True when the strip
+    was unit-banded (per-unit paint colors replace the family base)."""
     pattern = pattern or FLAVOR_PATTERNS["generic"]
     x0, y0, x1, y1 = box
     base = palette[family][shade_index]
@@ -463,20 +694,35 @@ def _material_base(draw, rng, box, family, palette, shade_index,
         row_h = max(4, h // int(pattern["brick_row"]))
         n_bricks = max(8, int(round(world_w / 0.21)))  # ~21 cm stretchers
         mortar = palette.get("mortar") or _adjust(base, 26)
+
+        def brick_shade():
+            # Reference brickwork is a mixed population: mostly stock
+            # bricks, a few over-burnt near-dark headers and rubbed
+            # lighter bricks (UK terrace / ladrillo refs).
+            roll = rng.random()
+            if roll < 0.05:
+                return _adjust(base, -30)
+            if roll < 0.10:
+                return _warm(_adjust(base, 22), 4)
+            if roll < 0.45:
+                return _shade(rng, base, 10)
+            return base
+
         for row, y in enumerate(range(y0, y1, row_h)):
             yb = min(y + row_h - 1, y1 - 1)
             off = 0.5 * (row % 2)
             draw.rectangle((x0, y, x1 - 1, yb), fill=base)
-            shades = [
-                _shade(rng, base, 8) if rng.random() < 0.35 else base
-                for _ in range(n_bricks)
-            ]
+            shades = [brick_shade() for _ in range(n_bricks)]
             _row_cells(draw, x0, x1, y, yb, n_bricks, off,
                        lambda i: shades[i])
             draw.line((x0, y, x1, y), fill=mortar, width=1)
             for ex in _cell_edges(x0, x1, n_bricks, off):
                 draw.line((ex, y, ex, yb), fill=mortar, width=1)
     elif family == "stucco":
+        if (rng.random() < float(pattern.get("unit_banding", 0.0))
+                and _paint_unit_bands(draw, rng, box, family, palette,
+                                      pattern, world_w, px_scale)):
+            return True
         # Large soft tonal blotches under the fine grain: render/whitewash.
         w = x1 - x0
         for _ in range(16):
@@ -488,6 +734,10 @@ def _material_base(draw, rng, box, family, palette, shade_index,
                          fill=_shade(rng, base, 5))
         _speckle(draw, rng, box, base, 10, _area_count(box, 48))
     elif family == "concrete":
+        if (rng.random() < float(pattern.get("unit_banding", 0.0))
+                and _paint_unit_bands(draw, rng, box, family, palette,
+                                      pattern, world_w, px_scale)):
+            return True
         _speckle(draw, rng, box, base, 8, _area_count(box, 96))
         joint = _adjust(base, -16)
         n_panels = max(2, int(round(world_w / 3.0)))  # ~3 m panel joints
@@ -511,11 +761,19 @@ def _draw_window(draw, rng, cx, sill_y, win_w, win_h, palette, pattern,
     y1 = int(sill_y)
     y0 = int(sill_y - win_h)
 
-    # Lintel hint over the frame; arch flavors get a light arc instead.
+    # Lintel hint over the frame; arch flavors get a light arc instead and
+    # stone-lintel flavors (UK terrace refs) a pale stone block.
     if pattern.get("arch"):
         ah = max(3, int(0.22 * ppm_y))
         draw.arc((x0 - bw, y0 - bw - ah, x1 + bw, y0 - bw + ah),
                  180, 360, fill=_adjust(wall_base, +10), width=bw)
+    elif pattern.get("stone_lintels"):
+        lh = max(2, int(0.18 * ppm_y))
+        ext = _S(px_scale, 2)
+        draw.rectangle((x0 - bw - ext, y0 - bw - lh, x1 + bw + ext,
+                        y0 - bw - 1), fill=_adjust(wall_base, +26))
+        draw.line((x0 - bw - ext, y0 - bw - 1, x1 + bw + ext, y0 - bw - 1),
+                  fill=_adjust(wall_base, -14), width=1)
     else:
         draw.line((x0 - bw, y0 - bw - 1, x1 + bw, y0 - bw - 1),
                   fill=_adjust(wall_base, -12), width=1)
@@ -537,6 +795,8 @@ def _draw_window(draw, rng, cx, sill_y, win_w, win_h, palette, pattern,
                   width=bw)
     else:  # warm interior light
         draw.rectangle((x0, y0, x1, y1), fill=_adjust((150, 126, 92), tone))
+    # Head reveal shadow: gives the glass depth behind the frame.
+    draw.line((x0, y0, x1, y0), fill=_adjust(glass_base, -34), width=1)
 
     # Mullions (frame color) per regional style.
     mullion = pattern.get("mullion", "single")
@@ -645,8 +905,8 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
                 world_h, ground=False, pattern=None, px_scale=1.0):
     pattern = pattern or FLAVOR_PATTERNS["generic"]
     x0, y0, x1, y1 = box
-    _material_base(draw, rng, box, family, palette, shade_index, pattern,
-                   px_scale, world_w)
+    banded = _material_base(draw, rng, box, family, palette, shade_index,
+                            pattern, px_scale, world_w)
     gutter = max(1, int(round(GUTTER_PX * px_scale)))
     px_per_m_x = (x1 - x0) / world_w
     # The OBJ maps V frac 0..1 onto the gutter-inset band, so vertical
@@ -660,7 +920,7 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
     # doors and windows paint over it).  Deterministic gradient: full-width
     # lines must never roll the RNG.
     grime = float(pattern.get("grime", 0.0))
-    if grime > 0 and family != "siding":
+    if grime > 0 and family != "siding" and not banded:
         gh = max(2, int(round(0.18 * px_per_m_y)))
         for k in range(gh):
             frac = (k + 1) / float(gh)
@@ -677,6 +937,7 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
     sill_y = base_y - int(0.9 * px_per_m_y)
     win_w = float(pattern["window_w"]) * px_per_m_x
     win_h = float(pattern["window_h"]) * px_per_m_y
+    jitter = float(pattern.get("win_jitter", 0.0))
     base = palette[family][shade_index]
     sill_xs = []
     for i in range(n_windows):
@@ -685,9 +946,13 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
             _paint_door(draw, rng, cx, base_y, y1 - 1, palette, pattern,
                         glass_base, px_scale, px_per_m_x, px_per_m_y)
         else:
-            _draw_window(draw, rng, cx, sill_y, win_w, win_h, palette,
+            # Real facades never repeat one exact window: jitter each
+            # opening a little around the regional size.
+            jw = win_w * rng.uniform(1.0 - jitter, 1.0 + jitter)
+            jh = win_h * rng.uniform(1.0 - jitter, 1.0 + jitter)
+            _draw_window(draw, rng, cx, sill_y, jw, jh, palette,
                          pattern, base, px_scale, px_per_m_x, px_per_m_y)
-            sill_xs.append((int(cx - win_w / 2), int(cx + win_w / 2)))
+            sill_xs.append((int(cx - jw / 2), int(cx + jw / 2)))
 
     # Weathering streaks running down from sill corners.
     streaks = float(pattern.get("streaks", 0.0))
@@ -831,13 +1096,32 @@ def _paint_roller(draw, rng, box, palette, world_w, world_h,
                       width=_S(px_scale, 3))
 
 
-def _paint_roof_shingle(draw, rng, box, base, pattern):
+def _eave_streaks(draw, rng, box, base, prob, n_cols, row_h):
+    """Per-column dirt/water wash rising from the eave edge (strip bottom
+    = V frac 0 = the eave on every pitched roof, whatever its v_top).
+    Vertical per-cell lines, so the banding rule holds."""
+    if prob <= 0:
+        return
+    x0, y0, x1, y1 = box
+    for ex in _cell_edges(x0, x1, n_cols, 0.3):
+        if rng.random() < prob:
+            length = rng.randint(row_h * 2, max(row_h * 2 + 1, row_h * 6))
+            draw.line((ex, max(y0, y1 - 1 - length), ex, y1 - 1),
+                      fill=_adjust(base, -14), width=1)
+
+
+def _paint_roof_shingle(draw, rng, box, base, pattern, palette):
     x0, y0, x1, y1 = box
     row_h = max(3, int(pattern["shingle_row"]))
     n_tabs = 48  # 0.25 m tabs over the 12 m repeat
+    alt = palette.get("roof_shingle_alt") or _adjust(base, 26)
+    mix = float(pattern.get("shingle_mix", 0.12))
 
     def tab_color(_i):
-        if rng.random() < 0.06:
+        roll = rng.random()
+        if roll < mix:
+            return _shade(rng, alt, 8)  # bleached / replaced tab
+        if roll < mix + 0.06:
             return _shade(rng, base, 14)  # rare odd tab
         return _shade(rng, base, 6)
 
@@ -846,16 +1130,28 @@ def _paint_roof_shingle(draw, rng, box, base, pattern):
         _row_cells(draw, x0, x1, y, yb, n_tabs, 0.5 * (row % 2), tab_color)
         draw.line((x0, y, x1, y), fill=_adjust(base, -10), width=1)
     _speckle(draw, rng, box, base, 8, _area_count(box, 600))
+    _eave_streaks(draw, rng, box, base,
+                  float(pattern.get("roof_streaks", 0.0)) * 0.5,
+                  n_tabs, row_h)
 
 
-def _paint_roof_tile(draw, rng, box, base, pattern):
+def _paint_roof_tile(draw, rng, box, base, pattern, palette):
     x0, y0, x1, y1 = box
     row_h = max(3, int(pattern["tile_row"]))
     n_pans = 64  # ~0.19 m pan width over the 12 m repeat
-    for row, y in enumerate(range(y0, y1, row_h)):
+    alt = palette.get("roof_tile_alt") or _adjust(base, -28)
+    mix = float(pattern.get("tile_mix", 0.16))
+    rows = list(range(y0, y1, row_h))
+    for row, y in enumerate(rows):
         yb = min(y + row_h - 1, y1 - 1)
         off = 0.5 * (row % 2)
-        pan_shades = [_shade(rng, base, 7) for _ in range(n_pans)]
+        # Two-population pans (Dubrovnik/Toledo refs): mostly base clay
+        # with weathered darker pans mixed in.
+        pan_shades = [
+            _shade(rng, alt, 7) if rng.random() < mix
+            else _shade(rng, base, 7)
+            for _ in range(n_pans)
+        ]
         _row_cells(draw, x0, x1, y, yb, n_pans, off, lambda i: pan_shades[i])
         edges = _cell_edges(x0, x1, n_pans, off)
         for i, ex in enumerate(edges):  # pan-gap shadow
@@ -866,12 +1162,36 @@ def _paint_roof_tile(draw, rng, box, base, pattern):
                 draw.line((ex, y + 1, ex, yb), fill=_adjust(pan_shades[i], 16),
                           width=1)
         draw.line((x0, y, x1, y), fill=_adjust(base, -12), width=1)
+    # Repaired-tile patches: small row x pan clusters in a fresher tone,
+    # cell-aligned so they read as replaced tiles, not paint smears.
+    for _ in range(int(pattern.get("repair_patches", 0))):
+        r0 = rng.randrange(max(1, len(rows) - 3))
+        rn = rng.randint(2, 4)
+        c0 = rng.randrange(n_pans)
+        cn = rng.randint(3, 7)
+        idx = {(c0 + j) % n_pans for j in range(cn)}
+        patch = _shade(rng, _adjust(base, 18), 6)
+        for r in range(r0, min(r0 + rn, len(rows))):
+            y = rows[r]
+            yb = min(y + row_h - 1, y1 - 1)
+            off = 0.5 * (r % 2)
+            shades = {i: _shade(rng, patch, 5) for i in idx}
+            _row_cells(draw, x0, x1, y + 1, yb, n_pans, off,
+                       lambda i: shades[i], indices=idx)
+    _eave_streaks(draw, rng, box, base,
+                  float(pattern.get("roof_streaks", 0.0)), n_pans, row_h)
 
 
-def _paint_roof_metal(draw, rng, box, base, pattern, px_scale):
+def _paint_roof_metal(draw, rng, box, base, pattern, px_scale,
+                      palette=None):
     x0, y0, x1, y1 = box
     n_sheets = 13  # ~0.92 m sheets over the 12 m repeat
-    sheet_shades = [_shade(rng, base, 4) for _ in range(n_sheets)]
+    alt = (palette or {}).get("roof_metal_alt")
+    sheet_shades = [
+        _shade(rng, alt, 6) if alt and rng.random() < 0.12
+        else _shade(rng, base, 4)
+        for _ in range(n_sheets)
+    ]
     _row_cells(draw, x0, x1, y0, y1 - 1, n_sheets, 0.0,
                lambda i: sheet_shades[i])
     corr = max(2, int(pattern["corrugation"]))
@@ -882,6 +1202,13 @@ def _paint_roof_metal(draw, rng, box, base, pattern, px_scale):
                   width=1)
     for ex in _cell_edges(x0, x1, n_sheets, 0.0):  # sheet seams
         draw.line((ex, y0, ex, y1 - 1), fill=_adjust(base, -14), width=1)
+    # Horizontal lap seams every ~2.25 m: deterministic structural lines
+    # (never RNG-rolled -- the roof-banding rule).
+    h = y1 - y0
+    for k in range(1, 4):
+        ly = y0 + (h * k) // 4
+        draw.line((x0, ly, x1, ly), fill=_adjust(base, -9), width=1)
+        draw.line((x0, ly + 1, x1, ly + 1), fill=_adjust(base, 5), width=1)
     if pattern["rust"]:
         # Weathered rust blotches, spread evenly (LOD far quads sample a
         # small window of the strip -- keep the mean representative).
@@ -907,6 +1234,22 @@ def _paint_roof_flat(draw, rng, box, base, px_scale):
     for ex in _cell_edges(x0, x1, n_sheets, 0.0):
         draw.line((ex, y0, ex, y1 - 1), fill=_adjust(base, -10), width=1)
     _speckle(draw, rng, box, base, 12, _area_count(box, 60))
+    # Ponding stains and small vents/stub pipes, spread evenly so the far
+    # LOD quads (which sample a small window) keep a representative mean.
+    for _ in range(int(round(6 * px_scale * px_scale))):
+        bw = rng.randint(_S(px_scale, 20), _S(px_scale, 60))
+        bh = rng.randint(_S(px_scale, 8), _S(px_scale, 24))
+        bx = rng.randint(x0, max(x0, x1 - bw - 1))
+        by = rng.randint(y0, max(y0, y1 - bh - 1))
+        draw.ellipse((bx, by, bx + bw, by + bh),
+                     fill=_shade(rng, _adjust(base, -7), 3))
+    for _ in range(int(round(10 * px_scale * px_scale))):
+        vs = _S(px_scale, 3)
+        vx = rng.randint(x0, x1 - vs - 1)
+        vy = rng.randint(y0, y1 - vs - 2)
+        draw.rectangle((vx, vy, vx + vs, vy + vs), fill=_adjust(base, 18))
+        draw.line((vx, vy + vs + 1, vx + vs, vy + vs + 1),
+                  fill=_adjust(base, -14), width=1)
     draw.rectangle((x0, y0, x1 - 1, y1 - 1), outline=_adjust(base, -12),
                    width=_S(px_scale, 3))
 
@@ -920,11 +1263,11 @@ def _paint_roof(draw, rng, box, kind, palette, pattern=None, px_scale=1.0):
     base = palette[kind]
     draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=base)
     if kind == "roof_shingle":
-        _paint_roof_shingle(draw, rng, box, base, pattern)
+        _paint_roof_shingle(draw, rng, box, base, pattern, palette)
     elif kind == "roof_tile":
-        _paint_roof_tile(draw, rng, box, base, pattern)
+        _paint_roof_tile(draw, rng, box, base, pattern, palette)
     elif kind == "roof_metal":
-        _paint_roof_metal(draw, rng, box, base, pattern, px_scale)
+        _paint_roof_metal(draw, rng, box, base, pattern, px_scale, palette)
     else:  # roof_flat: membrane sheets + gravel grain
         _paint_roof_flat(draw, rng, box, base, px_scale)
 
@@ -960,10 +1303,11 @@ def build_layout(size: int) -> dict:
 
 
 def paint_atlas(flavor: str, layout: dict, seed: int,
-                references: dict | None = None) -> Image.Image:
-    palette = PALETTES[flavor]
+                references: dict | None = None,
+                page: int = 0) -> Image.Image:
+    palette = page_palette(flavor, page)
     references = references or _load_reference_styles()
-    pattern = _pattern_for_flavor(flavor, references)
+    pattern = _pattern_for_flavor(flavor, references, page)
     size = layout["size"]
     # Roof row/pitch constants are authored in 2048px units; rescale so the
     # painted feature size in world metres is resolution-independent.
@@ -974,7 +1318,8 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
     draw = ImageDraw.Draw(img)
     for index, (name, _h, world_w, world_h, kind) in enumerate(STRIPS):
         flavor_salt = int(hashlib.sha1(flavor.encode("utf-8")).hexdigest()[:8], 16)
-        rng = random.Random(seed * 7919 + index * 104729 + flavor_salt)
+        rng = random.Random(seed * 7919 + index * 104729 + flavor_salt
+                            + page * 31337)
         y0, y1 = layout["strips"][name]["px"]
         # Paint the FULL band including the gutter so bleed shows the same
         # material, then UVs stay inside the inset V range.
@@ -1009,8 +1354,13 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
     return img
 
 
-def texture_name(flavor: str) -> str:
-    return f"o4sfr_procgen_atlas_{flavor}.png"
+def texture_name(flavor: str, page: int = 0) -> str:
+    """Atlas PNG name for one flavor page.  Page 0 keeps the historical
+    un-suffixed name so already-installed OBJs stay valid; pages 1+ get
+    _p2/_p3 suffixes (human page numbers)."""
+    if page <= 0:
+        return f"o4sfr_procgen_atlas_{flavor}.png"
+    return f"o4sfr_procgen_atlas_{flavor}_p{page + 1}.png"
 
 
 def main(argv=None) -> int:
@@ -1026,9 +1376,16 @@ def main(argv=None) -> int:
         config = yaml.safe_load(fh)
     references = _load_reference_styles()
     atlas_cfg = config["atlas"]
+    pages = max(1, int(atlas_cfg.get("pages", 1)))
     layout = build_layout(int(atlas_cfg["size"]))
     layout["flavors"] = {
         flavor: f"textures/{texture_name(flavor)}"
+        for flavor in atlas_cfg["flavors"]
+    }
+    layout["pages"] = pages
+    layout["flavor_pages"] = {
+        flavor: [f"textures/{texture_name(flavor, page)}"
+                 for page in range(pages)]
         for flavor in atlas_cfg["flavors"]
     }
     layout["reference_styles"] = {
@@ -1048,10 +1405,12 @@ def main(argv=None) -> int:
     # turned out to be hue-jittered roof rows in the PNG itself (_shade vs
     # _jitter), not mip bleed.
     for flavor in atlas_cfg["flavors"]:
-        img = paint_atlas(flavor, layout, int(atlas_cfg["seed"]), references)
-        path = os.path.join(textures_dir, texture_name(flavor))
-        img.save(path, optimize=True)
-        print(f"wrote {path}")
+        for page in range(pages):
+            img = paint_atlas(flavor, layout, int(atlas_cfg["seed"]),
+                              references, page)
+            path = os.path.join(textures_dir, texture_name(flavor, page))
+            img.save(path, optimize=True)
+            print(f"wrote {path}")
     print(f"wrote {args.layout_out}")
     return 0
 

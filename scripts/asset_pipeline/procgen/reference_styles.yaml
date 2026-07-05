@@ -34,8 +34,16 @@
       ],
       "sources": [
         "https://urbanomnibus.net/2017/02/at-face-value/",
-        "https://www.slcdocs.com/Planning/HLC/MFDGCompleteweb.pdf"
+        "https://www.slcdocs.com/Planning/HLC/MFDGCompleteweb.pdf",
+        "https://commons.wikimedia.org/wiki/File:Clifford_and_Farleigh_Terraces_-_geograph.org.uk_-_622410.jpg",
+        "https://commons.wikimedia.org/wiki/File:Dachlandschaft_Altbau_Krankenhaus_Steyr.jpg",
+        "https://commons.wikimedia.org/wiki/File:Roof_tiles_packed_in_crate_1.jpg",
+        "https://commons.wikimedia.org/wiki/File:Solna_Brick_wall_Silesian_bond_variation1.jpg"
       ],
+      "palette_hints": {
+        "brick": ["#ab6b5b", "#6c3427", "#c37c69"],
+        "roof_tile": ["#d57445", "#9b431b", "#ae775f"]
+      },
       "weights": {
         "families": {
           "stucco": 3,
@@ -63,8 +71,15 @@
       ],
       "sources": [
         "https://nhpt.org/gable-fronted-single-family-houses",
-        "https://media.villagepreservation.org/wp-content/uploads/2020/04/15074011/Report_-The-Federal-Era-Row-House-of-Lower-Manhattan.pdf"
+        "https://media.villagepreservation.org/wp-content/uploads/2020/04/15074011/Report_-The-Federal-Era-Row-House-of-Lower-Manhattan.pdf",
+        "https://commons.wikimedia.org/wiki/File:Houses_with_vinyl_siding,_South_Side,_2022-08-17,_01.jpg",
+        "https://commons.wikimedia.org/wiki/File:Unidentified_subdivision_aerial_view_-_DPLA_-_13633f48d6dd871d45c036158d0e8a25.jpg",
+        "https://commons.wikimedia.org/wiki/File:Beach_House_in_New_Jersey_with_asphalt_shingles.jpg"
       ],
+      "palette_hints": {
+        "roof_shingle": ["#2f2f33", "#515355", "#8d8a87"],
+        "siding": ["#c3bfb9", "#c8c5bf", "#a9a7a0"]
+      },
       "weights": {
         "families": {
           "siding": 4,
@@ -91,8 +106,16 @@
         "warm sun-faded doors and awnings"
       ],
       "sources": [
-        "https://www.thespruce.com/what-is-mediterranean-architecture-5072822"
+        "https://www.thespruce.com/what-is-mediterranean-architecture-5072822",
+        "https://commons.wikimedia.org/wiki/File:Dubrovnik-Rooftops.jpg",
+        "https://commons.wikimedia.org/wiki/File:Tejados_de_Toledo.jpg",
+        "https://commons.wikimedia.org/wiki/File:.Spain,_Andalusia,_Benamahoma_(01),_Calle_Real.jpg",
+        "https://commons.wikimedia.org/wiki/File:07-17-2012_-_Emborio_-_Emporio_-_Santorini_-_Greece_-_11.jpg"
       ],
+      "palette_hints": {
+        "roof_tile": ["#c8703a", "#a3674a", "#703c28", "#8c442d"],
+        "stucco": ["#f2ecdc", "#cdcdcc", "#c7c4bb"]
+      },
       "weights": {
         "families": {
           "stucco": 5,
@@ -119,8 +142,15 @@
         "metal and dark tile roofs"
       ],
       "sources": [
-        "https://www.archdaily.com/320233/lucky-shophouse-chang-architects"
+        "https://www.archdaily.com/320233/lucky-shophouse-chang-architects",
+        "https://commons.wikimedia.org/wiki/File:Penang_shophouses,_Magazine_Road,_George_Town.jpg",
+        "https://commons.wikimedia.org/wiki/File:Singapore_HDB_Apartment_Block_506_Bishan_(1).jpg",
+        "https://commons.wikimedia.org/wiki/File:HK_Sai_Ying_Pun_%E8%A5%BF%E7%87%9F%E7%9B%A4_Western_Street_High_Street_new_marble_glass_black_Apartment_facade_April_2013.JPG"
       ],
+      "palette_hints": {
+        "unit_pool": ["#c6d6c6", "#d6ceb0", "#bacace", "#d0baa0"],
+        "concrete": ["#c5d4d3", "#948f89", "#b2bdc2"]
+      },
       "weights": {
         "families": {
           "concrete": 3,
@@ -149,8 +179,14 @@
       ],
       "sources": [
         "https://www.unep.org/news-and-stories/story/traditional-building-practices-offer-sustainable-solutions-african-cities",
-        "https://www.oneplanetnetwork.org/sites/default/files/from-crm/Africa_responsibly%2520sourced%2520materials.pdf"
+        "https://www.oneplanetnetwork.org/sites/default/files/from-crm/Africa_responsibly%2520sourced%2520materials.pdf",
+        "https://commons.wikimedia.org/wiki/File:Homestead_Architecture,_Wembezi_Township.jpg",
+        "https://commons.wikimedia.org/wiki/File:House_Number_Kampala.jpg"
       ],
+      "palette_hints": {
+        "stucco": ["#b49f89", "#c7b092", "#a57b69"],
+        "roof_metal": ["#9c4230", "#969290", "#7c5a40"]
+      },
       "weights": {
         "families": {
           "stucco": 4,
@@ -176,8 +212,14 @@
         "clay tile and corrugated metal roofs"
       ],
       "sources": [
-        "https://www.archdaily.com/1024259/unpolished-narratives-exposed-materials-in-latin-american-affordable-housing"
+        "https://www.archdaily.com/1024259/unpolished-narratives-exposed-materials-in-latin-american-affordable-housing",
+        "https://commons.wikimedia.org/wiki/File:Rocinha_Favela_-_2362631796.jpg",
+        "https://commons.wikimedia.org/wiki/File:Buenos_Aires_-_Caminito_street_tin_houses_-_7701.jpg"
       ],
+      "palette_hints": {
+        "brick": ["#9c5838", "#833e23", "#b78a60"],
+        "concrete": ["#918571", "#9ea1a3"]
+      },
       "weights": {
         "families": {
           "stucco": 3,
@@ -203,8 +245,13 @@
         "light metal frames and restrained grime"
       ],
       "sources": [
-        "https://en.wikipedia.org/wiki/Australian_residential_architectural_styles"
+        "https://en.wikipedia.org/wiki/Australian_residential_architectural_styles",
+        "https://commons.wikimedia.org/wiki/File:House_in_Canowindra,_New_South_Wales,_2023.jpg",
+        "https://commons.wikimedia.org/wiki/File:View_of_Capital_Hill,_Barton_and_Forrest.jpg"
       ],
+      "palette_hints": {
+        "roof_metal": ["#aaacae", "#606462", "#86463a"]
+      },
       "weights": {
         "families": {
           "brick": 3,
@@ -381,7 +428,9 @@
         "roller doors, loading bays, vents, metal/concrete panels"
       ],
       "sources": [
-        "https://steelconstruction.info/Single_storey_industrial_buildings"
+        "https://steelconstruction.info/Single_storey_industrial_buildings",
+        "https://commons.wikimedia.org/wiki/File:Brackmills_Industrial_Estate,_Hardingstone_-_aerial_view_-_geograph.org.uk_-_7683842.jpg",
+        "https://commons.wikimedia.org/wiki/File:Aldi_distribution_centre_-_geograph.org.uk_-_6484912.jpg"
       ],
       "weights": {
         "families": {
