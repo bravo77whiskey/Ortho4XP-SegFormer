@@ -9039,7 +9039,11 @@ def run(
     }
     detail_timing = _env_flag("O4_SFR_TIMING_DETAIL")
     place_profile = _env_flag("O4_SFR_BLD_PLACE_PROFILE")
-    slow_timing_s = _env_float("O4_SFR_TIMING_SLOW", 3.0)
+    # Slow-texture timing lines are verbose output; an explicitly set
+    # O4_SFR_TIMING_SLOW still enables them regardless of verbose_log.
+    slow_timing_s = _env_float(
+        "O4_SFR_TIMING_SLOW", 3.0 if verbose_log else 0.0
+    )
     max_candidates_per_dds = max(
         0, int(_env_float("O4_SFR_BLD_MAX_CANDIDATES", BLD_MAX_CANDIDATES_PER_DDS))
     )

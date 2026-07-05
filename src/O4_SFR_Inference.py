@@ -688,6 +688,17 @@ def is_cuda_oom(exc):
     return _is_cuda_oom(exc)
 
 
+_last_batch_size_message = None
+
+
+def _print_batch_size_once(message):
+    """Print the batch-size line only when it changes, not once per texture."""
+    global _last_batch_size_message
+    if message != _last_batch_size_message:
+        _last_batch_size_message = message
+        print(message)
+
+
 def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size, num_classes, mean, std):
     """Return the selected batch size.
 
@@ -696,9 +707,9 @@ def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size
     one-pass timing, so the default path now uses a fixed recommended batch.
     """
     if segformer_batch_size and segformer_batch_size > 0:
-        print(f"[SegFormer] Inference batch size: {max_batch_size} (configured)")
+        _print_batch_size_once(f"[SegFormer] Inference batch size: {max_batch_size} (configured)")
         return max_batch_size
-    print(f"[SegFormer] Inference batch size: {max_batch_size} (default)")
+    _print_batch_size_once(f"[SegFormer] Inference batch size: {max_batch_size} (default)")
     return max_batch_size
 
 
@@ -848,7 +859,7 @@ def run_inference(model, device, img_rgb, processor=None):
             batch_size = tuned_batch_size
             _buf = np.empty((batch_size, P, P, 3), dtype=np.uint8)
     else:
-        print(f"[SegFormer] Inference batch size: {batch_size}")
+        _print_batch_size_once(f"[SegFormer] Inference batch size: {batch_size}")
 
     n_buf    = 0
     meta_buf = []
