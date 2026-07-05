@@ -74,6 +74,9 @@ FLAVOR_MASSING = {
     "asia": {
         "pitch": (21.0, 30.0), "hip_pitch": (18.0, 26.0),
         "overhang": 1.5, "chimney_prob": 0.05, "tank_prob": 0.55,
+        # Asian apartment/commercial fabric is flat-roofed; pitched massing
+        # stays reserved for the small/tiny residential classes.
+        "apt_flat": True,
     },
     "africa": {
         "pitch": (14.0, 24.0), "hip_pitch": (13.0, 20.0),

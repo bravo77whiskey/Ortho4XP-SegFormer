@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -28,8 +29,23 @@ from lod_shell import merge_bands_into_obj8, roof_quad_mesh, shell_mesh  # noqa:
 # Band boundaries in metres: full mesh, silhouette shell, flat-top box,
 # roof-colored quad, then culled. Flat-roofed archetypes skip the box stage
 # (their shell already is a flat-top box) and span shell -> quad directly.
-# The 25 km cull matches the visibility of simHeaven's auto-LOD objects.
-DEFAULT_BANDS = (2000, 6000, 12000, 25000)
+#
+# Bands are BASE values for a ~30 m-diagonal building and scale with the
+# footprint diagonal (see _band_scale): the horizon frame cost is dominated
+# by the tens of thousands of small residentials, which are subpixel long
+# before the old fixed 25 km cull.  A 10 m house now culls ~6 km out while
+# a 110 m warehouse still reaches ~26 km.
+DEFAULT_BANDS = (1200, 3500, 7000, 14000)
+
+_BAND_SCALE_REF_DIAG_M = 30.0
+_BAND_SCALE_MIN = 0.45
+_BAND_SCALE_MAX = 1.9
+
+
+def _band_scale(length_m: float, width_m: float) -> float:
+    diag = math.hypot(float(length_m), float(width_m))
+    return min(_BAND_SCALE_MAX,
+               max(_BAND_SCALE_MIN, diag / _BAND_SCALE_REF_DIAG_M))
 
 
 def _strip_band(layout: dict, name: str):
@@ -45,7 +61,8 @@ def patch_shell(obj_path: str, archetype: str, length_m: float,
     meta = spec.meta
     if not meta:
         return "no-meta"
-    d0, d1, d2, d3 = bands
+    scale = _band_scale(length_m, width_m)
+    d0, d1, d2, d3 = (int(round(b * scale)) for b in bands)
     wall_band = _strip_band(layout, meta["wall_strip"])
     roof_band = _strip_band(layout, meta["roof_strip"])
 

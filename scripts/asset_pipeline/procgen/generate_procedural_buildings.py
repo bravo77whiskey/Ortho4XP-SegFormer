@@ -93,36 +93,54 @@ def _texture_page(seed: int, pages: int) -> int:
     return int(seed) % max(1, int(pages))
 
 
-def _expected_texture_line(physical_path: str, flavor: str, seed: int = 0,
-                           pages: int = 1) -> str:
-    from atlas import texture_name
+def _expected_texture_lines(physical_path: str, flavor: str, seed: int = 0,
+                            pages: int = 1) -> list[str]:
+    """Header block: albedo page, its normal map (flat normals + specular
+    level in alpha) and the instancing-friendly global specular gain that
+    enables it (OBJ8: alpha is multiplied by GLOBAL_specular)."""
+    from atlas import texture_name, texture_normal_name
     depth = physical_path.replace("\\", "/").count("/")
     up = "../" * depth
-    name = texture_name(flavor, _texture_page(seed, pages))
-    return f"TEXTURE {up}textures/{name}"
+    page = _texture_page(seed, pages)
+    return [
+        f"TEXTURE {up}textures/{texture_name(flavor, page)}",
+        f"TEXTURE_NORMAL {up}textures/{texture_normal_name(flavor, page)}",
+        "GLOBAL_specular 1.0",
+    ]
 
 
-def _normalize_texture_directive(obj_path: str, texture_line: str) -> None:
-    """Force the OBJ8 header's TEXTURE line to the shared atlas."""
+def _normalize_texture_directive(obj_path: str, header_lines) -> None:
+    """Force the OBJ8 header's texture/material block to the shared atlas.
+
+    ``header_lines`` is the full block from _expected_texture_lines (or a
+    single TEXTURE string for back-compat); any pre-existing TEXTURE,
+    TEXTURE_NORMAL and GLOBAL_specular lines are dropped first.
+    """
+    if isinstance(header_lines, str):
+        header_lines = [header_lines]
+
+    def _is_managed(line: str) -> bool:
+        stripped = line.strip()
+        if stripped.startswith("TEXTURE_NORMAL") \
+                or stripped.startswith("GLOBAL_specular"):
+            return True
+        return (stripped.startswith("TEXTURE")
+                and not stripped.startswith("TEXTURE_"))
+
     with open(obj_path, "r", encoding="utf-8", errors="ignore") as fh:
         lines = fh.read().splitlines()
-    # Pass 1: drop every plain TEXTURE line the exporter may have written.
-    stripped_lines = [
-        line for line in lines
-        if not (line.strip().startswith("TEXTURE")
-                and not line.strip().startswith("TEXTURE_"))
-    ]
-    # Pass 2: insert exactly one directive after the OBJ header marker.
+    stripped_lines = [line for line in lines if not _is_managed(line)]
+    # Insert exactly one block after the OBJ header marker.
     out = []
     inserted = False
     for line in stripped_lines:
         out.append(line)
         if not inserted and line.strip() in ("OBJ", "OBJ8"):
             out.append("")
-            out.append(texture_line)
+            out.extend(header_lines)
             inserted = True
     if not inserted:
-        out = ["A", "800", "OBJ", "", texture_line, ""] + out
+        out = ["A", "800", "OBJ", ""] + list(header_lines) + [""] + out
     with open(obj_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(out) + "\n")
 
@@ -185,17 +203,17 @@ def main(argv=None) -> int:
         flavors = {row["flavor"] for row in pending}
 
     pages = max(1, int((manifest.get("atlas") or {}).get("pages", 1)))
-    from atlas import texture_name
+    from atlas import texture_name, texture_normal_name
     for flavor in sorted(flavors):
         for page in range(pages):
-            texture = os.path.join(
-                args.output, "textures", texture_name(flavor, page)
-            )
-            if not os.path.isfile(texture):
-                raise SystemExit(
-                    f"atlas texture missing: {texture}; run atlas.py "
-                    f"--output {args.output} first"
-                )
+            for name in (texture_name(flavor, page),
+                         texture_normal_name(flavor, page)):
+                texture = os.path.join(args.output, "textures", name)
+                if not os.path.isfile(texture):
+                    raise SystemExit(
+                        f"atlas texture missing: {texture}; run atlas.py "
+                        f"--output {args.output} first"
+                    )
 
     total = len(rows)
     print(f"{total} obj files in scope, {len(pending)} to generate")
@@ -250,8 +268,8 @@ def main(argv=None) -> int:
                 continue
             _normalize_texture_directive(
                 obj_path,
-                _expected_texture_line(row["physical_path"], row["flavor"],
-                                       row["seed"], pages),
+                _expected_texture_lines(row["physical_path"], row["flavor"],
+                                        row["seed"], pages),
             )
             if layout is not None:
                 patch_shell(

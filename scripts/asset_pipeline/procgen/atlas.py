@@ -567,6 +567,35 @@ def _map_palette_colors(value, fn):
     return tuple(fn(color) for color in value)
 
 
+# Specular/gloss side channel.  While paint_atlas runs, _GLOSS_DRAW holds an
+# ImageDraw on an 8-bit gloss canvas; painters mark glossy surfaces (glass,
+# roller doors, transoms) through _gloss().  The canvas becomes the ALPHA of
+# a flat normal map (OBJ8: TEXTURE_NORMAL alpha = specular level, scaled by
+# GLOBAL_specular) -- the SFD-Global-style window glint.  Never RNG-driven,
+# so it adds no rolls and cannot disturb the albedo layout.
+_GLOSS_DRAW = None
+
+# Base gloss per strip kind (walls stay near-matte, metal roofs shine).
+GLOSS_BASE = {
+    "wall": 14, "ground": 14, "plain": 14, "trim": 22,
+    "storefront": 18, "roller": 20,
+    "roof_shingle": 22, "roof_tile": 46, "roof_tile_glazed": 100,
+    "roof_metal": 96, "roof_flat": 30,
+}
+GLOSS_GLASS = 185
+GLOSS_DOOR = 45
+GLOSS_DOOR_GLASS = 165
+GLOSS_SIGN = 60
+GLOSS_AWNING = 20
+GLOSS_ROLLER_DOOR = 72
+
+
+def _gloss(box, level):
+    if _GLOSS_DRAW is not None:
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        _GLOSS_DRAW.rectangle((x0, y0, x1, y1), fill=int(level))
+
+
 def _speckle(draw, rng, box, base, amount, count):
     x0, y0, x1, y1 = box
     for _ in range(count):
@@ -814,6 +843,8 @@ def _draw_window(draw, rng, cx, sill_y, win_w, win_h, palette, pattern,
             sx = x0 + int((x1 - x0) * frac)
             draw.line((sx, y0, sx, y1), fill=frame, width=bw)
 
+    _gloss((x0, y0, x1, y1), GLOSS_GLASS)
+
     # Security bars (painted over the glass).
     if rng.random() < float(pattern.get("bars_prob", 0.0)):
         bar = (40, 42, 44)
@@ -892,12 +923,14 @@ def _paint_door(draw, rng, cx, base_y, y_gutter_end, palette, pattern,
                       width=1)
     draw.line((dx0 - bw, dy1, dx1 + bw, dy1),
               fill=_adjust(door, -20), width=1)  # threshold
+    _gloss((dx0, dy0, dx1, dy1), GLOSS_DOOR)
     if pattern.get("transom"):
         ty1 = dy0 - bw - 1
         ty0 = ty1 - int(0.35 * ppm_y)
         draw.rectangle((dx0 - bw, ty0 - bw, dx1 + bw, ty1 + bw), fill=frame)
         _vgrad(draw, dx0, ty0, dx1, ty1,
                _adjust(glass_base, 18), _adjust(glass_base, -8))
+        _gloss((dx0, ty0, dx1, ty1), GLOSS_DOOR_GLASS)
     return dx0, dx1
 
 
@@ -1004,6 +1037,7 @@ def _paint_storefront(draw, rng, box, palette, world_w, world_h,
         sign = _shade(rng, rng.choice(palette.get("sign_pool",
                                                   ((120, 110, 100),))), 8)
         draw.rectangle((bx0, sign_top, bx1 - 1, sign_bot), fill=sign)
+        _gloss((bx0, sign_top, bx1 - 1, sign_bot), GLOSS_SIGN)
         letter = _adjust(sign, 28)
         ly = (sign_top + sign_bot) // 2
         lx = bx0 + rng.randint(2, max(3, (bx1 - bx0) // 4))
@@ -1019,6 +1053,7 @@ def _paint_storefront(draw, rng, box, palette, world_w, world_h,
                                                      ((120, 110, 100),))), 8)
             draw.rectangle((bx0, sign_bot + 1, bx1 - 1, awning_bot),
                            fill=awn)
+            _gloss((bx0, sign_bot + 1, bx1 - 1, awning_bot), GLOSS_AWNING)
             if pattern.get("awning_stripes"):
                 stripe_n = max(4, int(round((bx1 - bx0) /
                                             (0.4 * ppm_x))))
@@ -1044,10 +1079,12 @@ def _paint_storefront(draw, rng, box, palette, world_w, world_h,
                 bar_y = glaze_top + int((base_y - glaze_top) * 0.55)
                 draw.line((px0 + 1, bar_y, px1 - 1, bar_y),
                           fill=(170, 172, 174), width=_S(px_scale, 2))
+                _gloss((px0, glaze_top, px1, base_y - 1), GLOSS_DOOR_GLASS)
             else:
                 _vgrad(draw, px0, glaze_top, px1, bulkhead_top - 1,
                        _jitter(rng, _adjust(glass_base, 14), 8),
                        _adjust(glass_base, -16))
+                _gloss((px0, glaze_top, px1, bulkhead_top - 1), GLOSS_GLASS)
                 # Bulkhead under the display glass.
                 draw.rectangle((px0, bulkhead_top, px1, base_y - 1),
                                fill=_adjust(base, -18))
@@ -1084,6 +1121,7 @@ def _paint_roller(draw, rng, box, palette, world_w, world_h,
         dx1 = dx0 + door_w
         door = _shade(rng, rng.choice(door_pool), 6)
         draw.rectangle((dx0, door_top, dx1, y1 - 1), fill=door)
+        _gloss((dx0, door_top, dx1, y1 - 1), GLOSS_ROLLER_DOOR)
         for y in range(door_top + slat_h, base_y, slat_h):
             draw.line((dx0, y, dx1, y), fill=_adjust(door, -12), width=1)
             draw.line((dx0, y + 1, dx1, y + 1), fill=_adjust(door, 10),
@@ -1304,7 +1342,11 @@ def build_layout(size: int) -> dict:
 
 def paint_atlas(flavor: str, layout: dict, seed: int,
                 references: dict | None = None,
-                page: int = 0) -> Image.Image:
+                page: int = 0, with_gloss: bool = False):
+    """Paint one atlas page.  Returns the RGB image, or (image, gloss)
+    when ``with_gloss`` -- gloss is the 8-bit specular-level canvas that
+    becomes the normal map's alpha channel."""
+    global _GLOSS_DRAW
     palette = page_palette(flavor, page)
     references = references or _load_reference_styles()
     pattern = _pattern_for_flavor(flavor, references, page)
@@ -1316,6 +1358,8 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
         pattern[key] = max(2, int(round(pattern[key] * px_scale)))
     img = Image.new("RGB", (size, size), (96, 96, 96))
     draw = ImageDraw.Draw(img)
+    gloss = Image.new("L", (size, size), GLOSS_BASE["wall"])
+    _GLOSS_DRAW = ImageDraw.Draw(gloss) if with_gloss else None
     for index, (name, _h, world_w, world_h, kind) in enumerate(STRIPS):
         flavor_salt = int(hashlib.sha1(flavor.encode("utf-8")).hexdigest()[:8], 16)
         rng = random.Random(seed * 7919 + index * 104729 + flavor_salt
@@ -1324,6 +1368,12 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
         # Paint the FULL band including the gutter so bleed shows the same
         # material, then UVs stay inside the inset V range.
         strip_box = (0, y0, size, y1)
+        base_gloss = GLOSS_BASE.get(kind, GLOSS_BASE["wall"])
+        if kind == "roof":
+            base_gloss = GLOSS_BASE[name] if name != "roof_tile" else (
+                GLOSS_BASE["roof_tile_glazed"] if pattern.get("tile_gloss")
+                else GLOSS_BASE["roof_tile"])
+        _gloss((0, y0, size - 1, y1 - 1), base_gloss)
         if kind == "wall":
             family, shade = name.split("_")[1:3]
             _paint_wall(draw, rng, strip_box, family, palette,
@@ -1351,6 +1401,9 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
         elif kind == "roof":
             _paint_roof(draw, rng, strip_box, name, palette, pattern,
                         px_scale)
+    _GLOSS_DRAW = None
+    if with_gloss:
+        return img, gloss
     return img
 
 
@@ -1361,6 +1414,22 @@ def texture_name(flavor: str, page: int = 0) -> str:
     if page <= 0:
         return f"o4sfr_procgen_atlas_{flavor}.png"
     return f"o4sfr_procgen_atlas_{flavor}_p{page + 1}.png"
+
+
+def texture_normal_name(flavor: str, page: int = 0) -> str:
+    """Companion normal map (flat normals + specular level in alpha)."""
+    return texture_name(flavor, page)[:-4] + "_nml.png"
+
+
+def build_normal_map(gloss: Image.Image, out_size: int) -> Image.Image:
+    """Flat tangent normal (128,128,255) with the gloss canvas as alpha.
+    Authored at half the albedo resolution: specular masks are rectangles,
+    so the detail loss is nil and the VRAM cost halves twice."""
+    gloss = gloss.resize((out_size, out_size), Image.BILINEAR)
+    flat_r = Image.new("L", (out_size, out_size), 128)
+    flat_g = Image.new("L", (out_size, out_size), 128)
+    flat_b = Image.new("L", (out_size, out_size), 255)
+    return Image.merge("RGBA", (flat_r, flat_g, flat_b, gloss))
 
 
 def main(argv=None) -> int:
@@ -1406,11 +1475,16 @@ def main(argv=None) -> int:
     # _jitter), not mip bleed.
     for flavor in atlas_cfg["flavors"]:
         for page in range(pages):
-            img = paint_atlas(flavor, layout, int(atlas_cfg["seed"]),
-                              references, page)
+            img, gloss = paint_atlas(flavor, layout, int(atlas_cfg["seed"]),
+                                     references, page, with_gloss=True)
             path = os.path.join(textures_dir, texture_name(flavor, page))
             img.save(path, optimize=True)
             print(f"wrote {path}")
+            normal = build_normal_map(gloss, max(1024, layout["size"] // 2))
+            nml_path = os.path.join(textures_dir,
+                                    texture_normal_name(flavor, page))
+            normal.save(nml_path, optimize=True)
+            print(f"wrote {nml_path}")
     print(f"wrote {args.layout_out}")
     return 0
 

@@ -21,9 +21,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from atlas import texture_name  # noqa: E402
+from atlas import texture_name, texture_normal_name  # noqa: E402
 from generate_procedural_buildings import (  # noqa: E402
-    _expected_texture_line, _flatten_rows, _normalize_texture_directive,
+    _expected_texture_lines, _flatten_rows, _normalize_texture_directive,
 )
 
 
@@ -45,10 +45,11 @@ def main(argv=None) -> int:
     missing_textures = []
     for flavor in sorted({a["flavor"] for a in manifest["assets"]}):
         for page in range(pages):
-            path = os.path.join(args.output, "textures",
-                                texture_name(flavor, page))
-            if not os.path.isfile(path):
-                missing_textures.append(path)
+            for name in (texture_name(flavor, page),
+                         texture_normal_name(flavor, page)):
+                path = os.path.join(args.output, "textures", name)
+                if not os.path.isfile(path):
+                    missing_textures.append(path)
     if missing_textures:
         for path in missing_textures:
             print(f"  ! missing atlas page: {path}")
@@ -61,11 +62,11 @@ def main(argv=None) -> int:
         if not os.path.isfile(obj_path):
             absent += 1
             continue
-        expected = _expected_texture_line(
+        expected = _expected_texture_lines(
             row["physical_path"], row["flavor"], row["seed"], pages)
         with open(obj_path, "r", encoding="utf-8", errors="ignore") as fh:
             current = fh.read()
-        if f"\n{expected}\n" in current:
+        if "\n" + "\n".join(expected) + "\n" in current:
             skipped += 1
             continue
         if not args.dry_run:

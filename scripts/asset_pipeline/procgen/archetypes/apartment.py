@@ -108,6 +108,22 @@ def build_aptblock(length_m: float, width_m: float, floors: int, seed: int,
         length_m, width_m, bucket="apartments", archetype="aptblock"
     )
     style = _apt_style(rng, layout, flavor, profile)
+    if flavor_massing(flavor).get("apt_flat"):
+        # Region rule (asia): apartment/commercial blocks are flat-roofed;
+        # same parapet massing as aptslab, without balconies.
+        hx, hy = length_m / 2.0, width_m / 2.0
+        top_z = floors * FLOOR_H
+        spec = MeshSpec()
+        ring = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
+        walls_with_floors(spec, ring, 0.0, floors, FLOOR_H,
+                          style["ground"], style["wall"])
+        parapet_flat_roof(
+            spec, hx, hy, top_z, PARAPET_H, 0.3,
+            style["plain"], style["trim"], style["roof_flat"],
+        )
+        set_shell_meta(spec, "flat", top_z + PARAPET_H, top_z,
+                       style["wall"], style["roof_flat"])
+        return validate_spec(spec, length_m, width_m)
     roof_choices = tuple(
         (name, weight) for name, weight in style_for_profile(
             flavor, profile

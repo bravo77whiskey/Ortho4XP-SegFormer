@@ -12,11 +12,13 @@ global_seed: 20260612
 output_package_name: O4SFR_ProcGen_Library
 
 atlas:
-  # 2048 = design resolution (windows ~30 px/m). The V-band layout scales
-  # proportionally so UVs are resolution-independent: changing size swaps
-  # texture detail only, installed OBJs need no rebuild. VRAM cost is
-  # ~5.6 MB DXT per flavor and only 1-2 flavors load per tile.
-  size: 2048
+  # Design resolution is 2048 (windows ~30 px/m); shipping at 4096 doubles
+  # texel density to ~60 px/m (in-sim sharpness feedback, July 2026). The
+  # V-band layout scales proportionally so UVs are resolution-independent:
+  # changing size swaps texture detail only, installed OBJs need no
+  # rebuild. VRAM is ~22 MB DXT per page and only 1-2 flavors (x3 pages)
+  # load per tile; companion _nml maps ship at half size.
+  size: 4096
   seed: 101
   # Painted page permutations per flavor: same strip layout/UVs, different
   # sub-palette + paint seed (page 0 base, 1 weathered, 2 fresh -- see

@@ -89,13 +89,18 @@ def test_lod_bands_added(tmp_path, layout, archetype, dims):
     assert status == "patched"
     after = _parse(obj)
 
+    # Band distances scale with the footprint diagonal (small buildings
+    # cull early, big ones stay visible): expect the scaled boundaries.
+    from apply_lod_shells import _band_scale
+    scale = _band_scale(length, width)
+    d0, d1, d2, d3 = (int(round(b * scale)) for b in bands)
+    assert 0.44 <= scale <= 1.9
     # Pitched: full / shell / flat box / roof quad. Flat-roofed archetypes
     # skip the box stage (their shell already is one).
     if archetype in PITCHED:
-        assert after["lods"] == [(0, 2000), (2000, 6000),
-                                 (6000, 11000), (11000, 16000)]
+        assert after["lods"] == [(0, d0), (d0, d1), (d1, d2), (d2, d3)]
     else:
-        assert after["lods"] == [(0, 2000), (2000, 11000), (11000, 16000)]
+        assert after["lods"] == [(0, d0), (d0, d2), (d2, d3)]
     # Far bands get progressively cheaper; last band is the 2-tri quad.
     far_tris = [count // 3 for _start, count in after["tris"][1:]]
     assert all(t <= 24 for t in far_tris)
