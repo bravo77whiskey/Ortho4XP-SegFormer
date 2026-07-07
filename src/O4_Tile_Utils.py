@@ -410,6 +410,7 @@ def build_tile_list(
             SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
             SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
             SFR.sfr_bld_yolo_min_coverage = tile.sfr_bld_yolo_min_coverage
+            SFR.sfr_bld_height_checkpoint = tile.sfr_bld_height_checkpoint
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap
             SFR.sfr_batch_size      = tile.sfr_batch_size

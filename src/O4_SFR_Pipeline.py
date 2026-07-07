@@ -235,6 +235,7 @@ sfr_bld_yolo_min_coverage = 0.80
 sfr_bld_yolo_iou = 0.5
 sfr_bld_yolo_stride = 512
 sfr_bld_yolo_max_det = 100000
+sfr_bld_height_checkpoint = r"H:\model_training\models\heightnet.pt"
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 sfr_patch_size        = 512
@@ -585,6 +586,7 @@ def process_bld_tile(lat, lon, build_dir):
         "[SFR Bld] Effective settings: "
         f"yolo_enabled={sfr_bld_yolo_enabled!r} "
         f"checkpoint={sfr_bld_yolo_checkpoint!r} "
+        f"height_checkpoint={sfr_bld_height_checkpoint!r} "
         f"conf={sfr_bld_yolo_conf!r} iou={sfr_bld_yolo_iou!r} "
         f"stride={sfr_bld_yolo_stride!r} max_det={sfr_bld_yolo_max_det!r} "
         f"min_coverage={sfr_bld_yolo_min_coverage!r} "
@@ -637,6 +639,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    yolo_stride              = {sfr_bld_yolo_stride!r},\n"
         f"    yolo_max_det             = {sfr_bld_yolo_max_det!r},\n"
         f"    yolo_min_coverage        = {sfr_bld_yolo_min_coverage!r},\n"
+        f"    height_checkpoint        = {sfr_bld_height_checkpoint!r},\n"
         f")\n"
     )
     ret = None

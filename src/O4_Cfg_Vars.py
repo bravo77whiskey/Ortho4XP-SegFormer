@@ -543,6 +543,21 @@ cfg_tile_vars = {
         "short_name": "bld_yolo_max",
         "hint": "YOLO OBB maximum detections per inference crop.",
     },
+    "sfr_bld_height_checkpoint": {
+        "type": str,
+        "default": r"H:\model_training\models\heightnet.pt",
+        "short_name": "bld_height_ckpt",
+        "file_picker": True,
+        "file_picker_title": "Choose HeightNet model checkpoint",
+        "filetypes": [
+            ("HeightNet model files", ("*.pt", "*.pth")),
+            ("All files", "*.*"),
+        ],
+        "hint": "HeightNet checkpoint used to predict per-building heights from "
+                "YOLO detections (second stage). Leave at the default unless you "
+                "trained a replacement. If the file is missing, buildings fall "
+                "back to class-default heights.",
+    },
     "sfr_bld_yolo_min_coverage": {
         "type": float,
         "default": 0.80,
@@ -690,6 +705,7 @@ list_sfr_bld_vars = [
     "sfr_bld_yolo_stride",
     "sfr_bld_yolo_max_det",
     "sfr_bld_yolo_min_coverage",
+    "sfr_bld_height_checkpoint",
 ]
 
 list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars

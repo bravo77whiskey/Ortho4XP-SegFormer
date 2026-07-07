@@ -41,6 +41,7 @@ import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
+import O4_SFR_Height_Model as HEIGHTMODEL
 from O4_SFR_DSF_Utils import (
     active_scenery_pack_dirs,
     ensure_cached_dsf_text,
@@ -2601,8 +2602,8 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 MAX_GENERATED_BUILDING_HEIGHT_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 60
-BLD_PLACEMENT_FAST_CACHE_VERSION = 62
+BLD_PLACEMENT_CACHE_VERSION = 61      # v61: height-fit object selection
+BLD_PLACEMENT_FAST_CACHE_VERSION = 63  # v63: height-fit object selection
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -2825,7 +2826,7 @@ OPTIONAL_ASSET_REGION_ALIASES = {
     "australia_oceania": {"australia_oceania"},
 }
 
-YOLO_OBB_CACHE_VERSION = 4
+YOLO_OBB_CACHE_VERSION = 5  # v5: HeightNet heights stored on detections
 YOLO_ANALYSIS_CACHE_VERSION = 1
 YOLO_ANALYSIS_TARGET_ZL = 16
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -5365,10 +5366,11 @@ def _checkpoint_signature(path):
 def _yolo_obb_cache_key(
     fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det,
     batch_size=1, fused=False, analysis_signature=None, analysis_target_zl=None,
-    covered_rects=None,
+    covered_rects=None, height_signature=None,
 ):
     return {
         'version': YOLO_OBB_CACHE_VERSION,
+        'height': height_signature,
         'covered_rects': (
             None if not covered_rects
             else [[int(v) for v in rect] for rect in covered_rects]
@@ -5973,8 +5975,8 @@ def _yolo_model_class_count(model):
 def _decode_yolo_obb_detection_class(model_cls_int, model_class_count=None):
     """Decode legacy 8-class or height-expanded YOLO OBB classes.
 
-    Height-expanded checkpoints are treated as placement-class models at
-    runtime; facade heights are randomized from regional/class asset priors.
+    Height-expanded (160-class) checkpoints carry a height bin per class;
+    decode it so placement can use the binned height directly.
     """
     height_model_class_count = len(BLD_PLACEMENT_CLASSES) * YOLO_HEIGHT_BIN_COUNT
     if int(model_class_count or 0) == height_model_class_count:
@@ -5982,7 +5984,7 @@ def _decode_yolo_obb_detection_class(model_cls_int, model_class_count=None):
         if 0 <= placement_index < len(BLD_PLACEMENT_CLASSES):
             return (
                 int(BLD_PLACEMENT_CLASSES[placement_index]),
-                None,
+                float(YOLO_HEIGHT_BINS_M[height_bin]),
             )
 
     mapped_cls = int(model_cls_int) + 1
@@ -6048,7 +6050,12 @@ def _yolo_obb_detection_from_points(
         placement_cls = int(placement_cls)
     else:
         placement_cls = _roof_fragment_class(area_m2, max_side_m, 1.0)
-    height_m = float(DEFAULT_FACADE_HEIGHT_M.get(placement_cls, 8.0))
+    if height_m is None:
+        height_m = float(DEFAULT_FACADE_HEIGHT_M.get(placement_cls, 8.0))
+        height_source = 'class_default'
+    else:
+        height_m = float(height_m)
+        height_source = 'height_bins'
 
     return {
         'points': clipped.tolist(),
@@ -6065,6 +6072,7 @@ def _yolo_obb_detection_from_points(
         'width_m': float(min_side_m),
         'placement_class': int(placement_cls),
         'height_m': float(height_m),
+        'height_source': height_source,
     }
 
 
@@ -6121,9 +6129,34 @@ def _append_yolo_result_detections(
         del corners, xywhr, confs, classes, corners_tensor, xywhr_tensor, obb, result
 
 
+def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
+    """Overwrite detection heights with clamped HeightNet predictions.
+
+    Detections whose window/scalars cannot be built keep their decoded or
+    class-default height. Predictions are clamped into the generated-asset
+    envelope; large single-story industry over-predicts (roof-only 64 m
+    windows), so the ceiling matters as much as the floor.
+    """
+    if height_model is None or not detections or image is None:
+        return
+    heights = HEIGHTMODEL.predict_detection_heights(
+        height_model, image, detections, m_per_px
+    )
+    lo = float(HEIGHTMODEL.HEIGHT_MODEL_MIN_M)
+    hi = float(MAX_GENERATED_BUILDING_HEIGHT_M)
+    for det, height in zip(detections, heights):
+        height = float(height)
+        if not math.isfinite(height):
+            continue
+        det['height_raw_m'] = round(height, 3)
+        det['height_m'] = float(min(max(height, lo), hi))
+        det['height_source'] = 'heightnet'
+
+
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                             device=None, m_per_px=1.0, batch_size=1,
-                            return_metadata=False, skip_rects_px=()):
+                            return_metadata=False, skip_rects_px=(),
+                            height_model=None):
     img_h, img_w = image.shape[:2]
     model_class_count = _yolo_model_class_count(model)
     skip_rects_px = tuple(skip_rects_px or ())
@@ -6206,6 +6239,7 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
             raise
 
     detections.sort(key=lambda item: (float(item['area_m2']), -float(item['confidence'])))
+    _apply_heightnet_to_detections(height_model, image, detections, m_per_px)
     if return_metadata:
         return {
             'detections': detections,
@@ -7577,6 +7611,7 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
     req_l = np.empty(n, dtype=np.float64)
     req_w = np.empty(n, dtype=np.float64)
     aspect = np.empty(n, dtype=np.float64)
+    height = np.empty(n, dtype=np.float64)
     for i, (_rank, _cls, cand) in enumerate(entries):
         cov_area[i] = float(cand['coverage_area_m2'])
         rl = float(cand['required_length_m'])
@@ -7586,6 +7621,10 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
         # Same expression the selector's score used per candidate:
         # max(required_length / max(required_width, 1e-6), 1e-6).
         aspect[i] = max(rl / max(rw, 1e-6), 1e-6)
+        asset_height = cand['asset'].get('height_m')
+        if asset_height is None:
+            asset_height = DEFAULT_FACADE_HEIGHT_M.get(int(_cls), 8.0)
+        height[i] = float(asset_height)
     bundle = {
         'entries': entries,
         'cov_area': cov_area,
@@ -7595,6 +7634,7 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
         # Python-float copy for the scan loop (tolist preserves the exact
         # doubles; skips a numpy scalar extraction per candidate).
         'aspect_list': aspect.tolist(),
+        'height_list': height.tolist(),
         # Ascending copy for the binary-search coverage cutoff (cov_area is
         # sorted descending, so the >=-threshold set is always a prefix).
         'cov_asc': np.ascontiguousarray(cov_area[::-1]),
@@ -7890,8 +7930,8 @@ def _select_yolo_object_candidate(
     )
     # Selection = the minimum-score viable candidate that passes the filters
     # (enabled map, residential context, inside-detection, occupancy). The
-    # score tuple (-coverage, aspect_error, class distance, class_rank,
-    # source, path, heading_delta) needs NO geometry, and the filters do not
+    # score tuple (-coverage, aspect_error, height_error, class distance,
+    # class_rank, source, path, heading_delta) needs NO geometry, and the filters do not
     # affect the ordering — so walk candidates in score order and return the
     # first one that passes, instead of paying a cv2 containment test per
     # scanned candidate just to feed the score comparison. Candidates are
@@ -7904,7 +7944,19 @@ def _select_yolo_object_candidate(
     requires_res = view['requires_res']
     static_rank = view['static_rank']
     aspect_list = merged_bundle['aspect_list']
+    height_list = merged_bundle['height_list']
     det_aspect_c = max(det_aspect, 1e-6)
+    # Height fit: same-footprint assets differing only in floors share
+    # coverage AND aspect, so ranking height error between aspect_error and
+    # static_rank picks the floor variant nearest the detection's (HeightNet)
+    # height without disturbing which footprint wins. No detection height ->
+    # 0.0 for every candidate, i.e. the legacy order.
+    try:
+        det_height_m = float(detection.get('height_m'))
+        if not (math.isfinite(det_height_m) and det_height_m > 0.0):
+            det_height_m = None
+    except (TypeError, ValueError):
+        det_height_m = None
     # The footprint polygon, its inside-detection test and the occupancy test
     # depend only on (bounds_m, heading_delta) for this call (jx/jy/heading/
     # m_per_px and the masks are fixed); memoise them across equal-dimension
@@ -7943,15 +7995,18 @@ def _select_yolo_object_candidate(
                 continue
             group.append((
                 abs(math.log(aspect_list[idx] / det_aspect_c)),
+                0.0 if det_height_m is None
+                else abs(height_list[idx] - det_height_m),
                 static_rank[idx],
                 idx,
                 asset,
             ))
         counters['seen'] += j - i
-        # (aspect_error, static_rank) is a total order (static_rank unique),
-        # so the sort never reaches the trailing idx/asset elements.
+        # (aspect_error, height_error, static_rank) is a total order
+        # (static_rank unique), so the sort never reaches the trailing
+        # idx/asset elements.
         group.sort()
-        for _aspect_error, _srank, idx, asset in group:
+        for _aspect_error, _height_error, _srank, idx, asset in group:
             candidate = entries[idx][2]
             heading_delta = float(candidate['heading_delta'])
             bounds_m = asset['bounds_m']
@@ -8726,6 +8781,7 @@ def run(
     yolo_max_det=None,
     yolo_imgsz=DEFAULT_YOLO_OBB_IMGSZ,
     yolo_min_coverage=YOLO_OBJECT_MIN_COVERAGE,
+    height_checkpoint=None,
     **legacy_kwargs,
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
@@ -9236,6 +9292,44 @@ def run(
                     f"YOLO OBB model failed to load from {yolo_checkpoint}: {exc}. "
                     "Set O4_SFR_BLD_YOLO_ALLOW_MISSING=1 to fall back to SegFormer-only placement."
                 ) from exc
+
+    # ── HeightNet second-stage building heights ────────────────────────────
+    # Optional per-detection height regression (64 m window crops around each
+    # YOLO OBB). Missing checkpoint degrades to the class-default heights, so
+    # the stage never blocks a build.
+    height_model = None
+    height_signature = None
+    height_enabled = yolo_enabled and _env_flag("O4_SFR_BLD_HEIGHT_ENABLED", True)
+    if height_enabled:
+        # cfg value wins; env var / module default apply when unset (mirrors
+        # the yolo_checkpoint resolution above).
+        if not height_checkpoint:
+            height_checkpoint = HEIGHTMODEL.default_checkpoint_path()
+        height_signature = _checkpoint_signature(height_checkpoint)
+        if height_signature is None:
+            print(
+                f"HeightNet heights: checkpoint unavailable ({height_checkpoint}); "
+                "using class-default building heights"
+            )
+        else:
+            try:
+                height_model = HEIGHTMODEL.load_height_model(
+                    height_checkpoint,
+                    device=("cuda" if torch.cuda.is_available() else "cpu"),
+                )
+                print(
+                    f"HeightNet heights: enabled checkpoint={height_checkpoint} "
+                    f"window={HEIGHTMODEL.WINDOW_M:.0f}m "
+                    f"clamp=[{HEIGHTMODEL.HEIGHT_MODEL_MIN_M:.1f}, "
+                    f"{MAX_GENERATED_BUILDING_HEIGHT_M:.1f}]m"
+                )
+            except Exception as exc:
+                print(
+                    f"HeightNet heights unavailable ({exc}); "
+                    "using class-default building heights"
+                )
+                height_model = None
+                height_signature = None
 
     # ── Stock YOLO-OBB (DOTAv1) for static objects pre-step ───────────────────
     # Detects storage tanks, sports fields, pools etc. BEFORE
@@ -9903,6 +9997,7 @@ def run(
                 analysis_target_zl=(
                     yolo_analysis_target_zl if _use_analysis else None
                 ),
+                height_signature=height_signature,
                 # Fully covered crops are skipped at inference time on the
                 # native path, so the raw detection set depends on coverage.
                 covered_rects=(
@@ -9968,6 +10063,7 @@ def run(
                                 m_per_px=analysis_m_per_px,
                                 batch_size=yolo_batch_size,
                                 return_metadata=True,
+                                height_model=height_model,
                             )
                             yolo_detections = _scale_yolo_detections_to_image(
                                 yolo_result['detections'],
@@ -9990,6 +10086,7 @@ def run(
                                 batch_size=yolo_batch_size,
                                 return_metadata=True,
                                 skip_rects_px=_covered_rects_px,
+                                height_model=height_model,
                             )
                             yolo_detections = yolo_result['detections']
                         prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
@@ -10020,6 +10117,7 @@ def run(
                                         None if _use_analysis
                                         else (_covered_rects_px or None)
                                     ),
+                                    height_signature=height_signature,
                                 ),
                                 yolo_detections,
                             )
