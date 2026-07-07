@@ -14,9 +14,13 @@ The shell is built from the archetype's MeshSpec bounds + roof family:
     the parapet height;
   * aptblock/warehouse: pitched with their shallow rises.
 
-Wall UVs stretch one wall strip over the full height -- at 2 km nobody can
-count floors. Coordinates are written in OBJ8 axes (Blender x,y,z ->
-x, z, -y), matching what xplane2blender emitted for band 1.
+Wall UVs come in two modes.  ``wall_mode="floors"`` (the near shell, where
+windows are still legible) stacks one quad per floor, each spanning the wall
+strip once -- the same window scale band 1 uses, so the swap no longer turns
+N floors into one row of giant windows.  ``wall_mode="stretch"`` (the far
+box, fed a windowless plain_* strip) keeps the legacy single stretched quad
+with capped UV spans.  Coordinates are written in OBJ8 axes (Blender x,y,z
+-> x, z, -y), matching what xplane2blender emitted for band 1.
 """
 
 from __future__ import annotations
@@ -28,11 +32,15 @@ FLOOR_H = 3.2
 
 def shell_mesh(length_m: float, width_m: float, floors: int,
                kind: str, ridge_z: float, eave_z: float,
-               wall_band: tuple, roof_band: tuple):
+               wall_band: tuple, roof_band: tuple,
+               wall_mode: str = "floors"):
     """Return (vertices, faces): verts as (x, y, z, nx, ny, nz, u, v).
 
     Blender-convention coordinates (z up); the OBJ8 writer converts.
     ``wall_band``/``roof_band`` are (v0, v1, world_w_m) of atlas strips.
+    ``wall_mode``: "floors" stacks a per-floor quad column per wall (window
+    rows keep their band-1 scale); "stretch" is the legacy single quad per
+    wall with capped UV spans (pair it with a windowless plain strip).
     """
     hx, hy = length_m / 2.0, width_m / 2.0
     wv0, wv1, wall_w = wall_band
@@ -74,21 +82,41 @@ def shell_mesh(length_m: float, width_m: float, floors: int,
 
     wall_top = floors * FLOOR_H if kind == "pitched" else ridge_z
 
-    # Far meshes never tile: capped UV spans keep texture-coordinate
-    # derivatives small so distant instances sample the top mip levels of
-    # the strip atlas instead of deep mips where strips bleed together
-    # (the "rainbow roof" artifact).
-    def wall_uvs(edge_len):
-        u1 = min(edge_len / wall_w, 0.5)
-        return ((0.0, wv0), (u1, wv0), (u1, wv1), (0.0, wv1))
-
     ring = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
-    for i in range(4):
-        a, b = ring[i], ring[(i + 1) % 4]
-        edge = math.dist(a, b)
-        quad((a[0], a[1], 0.0), (b[0], b[1], 0.0),
-             (b[0], b[1], wall_top), (a[0], a[1], wall_top),
-             wall_uvs(edge))
+    if wall_mode == "floors":
+        # One quad per floor per wall, each spanning the wall strip once in
+        # V and tiling U at band-1 scale: windows keep their real size and
+        # count (band-1 UV parity, so the swap is invisible).  The deeper
+        # mips this reaches at the band's far end blend adjacent WALL strips
+        # only (they cluster in the layout), which reads as wall tone --
+        # unlike the old stretched quad, which rendered one giant window
+        # row across the whole facade.
+        for i in range(4):
+            a, b = ring[i], ring[(i + 1) % 4]
+            u1 = math.dist(a, b) / wall_w
+            z0 = 0.0
+            while z0 < wall_top - 1e-6:
+                z1 = min(z0 + FLOOR_H, wall_top)
+                v1 = wv0 + (wv1 - wv0) * min(1.0, (z1 - z0) / FLOOR_H)
+                quad((a[0], a[1], z0), (b[0], b[1], z0),
+                     (b[0], b[1], z1), (a[0], a[1], z1),
+                     ((0.0, wv0), (u1, wv0), (u1, v1), (0.0, v1)))
+                z0 = z1
+    else:
+        # Far meshes never tile: capped UV spans keep texture-coordinate
+        # derivatives small so distant instances sample the top mip levels
+        # of the strip atlas instead of deep mips where strips bleed
+        # together (the "rainbow roof" artifact).
+        def wall_uvs(edge_len):
+            u1 = min(edge_len / wall_w, 0.5)
+            return ((0.0, wv0), (u1, wv0), (u1, wv1), (0.0, wv1))
+
+        for i in range(4):
+            a, b = ring[i], ring[(i + 1) % 4]
+            edge = math.dist(a, b)
+            quad((a[0], a[1], 0.0), (b[0], b[1], 0.0),
+                 (b[0], b[1], wall_top), (a[0], a[1], wall_top),
+                 wall_uvs(edge))
 
     u_roof = min(length_m / roof_w, 0.5)
     if kind == "pitched":
@@ -101,8 +129,12 @@ def shell_mesh(length_m: float, width_m: float, floors: int,
              (hx, 0.0, ridge_z), (-hx, 0.0, ridge_z), ruv)
         quad((hx, hy, ez), (-hx, hy, ez),
              (-hx, 0.0, ridge_z), (hx, 0.0, ridge_z), ruv)
+        # Gable V spans the rise as a fraction of one floor so the strip's
+        # window row is not magnified across the whole gable end.
         u_gable = min(width_m / wall_w, 0.5)
-        guv = ((0.0, wv0), (u_gable, wv0), (u_gable * 0.5, wv1))
+        gv1 = wv0 + (wv1 - wv0) * min(
+            1.0, max(ridge_z - wall_top, 0.0) / FLOOR_H)
+        guv = ((0.0, wv0), (u_gable, wv0), (u_gable * 0.5, gv1))
         tri((hx, -hy, wall_top), (hx, hy, wall_top), (hx, 0.0, ridge_z), guv)
         tri((-hx, hy, wall_top), (-hx, -hy, wall_top), (-hx, 0.0, ridge_z), guv)
     else:  # flat: single top quad at the parapet line
@@ -140,6 +172,10 @@ def merge_bands_into_obj8(obj_path: str, bands) -> str:
 
     ``bands`` is a list of (verts, faces, near_m, far_m) for the far bands;
     band 1 spans 0..bands[0].near. X-Plane allows up to 4 bands total.
+    Already-banded files are re-banded: the far bands this patcher appended
+    (vertices/indices strictly after the originals) are dropped and band 1
+    is recovered from the first ATTR_LOD block, so shell fixes and band
+    retunes never need a Blender rebuild.
     """
     if not bands or len(bands) > 3:
         return "bad-bands"
@@ -147,7 +183,8 @@ def merge_bands_into_obj8(obj_path: str, bands) -> str:
         lines = fh.read().splitlines()
 
     header, vt_lines, idx_values = [], [], []
-    tris_ranges = []
+    band_blocks = []   # one [(start, count), ...] list per ATTR_LOD block
+    plain_ranges = []  # TRIS lines before any ATTR_LOD (unbanded file)
     for line in lines:
         parts = line.split()
         cmd = parts[0] if parts else ""
@@ -156,15 +193,31 @@ def merge_bands_into_obj8(obj_path: str, bands) -> str:
         elif cmd in ("IDX", "IDX10"):
             idx_values.extend(int(v) for v in parts[1:])
         elif cmd == "TRIS":
-            tris_ranges.append((int(parts[1]), int(parts[2])))
+            target = band_blocks[-1] if band_blocks else plain_ranges
+            target.append((int(parts[1]), int(parts[2])))
         elif cmd == "ATTR_LOD":
-            return "already-banded"
+            band_blocks.append([])
         elif cmd == "POINT_COUNTS":
             continue
         elif cmd in ("ANIM_begin", "ANIM_end"):
             return "unsupported"
         elif not vt_lines and not idx_values:
             header.append(line)
+
+    if band_blocks:
+        # Re-band: block 0 is the original band-1 mesh; blocks 1+ reference
+        # only vertices/indices this patcher appended after the originals.
+        tris_ranges = plain_ranges + band_blocks[0]
+        far_ranges = [rng for blk in band_blocks[1:] for rng in blk]
+        if far_ranges:
+            orig_idx_count = min(start for start, _count in far_ranges)
+            tail = idx_values[orig_idx_count:]
+            if tail:
+                orig_vt_count = min(tail)
+                vt_lines = vt_lines[:orig_vt_count]
+            idx_values = idx_values[:orig_idx_count]
+    else:
+        tris_ranges = plain_ranges
     if not tris_ranges or not vt_lines:
         return "no-tris"
 

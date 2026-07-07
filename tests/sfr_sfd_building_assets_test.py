@@ -301,7 +301,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(result, "legacy-result")
         self.assertEqual(calls, [("image", "model", 512, 512)])
 
-    def test_yolo_obb_height_class_decode_ignores_height_bin(self):
+    def test_yolo_obb_height_class_decode_returns_height_bin(self):
         model_class = (
             (BLD.BLD_CLASS_APARTMENT_BLOCK - 1) * BLD.YOLO_HEIGHT_BIN_COUNT
             + BLD.YOLO_HEIGHT_BINS_M.index(60.0)
@@ -313,7 +313,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         )
 
         self.assertEqual(placement, BLD.BLD_CLASS_APARTMENT_BLOCK)
-        self.assertIsNone(height_m)
+        self.assertEqual(height_m, 60.0)
 
     def test_legacy_yolo_class_decode_returns_placement_only(self):
         placement, height_m = BLD._decode_yolo_obb_detection_class(
@@ -330,7 +330,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
             {"height_m": 5.0},
             {"height_m": 12.0},
             {"height_m": None},
-            {"height_m": BLD.MAX_GENERATED_BUILDING_HEIGHT_M + 1.0},
+            {"height_m": BLD.FACADE_HEIGHT_PRIOR_CAP_M + 1.0},
         ]
 
         priors = BLD._height_priors_by_class(pools)
@@ -2851,7 +2851,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertGreaterEqual(n_dropped, 1)
         self.assertTrue(np.all(gap_cls == BLD.BLD_CLASS_MEDIUM))
 
-    def test_very_tall_apartments_are_excluded_from_generated_assets(self):
+    def test_apartment_pool_height_gate(self):
         pools = BLD._build_sfd_asset_pools(35.5, 139.5)
         apartment_paths = _paths_for_classes(
             pools,
@@ -2861,13 +2861,26 @@ class SfdBuildingAssetTests(unittest.TestCase):
             ),
         )
 
-        self.assertNotIn("SFD_Global/Buildings/Apartment_30m_1.obj", apartment_paths)
-        self.assertNotIn("SFD_Global/Buildings/Apartment_30m_2.obj", apartment_paths)
-        self.assertTrue(
+        # 30 m apartments sit inside the 40 m pool gate since the HeightNet
+        # ceiling removal (height-fit selection selects them only for
+        # accordingly tall predictions).
+        self.assertIn("SFD_Global/Buildings/Apartment_30m_1.obj", apartment_paths)
+        self.assertIn("SFD_Global/Buildings/Apartment_30m_2.obj", apartment_paths)
+        self.assertFalse(
             BLD._is_very_tall_building_asset(
                 "SFD_Global/Buildings/Apartment_30m_2.obj",
                 BLD._object_estimated_height_m("SFD_Global/Buildings/Apartment_30m_2.obj"),
             )
+        )
+        # Above the gate (or skyscraper-named) assets stay out of the pools.
+        self.assertTrue(
+            BLD._is_very_tall_building_asset(
+                "SFD_Global/Buildings/Apartment_45m_1.obj",
+                BLD.MAX_GENERATED_BUILDING_HEIGHT_M + 5.0,
+            )
+        )
+        self.assertTrue(
+            BLD._is_very_tall_building_asset("some/lib/office_tower_1.obj")
         )
 
     def test_tiny_fillers_are_excluded_from_building_pools(self):
@@ -3184,6 +3197,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
                     "EXPORT simheaven/houses/house_05x05x1.obj objects/missing.obj",
                     "EXPORT simheaven/houses/house_09x12x3.obj objects/c.obj",
                     "EXPORT simheaven/residential/residential_20x20x8.obj objects/tall.obj",
+                    "EXPORT simheaven/residential/residential_20x20x14.obj objects/tall14.obj",
                     "EXPORT simheaven/sheds/shed_02x03x1.obj objects/shed.obj",
                     "EXPORT simheaven/commercial/school_30x40.obj objects/school.obj",
                 ],
@@ -3202,7 +3216,10 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertIn("simheaven/houses/house_04x06x1.obj", paths)
         self.assertIn("simheaven/houses/house_09x12x3.obj", paths)
         self.assertNotIn("simheaven/houses/house_05x05x1.obj", paths)
-        self.assertNotIn("simheaven/residential/residential_20x20x8.obj", paths)
+        # 8 floors (25.6 m) sits inside the 40 m pool gate since the
+        # HeightNet ceiling removal; 14 floors (44.8 m) stays out.
+        self.assertIn("simheaven/residential/residential_20x20x8.obj", paths)
+        self.assertNotIn("simheaven/residential/residential_20x20x14.obj", paths)
         self.assertNotIn("simheaven/sheds/shed_02x03x1.obj", paths)
         self.assertNotIn("simheaven/commercial/school_30x40.obj", paths)
         self.assertEqual(

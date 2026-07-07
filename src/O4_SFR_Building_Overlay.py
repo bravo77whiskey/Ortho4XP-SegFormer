@@ -2601,9 +2601,17 @@ OBJ_FOOTPRINTS: dict = {
 }
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
-MAX_GENERATED_BUILDING_HEIGHT_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 61      # v61: height-fit object selection
-BLD_PLACEMENT_FAST_CACHE_VERSION = 63  # v63: height-fit object selection
+# Tallest generated/pooled non-skyscraper asset (procgen floors <= 12 at
+# 3.2 m).  Gates which library assets may pool -- HeightNet predictions are
+# NOT clamped to it (floor-only), height-fit selection picks the nearest
+# available floor variant.
+MAX_GENERATED_BUILDING_HEIGHT_M = 40.0
+# Facade-fallback heights keep their historical envelope: SegFormer zones
+# carry no per-building height prediction, so the randomized facade height
+# stays capped where it always was instead of inheriting the taller pool.
+FACADE_HEIGHT_PRIOR_CAP_M = 24.0
+BLD_PLACEMENT_CACHE_VERSION = 62      # v62: uncapped HeightNet heights, 40 m pool gate
+BLD_PLACEMENT_FAST_CACHE_VERSION = 64  # v64: uncapped HeightNet heights, 40 m pool gate
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -2826,7 +2834,7 @@ OPTIONAL_ASSET_REGION_ALIASES = {
     "australia_oceania": {"australia_oceania"},
 }
 
-YOLO_OBB_CACHE_VERSION = 5  # v5: HeightNet heights stored on detections
+YOLO_OBB_CACHE_VERSION = 6  # v6: HeightNet heights uncapped (floor-only clamp)
 YOLO_ANALYSIS_CACHE_VERSION = 1
 YOLO_ANALYSIS_TARGET_ZL = 16
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -3835,7 +3843,7 @@ def _height_priors_by_class(asset_pools):
             if (
                 math.isfinite(height) and
                 height > 0.0 and
-                height <= float(MAX_GENERATED_BUILDING_HEIGHT_M)
+                height <= float(FACADE_HEIGHT_PRIOR_CAP_M)
             ):
                 heights.append(height)
 
@@ -3846,7 +3854,7 @@ def _height_priors_by_class(asset_pools):
             mode_h = float(np.clip(default_h, min_h, max_h))
         else:
             fallback_h = float(DEFAULT_FACADE_HEIGHT_M.get(zone_class, 8.0))
-            fallback_h = min(fallback_h, float(MAX_GENERATED_BUILDING_HEIGHT_M))
+            fallback_h = min(fallback_h, float(FACADE_HEIGHT_PRIOR_CAP_M))
             min_h = max_h = mode_h = fallback_h
         priors[int(zone_class)] = (min_h, max_h, mode_h)
     return priors
@@ -3873,11 +3881,11 @@ def _randomized_facade_height_m(rng, height_priors_by_class, placement_cls):
     bounds = (height_priors_by_class or {}).get(zone_class)
     if bounds is None:
         fallback_h = float(DEFAULT_FACADE_HEIGHT_M.get(zone_class, 8.0))
-        return min(fallback_h, float(MAX_GENERATED_BUILDING_HEIGHT_M))
+        return min(fallback_h, float(FACADE_HEIGHT_PRIOR_CAP_M))
 
     min_h, max_h, mode_h = (float(v) for v in bounds)
-    min_h = max(0.1, min(min_h, float(MAX_GENERATED_BUILDING_HEIGHT_M)))
-    max_h = max(min_h, min(max_h, float(MAX_GENERATED_BUILDING_HEIGHT_M)))
+    min_h = max(0.1, min(min_h, float(FACADE_HEIGHT_PRIOR_CAP_M)))
+    max_h = max(min_h, min(max_h, float(FACADE_HEIGHT_PRIOR_CAP_M)))
     mode_h = float(np.clip(mode_h, min_h, max_h))
     if max_h <= min_h + 1e-6:
         return min_h
@@ -6130,12 +6138,13 @@ def _append_yolo_result_detections(
 
 
 def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
-    """Overwrite detection heights with clamped HeightNet predictions.
+    """Overwrite detection heights with HeightNet predictions (floor only).
 
     Detections whose window/scalars cannot be built keep their decoded or
-    class-default height. Predictions are clamped into the generated-asset
-    envelope; large single-story industry over-predicts (roof-only 64 m
-    windows), so the ceiling matters as much as the floor.
+    class-default height. Predictions keep no ceiling: heights only rank
+    floor variants in height-fit selection, so an over-predicted warehouse
+    (roof-only 64 m windows) still lands on the tallest asset its class
+    pool offers -- same as a clamped value would.
     """
     if height_model is None or not detections or image is None:
         return
@@ -6143,13 +6152,12 @@ def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
         height_model, image, detections, m_per_px
     )
     lo = float(HEIGHTMODEL.HEIGHT_MODEL_MIN_M)
-    hi = float(MAX_GENERATED_BUILDING_HEIGHT_M)
     for det, height in zip(detections, heights):
         height = float(height)
         if not math.isfinite(height):
             continue
         det['height_raw_m'] = round(height, 3)
-        det['height_m'] = float(min(max(height, lo), hi))
+        det['height_m'] = float(max(height, lo))
         det['height_source'] = 'heightnet'
 
 
@@ -9268,7 +9276,7 @@ def run(
         )
         print(
             "YOLO OBB placement: direct detections only "
-            f"(max asset height {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
+            f"(asset pool heights up to {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
         )
         print(
             "YOLO OBB placement: object-only mode (no facade fallback)"
@@ -9320,8 +9328,7 @@ def run(
                 print(
                     f"HeightNet heights: enabled checkpoint={height_checkpoint} "
                     f"window={HEIGHTMODEL.WINDOW_M:.0f}m "
-                    f"clamp=[{HEIGHTMODEL.HEIGHT_MODEL_MIN_M:.1f}, "
-                    f"{MAX_GENERATED_BUILDING_HEIGHT_M:.1f}]m"
+                    f"floor={HEIGHTMODEL.HEIGHT_MODEL_MIN_M:.1f}m (no ceiling)"
                 )
             except Exception as exc:
                 print(

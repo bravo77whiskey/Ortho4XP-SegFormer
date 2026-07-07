@@ -66,7 +66,7 @@ limits:
 
 # Class -> archetype matrix.  Area bands mirror BLD_PLACEMENT_CLASSES caps.
 # floors token F gives the pool height F*3.2 m via the _LxWxF filename token
-# (must stay <= 7: MAX_GENERATED_BUILDING_HEIGHT_M = 24.0).
+# (must stay <= 12: MAX_GENERATED_BUILDING_HEIGHT_M = 40.0).
 # "regions" become o4sfr/<region>/ path tokens; "generic" is the wildcard.
 # bucket must keep the include-token contract: residential|apartments|
 # commercial|industrial.
@@ -110,7 +110,7 @@ bands:
     max_area_m2: 450.0
     bucket: apartments
     archetypes: [rowhouse, aptslab, flatcom, shophouse]
-    floors: [2, 3, 4, 5, 6]
+    floors: [2, 3, 4, 5, 6, 8]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -120,7 +120,9 @@ bands:
     max_area_m2: 850.0
     bucket: apartments
     archetypes: [aptblock, flatcom]
-    floors: [2, 3, 4, 5, 6, 7]
+    # 9/12 serve the uncapped HeightNet range (28.8 / 38.4 m); height-fit
+    # picks the nearest rung, so 2-floor gaps up high cost <1 floor error.
+    floors: [2, 3, 4, 5, 6, 7, 9, 12]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -130,7 +132,7 @@ bands:
     max_area_m2: 1650.0
     bucket: apartments
     archetypes: [aptslab, aptblock, flatcom]
-    floors: [3, 4, 5, 6, 7]
+    floors: [3, 4, 5, 6, 7, 9, 12]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -192,5 +194,8 @@ region_flavors:
 # overlay's object selector, which prefers the floor variant nearest the
 # predicted height among same-footprint assets (O4_SFR_Height_Model +
 # _select_yolo_object_candidate). Floors ladders above widened accordingly.
-# Still deferred: >24 m assets — predictions clamp to
-# MAX_GENERATED_BUILDING_HEIGHT_M, so floors stay <= 7.
+# 2026-07-07 (round 2): the prediction ceiling was removed (floor-only
+# clamp) and MAX_GENERATED_BUILDING_HEIGHT_M raised 24 -> 40, so apartment
+# bands carry 9/12-floor rungs (28.8 / 38.4 m).  Industrial bands stay at
+# <= 5 floors: HeightNet over-predicts roof-only warehouse crops, so tall
+# rungs there would materialize phantom towers.

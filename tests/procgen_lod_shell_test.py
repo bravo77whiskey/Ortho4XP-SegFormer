@@ -66,9 +66,6 @@ def _parse(path: Path):
             "declared": declared, "xs": xs, "ys": ys}
 
 
-PITCHED = {"gable", "hip", "lshape", "rowhouse", "aptblock", "warehouse"}
-
-
 @pytest.mark.parametrize("archetype,dims", [
     ("gable", (11.5, 9.5, 2)),
     ("hip", (11.5, 9.5, 1)),
@@ -89,30 +86,32 @@ def test_lod_bands_added(tmp_path, layout, archetype, dims):
     assert status == "patched"
     after = _parse(obj)
 
-    # Band distances scale with the footprint diagonal (small buildings
-    # cull early, big ones stay visible): expect the scaled boundaries.
+    # Band distances scale with the 3D bounding diagonal (small buildings
+    # cull early, big/tall ones stay visible): expect the scaled boundaries.
     from apply_lod_shells import _band_scale
-    scale = _band_scale(length, width)
+    scale = _band_scale(length, width, floors * 3.2)
     d0, d1, d2, d3 = (int(round(b * scale)) for b in bands)
     assert 0.44 <= scale <= 1.9
-    # Pitched: full / shell / flat box / roof quad. Flat-roofed archetypes
-    # skip the box stage (their shell already is one).
-    if archetype in PITCHED:
-        assert after["lods"] == [(0, d0), (d0, d1), (d1, d2), (d2, d3)]
-    else:
-        assert after["lods"] == [(0, d0), (d0, d2), (d2, d3)]
-    # Far bands get progressively cheaper; last band is the 2-tri quad.
+    # Every archetype: full / windowed shell / plain flat box / roof quad.
+    assert after["lods"] == [(0, d0), (d0, d1), (d1, d2), (d2, d3)]
+    # Far bands get progressively cheaper: the shell carries per-floor wall
+    # quads (window rows keep band-1 scale), the box and quad stay minimal.
     far_tris = [count // 3 for _start, count in after["tris"][1:]]
-    assert all(t <= 24 for t in far_tris)
+    # Shell walls: one quad per floor per side, plus a partial parapet
+    # course on flat archetypes and the roof/gable faces.
+    assert far_tris[0] <= 8 * (floors + 1) + 8
+    assert far_tris[1] <= 10
     assert far_tris[-1] == 2
     # Bookkeeping stays consistent and the footprint never grows.
     assert after["declared"] == (after["n_vt"], after["idx"])
     assert max(after["xs"]) <= length / 2 + 0.01
     assert min(after["xs"]) >= -length / 2 - 0.01
     assert max(map(abs, after["ys"])) <= width / 2 + 0.01
-    # Re-patching is a no-op.
+    # Re-patching re-bands in place and is byte-idempotent.
+    first = obj.read_bytes()
     assert patch_shell(str(obj), archetype, length, width, floors, 7,
-                       "generic", layout, bands) == "already-banded"
+                       "generic", layout, bands) == "patched"
+    assert obj.read_bytes() == first
 
 
 def test_every_archetype_has_shell_meta(layout):

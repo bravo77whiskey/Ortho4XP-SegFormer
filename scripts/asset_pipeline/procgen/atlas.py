@@ -85,11 +85,15 @@ STRIPS = (
 # UVs stay identical because the layout is shared.  Besides the material
 # bases, each flavor carries: window "frame"/"glass" colors, brick "mortar",
 # and color pools for doors / awnings / shop signs / shutters.
+# Wall families are (shade_a, shade_b) pairs feeding the wall_*_a/_b strips.
+# shade_b is a SECOND regional hue, not a darker copy of shade_a: together
+# with the 3 texture pages this gives ~6 visibly different wall looks per
+# family while every hue stays inside the region's reference palette.
 PALETTES = {
     "generic": {
-        "siding":   ((188, 182, 170), (170, 164, 152)),
-        "brick":    ((150, 96, 78),   (132, 84, 70)),
-        "stucco":   ((205, 198, 182), (186, 178, 164)),
+        "siding":   ((188, 182, 170), (168, 172, 154)),   # b: sage-gray
+        "brick":    ((150, 96, 78),   (124, 88, 66)),     # b: brown blend
+        "stucco":   ((205, 198, 182), (196, 182, 152)),   # b: warm buff
         "concrete": ((168, 168, 166), (150, 150, 148)),
         "roof_shingle": (84, 82, 82),
         "roof_tile":    (168, 92, 60),
@@ -112,10 +116,11 @@ PALETTES = {
                       (204, 190, 170)),
     },
     "europe": {
-        "siding":   ((196, 188, 168), (176, 168, 150)),
-        # UK terrace red-orange stock brick (refs: Norfolk/Chorley terraces).
-        "brick":    ((162, 84, 58),   (140, 72, 52)),
-        "stucco":   ((222, 210, 184), (206, 192, 168)),
+        "siding":   ((196, 188, 168), (170, 172, 150)),   # b: gray-green
+        # UK terrace red-orange stock brick (refs: Norfolk/Chorley terraces);
+        # b: London brown stock.
+        "brick":    ((162, 84, 58),   (122, 80, 58)),
+        "stucco":   ((222, 210, 184), (214, 190, 146)),   # b: ochre render
         "concrete": ((176, 174, 168), (158, 156, 152)),
         # Shingle doubles as slate on European stock: cool dark gray.
         "roof_shingle": (74, 74, 80),
@@ -138,9 +143,9 @@ PALETTES = {
                       (216, 198, 172)),
     },
     "north_america": {
-        "siding":   ((202, 198, 188), (172, 178, 184)),
-        "brick":    ((142, 84, 66),   (120, 74, 62)),
-        "stucco":   ((212, 200, 178), (192, 182, 162)),
+        "siding":   ((202, 198, 188), (172, 178, 184)),   # b: blue-gray
+        "brick":    ((142, 84, 66),   (108, 64, 54)),     # b: deep colonial
+        "stucco":   ((212, 200, 178), (198, 178, 146)),   # b: desert tan
         "concrete": ((170, 170, 168), (152, 152, 150)),
         # 1970s EPA subdivision aerials: shingle roofs read near-charcoal
         # with a strong roof-to-roof value spread (see PAGE_OVERRIDES).
@@ -165,8 +170,9 @@ PALETTES = {
     "mediterranean": {
         "siding":   ((216, 208, 192), (200, 190, 172)),
         "brick":    ((176, 124, 92),  (158, 110, 82)),
-        # Andalusia refs: whitewash is near-white in full sun.
-        "stucco":   ((242, 236, 220), (228, 216, 194)),
+        # Andalusia refs: whitewash is near-white in full sun; b: the sand
+        # ochre render population.
+        "stucco":   ((242, 236, 220), (230, 206, 162)),
         "concrete": ((196, 190, 178), (180, 174, 162)),
         "roof_shingle": (110, 96, 86),
         # Dubrovnik new-tile population; weathered lives on page 1.
@@ -190,8 +196,9 @@ PALETTES = {
     "asia": {
         "siding":   ((184, 180, 172), (164, 162, 156)),
         "brick":    ((148, 104, 88),  (130, 92, 78)),
-        "stucco":   ((208, 204, 194), (190, 186, 176)),
-        "concrete": ((184, 184, 180), (164, 164, 160)),  # weathered gray
+        "stucco":   ((208, 204, 194), (184, 194, 178)),  # b: pale celadon
+        "concrete": ((184, 184, 180), (172, 166, 152)),  # a: weathered gray,
+                                                         # b: aged warm render
         "roof_shingle": (72, 70, 68),
         "roof_tile":    (96, 84, 92),    # dark glazed tile
         "roof_metal":   (104, 118, 128), # blue-gray corrugated
@@ -215,8 +222,9 @@ PALETTES = {
     "africa": {
         "siding":   ((198, 184, 162), (182, 168, 146)),
         "brick":    ((164, 112, 82),  (146, 100, 74)),
-        # Wembezi township ref: warm tan render with white surrounds.
-        "stucco":   ((220, 198, 166), (204, 180, 146)),
+        # Wembezi township ref: warm tan render with white surrounds;
+        # b: the pinker earth-render population.
+        "stucco":   ((220, 198, 166), (206, 168, 134)),
         "concrete": ((186, 178, 164), (168, 160, 146)),
         "roof_shingle": (96, 88, 78),
         "roof_tile":    (166, 96, 64),
@@ -242,7 +250,7 @@ PALETTES = {
         "siding":   ((204, 192, 174), (186, 174, 156)),
         # Rocinha ref: raw ladrillo red-brown with gray slab frames.
         "brick":    ((156, 88, 58),   (138, 78, 52)),
-        "stucco":   ((222, 206, 182), (204, 188, 164)),
+        "stucco":   ((222, 206, 182), (206, 178, 132)),  # b: painted ochre
         "concrete": ((172, 168, 162), (154, 150, 144)),
         "roof_shingle": (90, 84, 78),
         "roof_tile":    (172, 90, 56),
@@ -266,7 +274,7 @@ PALETTES = {
                       (210, 200, 184), (188, 156, 120)),
     },
     "australia_oceania": {
-        "siding":   ((206, 200, 186), (188, 184, 174)),
+        "siding":   ((206, 200, 186), (182, 190, 176)),  # b: pale eucalypt
         "brick":    ((152, 92, 72),   (134, 100, 86)),
         "stucco":   ((214, 204, 184), (196, 188, 170)),
         "concrete": ((176, 174, 168), (158, 156, 150)),
@@ -297,12 +305,15 @@ PALETTES = {
 # deterministic _page_tone() drift so every page still reads distinct.
 PAGE_OVERRIDES = {
     "generic": {
-        1: {"roof_tile": (152, 86, 60), "roof_shingle": (72, 70, 70)},
-        2: {"roof_tile": (188, 104, 66)},
+        1: {"roof_tile": (152, 86, 60), "roof_shingle": (72, 70, 70),
+            "stucco": ((192, 184, 166), (178, 164, 136))},
+        2: {"roof_tile": (188, 104, 66),
+            "siding": ((206, 202, 192), (186, 190, 172))},
     },
     "europe": {
         1: {"roof_tile": (150, 82, 56), "roof_shingle": (66, 66, 72),
-            "brick": ((138, 70, 52), (120, 62, 46))},
+            "brick": ((138, 70, 52), (120, 62, 46)),
+            "stucco": ((210, 198, 174), (198, 178, 138))},
         2: {"roof_tile": (200, 116, 72),
             "stucco": ((228, 218, 196), (212, 200, 178))},
     },
@@ -310,32 +321,40 @@ PAGE_OVERRIDES = {
         1: {"roof_shingle": (52, 52, 56),
             "siding": ((172, 178, 184), (150, 158, 166))},
         2: {"roof_shingle": (104, 98, 92),
-            "siding": ((214, 208, 194), (196, 188, 172))},
+            "siding": ((214, 208, 194), (196, 188, 172)),
+            "brick": ((160, 104, 84), (140, 92, 74))},  # painted brick
     },
     "mediterranean": {
         1: {"roof_tile": (156, 96, 70),
             "stucco": ((232, 222, 202), (216, 204, 182))},
-        2: {"roof_tile": (206, 122, 74)},
+        2: {"roof_tile": (206, 122, 74),
+            "stucco": ((240, 222, 200), (226, 196, 168))},  # salmon wash
     },
     "asia": {
         1: {"concrete": ((196, 196, 192), (178, 178, 174)),
             "roof_metal": (88, 104, 118)},
         2: {"concrete": ((162, 160, 154), (144, 142, 136)),
+            "stucco": ((198, 208, 192), (178, 190, 172)),   # mint render
             "roof_tile": (110, 90, 78)},
     },
     "africa": {
-        1: {"roof_metal": (150, 66, 48)},    # painted red-oxide steel
-        2: {"roof_metal": (176, 178, 174)},  # new / sun-bleached zinc
+        1: {"roof_metal": (150, 66, 48),     # painted red-oxide steel
+            "stucco": ((212, 188, 150), (198, 162, 124))},  # sun-baked
+        2: {"roof_metal": (176, 178, 174),   # new / sun-bleached zinc
+            "stucco": ((228, 210, 180), (214, 180, 150))},  # fresh cream
     },
     "south_america": {
         1: {"brick": ((140, 78, 52), (124, 68, 46)),
+            "stucco": ((210, 182, 158), (192, 164, 134)),   # muted rose
             "roof_metal": (124, 110, 94)},
         2: {"stucco": ((214, 190, 150), (198, 172, 132)),
             "roof_tile": (188, 102, 62)},
     },
     "australia_oceania": {
-        1: {"roof_metal": (96, 100, 98)},    # Colorbond woodland grey
-        2: {"roof_metal": (134, 70, 58)},    # Colorbond manor red
+        1: {"roof_metal": (96, 100, 98),     # Colorbond woodland grey
+            "brick": ((136, 80, 62), (120, 86, 72))},       # chocolate
+        2: {"roof_metal": (134, 70, 58),     # Colorbond manor red
+            "siding": ((218, 216, 206), (198, 200, 188))},  # crisp repaint
     },
 }
 

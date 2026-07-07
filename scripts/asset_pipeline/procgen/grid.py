@@ -26,7 +26,7 @@ from archetypes.common import fmt_dim  # noqa: E402
 
 MANIFEST_SCHEMA_VERSION = 1
 FLOOR_HEIGHT_M = 3.2  # _SIMHEAVEN_FLOORS_RE contract: height = floors * 3.2
-MAX_FLOORS = 7        # 7 * 3.2 = 22.4 < MAX_GENERATED_BUILDING_HEIGHT_M (24)
+MAX_FLOORS = 12       # 12 * 3.2 = 38.4 < MAX_GENERATED_BUILDING_HEIGHT_M (40)
 
 # Mirror of the overlay's filename filters that could silently reject our
 # assets.  The authoritative audit (importing the real tuples from
@@ -139,7 +139,8 @@ def build_manifest(config: dict) -> dict:
                 if int(floors) > MAX_FLOORS:
                     raise SystemExit(
                         f"band {band['name']}: floors {floors} exceeds the "
-                        f"{MAX_FLOORS}-floor (24 m) ingestion cap"
+                        f"{MAX_FLOORS}-floor "
+                        f"({MAX_FLOORS * FLOOR_HEIGHT_M:.1f} m) ingestion cap"
                     )
                 for region in band["regions"]:
                     flavor = region_flavors[region]
