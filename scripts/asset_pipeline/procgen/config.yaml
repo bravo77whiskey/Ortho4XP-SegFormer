@@ -87,7 +87,7 @@ bands:
     max_area_m2: 170.0
     bucket: residential
     archetypes: [gable, hip, lshape, flatres, shophouse]
-    floors: [1, 2]
+    floors: [1, 2, 3]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -97,7 +97,7 @@ bands:
     max_area_m2: 270.0
     bucket: residential
     archetypes: [gable, hip, lshape, rowhouse, flatres, shophouse]
-    floors: [2, 3]
+    floors: [1, 2, 3, 4]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -110,7 +110,7 @@ bands:
     max_area_m2: 450.0
     bucket: apartments
     archetypes: [rowhouse, aptslab, flatcom, shophouse]
-    floors: [2, 3, 4]
+    floors: [2, 3, 4, 5, 6]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -120,7 +120,7 @@ bands:
     max_area_m2: 850.0
     bucket: apartments
     archetypes: [aptblock, flatcom]
-    floors: [3, 4, 5]
+    floors: [2, 3, 4, 5, 6, 7]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -130,7 +130,7 @@ bands:
     max_area_m2: 1650.0
     bucket: apartments
     archetypes: [aptslab, aptblock, flatcom]
-    floors: [4, 5, 6, 7]
+    floors: [3, 4, 5, 6, 7]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -142,7 +142,7 @@ bands:
     max_side_m: 100.0
     bucket: industrial
     archetypes: [warehouse, bigbox]
-    floors: [2, 3, 4]
+    floors: [2, 3, 4, 5]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -154,7 +154,7 @@ bands:
     max_aspect: 5.5
     bucket: industrial
     archetypes: [warehouse, bigbox]
-    floors: [2, 3, 4]
+    floors: [2, 3, 4, 5]
     variants: 2
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
@@ -188,6 +188,9 @@ region_flavors:
   south_america: south_america
   australia_oceania: australia_oceania
 
-# Deferred: 30-120 m height bins have no runtime consumer
-# (MAX_GENERATED_BUILDING_HEIGHT_M cap + discarded YOLO height bin).
-# Grid rows above floors<=7 are not generated; see plan M4.
+# Height fit is live (2026-07-07): HeightNet per-detection heights feed the
+# overlay's object selector, which prefers the floor variant nearest the
+# predicted height among same-footprint assets (O4_SFR_Height_Model +
+# _select_yolo_object_candidate). Floors ladders above widened accordingly.
+# Still deferred: >24 m assets — predictions clamp to
+# MAX_GENERATED_BUILDING_HEIGHT_M, so floors stay <= 7.
