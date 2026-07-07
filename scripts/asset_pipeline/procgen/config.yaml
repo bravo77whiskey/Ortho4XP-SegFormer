@@ -27,6 +27,15 @@ atlas:
   # texture.  Texture-only: changing this never requires a Blender rebuild
   # (retarget_texture_pages.py rewrites installed OBJ headers).
   pages: 3
+  # Every flavor page also ships a MODERN twin ("_m" names): identical
+  # strip layout/UVs, but wall/ground strips repaint with the high
+  # window-to-wall ratio of modern apartment/commercial facades (~52%
+  # glazing vs ~22% traditional).  Archetypes listed here reference the
+  # modern pages; everything else (houses, rowhouses, shophouses,
+  # warehouses/bigbox) keeps the traditional look.  Texture-only: switching
+  # an installed OBJ between page sets is a retarget_texture_pages.py
+  # header rewrite, no Blender rebuild.
+  modern_archetypes: [aptslab, aptblock, flatcom]
   # Flavors map 1:1 to a texture PNG per page; region dirs pick their
   # flavor below.
   flavors: [generic, europe, north_america, mediterranean, asia, africa,

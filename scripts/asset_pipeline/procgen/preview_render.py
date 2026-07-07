@@ -63,15 +63,18 @@ def _blender_main() -> int:
 
     materials = {}
     pages = max(1, int(layout.get("pages", 1)))
+    modern_set = set(layout.get("modern_archetypes") or ())
 
-    def _material(flavor, page):
+    def _material(flavor, page, modern=False):
         # Mirrors atlas.texture_name (not importable here: Blender's
         # bundled Python has no PIL/yaml).
-        suffix = "" if page <= 0 else f"_p{page + 1}"
-        key = (flavor, page)
+        suffix = ("_m" if modern else "") + \
+            ("" if page <= 0 else f"_p{page + 1}")
+        key = (flavor, page, modern)
         if key in materials:
             return materials[key]
-        material = bpy.data.materials.new(name=f"preview_{flavor}_p{page}")
+        material = bpy.data.materials.new(
+            name=f"preview_{flavor}{'_m' if modern else ''}_p{page}")
         material.use_nodes = True
         bsdf = material.node_tree.nodes.get("Principled BSDF")
         image_path = os.path.join(
@@ -104,7 +107,8 @@ def _blender_main() -> int:
                 uv_layer.data[loop_index].uv = uv
                 loop_index += 1
         mesh.materials.append(
-            _material(row["flavor"], int(row["seed"]) % pages))
+            _material(row["flavor"], int(row["seed"]) % pages,
+                      row["archetype"] in modern_set))
         obj = bpy.data.objects.new(row["stem"], mesh)
         scene.collection.objects.link(obj)
 

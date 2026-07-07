@@ -93,8 +93,19 @@ def _texture_page(seed: int, pages: int) -> int:
     return int(seed) % max(1, int(pages))
 
 
+def _modern_archetypes(manifest: dict = None) -> frozenset:
+    """Archetypes routed to the modern (high-glazing ``_m``) atlas pages;
+    config atlas.modern_archetypes overrides the atlas.py default."""
+    listed = ((manifest or {}).get("atlas") or {}).get("modern_archetypes")
+    if listed:
+        return frozenset(str(name) for name in listed)
+    from atlas import MODERN_ARCHETYPES
+    return MODERN_ARCHETYPES
+
+
 def _expected_texture_lines(physical_path: str, flavor: str, seed: int = 0,
-                            pages: int = 1) -> list[str]:
+                            pages: int = 1,
+                            modern: bool = False) -> list[str]:
     """Header block: albedo page, its normal map (flat normals + specular
     level in alpha) and the instancing-friendly global specular gain that
     enables it (OBJ8: alpha is multiplied by GLOBAL_specular)."""
@@ -103,8 +114,9 @@ def _expected_texture_lines(physical_path: str, flavor: str, seed: int = 0,
     up = "../" * depth
     page = _texture_page(seed, pages)
     return [
-        f"TEXTURE {up}textures/{texture_name(flavor, page)}",
-        f"TEXTURE_NORMAL {up}textures/{texture_normal_name(flavor, page)}",
+        f"TEXTURE {up}textures/{texture_name(flavor, page, modern)}",
+        f"TEXTURE_NORMAL {up}textures/"
+        f"{texture_normal_name(flavor, page, modern)}",
         "GLOBAL_specular 1.0",
     ]
 
@@ -203,17 +215,22 @@ def main(argv=None) -> int:
         flavors = {row["flavor"] for row in pending}
 
     pages = max(1, int((manifest.get("atlas") or {}).get("pages", 1)))
+    modern_set = _modern_archetypes(manifest)
+    modern_flavors = {row["flavor"] for row in pending
+                      if row["archetype"] in modern_set}
     from atlas import texture_name, texture_normal_name
     for flavor in sorted(flavors):
         for page in range(pages):
-            for name in (texture_name(flavor, page),
-                         texture_normal_name(flavor, page)):
-                texture = os.path.join(args.output, "textures", name)
-                if not os.path.isfile(texture):
-                    raise SystemExit(
-                        f"atlas texture missing: {texture}; run atlas.py "
-                        f"--output {args.output} first"
-                    )
+            moderns = (False, True) if flavor in modern_flavors else (False,)
+            for modern in moderns:
+                for name in (texture_name(flavor, page, modern),
+                             texture_normal_name(flavor, page, modern)):
+                    texture = os.path.join(args.output, "textures", name)
+                    if not os.path.isfile(texture):
+                        raise SystemExit(
+                            f"atlas texture missing: {texture}; run atlas.py "
+                            f"--output {args.output} first"
+                        )
 
     total = len(rows)
     print(f"{total} obj files in scope, {len(pending)} to generate")
@@ -269,7 +286,8 @@ def main(argv=None) -> int:
             _normalize_texture_directive(
                 obj_path,
                 _expected_texture_lines(row["physical_path"], row["flavor"],
-                                        row["seed"], pages),
+                                        row["seed"], pages,
+                                        row["archetype"] in modern_set),
             )
             if layout is not None:
                 patch_shell(

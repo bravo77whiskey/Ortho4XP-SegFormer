@@ -23,8 +23,14 @@ Paint rules (learned the hard way -- see the rainbow/banding history):
   * Keep 1px detail at moderate contrast: X-Plane box-filters PNG mips and
     high-contrast pixels shimmer / tint the deep mips.
 
+Besides the traditional pages, every flavor also gets MODERN pages
+(``_m`` names): identical layout/UVs, but wall and ground strips repaint
+with the high window-to-wall ratio of modern apartment/commercial fabric.
+Apartment-and-larger archetypes (MODERN_ARCHETYPES) reference the modern
+pages; houses, rowhouses and warehouses keep the traditional ones.
+
 Outputs:
-  <output>/textures/o4sfr_procgen_atlas_<flavor>.png   (one per flavor)
+  <output>/textures/o4sfr_procgen_atlas_<flavor>[_m][_pN].png
   atlas_layout.json (next to this script) -- strip name -> V band + world
   meters per U repeat / per band height, consumed by the archetypes.
 
@@ -509,6 +515,48 @@ _PAGE_PATTERN_TWEAKS = {
         "tile_mix": -0.06, "shingle_mix": -0.04},
 }
 
+# Archetypes whose OBJs reference the modern ("_m") pages.  Apartment slabs,
+# apartment blocks and commercial towers read modern; houses, rowhouses,
+# shophouses and the warehouse/bigbox industrial fabric stay traditional.
+# Overridable per build via config atlas.modern_archetypes.
+MODERN_ARCHETYPES = frozenset({"aptslab", "aptblock", "flatcom"})
+
+# Modern wall pattern (the "_m" pages): the window-to-wall ratio of modern
+# apartment/commercial facades is far higher than the traditional strips'
+# ~22%, so windows grow toward the structural cell and sills drop toward
+# the slab.  Traditional cues (shutters, arches, transoms, stone lintels)
+# disappear; a light unit-banding chance keeps some per-building color.
+# Paint-side only: the _m pages share the strip layout, so any built OBJ
+# retargets onto them with a pure header rewrite.
+_MODERN_PATTERN_BASE = {
+    "shutters": False, "arch": False, "transom": False, "louvered": False,
+    "stone_lintels": False, "win_jitter": 0.03, "sill_m": 0.55,
+    "unit_banding": 0.15,
+}
+
+# Per-flavor modern window geometry (metres on the 3.2 m floor cell).
+# Glazing fraction window_w*window_h / (period*3.2) lands at ~0.5-0.55
+# everywhere; regional identity stays in the glass/frame palette, AC
+# units, security bars, balcony rails and weathering knobs.
+_MODERN_FLAVOR_SIZES = {
+    "generic": {"window_w": 1.9, "window_h": 2.2, "period": 2.5,
+                "mullion": "slider"},
+    "europe": {"window_w": 1.8, "window_h": 2.3, "period": 2.4,
+               "mullion": "single"},
+    "north_america": {"window_w": 2.0, "window_h": 2.1, "period": 2.6,
+                      "mullion": "slider"},
+    "mediterranean": {"window_w": 1.9, "window_h": 2.1, "period": 2.7,
+                      "mullion": "slider"},
+    "asia": {"window_w": 2.3, "window_h": 2.1, "period": 2.8,
+             "mullion": "slider"},
+    "africa": {"window_w": 2.0, "window_h": 1.9, "period": 2.9,
+               "mullion": "slider", "bars_prob": 0.35},
+    "south_america": {"window_w": 2.1, "window_h": 2.0, "period": 2.8,
+                      "mullion": "slider", "bars_prob": 0.25},
+    "australia_oceania": {"window_w": 2.1, "window_h": 2.1, "period": 2.7,
+                          "mullion": "slider"},
+}
+
 
 def _load_reference_styles(path=None):
     path = path or os.path.join(HERE, "reference_styles.yaml")
@@ -517,7 +565,7 @@ def _load_reference_styles(path=None):
 
 
 def _pattern_for_flavor(flavor: str, references: dict,
-                        page: int = 0) -> dict:
+                        page: int = 0, modern: bool = False) -> dict:
     pattern = dict(_PATTERN_DEFAULTS)
     pattern.update(FLAVOR_PATTERNS.get(flavor, FLAVOR_PATTERNS["generic"]))
     pattern.update(_FLAVOR_PATTERN_EXTRAS.get(flavor) or {})
@@ -525,6 +573,10 @@ def _pattern_for_flavor(flavor: str, references: dict,
     pattern.update(region.get("pattern_overrides") or {})
     for key, delta in (_PAGE_PATTERN_TWEAKS.get(page) or {}).items():
         pattern[key] = min(1.0, max(0.0, float(pattern.get(key, 0.0)) + delta))
+    if modern:
+        pattern.update(_MODERN_PATTERN_BASE)
+        pattern.update(_MODERN_FLAVOR_SIZES.get(flavor)
+                       or _MODERN_FLAVOR_SIZES["generic"])
     return pattern
 
 
@@ -986,7 +1038,7 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
 
     n_windows = max(2, int(round(world_w / float(pattern["period"]))))
     door_slot = rng.randrange(n_windows) if ground else -1
-    sill_y = base_y - int(0.9 * px_per_m_y)
+    sill_y = base_y - int(float(pattern.get("sill_m", 0.9)) * px_per_m_y)
     win_w = float(pattern["window_w"]) * px_per_m_x
     win_h = float(pattern["window_h"]) * px_per_m_y
     jitter = float(pattern.get("win_jitter", 0.0))
@@ -1361,14 +1413,18 @@ def build_layout(size: int) -> dict:
 
 def paint_atlas(flavor: str, layout: dict, seed: int,
                 references: dict | None = None,
-                page: int = 0, with_gloss: bool = False):
+                page: int = 0, with_gloss: bool = False,
+                modern: bool = False):
     """Paint one atlas page.  Returns the RGB image, or (image, gloss)
     when ``with_gloss`` -- gloss is the 8-bit specular-level canvas that
-    becomes the normal map's alpha channel."""
+    becomes the normal map's alpha channel.  ``modern`` repaints wall and
+    ground strips with the high-glazing pattern; every other strip keeps
+    the same per-strip RNG stream, so roofs/storefronts/trim stay pixel
+    identical to the sibling traditional page."""
     global _GLOSS_DRAW
     palette = page_palette(flavor, page)
     references = references or _load_reference_styles()
-    pattern = _pattern_for_flavor(flavor, references, page)
+    pattern = _pattern_for_flavor(flavor, references, page, modern=modern)
     size = layout["size"]
     # Roof row/pitch constants are authored in 2048px units; rescale so the
     # painted feature size in world metres is resolution-independent.
@@ -1426,18 +1482,21 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
     return img
 
 
-def texture_name(flavor: str, page: int = 0) -> str:
+def texture_name(flavor: str, page: int = 0, modern: bool = False) -> str:
     """Atlas PNG name for one flavor page.  Page 0 keeps the historical
     un-suffixed name so already-installed OBJs stay valid; pages 1+ get
-    _p2/_p3 suffixes (human page numbers)."""
+    _p2/_p3 suffixes (human page numbers).  Modern pages (high-glazing
+    walls for MODERN_ARCHETYPES) insert an _m before the page suffix."""
+    mod = "_m" if modern else ""
     if page <= 0:
-        return f"o4sfr_procgen_atlas_{flavor}.png"
-    return f"o4sfr_procgen_atlas_{flavor}_p{page + 1}.png"
+        return f"o4sfr_procgen_atlas_{flavor}{mod}.png"
+    return f"o4sfr_procgen_atlas_{flavor}{mod}_p{page + 1}.png"
 
 
-def texture_normal_name(flavor: str, page: int = 0) -> str:
+def texture_normal_name(flavor: str, page: int = 0,
+                        modern: bool = False) -> str:
     """Companion normal map (flat normals + specular level in alpha)."""
-    return texture_name(flavor, page)[:-4] + "_nml.png"
+    return texture_name(flavor, page, modern)[:-4] + "_nml.png"
 
 
 def build_normal_map(gloss: Image.Image, out_size: int) -> Image.Image:
@@ -1476,6 +1535,15 @@ def main(argv=None) -> int:
                  for page in range(pages)]
         for flavor in atlas_cfg["flavors"]
     }
+    # Modern-page routing contract: consumed by the OBJ header writers
+    # (generate/retarget) and preview_render (which cannot import atlas).
+    layout["modern_archetypes"] = sorted(
+        atlas_cfg.get("modern_archetypes") or MODERN_ARCHETYPES)
+    layout["flavor_pages_modern"] = {
+        flavor: [f"textures/{texture_name(flavor, page, modern=True)}"
+                 for page in range(pages)]
+        for flavor in atlas_cfg["flavors"]
+    }
     layout["reference_styles"] = {
         "version": references.get("version"),
         "regions": sorted((references.get("regions") or {}).keys()),
@@ -1494,16 +1562,21 @@ def main(argv=None) -> int:
     # _jitter), not mip bleed.
     for flavor in atlas_cfg["flavors"]:
         for page in range(pages):
-            img, gloss = paint_atlas(flavor, layout, int(atlas_cfg["seed"]),
-                                     references, page, with_gloss=True)
-            path = os.path.join(textures_dir, texture_name(flavor, page))
-            img.save(path, optimize=True)
-            print(f"wrote {path}")
-            normal = build_normal_map(gloss, max(1024, layout["size"] // 2))
-            nml_path = os.path.join(textures_dir,
-                                    texture_normal_name(flavor, page))
-            normal.save(nml_path, optimize=True)
-            print(f"wrote {nml_path}")
+            for modern in (False, True):
+                img, gloss = paint_atlas(flavor, layout,
+                                         int(atlas_cfg["seed"]),
+                                         references, page, with_gloss=True,
+                                         modern=modern)
+                path = os.path.join(textures_dir,
+                                    texture_name(flavor, page, modern))
+                img.save(path, optimize=True)
+                print(f"wrote {path}")
+                normal = build_normal_map(gloss,
+                                          max(1024, layout["size"] // 2))
+                nml_path = os.path.join(
+                    textures_dir, texture_normal_name(flavor, page, modern))
+                normal.save(nml_path, optimize=True)
+                print(f"wrote {nml_path}")
     print(f"wrote {args.layout_out}")
     return 0
 
