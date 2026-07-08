@@ -1013,10 +1013,15 @@ def compose(output: Path, sources_dir: Path, combos, layout_path: Path,
             albedo, gloss = compose_page(flavor, group, page, sub,
                                          references, sources, sprites, seed)
             name = atlas.texture_name(flavor, group, page)
-            # Adaptive-palette save: full 4096 res at ~1-2 MB on disk.
+            # Quantize to 256 colors for compression, but ALWAYS expand
+            # back to truecolor RGB before saving: palette (P-mode) PNGs
+            # render with phantom transparency in X-Plane (observed
+            # in-sim 2026-07-08 -- flat roofs showed straight-edged
+            # see-through holes tracking texture sheet cells).  The
+            # 256-color content still zlib-compresses to a few MB.
             albedo.quantize(
                 colors=QUANT_COLORS, method=Image.Quantize.FASTOCTREE,
-            ).save(textures / name, optimize=True)
+            ).convert("RGB").save(textures / name, optimize=True)
             normal = atlas.build_normal_map(gloss, NML_SIZE)
             normal.save(textures / f"{name[:-4]}_nml.png", compress_level=6)
 
