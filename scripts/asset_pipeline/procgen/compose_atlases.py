@@ -120,16 +120,16 @@ SHIFT_REPEATS = {
 REGIONAL_MEAN_SHIFT = 0.30   # how far regional photos move toward palette
 SPRITE_SOFTEN = 0.70         # contrast multiplier for window/door sprites
 
-# Dark glass panes (user directive 2026-07-08): every glazing surface gets
-# a deterministic dark overlay tinted from the region's glass palette --
-# kills the sky/cloud reflections baked into the AI window sprites and
-# curtain-wall photos while keeping frames/mullions readable underneath.
+# Dark-glass overlays: tried 2026-07-08 and REJECTED by the user after
+# in-sim testing -- the natural AI-photo panes (including their sky
+# reflections) look better in the sim.  All alphas are 0 (darken_glass
+# no-ops); keep them at 0 unless the user explicitly asks again.
 GLASS_DARK_FACTOR = 0.42     # pane brightness relative to palette glass
-GLASS_OVERLAY_ALPHA = 150    # wall/ground window panes
-CURTAIN_OVERLAY_ALPHA = 120  # curtain-wall glazing fields
-STOREFRONT_OVERLAY_ALPHA = 110
-LOBBY_OVERLAY_ALPHA = 95
-HIGHBAND_OVERLAY_ALPHA = 115
+GLASS_OVERLAY_ALPHA = 0      # wall/ground window panes
+CURTAIN_OVERLAY_ALPHA = 0    # curtain-wall glazing fields
+STOREFRONT_OVERLAY_ALPHA = 0
+LOBBY_OVERLAY_ALPHA = 0
+HIGHBAND_OVERLAY_ALPHA = 0
 
 # On-disk optimization: adaptive-palette PNGs keep the full 4096 res at
 # ~1-2 MB per page (vs 6-13 MB truecolor) with no visible loss at atlas
@@ -143,6 +143,8 @@ def dark_glass_color(palette) -> tuple:
 
 
 def darken_glass(albedo, box, color, alpha):
+    if alpha <= 0:
+        return
     x0, y0, x1, y1 = (int(round(v)) for v in box)
     if x1 <= x0 or y1 <= y0:
         return
