@@ -97,7 +97,7 @@ def test_lod_bands_added(tmp_path, layout, archetype, dims):
     from apply_lod_shells import _band_scale
     scale = _band_scale(length, width, floors * 3.2)
     d0, d1, d2, d3 = (int(round(b * scale)) for b in bands)
-    assert 0.29 <= scale <= 1.65
+    assert 0.31 <= scale <= 1.65
     # Every archetype: full / windowed shell / plain flat box / roof quad.
     assert after["lods"] == [(0, d0), (d0, d1), (d1, d2), (d2, d3)]
     # Far bands get progressively cheaper: the shell carries per-floor wall

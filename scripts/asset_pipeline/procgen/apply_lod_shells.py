@@ -48,13 +48,16 @@ from lod_shell import merge_bands_into_obj8, roof_quad_mesh, shell_mesh  # noqa:
 # Round 3 (user directive: FULL detail up close, aggressively cheaper with
 # distance): the full-mesh band keeps its span; the shell/box bands
 # shrink and the cull comes in early -- at the horizon even 2-tri quads
-# cost per-instance overhead, so cull distance is the real lever.  Typical
-# house: full to ~550 m, shell 1.3 km, box 2.1 km, gone at 3.75 km; the
-# largest structures still reach ~12 km.
-DEFAULT_BANDS = (1100, 2600, 4200, 7500)
+# cost per-instance overhead, so cull distance is the real lever.
+# Round 4 (in-sim: "best performance we've ever seen", spend a little
+# headroom): mid/far bands step back up ~15% from round 3's
+# (1100,2600,4200,7500)/0.30 -- typical house full to ~550 m, shell
+# ~1.4 km, box ~2.4 km, gone ~4.25 km; towers reach ~14 km.  Far ring
+# ~+28% vs round 3, still ~35% under round 2.
+DEFAULT_BANDS = (1100, 2800, 4700, 8500)
 
 _BAND_SCALE_REF_DIAG_M = 30.0
-_BAND_SCALE_MIN = 0.30
+_BAND_SCALE_MIN = 0.32
 _BAND_SCALE_MAX = 1.65
 
 
