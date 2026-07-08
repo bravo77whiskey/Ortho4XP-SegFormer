@@ -13,6 +13,11 @@ if str(PROCGEN) not in sys.path:
 
 from apply_lod_shells import patch_shell  # noqa: E402
 from archetypes import ARCHETYPES, build_archetype  # noqa: E402
+from archetypes.combo_styles import group_for_archetype  # noqa: E402
+
+
+def _combo(layout, archetype, flavor="generic"):
+    return layout["combos"][f"{flavor}/{group_for_archetype(archetype)}"]
 
 
 @pytest.fixture(scope="module")
@@ -76,7 +81,8 @@ def _parse(path: Path):
 ])
 def test_lod_bands_added(tmp_path, layout, archetype, dims):
     length, width, floors = dims
-    spec = build_archetype(archetype, length, width, floors, 7, layout)
+    spec = build_archetype(archetype, length, width, floors, 7,
+                           _combo(layout, archetype))
     obj = tmp_path / f"{archetype}_test.obj"
     _write_minimal_obj8(obj, spec)
 
@@ -91,7 +97,7 @@ def test_lod_bands_added(tmp_path, layout, archetype, dims):
     from apply_lod_shells import _band_scale
     scale = _band_scale(length, width, floors * 3.2)
     d0, d1, d2, d3 = (int(round(b * scale)) for b in bands)
-    assert 0.44 <= scale <= 1.9
+    assert 0.35 <= scale <= 1.65
     # Every archetype: full / windowed shell / plain flat box / roof quad.
     assert after["lods"] == [(0, d0), (d0, d1), (d1, d2), (d2, d3)]
     # Far bands get progressively cheaper: the shell carries per-floor wall
@@ -116,8 +122,9 @@ def test_lod_bands_added(tmp_path, layout, archetype, dims):
 
 def test_every_archetype_has_shell_meta(layout):
     for name in sorted(ARCHETYPES):
-        spec = build_archetype(name, 20.9, 12.9, 2, 11, layout)
+        sub = _combo(layout, name)
+        spec = build_archetype(name, 20.9, 12.9, 2, 11, sub)
         assert spec.meta.get("kind") in ("pitched", "flat"), name
         assert spec.meta["ridge_z"] > 0, name
-        assert spec.meta["wall_strip"] in layout["strips"], name
-        assert spec.meta["roof_strip"] in layout["strips"], name
+        assert spec.meta["wall_strip"] in sub["strips"], name
+        assert spec.meta["roof_strip"] in sub["strips"], name

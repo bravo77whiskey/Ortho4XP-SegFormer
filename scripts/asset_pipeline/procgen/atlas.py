@@ -1,12 +1,13 @@
-"""Generate the shared procedural facade/roof texture atlases (PIL).
+"""Generate the per-combo procedural facade/roof texture atlases (PIL).
 
-One 2048x2048 PNG per region flavor PER PAGE; every generated OBJ references
-exactly one atlas page.  Pages share the strip layout (identical UVs) but
-differ in sub-palette and paint seed, so two buildings with the same geometry
-can still look different: the variant seed picks the page in the TEXTURE
-directive.  Page identities are reference-derived (see PAGE_OVERRIDES):
-page 0 = the base look, page 1 = the weathered population, page 2 = the
-fresh/repainted population.  The atlas is a stack of full-width horizontal
+One PNG per (region flavor x class group) COMBO per page; every generated
+OBJ references exactly one combo page.  Combos own their strip LAYOUT
+(strip set, window/door dimensions, facade period, ground-floor height --
+see archetypes/combo_styles.py), so a European house, a European apartment
+slab and an Asian shophouse no longer share a single UV contract.  Pages
+of one combo share its layout but differ in sub-palette and paint seed
+(page 0 base / 1 weathered / 2 fresh); the variant seed picks the page in
+the TEXTURE directive.  The atlas is a stack of full-width horizontal
 strips: U tiles freely (GL wrap) while V stays inside a strip's band, so a
 wall of any length is a single quad whose windows never stretch.
 
@@ -23,16 +24,14 @@ Paint rules (learned the hard way -- see the rainbow/banding history):
   * Keep 1px detail at moderate contrast: X-Plane box-filters PNG mips and
     high-contrast pixels shimmer / tint the deep mips.
 
-Besides the traditional pages, every flavor also gets MODERN pages
-(``_m`` names): identical layout/UVs, but wall and ground strips repaint
-with the high window-to-wall ratio of modern apartment/commercial fabric.
-Apartment-and-larger archetypes (MODERN_ARCHETYPES) reference the modern
-pages; houses, rowhouses and warehouses keep the traditional ones.
+The old global MODERN ("_m") twin pages are gone: high-glazing facades are
+now the ``curtain`` wall family inside the apt/com combos, chosen per
+building by the seeded RNG like any other family.
 
 Outputs:
-  <output>/textures/o4sfr_procgen_atlas_<flavor>[_m][_pN].png
-  atlas_layout.json (next to this script) -- strip name -> V band + world
-  meters per U repeat / per band height, consumed by the archetypes.
+  <output>/textures/o4sfr_procgen_atlas_<flavor>_<group>[_pN].png
+  atlas_layout.json (next to this script) -- v2 schema: one layout per
+  combo under "combos", consumed by the archetypes and the LOD sheller.
 
 Run:  python atlas.py --output <Custom Scenery>/O4SFR_ProcGen_Library
 """
@@ -54,38 +53,22 @@ if HERE not in sys.path:
 
 import yaml  # noqa: E402
 
+from archetypes.combo_styles import (  # noqa: E402
+    CLEAN_FLAVORS, FLAVORS, GROUPS, GROUP_STRIPS, combo_dims, combo_key,
+    combo_palette_overrides, combo_pattern_overrides, enforce_clean_flavor,
+)
+
 # V inset per band edge (2048px units, scaled with atlas size) so mipmaps
 # don't bleed across strips. 8px protects the first ~3 mip levels; combined
 # with the untiled-UV caps on roofs/far meshes this keeps sampling out of
 # the deep mips where the strip stack collapses into rainbow bands.
 GUTTER_PX = 8
 
-# (name, height_px, world_w_m, world_h_m, painter-kind)
-STRIPS = (
-    ("wall_siding_a",   96, 20.0, 3.2, "wall"),
-    ("wall_siding_b",   96, 20.0, 3.2, "wall"),
-    ("wall_brick_a",    96, 20.0, 3.2, "wall"),
-    ("wall_brick_b",    96, 20.0, 3.2, "wall"),
-    ("wall_stucco_a",   96, 20.0, 3.2, "wall"),
-    ("wall_stucco_b",   96, 20.0, 3.2, "wall"),
-    ("wall_concrete_a", 96, 20.0, 3.2, "wall"),
-    ("wall_concrete_b", 96, 20.0, 3.2, "wall"),
-    ("ground_siding",   96, 20.0, 3.2, "ground"),
-    ("ground_brick",    96, 20.0, 3.2, "ground"),
-    ("ground_stucco",   96, 20.0, 3.2, "ground"),
-    ("ground_concrete", 96, 20.0, 3.2, "ground"),
-    ("ground_storefront", 96, 20.0, 3.2, "storefront"),
-    ("ground_roller",   96, 24.0, 3.2, "roller"),
-    ("plain_siding",    64,  8.0, 2.0, "plain"),
-    ("plain_brick",     64,  8.0, 2.0, "plain"),
-    ("plain_stucco",    64,  8.0, 2.0, "plain"),
-    ("plain_concrete",  64,  8.0, 2.0, "plain"),
-    ("trim_dark",       32,  4.0, 0.3, "trim"),
-    ("roof_shingle",    96, 12.0, 9.0, "roof"),
-    ("roof_tile",       96, 12.0, 9.0, "roof"),
-    ("roof_metal",      96, 12.0, 9.0, "roof"),
-    ("roof_flat",      128, 16.0, 16.0, "roof"),
-)
+# Strip px heights in GROUP_STRIPS are authored for this design size and
+# scale proportionally with the actual atlas size.
+DESIGN_SIZE = 4096
+
+LAYOUT_SCHEMA_VERSION = 2
 
 # Per-flavor material palettes (RGB).  Flavors only swap colors; geometry
 # UVs stay identical because the layout is shared.  Besides the material
@@ -381,10 +364,10 @@ def page_palette(flavor: str, page: int = 0) -> dict:
                 value, lambda color: _page_tone(color, page))
     return palette
 
-WINDOW_PERIOD_M = 2.5
-
-# Per-flavor PATTERN parameters (paint-side only: the strip layout and the
-# UV contract are shared, so geometry never changes). Windows in metres;
+# Per-flavor PATTERN parameters for the RES combos (the regional baseline);
+# apt/com/ind combos override via combo_styles.COMBO_PATTERNS and window/
+# door dimensions always come from combo_styles.COMBO_DIMS. Windows in
+# metres;
 # row/pitch values in pixels on the 2048px strip.
 #   mullion: single | cross | sash | slider     (window divider style)
 #   glass_mix: weights for sky/dark/curtain/warm glass per window
@@ -440,7 +423,7 @@ FLAVOR_PATTERNS = {
         "tile_gloss": True,
         "mullion": "slider", "glass_mix": (2, 4, 1, 1),
         "bars_prob": 0.0, "ac_prob": 0.45, "arch": False, "transom": False,
-        "louvered": False, "streaks": 0.8, "grime": 0.5,
+        "louvered": False, "streaks": 0.0, "grime": 0.0,
         "awning_stripes": False, "door_panels": "flush",
     },
     "africa": {
@@ -498,7 +481,7 @@ _FLAVOR_PATTERN_EXTRAS = {
     "north_america": {"unit_banding": 0.1},
     "mediterranean": {"unit_banding": 0.4, "repair_patches": 3,
                       "tile_mix": 0.22},
-    "asia": {"unit_banding": 0.85, "tile_mix": 0.25, "roof_streaks": 0.5},
+    "asia": {"unit_banding": 0.85, "tile_mix": 0.25, "roof_streaks": 0.0},
     "africa": {"unit_banding": 0.45, "roof_streaks": 0.5,
                "repair_patches": 3},
     "south_america": {"unit_banding": 0.6, "repair_patches": 3,
@@ -515,49 +498,6 @@ _PAGE_PATTERN_TWEAKS = {
         "tile_mix": -0.06, "shingle_mix": -0.04},
 }
 
-# Archetypes whose OBJs reference the modern ("_m") pages.  Apartment slabs,
-# apartment blocks and commercial towers read modern; houses, rowhouses,
-# shophouses and the warehouse/bigbox industrial fabric stay traditional.
-# Overridable per build via config atlas.modern_archetypes.
-MODERN_ARCHETYPES = frozenset({"aptslab", "aptblock", "flatcom"})
-
-# Modern wall pattern (the "_m" pages): the window-to-wall ratio of modern
-# apartment/commercial facades is far higher than the traditional strips'
-# ~22%, so windows grow toward the structural cell and sills drop toward
-# the slab.  Traditional cues (shutters, arches, transoms, stone lintels)
-# disappear; a light unit-banding chance keeps some per-building color.
-# Paint-side only: the _m pages share the strip layout, so any built OBJ
-# retargets onto them with a pure header rewrite.
-_MODERN_PATTERN_BASE = {
-    "shutters": False, "arch": False, "transom": False, "louvered": False,
-    "stone_lintels": False, "win_jitter": 0.03, "sill_m": 0.55,
-    "unit_banding": 0.15,
-}
-
-# Per-flavor modern window geometry (metres on the 3.2 m floor cell).
-# Glazing fraction window_w*window_h / (period*3.2) lands at ~0.5-0.55
-# everywhere; regional identity stays in the glass/frame palette, AC
-# units, security bars, balcony rails and weathering knobs.
-_MODERN_FLAVOR_SIZES = {
-    "generic": {"window_w": 1.9, "window_h": 2.2, "period": 2.5,
-                "mullion": "slider"},
-    "europe": {"window_w": 1.8, "window_h": 2.3, "period": 2.4,
-               "mullion": "single"},
-    "north_america": {"window_w": 2.0, "window_h": 2.1, "period": 2.6,
-                      "mullion": "slider"},
-    "mediterranean": {"window_w": 1.9, "window_h": 2.1, "period": 2.7,
-                      "mullion": "slider"},
-    "asia": {"window_w": 2.3, "window_h": 2.1, "period": 2.8,
-             "mullion": "slider"},
-    "africa": {"window_w": 2.0, "window_h": 1.9, "period": 2.9,
-               "mullion": "slider", "bars_prob": 0.35},
-    "south_america": {"window_w": 2.1, "window_h": 2.0, "period": 2.8,
-                      "mullion": "slider", "bars_prob": 0.25},
-    "australia_oceania": {"window_w": 2.1, "window_h": 2.1, "period": 2.7,
-                          "mullion": "slider"},
-}
-
-
 def _load_reference_styles(path=None):
     path = path or os.path.join(HERE, "reference_styles.yaml")
     with open(path, "r", encoding="utf-8") as fh:
@@ -565,7 +505,8 @@ def _load_reference_styles(path=None):
 
 
 def _pattern_for_flavor(flavor: str, references: dict,
-                        page: int = 0, modern: bool = False) -> dict:
+                        page: int = 0) -> dict:
+    """Regional pattern baseline (the res-combo look)."""
     pattern = dict(_PATTERN_DEFAULTS)
     pattern.update(FLAVOR_PATTERNS.get(flavor, FLAVOR_PATTERNS["generic"]))
     pattern.update(_FLAVOR_PATTERN_EXTRAS.get(flavor) or {})
@@ -573,11 +514,37 @@ def _pattern_for_flavor(flavor: str, references: dict,
     pattern.update(region.get("pattern_overrides") or {})
     for key, delta in (_PAGE_PATTERN_TWEAKS.get(page) or {}).items():
         pattern[key] = min(1.0, max(0.0, float(pattern.get(key, 0.0)) + delta))
-    if modern:
-        pattern.update(_MODERN_PATTERN_BASE)
-        pattern.update(_MODERN_FLAVOR_SIZES.get(flavor)
-                       or _MODERN_FLAVOR_SIZES["generic"])
-    return pattern
+    # Clean-flavor kill-switch LAST: nothing (reference overrides, page
+    # tweaks) may re-add grime to CLEAN_FLAVORS.
+    return enforce_clean_flavor(flavor, pattern)
+
+
+def pattern_for_combo(flavor: str, group: str, references: dict,
+                      page: int = 0) -> dict:
+    """Pattern knobs for one combo page: regional baseline, then the
+    group's qualitative overrides, then the combo's own window/door
+    dimensions (the geometry-facing contract from COMBO_DIMS)."""
+    pattern = _pattern_for_flavor(flavor, references, page)
+    pattern.update(combo_pattern_overrides(flavor, group))
+    dims = combo_dims(flavor, group)
+    pattern["window_w"] = float(dims["window_w"])
+    pattern["window_h"] = float(dims["window_h"])
+    pattern["period"] = float(dims["period"])
+    pattern["sill_m"] = float(dims["sill"])
+    pattern["door_w"] = float(dims["door_w"])
+    pattern["door_h"] = float(dims["door_h"])
+    return enforce_clean_flavor(flavor, pattern)
+
+
+def combo_page_palette(flavor: str, group: str, page: int = 0) -> dict:
+    """page_palette + the combo's own colors (panel/metal/curtain/lobby/
+    balcony pools) merged on top."""
+    palette = dict(page_palette(flavor, page))
+    overrides = combo_palette_overrides(flavor, group)
+    for key, value in overrides.items():
+        palette[key] = _map_palette_colors(value, lambda c: _page_tone(c, page)) \
+            if page > 0 else value
+    return palette
 
 
 def _S(px_scale, px):
@@ -776,10 +743,59 @@ def _material_base(draw, rng, box, family, palette, shade_index,
     was unit-banded (per-unit paint colors replace the family base)."""
     pattern = pattern or FLAVOR_PATTERNS["generic"]
     x0, y0, x1, y1 = box
-    base = palette[family][shade_index]
+    fam_value = palette.get(family) or palette["concrete"]
+    base = fam_value[min(shade_index, len(fam_value) - 1)]
     draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=base)
     h = y1 - y0
-    if family == "siding":
+    if family == "panel":
+        # Prefab/precast panel wall: concrete-like grain with a strong
+        # deterministic joint grid (~3 m x per-floor).
+        _speckle(draw, rng, box, base, 7, _area_count(box, 110))
+        joint = _adjust(base, -22)
+        n_panels = max(2, int(round(world_w / 3.0)))
+        for ex in _cell_edges(x0, x1, n_panels, 0.0):
+            draw.line((ex, y0, ex, y1 - 1), fill=joint,
+                      width=max(1, _S(px_scale, 2)))
+        for frac in (0.0, 0.5):
+            ty = y0 + int(h * frac)
+            draw.line((x0, ty, x1, ty), fill=joint, width=1)
+            draw.line((x0, ty + 1, x1, ty + 1), fill=_adjust(base, 8),
+                      width=1)
+        # A few repainted panels (cell-based, wrap-safe).
+        pool = palette.get("unit_pool")
+        if pool and rng.random() < float(pattern.get("unit_banding", 0.0)):
+            shades = {i: _shade(rng, rng.choice(pool), 5)
+                      for i in rng.sample(range(n_panels),
+                                          max(1, n_panels // 4))}
+            _row_cells(draw, x0, x1, y0 + 2, y1 - 2, n_panels, 0.0,
+                       lambda i: shades[i], indices=set(shades))
+    elif family == "metal":
+        # Ribbed/corrugated cladding: per-sheet population + vertical ribs
+        # + horizontal girt lines (all deterministic or per-cell).
+        n_sheets = max(6, int(round(world_w / 1.0)))
+        sheet_shades = [_shade(rng, base, 5) for _ in range(n_sheets)]
+        _row_cells(draw, x0, x1, y0, y1 - 1, n_sheets, 0.0,
+                   lambda i: sheet_shades[i])
+        corr = max(2, int(pattern.get("corrugation", 14)))
+        n_corr = max(8, int(round((x1 - x0) / float(corr))))
+        for ex in _cell_edges(x0, x1, n_corr, 0.0):
+            draw.line((ex, y0, ex, y1 - 1), fill=_adjust(base, -9), width=1)
+            draw.line((ex + 1, y0, ex + 1, y1 - 1), fill=_adjust(base, 5),
+                      width=1)
+        for ex in _cell_edges(x0, x1, n_sheets, 0.0):
+            draw.line((ex, y0, ex, y1 - 1), fill=_adjust(base, -13), width=1)
+        for frac in (1.0 / 3.0, 2.0 / 3.0):
+            gy = y0 + int(h * frac)
+            draw.line((x0, gy, x1, gy), fill=_adjust(base, -8), width=1)
+        if pattern.get("rust"):
+            for _ in range(int(round(10 * px_scale * px_scale))):
+                bw = rng.randint(_S(px_scale, 6), _S(px_scale, 18))
+                bh = rng.randint(_S(px_scale, 3), _S(px_scale, 7))
+                bx = rng.randint(x0, max(x0, x1 - bw - 1))
+                by = rng.randint(y0, max(y0, y1 - bh - 1))
+                draw.ellipse((bx, by, bx + bw, by + bh),
+                             fill=_shade(rng, (120, 74, 48), 16))
+    elif family == "siding":
         step = max(4, h // int(pattern["siding_step"]))
         for y in range(y0, y1, step):
             yb = min(y + step - 1, y1 - 1)
@@ -963,8 +979,8 @@ def _draw_window(draw, rng, cx, sill_y, win_w, win_h, palette, pattern,
 def _paint_door(draw, rng, cx, base_y, y_gutter_end, palette, pattern,
                 glass_base, px_scale, ppm_x, ppm_y):
     frame = palette.get("frame", (225, 222, 214))
-    door_w = 1.0 * ppm_x
-    door_h = 2.15 * ppm_y
+    door_w = float(pattern.get("door_w", 1.0)) * ppm_x
+    door_h = float(pattern.get("door_h", 2.15)) * ppm_y
     bw = _S(px_scale, 2)
     dx0 = int(cx - door_w / 2)
     dx1 = int(cx + door_w / 2)
@@ -1023,6 +1039,8 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
     # Grime / floor-slab shadow at the bottom edge (before openings, so
     # doors and windows paint over it).  Deterministic gradient: full-width
     # lines must never roll the RNG.
+    fam_value = palette.get(family) or palette["concrete"]
+    base = fam_value[min(shade_index, len(fam_value) - 1)]
     grime = float(pattern.get("grime", 0.0))
     if grime > 0 and family != "siding" and not banded:
         gh = max(2, int(round(0.18 * px_per_m_y)))
@@ -1030,11 +1048,10 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
             frac = (k + 1) / float(gh)
             yy = base_y - gh + k
             draw.line((x0, yy, x1, yy),
-                      fill=_adjust(palette[family][shade_index],
-                                   -int(round(16 * grime * frac))), width=1)
+                      fill=_adjust(base, -int(round(16 * grime * frac))),
+                      width=1)
         draw.rectangle((x0, base_y, x1 - 1, y1 - 1),
-                       fill=_adjust(palette[family][shade_index],
-                                    -int(round(16 * grime))))
+                       fill=_adjust(base, -int(round(16 * grime))))
 
     n_windows = max(2, int(round(world_w / float(pattern["period"]))))
     door_slot = rng.randrange(n_windows) if ground else -1
@@ -1042,7 +1059,6 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
     win_w = float(pattern["window_w"]) * px_per_m_x
     win_h = float(pattern["window_h"]) * px_per_m_y
     jitter = float(pattern.get("win_jitter", 0.0))
-    base = palette[family][shade_index]
     sill_xs = []
     for i in range(n_windows):
         cx = x0 + (i + 0.5) * (x1 - x0) / n_windows
@@ -1082,7 +1098,7 @@ def _paint_wall(draw, rng, box, family, palette, shade_index, world_w,
 
 
 def _paint_storefront(draw, rng, box, palette, world_w, world_h,
-                      pattern=None, px_scale=1.0):
+                      pattern=None, px_scale=1.0, variant_b=False):
     pattern = pattern or FLAVOR_PATTERNS["generic"]
     x0, y0, x1, y1 = box
     _material_base(draw, rng, box, "concrete", palette, 0, pattern,
@@ -1095,7 +1111,8 @@ def _paint_storefront(draw, rng, box, palette, world_w, world_h,
     glass_base = palette.get("glass", (96, 112, 126))
     frame = (50, 54, 58)  # dark storefront aluminum
 
-    n_bays = 4  # 5 m bays over the 20 m repeat (wrap-clean)
+    # Bay rhythm ~5 m (variant B runs narrower bays for a second design).
+    n_bays = max(3, int(round(world_w / (4.0 if variant_b else 5.0))))
     sign_top = y0 + gutter
     sign_bot = sign_top + int(0.7 * ppm_y)
     awning_bot = sign_bot + int(0.3 * ppm_y)
@@ -1167,7 +1184,8 @@ def _paint_storefront(draw, rng, box, palette, world_w, world_h,
 
 
 def _paint_roller(draw, rng, box, palette, world_w, world_h,
-                  pattern=None, px_scale=1.0):
+                  pattern=None, px_scale=1.0, dock=False):
+    pattern = pattern or FLAVOR_PATTERNS["generic"]
     x0, y0, x1, y1 = box
     _material_base(draw, rng, box, "concrete", palette, 1,
                    pattern, px_scale, world_w)
@@ -1176,12 +1194,17 @@ def _paint_roller(draw, rng, box, palette, world_w, world_h,
     ppm_y = (y1 - y0 - 2 * gutter) / world_h
     base = palette["concrete"][1]
     base_y = y1 - gutter
-    door_pool = ((150, 152, 154), (166, 160, 148),
-                 (120, 134, 146), (128, 138, 128))
-    n_doors = 6  # 4 m cells over the 24 m repeat (wrap-clean)
-    door_w = int(3.4 * ppm_x)
-    door_top = y0 + int((y1 - y0) * 0.15)
-    slat_h = max(3, int(0.18 * ppm_y))
+    door_pool = ((222, 222, 218), (200, 202, 204), (186, 190, 194)) if dock \
+        else ((150, 152, 154), (166, 160, 148),
+              (120, 134, 146), (128, 138, 128))
+    door_w_m = float((pattern or {}).get("door_w", 3.4))
+    period = max(door_w_m + 0.8, float((pattern or {}).get("period", 4.0)))
+    n_doors = max(3, int(round(world_w / period)))
+    door_w = int(door_w_m * ppm_x)
+    door_h_m = float((pattern or {}).get("door_h", 3.2))
+    door_top = max(y0 + gutter,
+                   int(base_y - door_h_m * ppm_y))
+    slat_h = max(3, int((0.55 if dock else 0.18) * ppm_y))
     cell_edges = _cell_edges(x0, x1, n_doors, 0.0)
     # Lintel beam running over the doors.
     draw.line((x0, door_top - 2, x1, door_top - 2),
@@ -1197,12 +1220,189 @@ def _paint_roller(draw, rng, box, palette, world_w, world_h,
             draw.line((dx0, y, dx1, y), fill=_adjust(door, -12), width=1)
             draw.line((dx0, y + 1, dx1, y + 1), fill=_adjust(door, 10),
                       width=1)
+        if dock:
+            # Sectional door: window row in the top panel + rubber bumpers.
+            wy = door_top + slat_h // 2
+            n_lites = 4
+            lw = max(2, door_w // (n_lites * 2))
+            for k in range(n_lites):
+                lx = dx0 + int((k + 0.5) * door_w / n_lites) - lw // 2
+                draw.rectangle((lx, wy - 1, lx + lw, wy + max(2, slat_h // 4)),
+                               fill=_adjust((96, 112, 126), rng.randint(-6, 6)))
+            for bx in (dx0 - 1, dx1 + 1):
+                draw.rectangle((bx - _S(px_scale, 2), base_y - _S(px_scale, 10),
+                                bx + _S(px_scale, 2), base_y),
+                               fill=(38, 38, 38))
         # Oil/tyre grime on the bottom slats.
         draw.rectangle((dx0, base_y - max(2, int(0.12 * ppm_y)), dx1, y1 - 1),
                        fill=_adjust(door, -16))
         for px in (dx0 - 1, dx1 + 1):  # frame posts
             draw.line((px, door_top - 1, px, base_y), fill=_adjust(base, -24),
                       width=_S(px_scale, 3))
+
+
+def _paint_curtain(draw, rng, box, palette, world_w, world_h,
+                   pattern=None, px_scale=1.0, shade_index=0):
+    """High-glazing curtain-wall floor cell: spandrel band + glazing grid.
+
+    Replaces the old global modern pages: apt/com combos carry these as
+    the ``curtain`` wall family, so high-rise glass fabric is a seeded
+    per-building choice inside the combo.
+    """
+    pattern = pattern or FLAVOR_PATTERNS["generic"]
+    x0, y0, x1, y1 = box
+    fam = palette.get("curtain") or (palette.get("glass", (88, 104, 118)),)
+    tint = fam[min(shade_index, len(fam) - 1)]
+    frame = _adjust(palette.get("frame", (120, 124, 128)), -40)
+    gutter = max(1, int(round(GUTTER_PX * px_scale)))
+    ppm_y = (y1 - y0 - 2 * gutter) / world_h
+    base_y = y1 - gutter
+    # Spandrel: solid band at slab level (bottom ~30% of the cell).
+    spandrel_h = int(0.9 * ppm_y)
+    spandrel = _adjust(tint, -26)
+    draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=spandrel)
+    glass_top = y0 + gutter
+    glass_bot = base_y - spandrel_h
+    # Glazing field with per-pane tonal population (cell-based).
+    n_panes = max(8, int(round(world_w / 1.5)))
+    pane_shades = []
+    for _ in range(n_panes):
+        roll = rng.random()
+        if roll < 0.12:
+            pane_shades.append(_adjust((58, 66, 72), rng.randint(-6, 6)))
+        elif roll < 0.2:
+            pane_shades.append(_shade(rng, _adjust(tint, 26), 6))
+        else:
+            pane_shades.append(_shade(rng, tint, 7))
+    _row_cells(draw, x0, x1, glass_top, glass_bot, n_panes, 0.0,
+               lambda i: pane_shades[i])
+    # Head reveal shadow (deterministic full-width structural line).
+    draw.line((x0, glass_top + 1, x1, glass_top + 1),
+              fill=_adjust(tint, -20), width=1)
+    for ex in _cell_edges(x0, x1, n_panes, 0.0):
+        draw.line((ex, glass_top, ex, glass_bot), fill=frame,
+                  width=max(1, _S(px_scale, 2)))
+    draw.line((x0, glass_top, x1, glass_top), fill=frame, width=1)
+    draw.line((x0, glass_bot, x1, glass_bot), fill=frame,
+              width=max(1, _S(px_scale, 2)))
+    # Slab shadow line inside the spandrel.
+    draw.line((x0, glass_bot + max(2, spandrel_h // 3), x1,
+               glass_bot + max(2, spandrel_h // 3)),
+              fill=_adjust(spandrel, -14), width=1)
+    _gloss((x0, glass_top, x1, glass_bot), GLOSS_GLASS)
+    _gloss((x0, glass_bot + 1, x1, y1 - 1), 40)
+
+
+def _paint_lobby(draw, rng, box, palette, world_w, world_h,
+                 pattern=None, px_scale=1.0):
+    """Apartment/office entrance band: full-height glazing bays, one or two
+    entrance doors with a canopy line, solid piers between bays."""
+    pattern = pattern or FLAVOR_PATTERNS["generic"]
+    x0, y0, x1, y1 = box
+    _material_base(draw, rng, box, "concrete", palette, 0, pattern,
+                   px_scale, world_w)
+    gutter = max(1, int(round(GUTTER_PX * px_scale)))
+    ppm_x = (x1 - x0) / world_w
+    ppm_y = (y1 - y0 - 2 * gutter) / world_h
+    base = (palette.get("concrete") or ((168, 168, 166),))[0]
+    lobby = palette.get("lobby", (66, 74, 82))
+    frame = _adjust(lobby, -18)
+    base_y = y1 - gutter
+    n_bays = max(4, int(round(world_w / 5.0)))
+    bay_edges = _cell_edges(x0, x1, n_bays, 0.0) + [x1]
+    canopy_y = y0 + gutter + int(0.5 * ppm_y)
+    door_bay = rng.randrange(n_bays)
+    for b in range(n_bays):
+        bx0, bx1 = bay_edges[b], bay_edges[b + 1]
+        pier = max(2, int(0.35 * ppm_x))
+        gx0, gx1 = bx0 + pier, bx1 - pier
+        if gx1 <= gx0:
+            continue
+        # Glazing: dark lobby glass with faint interior warmth near doors.
+        _vgrad(draw, gx0, canopy_y + 2, gx1, base_y - 1,
+               _adjust(lobby, 16), _adjust(lobby, -10))
+        _gloss((gx0, canopy_y + 2, gx1, base_y - 1), GLOSS_GLASS)
+        for frac in (0.33, 0.66):
+            mx = gx0 + int((gx1 - gx0) * frac)
+            draw.line((mx, canopy_y + 2, mx, base_y - 1), fill=frame,
+                      width=1)
+        if b == door_bay:
+            dw = max(3, int(float(pattern.get("door_w", 1.6)) * ppm_x))
+            dx = (gx0 + gx1) // 2
+            draw.rectangle((dx - dw // 2, canopy_y + 2, dx + dw // 2,
+                            base_y - 1), fill=_adjust((150, 126, 92), -20))
+            draw.rectangle((dx - dw // 2, canopy_y + 2, dx + dw // 2,
+                            base_y - 1), outline=frame, width=1)
+            _gloss((dx - dw // 2, canopy_y + 2, dx + dw // 2, base_y - 1),
+                   GLOSS_DOOR_GLASS)
+    # Canopy: deterministic full-width band (structural line rule).
+    draw.rectangle((x0, canopy_y - max(2, _S(px_scale, 4)), x1 - 1, canopy_y),
+                   fill=_adjust(base, -30))
+    draw.line((x0, canopy_y + 1, x1, canopy_y + 1),
+              fill=_adjust(base, 14), width=1)
+
+
+def _paint_balcony_band(draw, rng, box, palette, world_w, world_h,
+                        pattern=None, px_scale=1.0):
+    """Balcony front band for the aptslab rail quads: regional railing
+    (bars / solid panel / corrugated infill) over a shadowed interior."""
+    pattern = pattern or FLAVOR_PATTERNS["generic"]
+    x0, y0, x1, y1 = box
+    interior = (44, 46, 48)
+    draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=interior)
+    panel = palette.get("balcony", (150, 148, 145))
+    h = y1 - y0
+    rail_y = y0 + max(1, h // 8)
+    style_roll = rng.random()
+    n_units = max(2, int(round(world_w / 2.0)))
+    unit_shades = [_shade(rng, panel, 6) for _ in range(n_units)]
+    if style_roll < 0.45:
+        # Solid panel fronts (concrete/painted) with per-unit tone.
+        _row_cells(draw, x0, x1, rail_y + 2, y1 - max(1, h // 6), n_units,
+                   0.0, lambda i: unit_shades[i])
+        for ex in _cell_edges(x0, x1, n_units, 0.0):
+            draw.line((ex, rail_y + 2, ex, y1 - max(1, h // 6)),
+                      fill=_adjust(panel, -24), width=1)
+        draw.line((x0, y1 - max(1, h // 6), x1, y1 - max(1, h // 6)),
+                  fill=_adjust(panel, -30), width=1)
+    else:
+        # Open railing: pickets per ~18 cm cell over the shadow.
+        n_pickets = max(16, int(round(world_w / 0.18)))
+        for ex in _cell_edges(x0, x1, n_pickets, 0.0):
+            draw.line((ex, rail_y, ex, y1 - 2), fill=_adjust(panel, -10),
+                      width=1)
+    draw.line((x0, rail_y, x1, rail_y), fill=panel,
+              width=max(1, _S(px_scale, 3)))
+    _gloss((x0, y0, x1 - 1, y1 - 1), 20)
+
+
+def _paint_highband(draw, rng, box, palette, world_w, world_h,
+                    pattern=None, px_scale=1.0):
+    """Industrial high-level window band: continuous steel-framed glazing
+    row under the eaves, per-pane tonal population."""
+    pattern = pattern or FLAVOR_PATTERNS["generic"]
+    x0, y0, x1, y1 = box
+    base = (palette.get("metal") or palette.get("concrete")
+            or ((160, 160, 158),))[0]
+    draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=_adjust(base, -6))
+    gutter = max(1, int(round(GUTTER_PX * px_scale)))
+    glass_base = palette.get("glass", (96, 112, 126))
+    frame = (74, 78, 80)
+    gy0 = y0 + gutter + max(1, (y1 - y0) // 10)
+    gy1 = y1 - gutter - max(1, (y1 - y0) // 10)
+    n_panes = max(12, int(round(world_w / 0.9)))
+    shades = []
+    for _ in range(n_panes):
+        roll = rng.random()
+        if roll < 0.25:
+            shades.append(_adjust((196, 198, 192), rng.randint(-8, 8)))
+        else:
+            shades.append(_shade(rng, glass_base, 8))
+    _row_cells(draw, x0, x1, gy0, gy1, n_panes, 0.0, lambda i: shades[i])
+    for ex in _cell_edges(x0, x1, n_panes, 0.0):
+        draw.line((ex, gy0, ex, gy1), fill=frame, width=1)
+    draw.rectangle((x0, gy0 - 1, x1 - 1, gy1 + 1), outline=frame, width=1)
+    _gloss((x0, gy0, x1 - 1, gy1), GLOSS_GLASS - 30)
 
 
 def _eave_streaks(draw, rng, box, base, prob, n_cols, row_h):
@@ -1381,51 +1581,107 @@ def _paint_roof(draw, rng, box, kind, palette, pattern=None, px_scale=1.0):
         _paint_roof_flat(draw, rng, box, base, px_scale)
 
 
-def build_layout(size: int) -> dict:
-    """Compute strip pixel rows and the V bands archetypes will use.
+def build_layout(size: int, flavor: str = "generic",
+                 group: str = "res") -> dict:
+    """Compute one COMBO's strip pixel rows and V bands.
 
-    STRIPS heights are authored for a 2048px atlas and scale proportionally
-    for other sizes (e.g. 1024 halves every band), so the V bands -- and
-    therefore the archetypes' UVs -- are identical at any resolution.
+    GROUP_STRIPS heights are authored for the 4096px design size and scale
+    proportionally, so a combo's V bands -- and therefore its OBJs' UVs --
+    are identical at any resolution.  World widths/heights resolve from the
+    combo's dimensions: "wall" width = period * windows_per_repeat,
+    "floor"/"ground" heights = the combo's texture floor cell / ground
+    floor height.
     """
-    scale = size / 2048.0
-    gutter = max(1, int(round(GUTTER_PX * scale)))
+    dims = combo_dims(flavor, group)
+    scale = size / float(DESIGN_SIZE)
+    gutter = max(1, int(round(GUTTER_PX * (size / 2048.0))))
     strips = {}
     y = 0
-    for name, height_px, world_w, world_h, kind in STRIPS:
+    for name, kind, height_px, w_spec, h_spec in GROUP_STRIPS[group]:
         scaled_h = max(8, int(round(height_px * scale)))
         y0, y1 = y, y + scaled_h
         if y1 > size:
             raise SystemExit(
-                f"scaled strip heights exceed atlas size {size}px at {name}"
+                f"scaled strip heights exceed atlas size {size}px at "
+                f"{flavor}/{group}:{name}"
             )
+        world_w = dims["wall_strip_w"] if w_spec == "wall" else float(w_spec)
+        if h_spec == "floor":
+            world_h = float(dims["floor_tex_h"])
+        elif h_spec == "ground":
+            world_h = float(dims["ground_h"])
+        else:
+            world_h = float(h_spec)
         strips[name] = {
             "px": [y0, y1],
             "kind": kind,
             "v0": round(1.0 - (y1 - gutter) / size, 6),
             "v1": round(1.0 - (y0 + gutter) / size, 6),
-            "world_w_m": world_w,
-            "world_h_m": world_h,
+            "world_w_m": round(world_w, 3),
+            "world_h_m": round(world_h, 3),
         }
         y = y1
-    return {"size": size, "window_period_m": WINDOW_PERIOD_M, "strips": strips}
+    return {
+        "size": size,
+        "flavor": flavor,
+        "group": group,
+        "window_period_m": float(dims["period"]),
+        "dims": {k: dims[k] for k in
+                 ("window_w", "window_h", "period", "sill", "door_w",
+                  "door_h", "ground_h", "floor_tex_h", "wall_strip_w")},
+        "strips": strips,
+    }
+
+
+def build_all_layouts(size: int, pages: int = 1) -> dict:
+    """The v2 layout registry: one layout per (flavor, group) combo."""
+    combos = {}
+    for flavor in FLAVORS:
+        for group in GROUPS:
+            combos[combo_key(flavor, group)] = build_layout(
+                size, flavor, group)
+    return {
+        "version": LAYOUT_SCHEMA_VERSION,
+        "size": size,
+        "pages": pages,
+        "flavors": list(FLAVORS),
+        "groups": list(GROUPS),
+        "combos": combos,
+        "combo_pages": {
+            combo_key(flavor, group): [
+                f"textures/{texture_name(flavor, group, page)}"
+                for page in range(pages)
+            ]
+            for flavor in FLAVORS for group in GROUPS
+        },
+    }
+
+
+def combo_layout(layout: dict, flavor: str, group: str) -> dict:
+    """Resolve one combo's sub-layout from the v2 registry (accepts an
+    already-resolved combo layout for convenience)."""
+    if "combos" in layout:
+        return layout["combos"][combo_key(flavor, group)]
+    return layout
+
+
+SHADE_INDEX = {"a": 0, "b": 1, "c": 2}
 
 
 def paint_atlas(flavor: str, layout: dict, seed: int,
                 references: dict | None = None,
                 page: int = 0, with_gloss: bool = False,
-                modern: bool = False):
-    """Paint one atlas page.  Returns the RGB image, or (image, gloss)
-    when ``with_gloss`` -- gloss is the 8-bit specular-level canvas that
-    becomes the normal map's alpha channel.  ``modern`` repaints wall and
-    ground strips with the high-glazing pattern; every other strip keeps
-    the same per-strip RNG stream, so roofs/storefronts/trim stay pixel
-    identical to the sibling traditional page."""
+                group: str = "res"):
+    """Paint one COMBO atlas page.  ``layout`` is either the v2 registry or
+    one combo's sub-layout.  Returns the RGB image, or (image, gloss) when
+    ``with_gloss`` -- gloss is the 8-bit specular-level canvas that becomes
+    the normal map's alpha channel."""
     global _GLOSS_DRAW
-    palette = page_palette(flavor, page)
+    sub = combo_layout(layout, flavor, group)
+    palette = combo_page_palette(flavor, group, page)
     references = references or _load_reference_styles()
-    pattern = _pattern_for_flavor(flavor, references, page, modern=modern)
-    size = layout["size"]
+    pattern = pattern_for_combo(flavor, group, references, page)
+    size = sub["size"]
     # Roof row/pitch constants are authored in 2048px units; rescale so the
     # painted feature size in world metres is resolution-independent.
     px_scale = size / 2048.0
@@ -1435,11 +1691,16 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
     draw = ImageDraw.Draw(img)
     gloss = Image.new("L", (size, size), GLOSS_BASE["wall"])
     _GLOSS_DRAW = ImageDraw.Draw(gloss) if with_gloss else None
-    for index, (name, _h, world_w, world_h, kind) in enumerate(STRIPS):
-        flavor_salt = int(hashlib.sha1(flavor.encode("utf-8")).hexdigest()[:8], 16)
-        rng = random.Random(seed * 7919 + index * 104729 + flavor_salt
+    combo_salt = int(hashlib.sha1(
+        f"{flavor}/{group}".encode("utf-8")).hexdigest()[:8], 16)
+    ordered = sorted(sub["strips"].items(), key=lambda kv: kv[1]["px"][0])
+    for index, (name, strip) in enumerate(ordered):
+        kind = strip["kind"]
+        world_w = float(strip["world_w_m"])
+        world_h = float(strip["world_h_m"])
+        rng = random.Random(seed * 7919 + index * 104729 + combo_salt
                             + page * 31337)
-        y0, y1 = layout["strips"][name]["px"]
+        y0, y1 = strip["px"]
         # Paint the FULL band including the gutter so bleed shows the same
         # material, then UVs stay inside the inset V range.
         strip_box = (0, y0, size, y1)
@@ -1452,8 +1713,13 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
         if kind == "wall":
             family, shade = name.split("_")[1:3]
             _paint_wall(draw, rng, strip_box, family, palette,
-                        0 if shade == "a" else 1, world_w, world_h,
+                        SHADE_INDEX.get(shade, 0), world_w, world_h,
                         pattern=pattern, px_scale=px_scale)
+        elif kind == "glass":
+            shade = name.split("_")[2]
+            _paint_curtain(draw, rng, strip_box, palette, world_w, world_h,
+                           pattern=pattern, px_scale=px_scale,
+                           shade_index=SHADE_INDEX.get(shade, 0))
         elif kind == "ground":
             family = name.split("_")[1]
             _paint_wall(draw, rng, strip_box, family, palette, 0,
@@ -1461,10 +1727,21 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
                         px_scale=px_scale)
         elif kind == "storefront":
             _paint_storefront(draw, rng, strip_box, palette, world_w,
-                              world_h, pattern=pattern, px_scale=px_scale)
+                              world_h, pattern=pattern, px_scale=px_scale,
+                              variant_b=name.endswith("_b"))
+        elif kind == "lobby":
+            _paint_lobby(draw, rng, strip_box, palette, world_w, world_h,
+                         pattern=pattern, px_scale=px_scale)
         elif kind == "roller":
             _paint_roller(draw, rng, strip_box, palette, world_w, world_h,
-                          pattern=pattern, px_scale=px_scale)
+                          pattern=pattern, px_scale=px_scale,
+                          dock=name.endswith("_dock"))
+        elif kind == "balcony":
+            _paint_balcony_band(draw, rng, strip_box, palette, world_w,
+                                world_h, pattern=pattern, px_scale=px_scale)
+        elif kind == "highband":
+            _paint_highband(draw, rng, strip_box, palette, world_w, world_h,
+                            pattern=pattern, px_scale=px_scale)
         elif kind == "plain":
             family = name.split("_")[1]
             _material_base(draw, rng, strip_box, family, palette, 0,
@@ -1482,21 +1759,18 @@ def paint_atlas(flavor: str, layout: dict, seed: int,
     return img
 
 
-def texture_name(flavor: str, page: int = 0, modern: bool = False) -> str:
-    """Atlas PNG name for one flavor page.  Page 0 keeps the historical
-    un-suffixed name so already-installed OBJs stay valid; pages 1+ get
-    _p2/_p3 suffixes (human page numbers).  Modern pages (high-glazing
-    walls for MODERN_ARCHETYPES) insert an _m before the page suffix."""
-    mod = "_m" if modern else ""
+def texture_name(flavor: str, group: str = "res", page: int = 0) -> str:
+    """Atlas PNG name for one combo page: page 0 un-suffixed, pages 1+
+    get _p2/_p3 suffixes (human page numbers)."""
     if page <= 0:
-        return f"o4sfr_procgen_atlas_{flavor}{mod}.png"
-    return f"o4sfr_procgen_atlas_{flavor}{mod}_p{page + 1}.png"
+        return f"o4sfr_procgen_atlas_{flavor}_{group}.png"
+    return f"o4sfr_procgen_atlas_{flavor}_{group}_p{page + 1}.png"
 
 
-def texture_normal_name(flavor: str, page: int = 0,
-                        modern: bool = False) -> str:
+def texture_normal_name(flavor: str, group: str = "res",
+                        page: int = 0) -> str:
     """Companion normal map (flat normals + specular level in alpha)."""
-    return texture_name(flavor, page, modern)[:-4] + "_nml.png"
+    return texture_name(flavor, group, page)[:-4] + "_nml.png"
 
 
 def build_normal_map(gloss: Image.Image, out_size: int) -> Image.Image:
@@ -1517,6 +1791,10 @@ def main(argv=None) -> int:
                         help="Library package folder; PNGs land in textures/.")
     parser.add_argument("--layout-out",
                         default=os.path.join(HERE, "atlas_layout.json"))
+    parser.add_argument("--layout-only", action="store_true",
+                        help="Write atlas_layout.json and skip painting "
+                             "(compose_atlases.py is the shipping texture "
+                             "path; the procedural painter is the fallback).")
     args = parser.parse_args(argv)
 
     with open(args.config, "r", encoding="utf-8") as fh:
@@ -1524,26 +1802,8 @@ def main(argv=None) -> int:
     references = _load_reference_styles()
     atlas_cfg = config["atlas"]
     pages = max(1, int(atlas_cfg.get("pages", 1)))
-    layout = build_layout(int(atlas_cfg["size"]))
-    layout["flavors"] = {
-        flavor: f"textures/{texture_name(flavor)}"
-        for flavor in atlas_cfg["flavors"]
-    }
-    layout["pages"] = pages
-    layout["flavor_pages"] = {
-        flavor: [f"textures/{texture_name(flavor, page)}"
-                 for page in range(pages)]
-        for flavor in atlas_cfg["flavors"]
-    }
-    # Modern-page routing contract: consumed by the OBJ header writers
-    # (generate/retarget) and preview_render (which cannot import atlas).
-    layout["modern_archetypes"] = sorted(
-        atlas_cfg.get("modern_archetypes") or MODERN_ARCHETYPES)
-    layout["flavor_pages_modern"] = {
-        flavor: [f"textures/{texture_name(flavor, page, modern=True)}"
-                 for page in range(pages)]
-        for flavor in atlas_cfg["flavors"]
-    }
+    size = int(atlas_cfg["size"])
+    layout = build_all_layouts(size, pages)
     layout["reference_styles"] = {
         "version": references.get("version"),
         "regions": sorted((references.get("regions") or {}).keys()),
@@ -1552,6 +1812,9 @@ def main(argv=None) -> int:
     with open(args.layout_out, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(layout, fh, indent=1, sort_keys=True)
         fh.write("\n")
+    if args.layout_only:
+        print(f"wrote {args.layout_out} (layout only)")
+        return 0
 
     textures_dir = os.path.join(args.output, "textures")
     os.makedirs(textures_dir, exist_ok=True)
@@ -1560,21 +1823,20 @@ def main(argv=None) -> int:
     # uncompressed variant is unvalidated in-sim. The rainbow-roof artifact
     # turned out to be hue-jittered roof rows in the PNG itself (_shade vs
     # _jitter), not mip bleed.
-    for flavor in atlas_cfg["flavors"]:
-        for page in range(pages):
-            for modern in (False, True):
+    for flavor in FLAVORS:
+        for group in GROUPS:
+            for page in range(pages):
                 img, gloss = paint_atlas(flavor, layout,
                                          int(atlas_cfg["seed"]),
                                          references, page, with_gloss=True,
-                                         modern=modern)
+                                         group=group)
                 path = os.path.join(textures_dir,
-                                    texture_name(flavor, page, modern))
+                                    texture_name(flavor, group, page))
                 img.save(path, optimize=True)
                 print(f"wrote {path}")
-                normal = build_normal_map(gloss,
-                                          max(1024, layout["size"] // 2))
+                normal = build_normal_map(gloss, max(1024, size // 2))
                 nml_path = os.path.join(
-                    textures_dir, texture_normal_name(flavor, page, modern))
+                    textures_dir, texture_normal_name(flavor, group, page))
                 normal.save(nml_path, optimize=True)
                 print(f"wrote {nml_path}")
     print(f"wrote {args.layout_out}")

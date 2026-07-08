@@ -27,6 +27,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from archetypes import build_archetype  # noqa: E402
+from archetypes.combo_styles import group_for_archetype  # noqa: E402
 from add_lod import strip_lod  # noqa: E402
 from lod_shell import merge_bands_into_obj8, roof_quad_mesh, shell_mesh  # noqa: E402
 
@@ -38,13 +39,17 @@ from lod_shell import merge_bands_into_obj8, roof_quad_mesh, shell_mesh  # noqa:
 # 3D bounding diagonal (footprint + height, see _band_scale): the horizon
 # frame cost is dominated by the tens of thousands of small residentials,
 # which are subpixel long before the old fixed 25 km cull.  A 10 m house
-# still culls ~6 km out, a 110 m warehouse or a 12-floor tower reaches
+# still culls ~5 km out, a 110 m warehouse or a 12-floor tower reaches
 # further.
-DEFAULT_BANDS = (1200, 3500, 7000, 14000)
+# 2026-07-08 horizon-perf round 2 (user: dense-area horizon still costs
+# frames): bands (1200,3500,7000,14000) -> (1100,3000,5500,10500) and the
+# scale clamp narrowed 0.45..1.9 -> 0.36..1.65 -- the far quad ring holds
+# ~45% fewer instances, tiny residentials cull ~3.8 km, towers ~17 km.
+DEFAULT_BANDS = (1100, 3000, 5500, 10500)
 
 _BAND_SCALE_REF_DIAG_M = 30.0
-_BAND_SCALE_MIN = 0.45
-_BAND_SCALE_MAX = 1.9
+_BAND_SCALE_MIN = 0.36
+_BAND_SCALE_MAX = 1.65
 
 
 def _band_scale(length_m: float, width_m: float,
@@ -69,12 +74,19 @@ def _plain_strip_band(layout: dict, wall_strip: str):
         plain = f"plain_{parts[1]}"
         if plain in layout["strips"]:
             return _strip_band(layout, plain)
+    if "plain_concrete" in layout["strips"]:
+        return _strip_band(layout, "plain_concrete")
     return _strip_band(layout, wall_strip)
 
 
 def patch_shell(obj_path: str, archetype: str, length_m: float,
                 width_m: float, floors: int, seed: int, flavor: str,
                 layout: dict, bands=DEFAULT_BANDS) -> str:
+    # ``layout`` may be the v2 registry (one layout per combo) or an
+    # already-resolved combo layout.
+    if "combos" in layout:
+        group = group_for_archetype(archetype)
+        layout = layout["combos"][f"{flavor}/{group}"]
     spec = build_archetype(archetype, length_m, width_m, floors, seed,
                            layout, flavor)
     meta = spec.meta

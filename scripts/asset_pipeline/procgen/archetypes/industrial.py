@@ -1,9 +1,13 @@
 """Industrial archetypes: low-pitch warehouse and big-box retail.
 
-warehouse: concrete walls with roller doors at grade, a 6-degree ridged
-metal roof along the long axis, rooftop vents and a small office annex.
-bigbox: windowless block with a storefront entrance band on the front
-facade only, tall parapet and large rooftop HVAC plant.
+warehouse: per-combo cladding (ribbed metal / tilt-up concrete / brick)
+with roller or dock doors at grade, a high window band under the eaves,
+a shallow ridged metal roof and a small office annex.
+bigbox: windowless block with an office/storefront entrance band on the
+front facade only and a tall per-combo parapet.
+
+Both draw from the ``ind`` combo: window bands, door widths and ground
+heights differ per region and never share the residential rhythm.
 """
 
 from __future__ import annotations
@@ -11,42 +15,57 @@ from __future__ import annotations
 import math
 import random
 
-from .common import MeshSpec, StripUV, box, parapet_flat_roof, \
+from .common import MeshSpec, StripUV, box, floor_zs, parapet_flat_roof, \
     set_shell_meta, validate_spec, wall_quad
-from .styles import profile_for_asset, style_for_profile, weighted_choice
+from .styles import flavor_massing, profile_for_asset, style_weights, \
+    weighted_choice
+from .combo_styles import GROUP_SHADES
 
 FLOOR_H = 3.2
-WAREHOUSE_PITCH_DEG = 6.0
 FASCIA_DROP_M = 0.25
+
+
+def _ind_style(rng: random.Random, layout: dict, flavor: str,
+               profile: str | None):
+    weights = style_weights(flavor, "ind", profile)
+    family = weighted_choice(rng, weights["families"])
+    shade = rng.choice(GROUP_SHADES["ind"])
+    plain_name = f"plain_{family}" if f"plain_{family}" in layout["strips"] \
+        else "plain_concrete"
+    return {
+        "family": family,
+        "wall": StripUV(layout, f"wall_{family}_{shade}"),
+        "plain": StripUV(layout, plain_name),
+        "band": StripUV(layout, "band_window"),
+        "trim": StripUV(layout, "trim_dark"),
+    }
 
 
 def build_warehouse(length_m: float, width_m: float, floors: int, seed: int,
                     layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    shade = rng.choice(("a", "b"))
     profile = profile_for_asset(
         length_m, width_m, bucket="industrial", archetype="warehouse"
     )
-    weights = style_for_profile(flavor, profile, industrial_bias=True)
-    family = weighted_choice(
-        rng,
-        tuple(
-            (candidate, weight)
-            for candidate, weight in weights["families"]
-            if candidate in {"concrete", "brick", "stucco"}
-        ) or (("concrete", 1),),
-    )
-    wall = StripUV(layout, f"wall_{family}_{shade}")
-    plain = StripUV(layout, f"plain_{family}")
-    roller = StripUV(layout, "ground_roller")
+    style = _ind_style(rng, layout, flavor, profile)
+    wall, plain = style["wall"], style["plain"]
+    # Dock doors are the North-American default; simple rollers elsewhere.
+    dock_prob = 0.7 if flavor == "north_america" else 0.25
+    roller = StripUV(layout, "ground_dock" if rng.random() < dock_prob
+                     else "ground_roller")
     roof = StripUV(layout, "roof_metal")
     trim = StripUV(layout, "trim_dark")
+    massing = flavor_massing(flavor, profile)
+    ground_h = float((layout.get("dims") or {}).get("ground_h", FLOOR_H))
+    spans = floor_zs(floors, FLOOR_H, ground_h)
 
     hx, hy = length_m / 2.0, width_m / 2.0
     overhang = min(0.35, 0.03 * min(length_m, width_m))
     wx, wy = hx - overhang, hy - overhang
     eave_z_wall = floors * FLOOR_H
-    rise = max(0.4, math.tan(math.radians(WAREHOUSE_PITCH_DEG)) * wy)
+    shed_lo, shed_hi = massing.get("shed_pitch", (4.0, 8.0))
+    pitch = rng.uniform(shed_lo, shed_hi)
+    rise = max(0.4, math.tan(math.radians(pitch)) * wy)
     ridge_z = eave_z_wall + rise
     slope = rise / wy
     eave_z = eave_z_wall - slope * overhang
@@ -55,15 +74,14 @@ def build_warehouse(length_m: float, width_m: float, floors: int, seed: int,
     ring = ((-wx, -wy), (wx, -wy), (wx, wy), (-wx, wy))
     for i in range(4):
         a, b = ring[i], ring[(i + 1) % 4]
-        # Roller doors at grade on the long facades, blank panels between,
-        # and a high window band (real warehouses light from the eaves) on
-        # the top floor only -- no stretched window rows.
+        # Roller/dock doors at grade on the long facades, blank panels
+        # between, and a high window band under the eaves (real warehouses
+        # light from the top of the wall) -- no stretched window rows.
         ground = roller if i in (0, 2) else plain
-        wall_quad(spec, a, b, 0.0, FLOOR_H, ground)
+        wall_quad(spec, a, b, spans[0][0], spans[0][1], ground)
         for floor in range(1, floors):
-            strip = wall if floor == floors - 1 else plain
-            wall_quad(spec, a, b, floor * FLOOR_H, (floor + 1) * FLOOR_H,
-                      strip)
+            strip = style["band"] if floor == floors - 1 else plain
+            wall_quad(spec, a, b, spans[floor][0], spans[floor][1], strip)
 
     # Gable ends (shallow triangles) + ridged roof spanning the footprint.
     gable_uvs = (
@@ -102,9 +120,9 @@ def build_warehouse(length_m: float, width_m: float, floors: int, seed: int,
         x0 = x1 - sx * annex_l
         y1 = sy * (wy - 1.0)
         y0 = y1 - sy * annex_w
-        storefront = StripUV(layout, "ground_storefront")
+        office = StripUV(layout, "ground_office")
         box(spec, min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1),
-            0.0, FLOOR_H + 0.4, storefront, top_strip=plain)
+            0.0, min(ground_h, FLOOR_H) + 0.4, office, top_strip=plain)
 
     set_shell_meta(spec, "pitched", ridge_z, eave_z_wall, wall, roof)
     return validate_spec(spec, length_m, width_m)
@@ -113,24 +131,18 @@ def build_warehouse(length_m: float, width_m: float, floors: int, seed: int,
 def build_bigbox(length_m: float, width_m: float, floors: int, seed: int,
                  layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
-    shade = rng.choice(("a", "b"))
     profile = profile_for_asset(
         length_m, width_m, bucket="commercial", archetype="bigbox"
     )
-    weights = style_for_profile(flavor, profile, industrial_bias=True)
-    family = weighted_choice(
-        rng,
-        tuple(
-            (candidate, weight)
-            for candidate, weight in weights["families"]
-            if candidate in {"concrete", "brick", "stucco"}
-        ) or (("concrete", 1),),
-    )
-    wall = StripUV(layout, f"wall_{family}_{shade}")
-    plain = StripUV(layout, f"plain_{family}")
-    storefront = StripUV(layout, "ground_storefront")
+    style = _ind_style(rng, layout, flavor, profile)
+    wall, plain = style["wall"], style["plain"]
+    office = StripUV(layout, "ground_office")
     roof = StripUV(layout, "roof_flat")
     trim = StripUV(layout, "trim_dark")
+    massing = flavor_massing(flavor, profile)
+    parapet_h = rng.uniform(*massing["parapet"])
+    ground_h = float((layout.get("dims") or {}).get("ground_h", FLOOR_H))
+    spans = floor_zs(floors, FLOOR_H, ground_h)
 
     hx, hy = length_m / 2.0, width_m / 2.0
     top_z = floors * FLOOR_H
@@ -140,16 +152,15 @@ def build_bigbox(length_m: float, width_m: float, floors: int, seed: int,
     for i in range(4):
         a, b = ring[i], ring[(i + 1) % 4]
         # Entrance glazing only on the front facade; everything else blank.
-        ground = storefront if i == 0 else plain
-        wall_quad(spec, a, b, 0.0, FLOOR_H, ground)
+        ground = office if i == 0 else plain
+        wall_quad(spec, a, b, spans[0][0], spans[0][1], ground)
         for floor in range(1, floors):
             # Windowless upper bands: big boxes read as solid slabs.
-            wall_quad(spec, a, b, floor * FLOOR_H, (floor + 1) * FLOOR_H,
-                      plain)
+            wall_quad(spec, a, b, spans[floor][0], spans[floor][1], plain)
     parapet_flat_roof(
-        spec, hx, hy, top_z, 1.1, 0.35, plain, trim, roof,
+        spec, hx, hy, top_z, parapet_h, 0.35, plain, trim, roof,
     )
 
     # Rooftop HVAC plant removed at user request: flat roofs stay clean.
-    set_shell_meta(spec, "flat", top_z + 1.1, top_z, plain, roof)
+    set_shell_meta(spec, "flat", top_z + parapet_h, top_z, plain, roof)
     return validate_spec(spec, length_m, width_m)

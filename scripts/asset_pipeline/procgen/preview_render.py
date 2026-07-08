@@ -63,23 +63,21 @@ def _blender_main() -> int:
 
     materials = {}
     pages = max(1, int(layout.get("pages", 1)))
-    modern_set = set(layout.get("modern_archetypes") or ())
 
-    def _material(flavor, page, modern=False):
+    def _material(flavor, group, page):
         # Mirrors atlas.texture_name (not importable here: Blender's
         # bundled Python has no PIL/yaml).
-        suffix = ("_m" if modern else "") + \
-            ("" if page <= 0 else f"_p{page + 1}")
-        key = (flavor, page, modern)
+        suffix = "" if page <= 0 else f"_p{page + 1}"
+        key = (flavor, group, page)
         if key in materials:
             return materials[key]
         material = bpy.data.materials.new(
-            name=f"preview_{flavor}{'_m' if modern else ''}_p{page}")
+            name=f"preview_{flavor}_{group}_p{page}")
         material.use_nodes = True
         bsdf = material.node_tree.nodes.get("Principled BSDF")
         image_path = os.path.join(
             output_root, "textures",
-            f"o4sfr_procgen_atlas_{flavor}{suffix}.png"
+            f"o4sfr_procgen_atlas_{flavor}_{group}{suffix}.png"
         )
         if bsdf is not None and os.path.isfile(image_path):
             image = bpy.data.images.load(image_path, check_existing=True)
@@ -93,9 +91,10 @@ def _blender_main() -> int:
 
     os.makedirs(render_dir, exist_ok=True)
     for row in plan["assets"]:
+        combo = layout["combos"][f"{row['flavor']}/{row['group']}"]             if "combos" in layout else layout
         spec = build_archetype(
             row["archetype"], float(row["length_m"]), float(row["width_m"]),
-            int(row["floors"]), int(row["seed"]), layout, row["flavor"],
+            int(row["floors"]), int(row["seed"]), combo, row["flavor"],
         )
         mesh = bpy.data.meshes.new(row["stem"])
         mesh.from_pydata(spec.vertices, [], spec.faces)
@@ -107,8 +106,8 @@ def _blender_main() -> int:
                 uv_layer.data[loop_index].uv = uv
                 loop_index += 1
         mesh.materials.append(
-            _material(row["flavor"], int(row["seed"]) % pages,
-                      row["archetype"] in modern_set))
+            _material(row["flavor"], row["group"],
+                      int(row["seed"]) % pages))
         obj = bpy.data.objects.new(row["stem"], mesh)
         scene.collection.objects.link(obj)
 
@@ -192,6 +191,7 @@ def _host_main() -> int:
                     os.path.basename(variant["physical_path"])
                 )[0],
                 "region": asset["region"],
+                "group": variant.get("group") or "res",
                 "archetype": archetype,
                 "length_m": asset["length_m"],
                 "width_m": asset["width_m"],

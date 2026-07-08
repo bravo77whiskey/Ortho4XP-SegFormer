@@ -60,3 +60,33 @@ def test_reference_styles_yaml_round_trips():
     path = PROCGEN / "reference_styles.yaml"
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert loaded["version"] == 1
+
+
+def test_clean_flavors_stay_clean():
+    """USER DIRECTIVE (2026-07-08): asia textures must NEVER carry grime.
+
+    Grime resurfaced four times because it stacks from independent layers
+    (FLAVOR_PATTERNS, reference_styles.yaml overrides, page tweaks, the
+    compositor's page-1 grunge floor, staining baked into AI sources).
+    This test pins the kill-switch across every group and page: if it
+    fails, someone re-added weathering to a CLEAN flavor -- remove it.
+    """
+    import atlas
+    import compose_atlases
+    from archetypes.combo_styles import CLEAN_FLAVORS, GROUPS
+
+    assert "asia" in CLEAN_FLAVORS
+    references = atlas._load_reference_styles()
+    for flavor in CLEAN_FLAVORS:
+        for group in GROUPS:
+            for page in range(3):
+                pattern = atlas.pattern_for_combo(
+                    flavor, group, references, page)
+                assert pattern["grime"] == 0.0, (flavor, group, page)
+                assert pattern["streaks"] == 0.0, (flavor, group, page)
+                assert pattern["roof_streaks"] == 0.0, (flavor, group, page)
+                assert pattern["rust"] is False, (flavor, group, page)
+        # The compositor must fully disable its grunge overlay (the page-1
+        # formula has a constant floor even at grime=0).
+        dirt = compose_atlases.FLAVOR_DIRT.get(flavor) or {}
+        assert float(dirt.get("grunge_scale", 1.0)) == 0.0, flavor

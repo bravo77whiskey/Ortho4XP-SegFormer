@@ -23,8 +23,7 @@ if HERE not in sys.path:
 
 from atlas import texture_name, texture_normal_name  # noqa: E402
 from generate_procedural_buildings import (  # noqa: E402
-    _expected_texture_lines, _flatten_rows, _modern_archetypes,
-    _normalize_texture_directive,
+    _expected_texture_lines, _flatten_rows, _normalize_texture_directive,
 )
 
 
@@ -43,22 +42,22 @@ def main(argv=None) -> int:
         manifest = json.load(fh)
     pages = max(1, int((manifest.get("atlas") or {}).get("pages", 1)))
 
-    modern_set = _modern_archetypes(manifest)
+    rows_all = _flatten_rows(manifest)
     missing_textures = []
-    for flavor in sorted({a["flavor"] for a in manifest["assets"]}):
+    for flavor, group in sorted({(r["flavor"], r["group"])
+                                 for r in rows_all}):
         for page in range(pages):
-            for modern in (False, True):
-                for name in (texture_name(flavor, page, modern),
-                             texture_normal_name(flavor, page, modern)):
-                    path = os.path.join(args.output, "textures", name)
-                    if not os.path.isfile(path):
-                        missing_textures.append(path)
+            for name in (texture_name(flavor, group, page),
+                         texture_normal_name(flavor, group, page)):
+                path = os.path.join(args.output, "textures", name)
+                if not os.path.isfile(path):
+                    missing_textures.append(path)
     if missing_textures:
         for path in missing_textures:
             print(f"  ! missing atlas page: {path}")
         raise SystemExit("run atlas.py --output <pkg> first")
 
-    rows = _flatten_rows(manifest)
+    rows = rows_all
     changed = skipped = absent = 0
     for row in rows:
         obj_path = os.path.join(args.output, row["physical_path"])
@@ -66,8 +65,8 @@ def main(argv=None) -> int:
             absent += 1
             continue
         expected = _expected_texture_lines(
-            row["physical_path"], row["flavor"], row["seed"], pages,
-            row["archetype"] in modern_set)
+            row["physical_path"], row["flavor"], row["group"],
+            row["seed"], pages)
         with open(obj_path, "r", encoding="utf-8", errors="ignore") as fh:
             current = fh.read()
         if "\n" + "\n".join(expected) + "\n" in current:

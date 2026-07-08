@@ -1,10 +1,10 @@
 """Per-region-flavor and footprint-class material weighting.
 
-The atlas gives every flavor the same strip LAYOUT with different palettes,
-so colors regionalize for free; this table regionalizes the DISTRIBUTION of
-wall families and roof types (Mediterranean = clay tile on stucco, Africa =
-corrugated metal on render, Asia = concrete + metal/tile, ...).  Weights are
-consumed with the asset's seeded RNG so variants stay deterministic.
+Post-overhaul (July 2026) the base DISTRIBUTIONS of wall families and roof
+types live per (flavor, class-group) in combo_styles; this module layers
+the reference class-profile weights on top and exposes the massing lookup
+(per flavor x class profile) the builders consume.  Weights are consumed
+with the asset's seeded RNG so variants stay deterministic.
 """
 
 from __future__ import annotations
@@ -12,6 +12,12 @@ from __future__ import annotations
 from functools import lru_cache
 import json
 import os
+
+from .combo_styles import (
+    GROUP_FAMILIES, GROUP_SHADES, GROUP_STRIPS,
+    combo_family_weights, combo_massing, combo_roof_weights,
+    group_for_archetype,
+)
 
 # (choice, weight) pairs; families must have wall_/ground_/plain_ strips.
 FLAVOR_STYLES = {
@@ -50,55 +56,19 @@ FLAVOR_STYLES = {
 }
 
 
-# Per-flavor MASSING parameters: region identity comes from silhouettes as
-# much as materials. pitch/hip_pitch in degrees, overhang as a multiplier on
-# the base eave overhang, chimney_prob gates the seeded rooftop chimney,
-# tank_prob gates a rooftop water tank (flat-roof archetypes).
-FLAVOR_MASSING = {
-    "generic": {
-        "pitch": (32.0, 42.0), "hip_pitch": (26.0, 34.0),
-        "overhang": 1.0, "chimney_prob": 0.55, "tank_prob": 0.25,
-    },
-    "europe": {
-        "pitch": (38.0, 48.0), "hip_pitch": (30.0, 38.0),
-        "overhang": 0.9, "chimney_prob": 0.75, "tank_prob": 0.05,
-    },
-    "north_america": {
-        "pitch": (34.0, 45.0), "hip_pitch": (28.0, 36.0),
-        "overhang": 1.0, "chimney_prob": 0.60, "tank_prob": 0.05,
-    },
-    "mediterranean": {
-        "pitch": (17.0, 25.0), "hip_pitch": (15.0, 22.0),
-        "overhang": 1.1, "chimney_prob": 0.25, "tank_prob": 0.35,
-    },
-    "asia": {
-        "pitch": (21.0, 30.0), "hip_pitch": (18.0, 26.0),
-        "overhang": 1.5, "chimney_prob": 0.05, "tank_prob": 0.55,
-        # Asian apartment/commercial fabric is flat-roofed; pitched massing
-        # stays reserved for the small/tiny residential classes.
-        "apt_flat": True,
-    },
-    "africa": {
-        "pitch": (14.0, 24.0), "hip_pitch": (13.0, 20.0),
-        "overhang": 1.2, "chimney_prob": 0.05, "tank_prob": 0.55,
-    },
-    "south_america": {
-        "pitch": (17.0, 27.0), "hip_pitch": (15.0, 23.0),
-        "overhang": 1.1, "chimney_prob": 0.15, "tank_prob": 0.45,
-    },
-    "australia_oceania": {
-        "pitch": (19.0, 29.0), "hip_pitch": (17.0, 25.0),
-        "overhang": 1.3, "chimney_prob": 0.30, "tank_prob": 0.15,
-    },
-}
+# NOTE: the old flavor-only FLAVOR_MASSING table moved to combo_styles
+# (_MASSING_BASE + MASSING_PROFILES) where it is differentiated per class
+# profile; flavor_massing(flavor, profile) below is the lookup.
 
 
 def flavor_style(flavor: str) -> dict:
     return FLAVOR_STYLES.get(flavor, FLAVOR_STYLES["generic"])
 
 
-def flavor_massing(flavor: str) -> dict:
-    return FLAVOR_MASSING.get(flavor, FLAVOR_MASSING["generic"])
+def flavor_massing(flavor: str, profile: str | None = None) -> dict:
+    """Massing parameters per (flavor, class profile) -- combo_styles is
+    the source of truth; the old flavor-only table is gone."""
+    return combo_massing(flavor, profile)
 
 
 @lru_cache(maxsize=1)
@@ -132,42 +102,55 @@ def _merge_pairs(*groups) -> tuple:
                  if weight > 0)
 
 
+def _group_roof_strips(group: str) -> set:
+    return {row[0] for row in GROUP_STRIPS[group] if row[1] == "roof"}
+
+
+def _filtered(pairs, allowed) -> tuple:
+    return tuple((choice, weight) for choice, weight
+                 in _pairs_from_mapping(pairs) if choice in allowed)
+
+
+def style_weights(flavor: str, group: str,
+                  profile: str | None = None) -> dict:
+    """Families/roofs weights for one (flavor, group, class profile).
+
+    Base distributions are the combo tables (per flavor x group); the
+    reference region/class-profile weights merge on top, filtered to the
+    families and roof strips that actually exist in the group's layout --
+    this is where two classes inside one group still diverge.
+    """
+    families_base = combo_family_weights(flavor, group)
+    roofs_base = combo_roof_weights(flavor, group)
+    allowed_fams = set(GROUP_FAMILIES[group])
+    allowed_roofs = _group_roof_strips(group)
+    refs = reference_styles()
+    region_w = ((refs.get("regions") or {}).get(flavor, {})
+                .get("weights") or {})
+    profile_w = ((refs.get("class_profiles") or {}).get(profile or "", {})
+                 .get("weights") or {})
+    families = _merge_pairs(
+        families_base,
+        _filtered(region_w.get("families"), allowed_fams),
+        _filtered(profile_w.get("families"), allowed_fams),
+    )
+    roofs = _merge_pairs(
+        roofs_base,
+        _filtered(region_w.get("roofs"), allowed_roofs),
+        _filtered(profile_w.get("roofs"), allowed_roofs),
+    )
+    return {
+        "families": families or families_base,
+        "roofs": roofs or roofs_base,
+    }
+
+
 def style_for_profile(flavor: str, profile: str | None = None,
                       *, apartment_bias: bool = False,
                       industrial_bias: bool = False) -> dict:
-    """Return region + class weighted families/roofs for a generated asset."""
-    base = flavor_style(flavor)
-    refs = reference_styles()
-    region_ref = (refs.get("regions") or {}).get(flavor, {})
-    profile_ref = (refs.get("class_profiles") or {}).get(profile or "", {})
-    region_weights = region_ref.get("weights") or {}
-    profile_weights = profile_ref.get("weights") or {}
-
-    family_bias = ()
-    roof_bias = ()
-    if apartment_bias:
-        family_bias += (("concrete", 3),)
-        roof_bias += (("roof_flat", 2),)
-    if industrial_bias:
-        family_bias += (("concrete", 5),)
-        roof_bias += (("roof_metal", 3), ("roof_flat", 2))
-
-    families = _merge_pairs(
-        base.get("families"),
-        region_weights.get("families"),
-        profile_weights.get("families"),
-        family_bias,
-    )
-    roofs = _merge_pairs(
-        base.get("roofs"),
-        region_weights.get("roofs"),
-        profile_weights.get("roofs"),
-        roof_bias,
-    )
-    return {
-        "families": families or base["families"],
-        "roofs": roofs or base["roofs"],
-    }
+    """Back-compat wrapper: biases map onto the group axis."""
+    group = "ind" if industrial_bias else ("apt" if apartment_bias else "res")
+    return style_weights(flavor, group, profile)
 
 
 def placement_class_for_footprint(length_m: float, width_m: float) -> int:

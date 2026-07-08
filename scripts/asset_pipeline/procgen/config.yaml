@@ -6,40 +6,32 @@
 # procgen_manifest.json; changing a value here changes asset ids/seeds only
 # where it must.
 
-version: 1
-lib_version: 1
+version: 2
+# lib_version 2 = the per-combo overhaul (July 2026): every (region x class
+# group) combo owns its atlas layout, texture pages, palettes and massing.
+# Bumping reseeds every variant -- fine, the layout change forces a full
+# Blender rebuild anyway.
+lib_version: 2
 global_seed: 20260612
 output_package_name: O4SFR_ProcGen_Library
 
 atlas:
-  # Design resolution is 2048 (windows ~30 px/m); shipping at 4096 doubles
-  # texel density to ~60 px/m (in-sim sharpness feedback, July 2026). The
-  # V-band layout scales proportionally so UVs are resolution-independent:
-  # changing size swaps texture detail only, installed OBJs need no
-  # rebuild. VRAM is ~22 MB DXT per page and only 1-2 flavors (x3 pages)
-  # load per tile; companion _nml maps ship at half size.
+  # Per-COMBO atlases: 8 region flavors x 4 class groups (res/apt/com/ind,
+  # see archetypes/combo_styles.py) x `pages` PNGs.  Strip sets, window/
+  # door dimensions, facade rhythm and ground-floor heights are per combo;
+  # V-band layouts scale proportionally with size so UVs are resolution-
+  # independent.  Per tile only ONE region's 4 groups (x3 pages) load.
   size: 4096
   seed: 101
-  # Painted page permutations per flavor: same strip layout/UVs, different
-  # sub-palette + paint seed (page 0 base, 1 weathered, 2 fresh -- see
-  # atlas.py PAGE_OVERRIDES).  A variant's seed picks its page in the
-  # TEXTURE directive, so identical geometry no longer means identical
-  # texture.  Texture-only: changing this never requires a Blender rebuild
-  # (retarget_texture_pages.py rewrites installed OBJ headers).
+  # Page permutations per combo: same strip layout/UVs, different
+  # sub-palette + paint seed (page 0 base, 1 weathered, 2 fresh).  A
+  # variant's seed picks its page in the TEXTURE directive, so identical
+  # geometry no longer means identical texture.  Texture-only: changing
+  # this never requires a Blender rebuild (retarget_texture_pages.py
+  # rewrites installed OBJ headers).
   pages: 3
-  # Every flavor page also ships a MODERN twin ("_m" names): identical
-  # strip layout/UVs, but wall/ground strips repaint with the high
-  # window-to-wall ratio of modern apartment/commercial facades (~52%
-  # glazing vs ~22% traditional).  Archetypes listed here reference the
-  # modern pages; everything else (houses, rowhouses, shophouses,
-  # warehouses/bigbox) keeps the traditional look.  Texture-only: switching
-  # an installed OBJ between page sets is a retarget_texture_pages.py
-  # header rewrite, no Blender rebuild.
-  modern_archetypes: [aptslab, aptblock, flatcom]
-  # Flavors map 1:1 to a texture PNG per page; region dirs pick their
-  # flavor below.
-  flavors: [generic, europe, north_america, mediterranean, asia, africa,
-            south_america, australia_oceania]
+  # The old MODERN "_m" twin pages are gone: high-glazing facades are the
+  # `curtain` wall family inside the apt/com combos.
 
 # Geometric dimension ladders.  A candidate asset is accepted by the matcher
 # when asset_l <= det_l, asset_w <= det_w and asset_area/det_area >= c, so a
@@ -74,6 +66,11 @@ limits:
   max_side_m: 110.0
 
 # Class -> archetype matrix.  Area bands mirror BLD_PLACEMENT_CLASSES caps.
+# variants per archetype (2026-07-08): residential 4 / apartments 3 /
+# industrial 2 -- each variant is one seeded style draw from the combo
+# (family x shade x page x massing), and X-Plane randomizes across the
+# EXPORT fan-out per placement, so this is THE lever that surfaces the
+# per-combo variety in dense same-footprint fabric.
 # floors token F gives the pool height F*3.2 m via the _LxWxF filename token
 # (must stay <= 12: MAX_GENERATED_BUILDING_HEIGHT_M = 40.0).
 # "regions" become o4sfr/<region>/ path tokens; "generic" is the wildcard.
@@ -87,7 +84,7 @@ bands:
     bucket: residential
     archetypes: [gable, hip, flatres]
     floors: [1, 2]
-    variants: 2
+    variants: 4
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
   - name: small_residential       # class 2
@@ -97,7 +94,7 @@ bands:
     bucket: residential
     archetypes: [gable, hip, lshape, flatres, shophouse]
     floors: [1, 2, 3]
-    variants: 2
+    variants: 4
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
   - name: compact_residential     # class 3
@@ -107,7 +104,7 @@ bands:
     bucket: residential
     archetypes: [gable, hip, lshape, rowhouse, flatres, shophouse]
     floors: [1, 2, 3, 4]
-    variants: 2
+    variants: 4
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
   # NOTE: tier B band floors overlap DOWN by the 0.8 coverage factor --
@@ -120,7 +117,7 @@ bands:
     bucket: apartments
     archetypes: [rowhouse, aptslab, flatcom, shophouse]
     floors: [2, 3, 4, 5, 6, 8]
-    variants: 2
+    variants: 3
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
   - name: small_apartment         # class 5
@@ -132,7 +129,7 @@ bands:
     # 9/12 serve the uncapped HeightNet range (28.8 / 38.4 m); height-fit
     # picks the nearest rung, so 2-floor gaps up high cost <1 floor error.
     floors: [2, 3, 4, 5, 6, 7, 9, 12]
-    variants: 2
+    variants: 3
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
   - name: apartment_block         # class 6
@@ -142,7 +139,7 @@ bands:
     bucket: apartments
     archetypes: [aptslab, aptblock, flatcom]
     floors: [3, 4, 5, 6, 7, 9, 12]
-    variants: 2
+    variants: 3
     regions: [generic, europe, north_america, mediterranean, asia, africa,
               south_america, australia_oceania]
   - name: large                   # class 7

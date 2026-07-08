@@ -62,7 +62,9 @@ def _build_package(tmp_path: Path) -> Path:
         for k in range(1, VARIANTS + 1):
             physical = f"{region}/residential/{stem}_v{k}.obj"
             spec = build_archetype("gable", length, width, floors,
-                                   1000 + k, layout)
+                                   1000 + k,
+                                   layout["combos"][f"{region}/res"],
+                                   region)
             target = pkg / physical
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(_spec_to_obj8(spec), encoding="utf-8")

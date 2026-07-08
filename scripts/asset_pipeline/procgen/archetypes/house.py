@@ -17,8 +17,9 @@ import random
 
 from .common import MeshSpec, StripUV, box, set_shell_meta, validate_spec, \
     wall_quad, walls_with_floors
-from .styles import flavor_massing, profile_for_asset, style_for_profile, \
+from .styles import flavor_massing, profile_for_asset, style_weights, \
     weighted_choice
+from .combo_styles import GROUP_SHADES
 
 FLOOR_H = 3.2
 ROOF_PITCH_DEG = 40.0
@@ -27,15 +28,17 @@ HIP_PITCH_DEG = 35.0
 HIP_MAX_RISE_M = 3.8
 FASCIA_DROP_M = 0.18
 
-WALL_SHADES = ("a", "b")
+
+def _ground_h(layout: dict) -> float:
+    return float((layout.get("dims") or {}).get("ground_h", FLOOR_H))
 
 
 def _house_style(rng: random.Random, layout: dict, flavor: str = "generic",
                  profile: str | None = None):
-    """Pick region-weighted wall/ground/plain strips plus a roof strip."""
-    weights = style_for_profile(flavor, profile)
+    """Pick combo-weighted wall/ground/plain strips plus a roof strip."""
+    weights = style_weights(flavor, "res", profile)
     family = weighted_choice(rng, weights["families"])
-    shade = rng.choice(WALL_SHADES)
+    shade = rng.choice(GROUP_SHADES["res"])
     return {
         "family": family,
         "wall": StripUV(layout, f"wall_{family}_{shade}"),
@@ -54,7 +57,7 @@ def _gable_volume(spec: MeshSpec, cx: float, cy: float, lu: float, lv: float,
                   floors: int, style: dict, axis: str = "x",
                   pitch_deg: float = ROOF_PITCH_DEG,
                   max_rise: float = MAX_ROOF_RISE_M,
-                  overhang_scale: float = 1.0):
+                  overhang_scale: float = 1.0, ground_h: float = None):
     """One gabled volume: walls, gable ends, roof, fascia.
 
     ``lu`` is the extent along the ridge, ``lv`` across it; ``axis`` maps
@@ -89,7 +92,8 @@ def _gable_volume(spec: MeshSpec, cx: float, cy: float, lu: float, lv: float,
     ring = [world(u, v, 0.0)[:2] for u, v in ring_local]
     if flip:
         ring = ring[::-1]
-    walls_with_floors(spec, ring, 0.0, floors, FLOOR_H, ground, wall)
+    walls_with_floors(spec, ring, 0.0, floors, FLOOR_H, ground, wall,
+                      ground_h=ground_h)
 
     def _gable_uvs():
         return (
@@ -148,12 +152,13 @@ def build_gable(length_m: float, width_m: float, floors: int, seed: int,
     rng = random.Random(seed)
     profile = profile_for_asset(length_m, width_m, archetype="gable")
     style = _house_style(rng, layout, flavor, profile)
-    massing = flavor_massing(flavor)
+    massing = flavor_massing(flavor, profile)
     pitch = rng.uniform(*massing["pitch"])
     spec = MeshSpec()
     geo = _gable_volume(
         spec, 0.0, 0.0, length_m, width_m, floors, style,
         pitch_deg=pitch, overhang_scale=massing["overhang"],
+        ground_h=_ground_h(layout),
     )
     if (rng.random() < massing["chimney_prob"]
             and length_m >= 5.0 and floors <= 3):
@@ -225,7 +230,7 @@ def build_hip(length_m: float, width_m: float, floors: int, seed: int,
     rng = random.Random(seed)
     profile = profile_for_asset(length_m, width_m, archetype="hip")
     style = _house_style(rng, layout, flavor, profile)
-    massing = flavor_massing(flavor)
+    massing = flavor_massing(flavor, profile)
     hx, hy = length_m / 2.0, width_m / 2.0
     overhang = min(0.45 * max(massing["overhang"], 0.5),
                    0.12 * min(length_m, width_m))
@@ -235,7 +240,8 @@ def build_hip(length_m: float, width_m: float, floors: int, seed: int,
     spec = MeshSpec()
     ring = ((-wx, -wy), (wx, -wy), (wx, wy), (-wx, wy))
     walls_with_floors(spec, ring, 0.0, floors, FLOOR_H,
-                      style["ground"], style["wall"])
+                      style["ground"], style["wall"],
+                      ground_h=_ground_h(layout))
     geo = _hip_roof(spec, hx, hy, overhang, eave_wall_z,
                     style["roof"], style["trim"],
                     pitch_deg=rng.uniform(*massing["hip_pitch"]))
@@ -262,7 +268,7 @@ def build_lshape(length_m: float, width_m: float, floors: int, seed: int,
     rng = random.Random(seed)
     profile = profile_for_asset(length_m, width_m, archetype="lshape")
     style = _house_style(rng, layout, flavor, profile)
-    massing = flavor_massing(flavor)
+    massing = flavor_massing(flavor, profile)
     pitch = rng.uniform(*massing["pitch"])
     hx, hy = length_m / 2.0, width_m / 2.0
 
@@ -276,12 +282,14 @@ def build_lshape(length_m: float, width_m: float, floors: int, seed: int,
     main_cy = sy * (hy - main_depth / 2.0)
     geo_main = _gable_volume(
         spec, 0.0, main_cy, length_m, main_depth, floors, style, axis="x",
-        pitch_deg=pitch, overhang_scale=massing["overhang"])
+        pitch_deg=pitch, overhang_scale=massing["overhang"],
+        ground_h=_ground_h(layout))
     # Cross wing: full width, hugging the +-sx end.
     wing_cx = sx * (hx - wing_len / 2.0)
     _gable_volume(
         spec, wing_cx, 0.0, width_m, wing_len, floors, style, axis="y",
-        pitch_deg=pitch, overhang_scale=massing["overhang"])
+        pitch_deg=pitch, overhang_scale=massing["overhang"],
+        ground_h=_ground_h(layout))
 
     if rng.random() < massing["chimney_prob"] and floors <= 3:
         _roof_chimney(spec, rng, style, 0.0, main_cy, geo_main)

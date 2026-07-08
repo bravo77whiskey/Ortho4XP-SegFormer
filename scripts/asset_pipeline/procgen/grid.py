@@ -22,9 +22,10 @@ if HERE not in sys.path:
 import yaml  # noqa: E402
 
 from archetypes import ARCHETYPES  # noqa: E402
+from archetypes.combo_styles import group_for_archetype  # noqa: E402
 from archetypes.common import fmt_dim  # noqa: E402
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 FLOOR_HEIGHT_M = 3.2  # _SIMHEAVEN_FLOORS_RE contract: height = floors * 3.2
 MAX_FLOORS = 12       # 12 * 3.2 = 38.4 < MAX_GENERATED_BUILDING_HEIGHT_M (40)
 
@@ -164,6 +165,7 @@ def build_manifest(config: dict) -> dict:
                         variants = [
                             {
                                 "archetype": archetype,
+                                "group": group_for_archetype(archetype),
                                 "variant": k,
                                 "seed": _asset_seed(
                                     lib_version, asset_id, archetype, k

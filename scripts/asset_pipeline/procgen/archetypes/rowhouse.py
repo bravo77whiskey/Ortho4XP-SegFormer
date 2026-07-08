@@ -10,26 +10,27 @@ from __future__ import annotations
 import math
 import random
 
-from .common import MeshSpec, StripUV, box, set_shell_meta, validate_spec, \
-    wall_quad
-from .styles import flavor_massing, profile_for_asset, style_for_profile, \
+from .common import MeshSpec, StripUV, box, floor_zs, set_shell_meta, \
+    validate_spec, wall_quad
+from .styles import flavor_massing, profile_for_asset, style_weights, \
     weighted_choice
 
 FLOOR_H = 3.2
 PITCH_DEG = 33.0
 MAX_RISE_M = 3.4
 FASCIA_DROP_M = 0.18
-BAY_TARGET_W_M = 7.0  # wider bays = fewer facade quads (vertex budget)
 
 
 def build_rowhouse(length_m: float, width_m: float, floors: int, seed: int,
                    layout: dict, flavor: str = "generic") -> MeshSpec:
     rng = random.Random(seed)
     profile = profile_for_asset(length_m, width_m, archetype="rowhouse")
-    weights = style_for_profile(flavor, profile)
+    weights = style_weights(flavor, "res", profile)
     family = weighted_choice(rng, weights["families"])
-    wall_a = StripUV(layout, f"wall_{family}_a")
-    wall_b = StripUV(layout, f"wall_{family}_b")
+    # Rowhouse bays alternate between two of the res combo's three shades.
+    shade_a, shade_b = rng.sample(["a", "b", "c"], 2)
+    wall_a = StripUV(layout, f"wall_{family}_{shade_a}")
+    wall_b = StripUV(layout, f"wall_{family}_{shade_b}")
     ground = StripUV(layout, f"ground_{family}")
     plain = StripUV(layout, f"plain_{family}")
     roof_choices = tuple(
@@ -39,7 +40,9 @@ def build_rowhouse(length_m: float, width_m: float, floors: int, seed: int,
     roof = StripUV(layout, weighted_choice(rng, roof_choices))
     trim = StripUV(layout, "trim_dark")
 
-    massing = flavor_massing(flavor)
+    massing = flavor_massing(flavor, profile)
+    ground_h = float((layout.get("dims") or {}).get("ground_h", FLOOR_H))
+    spans = floor_zs(floors, FLOOR_H, ground_h)
     hx, hy = length_m / 2.0, width_m / 2.0
     overhang = min(0.40 * max(massing["overhang"], 0.5),
                    0.10 * min(length_m, width_m))
@@ -51,7 +54,8 @@ def build_rowhouse(length_m: float, width_m: float, floors: int, seed: int,
     slope = rise / wy
     eave_z = eave_wall_z - slope * overhang
 
-    n_bays = max(2, int(round(length_m / BAY_TARGET_W_M)))
+    n_bays = max(2, int(round(length_m / float(massing.get("bay_w",
+                                                          7.0)))))
     bay_w = (2 * wx) / n_bays
 
     spec = MeshSpec()
@@ -67,14 +71,14 @@ def build_rowhouse(length_m: float, width_m: float, floors: int, seed: int,
                 ((x0, y_edge), (x1, y_edge))
             for floor in range(floors):
                 strip = ground if floor == 0 else upper
-                wall_quad(spec, a, b, floor * FLOOR_H, (floor + 1) * FLOOR_H,
+                wall_quad(spec, a, b, spans[floor][0], spans[floor][1],
                           strip)
     for x_edge, flip in ((wx, False), (-wx, True)):
         a, b = ((x_edge, -wy), (x_edge, wy)) if not flip else \
             ((x_edge, wy), (x_edge, -wy))
         for floor in range(floors):
             strip = ground if floor == 0 else wall_a
-            wall_quad(spec, a, b, floor * FLOOR_H, (floor + 1) * FLOOR_H,
+            wall_quad(spec, a, b, spans[floor][0], spans[floor][1],
                       strip)
 
     # Gable ends + roof (full footprint), as in the gable house.

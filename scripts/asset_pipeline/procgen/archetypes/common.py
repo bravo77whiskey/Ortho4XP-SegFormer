@@ -167,25 +167,47 @@ def wall_quad(spec: MeshSpec, p_bl, p_br, z0: float, z1: float,
     )
 
 
+def floor_zs(floors: int, floor_h: float, ground_h: float = None) -> list:
+    """Per-floor (z0, z1) spans totalling EXACTLY floors * floor_h.
+
+    The total is the ``_LxWxF`` filename contract (pool height = F * 3.2);
+    a combo's taller/shorter ground floor is absorbed by evenly squeezing
+    the upper floors, so the building's declared height never drifts.
+    """
+    total = floors * floor_h
+    if floors <= 1 or not ground_h or abs(ground_h - floor_h) < 1e-6:
+        return [(i * floor_h, (i + 1) * floor_h) for i in range(floors)]
+    # Never squeeze uppers below 70% of the nominal floor: a 2-floor
+    # building with a 4.4 m lobby would otherwise get a crushed top row.
+    max_ground = total - 0.7 * floor_h * (floors - 1)
+    g = max(0.7 * floor_h, min(float(ground_h), max_ground))
+    upper = (total - g) / (floors - 1)
+    spans = [(0.0, g)]
+    for i in range(floors - 1):
+        spans.append((g + i * upper, g + (i + 1) * upper))
+    return spans
+
+
 def walls_with_floors(spec: MeshSpec, ring, z0: float, floors: int,
                       floor_h: float, ground_strip: StripUV,
-                      upper_strip: StripUV):
+                      upper_strip: StripUV, ground_h: float = None):
     """Extrude a CCW ground-plane ring into per-floor wall quads.
 
     ``ring`` is a list of (x, y) corners ordered CCW seen from above
     (so each edge's outward normal faces away from the interior).
-    Floor 0 maps to ground_strip, floors 1..F-1 to upper_strip.
+    Floor 0 maps to ground_strip, floors 1..F-1 to upper_strip; a combo
+    ``ground_h`` gives floor 0 its own height (see floor_zs).
     """
     n = len(ring)
+    spans = floor_zs(floors, floor_h, ground_h)
     for i in range(n):
         a = ring[i]
         b = ring[(i + 1) % n]
         edge_len = math.dist(a, b)
-        for floor in range(floors):
+        for floor, (fz0, fz1) in enumerate(spans):
             strip = ground_strip if floor == 0 else upper_strip
             wall_quad(
-                spec, a, b,
-                z0 + floor * floor_h, z0 + (floor + 1) * floor_h,
+                spec, a, b, z0 + fz0, z0 + fz1,
                 strip, 0.0, edge_len,
             )
 

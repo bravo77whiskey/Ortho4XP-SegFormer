@@ -19,6 +19,7 @@ if str(PROCGEN) not in sys.path:
     sys.path.insert(0, str(PROCGEN))
 
 from archetypes import ARCHETYPES, build_archetype  # noqa: E402
+from archetypes.combo_styles import group_for_archetype  # noqa: E402
 from archetypes.common import TRI_BUDGET  # noqa: E402
 
 
@@ -26,6 +27,11 @@ from archetypes.common import TRI_BUDGET  # noqa: E402
 def layout():
     with open(PROCGEN / "atlas_layout.json", "r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _combo(layout, archetype, flavor="generic"):
+    group = group_for_archetype(archetype)
+    return layout["combos"][f"{flavor}/{group}"]
 
 
 # Dimension sweep per archetype: (length, width, floors) spanning each
@@ -69,8 +75,9 @@ def _cases():
 def test_archetype_contract(name, dims, layout):
     length, width, floors = dims
     bounds_seen = set()
+    sub = _combo(layout, name)
     for seed in SEEDS:
-        spec = build_archetype(name, length, width, floors, seed, layout)
+        spec = build_archetype(name, length, width, floors, seed, sub)
         # validate_spec already ran inside the builder; re-assert the core
         # contract here so a builder that forgets to validate still fails.
         assert spec.tri_count() <= TRI_BUDGET
@@ -88,10 +95,11 @@ def test_archetype_contract(name, dims, layout):
 @pytest.mark.parametrize("name,dims", list(_cases()))
 def test_archetype_uvs_inside_strip_bands(name, dims, layout):
     length, width, floors = dims
+    sub = _combo(layout, name)
     bands = sorted(
-        (row["v0"], row["v1"]) for row in layout["strips"].values()
+        (row["v0"], row["v1"]) for row in sub["strips"].values()
     )
-    spec = build_archetype(name, length, width, floors, SEEDS[0], layout)
+    spec = build_archetype(name, length, width, floors, SEEDS[0], sub)
     for face_uvs in spec.uvs:
         for _u, v in face_uvs:
             assert any(v0 - 1e-6 <= v <= v1 + 1e-6 for v0, v1 in bands), (
@@ -102,8 +110,9 @@ def test_archetype_uvs_inside_strip_bands(name, dims, layout):
 def test_same_seed_same_mesh(layout):
     for name in sorted(ARCHETYPES):
         length, width, floors = SWEEPS[name][1]
-        a = build_archetype(name, length, width, floors, 42, layout)
-        b = build_archetype(name, length, width, floors, 42, layout)
+        sub = _combo(layout, name)
+        a = build_archetype(name, length, width, floors, 42, sub)
+        b = build_archetype(name, length, width, floors, 42, sub)
         assert a.vertices == b.vertices
         assert a.faces == b.faces
         assert a.uvs == b.uvs
@@ -116,7 +125,8 @@ def test_flavor_changes_massing_not_bounds(layout):
         heights = {}
         for flavor in ("europe", "mediterranean", "asia"):
             spec = build_archetype(
-                name, length, width, floors, 42, layout, flavor
+                name, length, width, floors, 42,
+                _combo(layout, name, flavor), flavor
             )
             xmin, xmax, ymin, ymax, _zmin, zmax = spec.bounds()
             assert abs(xmax - length / 2) < 0.005

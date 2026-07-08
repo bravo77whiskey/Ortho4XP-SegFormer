@@ -9,7 +9,11 @@ Runs INSIDE Blender (never import from host code):
 generate_procedural_buildings.py:
 
     {"assets": [{"stem", "physical_path", "archetype", "length_m",
-                 "width_m", "floors", "seed", "flavor"}, ...]}
+                 "width_m", "floors", "seed", "flavor", "group"}, ...]}
+
+``atlas_layout.json`` is the v2 registry: one strip layout per
+(flavor, group) combo under "combos"; each row builds against its own
+combo sub-layout.
 
 The export recipe (fresh exportable collection per asset, layer.name = stem,
 export_type "scenery") mirrors the proven flow in convert_to_xplane_obj.py.
@@ -43,14 +47,14 @@ def _enable_xplane2blender():
     )
 
 
-def _texture_relpath(flavor: str) -> str:
+def _texture_relpath(flavor: str, group: str) -> str:
     # Physical objs live at <root>/<region>/<bucket>/, atlases at
     # <root>/textures/ -- two levels up.
-    return f"../../textures/o4sfr_procgen_atlas_{flavor}.png"
+    return f"../../textures/o4sfr_procgen_atlas_{flavor}_{group}.png"
 
 
-def _material_for_flavor(flavor: str, output_root: str):
-    name = f"o4sfr_procgen_{flavor}"
+def _material_for_flavor(flavor: str, group: str, output_root: str):
+    name = f"o4sfr_procgen_{flavor}_{group}"
     material = bpy.data.materials.get(name)
     if material is not None:
         return material
@@ -58,7 +62,8 @@ def _material_for_flavor(flavor: str, output_root: str):
     material.use_nodes = True
     bsdf = material.node_tree.nodes.get("Principled BSDF")
     image_path = os.path.join(
-        output_root, "textures", f"o4sfr_procgen_atlas_{flavor}.png"
+        output_root, "textures",
+        f"o4sfr_procgen_atlas_{flavor}_{group}.png"
     )
     if os.path.isfile(image_path) and bsdf is not None:
         image = bpy.data.images.get(os.path.basename(image_path))
@@ -99,11 +104,13 @@ def _export_one(row: dict, output_root: str, layout: dict) -> str | None:
     os.makedirs(target_dir, exist_ok=True)
     final_obj = os.path.join(output_root, row["physical_path"])
 
+    combo = layout["combos"][f"{row['flavor']}/{row['group']}"]
     spec = build_archetype(
         row["archetype"], float(row["length_m"]), float(row["width_m"]),
-        int(row["floors"]), int(row["seed"]), layout, row["flavor"],
+        int(row["floors"]), int(row["seed"]), combo, row["flavor"],
     )
-    material = _material_for_flavor(row["flavor"], output_root)
+    material = _material_for_flavor(row["flavor"], row["group"],
+                                    output_root)
     obj = _build_mesh_object(stem, spec, material)
 
     export_coll = bpy.data.collections.new(name=f"O4SFR_{stem}")
@@ -129,7 +136,8 @@ def _export_one(row: dict, output_root: str, layout: dict) -> str | None:
             # Pin the texture so the exporter writes a deterministic
             # TEXTURE directive; the host driver re-checks it either way.
             xp.layer.autodetectTextures = False
-            xp.layer.texture = _texture_relpath(row["flavor"])
+            xp.layer.texture = _texture_relpath(row["flavor"],
+                                                row["group"])
         except Exception:
             pass
         try:

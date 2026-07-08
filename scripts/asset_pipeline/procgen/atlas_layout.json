@@ -1,56 +1,7216 @@
 {
- "flavor_pages": {
-  "africa": [
-   "textures/o4sfr_procgen_atlas_africa.png",
-   "textures/o4sfr_procgen_atlas_africa_p2.png",
-   "textures/o4sfr_procgen_atlas_africa_p3.png"
+ "combo_pages": {
+  "africa/apt": [
+   "textures/o4sfr_procgen_atlas_africa_apt.png",
+   "textures/o4sfr_procgen_atlas_africa_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_africa_apt_p3.png"
   ],
-  "asia": [
-   "textures/o4sfr_procgen_atlas_asia.png",
-   "textures/o4sfr_procgen_atlas_asia_p2.png",
-   "textures/o4sfr_procgen_atlas_asia_p3.png"
+  "africa/com": [
+   "textures/o4sfr_procgen_atlas_africa_com.png",
+   "textures/o4sfr_procgen_atlas_africa_com_p2.png",
+   "textures/o4sfr_procgen_atlas_africa_com_p3.png"
   ],
-  "australia_oceania": [
-   "textures/o4sfr_procgen_atlas_australia_oceania.png",
-   "textures/o4sfr_procgen_atlas_australia_oceania_p2.png",
-   "textures/o4sfr_procgen_atlas_australia_oceania_p3.png"
+  "africa/ind": [
+   "textures/o4sfr_procgen_atlas_africa_ind.png",
+   "textures/o4sfr_procgen_atlas_africa_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_africa_ind_p3.png"
   ],
-  "europe": [
-   "textures/o4sfr_procgen_atlas_europe.png",
-   "textures/o4sfr_procgen_atlas_europe_p2.png",
-   "textures/o4sfr_procgen_atlas_europe_p3.png"
+  "africa/res": [
+   "textures/o4sfr_procgen_atlas_africa_res.png",
+   "textures/o4sfr_procgen_atlas_africa_res_p2.png",
+   "textures/o4sfr_procgen_atlas_africa_res_p3.png"
   ],
-  "generic": [
-   "textures/o4sfr_procgen_atlas_generic.png",
-   "textures/o4sfr_procgen_atlas_generic_p2.png",
-   "textures/o4sfr_procgen_atlas_generic_p3.png"
+  "asia/apt": [
+   "textures/o4sfr_procgen_atlas_asia_apt.png",
+   "textures/o4sfr_procgen_atlas_asia_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_asia_apt_p3.png"
   ],
-  "mediterranean": [
-   "textures/o4sfr_procgen_atlas_mediterranean.png",
-   "textures/o4sfr_procgen_atlas_mediterranean_p2.png",
-   "textures/o4sfr_procgen_atlas_mediterranean_p3.png"
+  "asia/com": [
+   "textures/o4sfr_procgen_atlas_asia_com.png",
+   "textures/o4sfr_procgen_atlas_asia_com_p2.png",
+   "textures/o4sfr_procgen_atlas_asia_com_p3.png"
   ],
-  "north_america": [
-   "textures/o4sfr_procgen_atlas_north_america.png",
-   "textures/o4sfr_procgen_atlas_north_america_p2.png",
-   "textures/o4sfr_procgen_atlas_north_america_p3.png"
+  "asia/ind": [
+   "textures/o4sfr_procgen_atlas_asia_ind.png",
+   "textures/o4sfr_procgen_atlas_asia_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_asia_ind_p3.png"
   ],
-  "south_america": [
-   "textures/o4sfr_procgen_atlas_south_america.png",
-   "textures/o4sfr_procgen_atlas_south_america_p2.png",
-   "textures/o4sfr_procgen_atlas_south_america_p3.png"
+  "asia/res": [
+   "textures/o4sfr_procgen_atlas_asia_res.png",
+   "textures/o4sfr_procgen_atlas_asia_res_p2.png",
+   "textures/o4sfr_procgen_atlas_asia_res_p3.png"
+  ],
+  "australia_oceania/apt": [
+   "textures/o4sfr_procgen_atlas_australia_oceania_apt.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_apt_p3.png"
+  ],
+  "australia_oceania/com": [
+   "textures/o4sfr_procgen_atlas_australia_oceania_com.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_com_p2.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_com_p3.png"
+  ],
+  "australia_oceania/ind": [
+   "textures/o4sfr_procgen_atlas_australia_oceania_ind.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_ind_p3.png"
+  ],
+  "australia_oceania/res": [
+   "textures/o4sfr_procgen_atlas_australia_oceania_res.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_res_p2.png",
+   "textures/o4sfr_procgen_atlas_australia_oceania_res_p3.png"
+  ],
+  "europe/apt": [
+   "textures/o4sfr_procgen_atlas_europe_apt.png",
+   "textures/o4sfr_procgen_atlas_europe_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_europe_apt_p3.png"
+  ],
+  "europe/com": [
+   "textures/o4sfr_procgen_atlas_europe_com.png",
+   "textures/o4sfr_procgen_atlas_europe_com_p2.png",
+   "textures/o4sfr_procgen_atlas_europe_com_p3.png"
+  ],
+  "europe/ind": [
+   "textures/o4sfr_procgen_atlas_europe_ind.png",
+   "textures/o4sfr_procgen_atlas_europe_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_europe_ind_p3.png"
+  ],
+  "europe/res": [
+   "textures/o4sfr_procgen_atlas_europe_res.png",
+   "textures/o4sfr_procgen_atlas_europe_res_p2.png",
+   "textures/o4sfr_procgen_atlas_europe_res_p3.png"
+  ],
+  "generic/apt": [
+   "textures/o4sfr_procgen_atlas_generic_apt.png",
+   "textures/o4sfr_procgen_atlas_generic_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_generic_apt_p3.png"
+  ],
+  "generic/com": [
+   "textures/o4sfr_procgen_atlas_generic_com.png",
+   "textures/o4sfr_procgen_atlas_generic_com_p2.png",
+   "textures/o4sfr_procgen_atlas_generic_com_p3.png"
+  ],
+  "generic/ind": [
+   "textures/o4sfr_procgen_atlas_generic_ind.png",
+   "textures/o4sfr_procgen_atlas_generic_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_generic_ind_p3.png"
+  ],
+  "generic/res": [
+   "textures/o4sfr_procgen_atlas_generic_res.png",
+   "textures/o4sfr_procgen_atlas_generic_res_p2.png",
+   "textures/o4sfr_procgen_atlas_generic_res_p3.png"
+  ],
+  "mediterranean/apt": [
+   "textures/o4sfr_procgen_atlas_mediterranean_apt.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_apt_p3.png"
+  ],
+  "mediterranean/com": [
+   "textures/o4sfr_procgen_atlas_mediterranean_com.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_com_p2.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_com_p3.png"
+  ],
+  "mediterranean/ind": [
+   "textures/o4sfr_procgen_atlas_mediterranean_ind.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_ind_p3.png"
+  ],
+  "mediterranean/res": [
+   "textures/o4sfr_procgen_atlas_mediterranean_res.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_res_p2.png",
+   "textures/o4sfr_procgen_atlas_mediterranean_res_p3.png"
+  ],
+  "north_america/apt": [
+   "textures/o4sfr_procgen_atlas_north_america_apt.png",
+   "textures/o4sfr_procgen_atlas_north_america_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_north_america_apt_p3.png"
+  ],
+  "north_america/com": [
+   "textures/o4sfr_procgen_atlas_north_america_com.png",
+   "textures/o4sfr_procgen_atlas_north_america_com_p2.png",
+   "textures/o4sfr_procgen_atlas_north_america_com_p3.png"
+  ],
+  "north_america/ind": [
+   "textures/o4sfr_procgen_atlas_north_america_ind.png",
+   "textures/o4sfr_procgen_atlas_north_america_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_north_america_ind_p3.png"
+  ],
+  "north_america/res": [
+   "textures/o4sfr_procgen_atlas_north_america_res.png",
+   "textures/o4sfr_procgen_atlas_north_america_res_p2.png",
+   "textures/o4sfr_procgen_atlas_north_america_res_p3.png"
+  ],
+  "south_america/apt": [
+   "textures/o4sfr_procgen_atlas_south_america_apt.png",
+   "textures/o4sfr_procgen_atlas_south_america_apt_p2.png",
+   "textures/o4sfr_procgen_atlas_south_america_apt_p3.png"
+  ],
+  "south_america/com": [
+   "textures/o4sfr_procgen_atlas_south_america_com.png",
+   "textures/o4sfr_procgen_atlas_south_america_com_p2.png",
+   "textures/o4sfr_procgen_atlas_south_america_com_p3.png"
+  ],
+  "south_america/ind": [
+   "textures/o4sfr_procgen_atlas_south_america_ind.png",
+   "textures/o4sfr_procgen_atlas_south_america_ind_p2.png",
+   "textures/o4sfr_procgen_atlas_south_america_ind_p3.png"
+  ],
+  "south_america/res": [
+   "textures/o4sfr_procgen_atlas_south_america_res.png",
+   "textures/o4sfr_procgen_atlas_south_america_res_p2.png",
+   "textures/o4sfr_procgen_atlas_south_america_res_p3.png"
   ]
  },
- "flavors": {
-  "africa": "textures/o4sfr_procgen_atlas_africa.png",
-  "asia": "textures/o4sfr_procgen_atlas_asia.png",
-  "australia_oceania": "textures/o4sfr_procgen_atlas_australia_oceania.png",
-  "europe": "textures/o4sfr_procgen_atlas_europe.png",
-  "generic": "textures/o4sfr_procgen_atlas_generic.png",
-  "mediterranean": "textures/o4sfr_procgen_atlas_mediterranean.png",
-  "north_america": "textures/o4sfr_procgen_atlas_north_america.png",
-  "south_america": "textures/o4sfr_procgen_atlas_south_america.png"
+ "combos": {
+  "africa/apt": {
+   "dims": {
+    "door_h": 2.3,
+    "door_w": 1.5,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.3,
+    "period": 3.0,
+    "sill": 1.0,
+    "wall_strip_w": 24.0,
+    "window_h": 1.3,
+    "window_w": 1.4
+   },
+   "flavor": "africa",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.3,
+     "world_w_m": 24.0
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.3,
+     "world_w_m": 24.0
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.3,
+     "world_w_m": 24.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    }
+   },
+   "window_period_m": 3.0
+  },
+  "africa/com": {
+   "dims": {
+    "door_h": 2.4,
+    "door_w": 1.6,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.4,
+    "period": 2.9,
+    "sill": 1.0,
+    "wall_strip_w": 23.2,
+    "window_h": 1.3,
+    "window_w": 1.4
+   },
+   "flavor": "africa",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.4,
+     "world_w_m": 23.2
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.4,
+     "world_w_m": 23.2
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.4,
+     "world_w_m": 23.2
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    }
+   },
+   "window_period_m": 2.9
+  },
+  "africa/ind": {
+   "dims": {
+    "door_h": 3.0,
+    "door_w": 3.0,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.8,
+    "period": 3.6,
+    "sill": 1.8,
+    "wall_strip_w": 28.8,
+    "window_h": 0.9,
+    "window_w": 1.8
+   },
+   "flavor": "africa",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 28.8
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 3.8,
+     "world_w_m": 28.8
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 3.8,
+     "world_w_m": 28.8
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 3.8,
+     "world_w_m": 28.8
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    }
+   },
+   "window_period_m": 3.6
+  },
+  "africa/res": {
+   "dims": {
+    "door_h": 2.0,
+    "door_w": 0.95,
+    "floor_tex_h": 3.0,
+    "ground_h": 3.0,
+    "period": 3.0,
+    "sill": 1.1,
+    "wall_strip_w": 24.0,
+    "window_h": 1.05,
+    "window_w": 0.9
+   },
+   "flavor": "africa",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    }
+   },
+   "window_period_m": 3.0
+  },
+  "asia/apt": {
+   "dims": {
+    "door_h": 2.4,
+    "door_w": 1.6,
+    "floor_tex_h": 3.0,
+    "ground_h": 3.6,
+    "period": 2.8,
+    "sill": 0.85,
+    "wall_strip_w": 22.4,
+    "window_h": 1.6,
+    "window_w": 2.2
+   },
+   "flavor": "asia",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.0,
+     "world_w_m": 22.4
+    }
+   },
+   "window_period_m": 2.8
+  },
+  "asia/com": {
+   "dims": {
+    "door_h": 2.5,
+    "door_w": 1.6,
+    "floor_tex_h": 3.1,
+    "ground_h": 3.8,
+    "period": 2.7,
+    "sill": 0.9,
+    "wall_strip_w": 21.6,
+    "window_h": 1.5,
+    "window_w": 2.1
+   },
+   "flavor": "asia",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.8,
+     "world_w_m": 21.6
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.8,
+     "world_w_m": 21.6
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.8,
+     "world_w_m": 21.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    }
+   },
+   "window_period_m": 2.7
+  },
+  "asia/ind": {
+   "dims": {
+    "door_h": 3.2,
+    "door_w": 3.2,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.0,
+    "period": 3.6,
+    "sill": 1.6,
+    "wall_strip_w": 28.8,
+    "window_h": 1.1,
+    "window_w": 2.4
+   },
+   "flavor": "asia",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 28.8
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 4.0,
+     "world_w_m": 28.8
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 4.0,
+     "world_w_m": 28.8
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 4.0,
+     "world_w_m": 28.8
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 28.8
+    }
+   },
+   "window_period_m": 3.6
+  },
+  "asia/res": {
+   "dims": {
+    "door_h": 2.0,
+    "door_w": 0.9,
+    "floor_tex_h": 3.0,
+    "ground_h": 3.0,
+    "period": 2.6,
+    "sill": 1.0,
+    "wall_strip_w": 20.8,
+    "window_h": 1.25,
+    "window_w": 1.8
+   },
+   "flavor": "asia",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.0,
+     "world_w_m": 20.8
+    }
+   },
+   "window_period_m": 2.6
+  },
+  "australia_oceania/apt": {
+   "dims": {
+    "door_h": 2.4,
+    "door_w": 1.7,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.7,
+    "period": 3.1,
+    "sill": 0.8,
+    "wall_strip_w": 24.8,
+    "window_h": 1.6,
+    "window_w": 2.0
+   },
+   "flavor": "australia_oceania",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.7,
+     "world_w_m": 24.8
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.7,
+     "world_w_m": 24.8
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.7,
+     "world_w_m": 24.8
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 24.8
+    }
+   },
+   "window_period_m": 3.1
+  },
+  "australia_oceania/com": {
+   "dims": {
+    "door_h": 2.6,
+    "door_w": 1.8,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.0,
+    "period": 3.2,
+    "sill": 0.9,
+    "wall_strip_w": 25.6,
+    "window_h": 1.5,
+    "window_w": 2.1
+   },
+   "flavor": "australia_oceania",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 4.0,
+     "world_w_m": 25.6
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 4.0,
+     "world_w_m": 25.6
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 4.0,
+     "world_w_m": 25.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    }
+   },
+   "window_period_m": 3.2
+  },
+  "australia_oceania/ind": {
+   "dims": {
+    "door_h": 3.4,
+    "door_w": 3.8,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.2,
+    "period": 4.2,
+    "sill": 1.8,
+    "wall_strip_w": 33.6,
+    "window_h": 1.0,
+    "window_w": 2.4
+   },
+   "flavor": "australia_oceania",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 33.6
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 4.2,
+     "world_w_m": 33.6
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 4.2,
+     "world_w_m": 33.6
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 4.2,
+     "world_w_m": 33.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 33.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 33.6
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 33.6
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 33.6
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 33.6
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 33.6
+    }
+   },
+   "window_period_m": 4.2
+  },
+  "australia_oceania/res": {
+   "dims": {
+    "door_h": 2.05,
+    "door_w": 0.95,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.2,
+    "period": 2.9,
+    "sill": 0.9,
+    "wall_strip_w": 23.2,
+    "window_h": 1.2,
+    "window_w": 1.6
+   },
+   "flavor": "australia_oceania",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    }
+   },
+   "window_period_m": 2.9
+  },
+  "europe/apt": {
+   "dims": {
+    "door_h": 2.3,
+    "door_w": 1.5,
+    "floor_tex_h": 3.0,
+    "ground_h": 3.4,
+    "period": 3.0,
+    "sill": 0.8,
+    "wall_strip_w": 24.0,
+    "window_h": 1.55,
+    "window_w": 1.6
+   },
+   "flavor": "europe",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.4,
+     "world_w_m": 24.0
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.4,
+     "world_w_m": 24.0
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.4,
+     "world_w_m": 24.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.0,
+     "world_w_m": 24.0
+    }
+   },
+   "window_period_m": 3.0
+  },
+  "europe/com": {
+   "dims": {
+    "door_h": 2.5,
+    "door_w": 1.6,
+    "floor_tex_h": 3.1,
+    "ground_h": 3.8,
+    "period": 2.7,
+    "sill": 0.85,
+    "wall_strip_w": 21.6,
+    "window_h": 1.7,
+    "window_w": 1.4
+   },
+   "flavor": "europe",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.8,
+     "world_w_m": 21.6
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.8,
+     "world_w_m": 21.6
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.8,
+     "world_w_m": 21.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.1,
+     "world_w_m": 21.6
+    }
+   },
+   "window_period_m": 2.7
+  },
+  "europe/ind": {
+   "dims": {
+    "door_h": 3.4,
+    "door_w": 3.4,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.0,
+    "period": 3.8,
+    "sill": 1.7,
+    "wall_strip_w": 30.4,
+    "window_h": 1.1,
+    "window_w": 2.2
+   },
+   "flavor": "europe",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 30.4
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 4.0,
+     "world_w_m": 30.4
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 4.0,
+     "world_w_m": 30.4
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 4.0,
+     "world_w_m": 30.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    }
+   },
+   "window_period_m": 3.8
+  },
+  "europe/res": {
+   "dims": {
+    "door_h": 2.05,
+    "door_w": 0.95,
+    "floor_tex_h": 3.0,
+    "ground_h": 3.2,
+    "period": 2.3,
+    "sill": 0.85,
+    "wall_strip_w": 18.4,
+    "window_h": 1.7,
+    "window_w": 1.05
+   },
+   "flavor": "europe",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.2,
+     "world_w_m": 18.4
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.2,
+     "world_w_m": 18.4
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.2,
+     "world_w_m": 18.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.0,
+     "world_w_m": 18.4
+    }
+   },
+   "window_period_m": 2.3
+  },
+  "generic/apt": {
+   "dims": {
+    "door_h": 2.4,
+    "door_w": 1.6,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.6,
+    "period": 3.0,
+    "sill": 0.75,
+    "wall_strip_w": 24.0,
+    "window_h": 1.6,
+    "window_w": 1.8
+   },
+   "flavor": "generic",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.6,
+     "world_w_m": 24.0
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.6,
+     "world_w_m": 24.0
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.6,
+     "world_w_m": 24.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    }
+   },
+   "window_period_m": 3.0
+  },
+  "generic/com": {
+   "dims": {
+    "door_h": 2.6,
+    "door_w": 1.8,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.0,
+    "period": 3.0,
+    "sill": 0.9,
+    "wall_strip_w": 24.0,
+    "window_h": 1.5,
+    "window_w": 1.9
+   },
+   "flavor": "generic",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 4.0,
+     "world_w_m": 24.0
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 4.0,
+     "world_w_m": 24.0
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 4.0,
+     "world_w_m": 24.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 24.0
+    }
+   },
+   "window_period_m": 3.0
+  },
+  "generic/ind": {
+   "dims": {
+    "door_h": 3.4,
+    "door_w": 3.6,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.2,
+    "period": 4.0,
+    "sill": 1.8,
+    "wall_strip_w": 32.0,
+    "window_h": 1.0,
+    "window_w": 2.4
+   },
+   "flavor": "generic",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 32.0
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 4.2,
+     "world_w_m": 32.0
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 4.2,
+     "world_w_m": 32.0
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 4.2,
+     "world_w_m": 32.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 32.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 32.0
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 32.0
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 32.0
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 32.0
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 32.0
+    }
+   },
+   "window_period_m": 4.0
+  },
+  "generic/res": {
+   "dims": {
+    "door_h": 2.05,
+    "door_w": 1.0,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.2,
+    "period": 2.5,
+    "sill": 0.9,
+    "wall_strip_w": 20.0,
+    "window_h": 1.45,
+    "window_w": 1.25
+   },
+   "flavor": "generic",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.2,
+     "world_w_m": 20.0
+    }
+   },
+   "window_period_m": 2.5
+  },
+  "mediterranean/apt": {
+   "dims": {
+    "door_h": 2.3,
+    "door_w": 1.5,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.5,
+    "period": 2.9,
+    "sill": 0.7,
+    "wall_strip_w": 23.2,
+    "window_h": 1.6,
+    "window_w": 1.5
+   },
+   "flavor": "mediterranean",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.5,
+     "world_w_m": 23.2
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.5,
+     "world_w_m": 23.2
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.5,
+     "world_w_m": 23.2
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    }
+   },
+   "window_period_m": 2.9
+  },
+  "mediterranean/com": {
+   "dims": {
+    "door_h": 2.5,
+    "door_w": 1.6,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.6,
+    "period": 2.8,
+    "sill": 0.8,
+    "wall_strip_w": 22.4,
+    "window_h": 1.6,
+    "window_w": 1.3
+   },
+   "flavor": "mediterranean",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    }
+   },
+   "window_period_m": 2.8
+  },
+  "mediterranean/ind": {
+   "dims": {
+    "door_h": 3.2,
+    "door_w": 3.2,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.9,
+    "period": 3.8,
+    "sill": 1.7,
+    "wall_strip_w": 30.4,
+    "window_h": 1.0,
+    "window_w": 2.0
+   },
+   "flavor": "mediterranean",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 30.4
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 3.9,
+     "world_w_m": 30.4
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 3.9,
+     "world_w_m": 30.4
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 3.9,
+     "world_w_m": 30.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 30.4
+    }
+   },
+   "window_period_m": 3.8
+  },
+  "mediterranean/res": {
+   "dims": {
+    "door_h": 2.2,
+    "door_w": 1.0,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.2,
+    "period": 2.6,
+    "sill": 0.8,
+    "wall_strip_w": 20.8,
+    "window_h": 1.6,
+    "window_w": 0.95
+   },
+   "flavor": "mediterranean",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.2,
+     "world_w_m": 20.8
+    }
+   },
+   "window_period_m": 2.6
+  },
+  "north_america/apt": {
+   "dims": {
+    "door_h": 2.4,
+    "door_w": 1.7,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.8,
+    "period": 3.2,
+    "sill": 0.8,
+    "wall_strip_w": 25.6,
+    "window_h": 1.5,
+    "window_w": 1.9
+   },
+   "flavor": "north_america",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.8,
+     "world_w_m": 25.6
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.8,
+     "world_w_m": 25.6
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.8,
+     "world_w_m": 25.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 25.6
+    }
+   },
+   "window_period_m": 3.2
+  },
+  "north_america/com": {
+   "dims": {
+    "door_h": 2.7,
+    "door_w": 1.9,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.2,
+    "period": 3.4,
+    "sill": 0.95,
+    "wall_strip_w": 27.2,
+    "window_h": 1.5,
+    "window_w": 2.3
+   },
+   "flavor": "north_america",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 4.2,
+     "world_w_m": 27.2
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 4.2,
+     "world_w_m": 27.2
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 4.2,
+     "world_w_m": 27.2
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 27.2
+    }
+   },
+   "window_period_m": 3.4
+  },
+  "north_america/ind": {
+   "dims": {
+    "door_h": 3.6,
+    "door_w": 4.0,
+    "floor_tex_h": 3.2,
+    "ground_h": 4.4,
+    "period": 4.4,
+    "sill": 1.9,
+    "wall_strip_w": 35.2,
+    "window_h": 1.0,
+    "window_w": 2.6
+   },
+   "flavor": "north_america",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 35.2
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 4.4,
+     "world_w_m": 35.2
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 4.4,
+     "world_w_m": 35.2
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 4.4,
+     "world_w_m": 35.2
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 35.2
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 35.2
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 35.2
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 35.2
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 35.2
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 35.2
+    }
+   },
+   "window_period_m": 4.4
+  },
+  "north_america/res": {
+   "dims": {
+    "door_h": 2.05,
+    "door_w": 1.0,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.2,
+    "period": 2.7,
+    "sill": 0.85,
+    "wall_strip_w": 21.6,
+    "window_h": 1.4,
+    "window_w": 1.5
+   },
+   "flavor": "north_america",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.2,
+     "world_w_m": 21.6
+    }
+   },
+   "window_period_m": 2.7
+  },
+  "south_america/apt": {
+   "dims": {
+    "door_h": 2.3,
+    "door_w": 1.5,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.4,
+    "period": 2.9,
+    "sill": 0.9,
+    "wall_strip_w": 23.2,
+    "window_h": 1.5,
+    "window_w": 1.7
+   },
+   "flavor": "south_america",
+   "group": "apt",
+   "size": 4096,
+   "strips": {
+    "balcony_band": {
+     "kind": "balcony",
+     "px": [
+      2592,
+      2688
+     ],
+     "v0": 0.347656,
+     "v1": 0.363281,
+     "world_h_m": 1.1,
+     "world_w_m": 8.0
+    },
+    "ground_concrete": {
+     "kind": "ground",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.4,
+     "world_w_m": 23.2
+    },
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.4,
+     "world_w_m": 23.2
+    },
+    "ground_shop": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.4,
+     "world_w_m": 23.2
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_panel": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2688,
+      2944
+     ],
+     "v0": 0.285156,
+     "v1": 0.339844,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3136,
+      3328
+     ],
+     "v0": 0.191406,
+     "v1": 0.230469,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2944,
+      3136
+     ],
+     "v0": 0.238281,
+     "v1": 0.277344,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3328,
+      3392
+     ],
+     "v0": 0.175781,
+     "v1": 0.183594,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_panel_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    },
+    "wall_panel_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 23.2
+    }
+   },
+   "window_period_m": 2.9
+  },
+  "south_america/com": {
+   "dims": {
+    "door_h": 2.4,
+    "door_w": 1.6,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.6,
+    "period": 2.8,
+    "sill": 0.95,
+    "wall_strip_w": 22.4,
+    "window_h": 1.4,
+    "window_w": 1.6
+   },
+   "flavor": "south_america",
+   "group": "com",
+   "size": 4096,
+   "strips": {
+    "ground_lobby": {
+     "kind": "lobby",
+     "px": [
+      1984,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.511719,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "ground_storefront": {
+     "kind": "storefront",
+     "px": [
+      1536,
+      1760
+     ],
+     "v0": 0.574219,
+     "v1": 0.621094,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "ground_storefront_b": {
+     "kind": "storefront",
+     "px": [
+      1760,
+      1984
+     ],
+     "v0": 0.519531,
+     "v1": 0.566406,
+     "world_h_m": 3.6,
+     "world_w_m": 22.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2336,
+      2464
+     ],
+     "v0": 0.402344,
+     "v1": 0.425781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      2208,
+      2336
+     ],
+     "v0": 0.433594,
+     "v1": 0.457031,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2464,
+      2592
+     ],
+     "v0": 0.371094,
+     "v1": 0.394531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2592,
+      2848
+     ],
+     "v0": 0.308594,
+     "v1": 0.363281,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3040,
+      3232
+     ],
+     "v0": 0.214844,
+     "v1": 0.253906,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2848,
+      3040
+     ],
+     "v0": 0.261719,
+     "v1": 0.300781,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3232,
+      3296
+     ],
+     "v0": 0.199219,
+     "v1": 0.207031,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_curtain_a": {
+     "kind": "glass",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_curtain_b": {
+     "kind": "glass",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    }
+   },
+   "window_period_m": 2.8
+  },
+  "south_america/ind": {
+   "dims": {
+    "door_h": 3.2,
+    "door_w": 3.2,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.9,
+    "period": 3.7,
+    "sill": 1.7,
+    "wall_strip_w": 29.6,
+    "window_h": 1.0,
+    "window_w": 2.0
+   },
+   "flavor": "south_america",
+   "group": "ind",
+   "size": 4096,
+   "strips": {
+    "band_window": {
+     "kind": "highband",
+     "px": [
+      2208,
+      2304
+     ],
+     "v0": 0.441406,
+     "v1": 0.457031,
+     "world_h_m": 1.4,
+     "world_w_m": 29.6
+    },
+    "ground_dock": {
+     "kind": "roller",
+     "px": [
+      1376,
+      1600
+     ],
+     "v0": 0.613281,
+     "v1": 0.660156,
+     "world_h_m": 3.9,
+     "world_w_m": 29.6
+    },
+    "ground_office": {
+     "kind": "storefront",
+     "px": [
+      1600,
+      1824
+     ],
+     "v0": 0.558594,
+     "v1": 0.605469,
+     "world_h_m": 3.9,
+     "world_w_m": 29.6
+    },
+    "ground_roller": {
+     "kind": "roller",
+     "px": [
+      1152,
+      1376
+     ],
+     "v0": 0.667969,
+     "v1": 0.714844,
+     "world_h_m": 3.9,
+     "world_w_m": 29.6
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2080,
+      2208
+     ],
+     "v0": 0.464844,
+     "v1": 0.488281,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_concrete": {
+     "kind": "plain",
+     "px": [
+      1952,
+      2080
+     ],
+     "v0": 0.496094,
+     "v1": 0.519531,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_metal": {
+     "kind": "plain",
+     "px": [
+      1824,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.550781,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      2496,
+      2752
+     ],
+     "v0": 0.332031,
+     "v1": 0.386719,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      2304,
+      2496
+     ],
+     "v0": 0.394531,
+     "v1": 0.433594,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      2752,
+      2816
+     ],
+     "v0": 0.316406,
+     "v1": 0.324219,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 29.6
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 29.6
+    },
+    "wall_concrete_a": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 29.6
+    },
+    "wall_concrete_b": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 29.6
+    },
+    "wall_metal_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 29.6
+    },
+    "wall_metal_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 29.6
+    }
+   },
+   "window_period_m": 3.7
+  },
+  "south_america/res": {
+   "dims": {
+    "door_h": 2.1,
+    "door_w": 0.95,
+    "floor_tex_h": 3.2,
+    "ground_h": 3.2,
+    "period": 2.8,
+    "sill": 0.95,
+    "wall_strip_w": 22.4,
+    "window_h": 1.3,
+    "window_w": 1.1
+   },
+   "flavor": "south_america",
+   "group": "res",
+   "size": 4096,
+   "strips": {
+    "ground_brick": {
+     "kind": "ground",
+     "px": [
+      1952,
+      2176
+     ],
+     "v0": 0.472656,
+     "v1": 0.519531,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "ground_siding": {
+     "kind": "ground",
+     "px": [
+      1728,
+      1952
+     ],
+     "v0": 0.527344,
+     "v1": 0.574219,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "ground_stucco": {
+     "kind": "ground",
+     "px": [
+      2176,
+      2400
+     ],
+     "v0": 0.417969,
+     "v1": 0.464844,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "plain_brick": {
+     "kind": "plain",
+     "px": [
+      2528,
+      2656
+     ],
+     "v0": 0.355469,
+     "v1": 0.378906,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_siding": {
+     "kind": "plain",
+     "px": [
+      2400,
+      2528
+     ],
+     "v0": 0.386719,
+     "v1": 0.410156,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "plain_stucco": {
+     "kind": "plain",
+     "px": [
+      2656,
+      2784
+     ],
+     "v0": 0.324219,
+     "v1": 0.347656,
+     "world_h_m": 2.0,
+     "world_w_m": 8.0
+    },
+    "roof_flat": {
+     "kind": "roof",
+     "px": [
+      3360,
+      3616
+     ],
+     "v0": 0.121094,
+     "v1": 0.175781,
+     "world_h_m": 16.0,
+     "world_w_m": 16.0
+    },
+    "roof_metal": {
+     "kind": "roof",
+     "px": [
+      3168,
+      3360
+     ],
+     "v0": 0.183594,
+     "v1": 0.222656,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_shingle": {
+     "kind": "roof",
+     "px": [
+      2784,
+      2976
+     ],
+     "v0": 0.277344,
+     "v1": 0.316406,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "roof_tile": {
+     "kind": "roof",
+     "px": [
+      2976,
+      3168
+     ],
+     "v0": 0.230469,
+     "v1": 0.269531,
+     "world_h_m": 9.0,
+     "world_w_m": 12.0
+    },
+    "trim_dark": {
+     "kind": "trim",
+     "px": [
+      3616,
+      3680
+     ],
+     "v0": 0.105469,
+     "v1": 0.113281,
+     "world_h_m": 0.3,
+     "world_w_m": 4.0
+    },
+    "wall_brick_a": {
+     "kind": "wall",
+     "px": [
+      576,
+      768
+     ],
+     "v0": 0.816406,
+     "v1": 0.855469,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_brick_b": {
+     "kind": "wall",
+     "px": [
+      768,
+      960
+     ],
+     "v0": 0.769531,
+     "v1": 0.808594,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_brick_c": {
+     "kind": "wall",
+     "px": [
+      960,
+      1152
+     ],
+     "v0": 0.722656,
+     "v1": 0.761719,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_siding_a": {
+     "kind": "wall",
+     "px": [
+      0,
+      192
+     ],
+     "v0": 0.957031,
+     "v1": 0.996094,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_siding_b": {
+     "kind": "wall",
+     "px": [
+      192,
+      384
+     ],
+     "v0": 0.910156,
+     "v1": 0.949219,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_siding_c": {
+     "kind": "wall",
+     "px": [
+      384,
+      576
+     ],
+     "v0": 0.863281,
+     "v1": 0.902344,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_a": {
+     "kind": "wall",
+     "px": [
+      1152,
+      1344
+     ],
+     "v0": 0.675781,
+     "v1": 0.714844,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_b": {
+     "kind": "wall",
+     "px": [
+      1344,
+      1536
+     ],
+     "v0": 0.628906,
+     "v1": 0.667969,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    },
+    "wall_stucco_c": {
+     "kind": "wall",
+     "px": [
+      1536,
+      1728
+     ],
+     "v0": 0.582031,
+     "v1": 0.621094,
+     "world_h_m": 3.2,
+     "world_w_m": 22.4
+    }
+   },
+   "window_period_m": 2.8
+  }
  },
+ "flavors": [
+  "generic",
+  "europe",
+  "north_america",
+  "mediterranean",
+  "asia",
+  "africa",
+  "south_america",
+  "australia_oceania"
+ ],
+ "groups": [
+  "res",
+  "apt",
+  "com",
+  "ind"
+ ],
  "pages": 3,
  "reference_styles": {
   "class_profiles": [
@@ -76,260 +7236,5 @@
   "version": 1
  },
  "size": 4096,
- "strips": {
-  "ground_brick": {
-   "kind": "ground",
-   "px": [
-    1728,
-    1920
-   ],
-   "v0": 0.535156,
-   "v1": 0.574219,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "ground_concrete": {
-   "kind": "ground",
-   "px": [
-    2112,
-    2304
-   ],
-   "v0": 0.441406,
-   "v1": 0.480469,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "ground_roller": {
-   "kind": "roller",
-   "px": [
-    2496,
-    2688
-   ],
-   "v0": 0.347656,
-   "v1": 0.386719,
-   "world_h_m": 3.2,
-   "world_w_m": 24.0
-  },
-  "ground_siding": {
-   "kind": "ground",
-   "px": [
-    1536,
-    1728
-   ],
-   "v0": 0.582031,
-   "v1": 0.621094,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "ground_storefront": {
-   "kind": "storefront",
-   "px": [
-    2304,
-    2496
-   ],
-   "v0": 0.394531,
-   "v1": 0.433594,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "ground_stucco": {
-   "kind": "ground",
-   "px": [
-    1920,
-    2112
-   ],
-   "v0": 0.488281,
-   "v1": 0.527344,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "plain_brick": {
-   "kind": "plain",
-   "px": [
-    2816,
-    2944
-   ],
-   "v0": 0.285156,
-   "v1": 0.308594,
-   "world_h_m": 2.0,
-   "world_w_m": 8.0
-  },
-  "plain_concrete": {
-   "kind": "plain",
-   "px": [
-    3072,
-    3200
-   ],
-   "v0": 0.222656,
-   "v1": 0.246094,
-   "world_h_m": 2.0,
-   "world_w_m": 8.0
-  },
-  "plain_siding": {
-   "kind": "plain",
-   "px": [
-    2688,
-    2816
-   ],
-   "v0": 0.316406,
-   "v1": 0.339844,
-   "world_h_m": 2.0,
-   "world_w_m": 8.0
-  },
-  "plain_stucco": {
-   "kind": "plain",
-   "px": [
-    2944,
-    3072
-   ],
-   "v0": 0.253906,
-   "v1": 0.277344,
-   "world_h_m": 2.0,
-   "world_w_m": 8.0
-  },
-  "roof_flat": {
-   "kind": "roof",
-   "px": [
-    3840,
-    4096
-   ],
-   "v0": 0.003906,
-   "v1": 0.058594,
-   "world_h_m": 16.0,
-   "world_w_m": 16.0
-  },
-  "roof_metal": {
-   "kind": "roof",
-   "px": [
-    3648,
-    3840
-   ],
-   "v0": 0.066406,
-   "v1": 0.105469,
-   "world_h_m": 9.0,
-   "world_w_m": 12.0
-  },
-  "roof_shingle": {
-   "kind": "roof",
-   "px": [
-    3264,
-    3456
-   ],
-   "v0": 0.160156,
-   "v1": 0.199219,
-   "world_h_m": 9.0,
-   "world_w_m": 12.0
-  },
-  "roof_tile": {
-   "kind": "roof",
-   "px": [
-    3456,
-    3648
-   ],
-   "v0": 0.113281,
-   "v1": 0.152344,
-   "world_h_m": 9.0,
-   "world_w_m": 12.0
-  },
-  "trim_dark": {
-   "kind": "trim",
-   "px": [
-    3200,
-    3264
-   ],
-   "v0": 0.207031,
-   "v1": 0.214844,
-   "world_h_m": 0.3,
-   "world_w_m": 4.0
-  },
-  "wall_brick_a": {
-   "kind": "wall",
-   "px": [
-    384,
-    576
-   ],
-   "v0": 0.863281,
-   "v1": 0.902344,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_brick_b": {
-   "kind": "wall",
-   "px": [
-    576,
-    768
-   ],
-   "v0": 0.816406,
-   "v1": 0.855469,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_concrete_a": {
-   "kind": "wall",
-   "px": [
-    1152,
-    1344
-   ],
-   "v0": 0.675781,
-   "v1": 0.714844,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_concrete_b": {
-   "kind": "wall",
-   "px": [
-    1344,
-    1536
-   ],
-   "v0": 0.628906,
-   "v1": 0.667969,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_siding_a": {
-   "kind": "wall",
-   "px": [
-    0,
-    192
-   ],
-   "v0": 0.957031,
-   "v1": 0.996094,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_siding_b": {
-   "kind": "wall",
-   "px": [
-    192,
-    384
-   ],
-   "v0": 0.910156,
-   "v1": 0.949219,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_stucco_a": {
-   "kind": "wall",
-   "px": [
-    768,
-    960
-   ],
-   "v0": 0.769531,
-   "v1": 0.808594,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  },
-  "wall_stucco_b": {
-   "kind": "wall",
-   "px": [
-    960,
-    1152
-   ],
-   "v0": 0.722656,
-   "v1": 0.761719,
-   "world_h_m": 3.2,
-   "world_w_m": 20.0
-  }
- },
- "window_period_m": 2.5
+ "version": 2
 }
