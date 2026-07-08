@@ -45,10 +45,16 @@ from lod_shell import merge_bands_into_obj8, roof_quad_mesh, shell_mesh  # noqa:
 # frames): bands (1200,3500,7000,14000) -> (1100,3000,5500,10500) and the
 # scale clamp narrowed 0.45..1.9 -> 0.36..1.65 -- the far quad ring holds
 # ~45% fewer instances, tiny residentials cull ~3.8 km, towers ~17 km.
-DEFAULT_BANDS = (1100, 3000, 5500, 10500)
+# Round 3 (user directive: FULL detail up close, aggressively cheaper with
+# distance): the full-mesh band keeps its span; the shell/box bands
+# shrink and the cull comes in early -- at the horizon even 2-tri quads
+# cost per-instance overhead, so cull distance is the real lever.  Typical
+# house: full to ~550 m, shell 1.3 km, box 2.1 km, gone at 3.75 km; the
+# largest structures still reach ~12 km.
+DEFAULT_BANDS = (1100, 2600, 4200, 7500)
 
 _BAND_SCALE_REF_DIAG_M = 30.0
-_BAND_SCALE_MIN = 0.36
+_BAND_SCALE_MIN = 0.30
 _BAND_SCALE_MAX = 1.65
 
 
