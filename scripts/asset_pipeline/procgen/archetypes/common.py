@@ -216,51 +216,37 @@ def parapet_flat_roof(spec: MeshSpec, hx: float, hy: float, top_z: float,
                       parapet_h: float, thickness: float, band_strip: StripUV,
                       cap_strip: StripUV, roof_strip: StripUV,
                       roof_drop: float = 0.35, roof_u_m: float = None):
-    """Parapet band + mitered cap ring + inner faces + roof membrane.
+    """Parapet band + ONE full-footprint roof quad at the parapet top.
 
     Walls below ``top_z`` are the caller's job; this closes the building
-    with the flat-roof-behind-parapet massing shared by commercial blocks,
-    apartment slabs and big-box stores.
+    like the top of a simple cuboid (user request 2026-07-08): the old
+    mitered cap ring + sunken membrane construction produced see-through
+    roof artifacts in-sim, so the roof is now a single quad at parapet_z
+    spanning the exact footprint.  ``thickness``/``roof_drop``/
+    ``cap_strip`` stay in the signature for call-site compatibility but
+    are unused.
+
+    The roof quad deliberately does NOT tile: capping the U/V span kills
+    the texture-coordinate derivative that otherwise pushes big roofs into
+    deep mip levels at distance, where the strip atlas collapses and
+    neighboring strips bleed through as rainbow rings.
     """
-    t = thickness
     parapet_z = top_z + parapet_h
-    roof_z = parapet_z - roof_drop
     ring = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
     for i in range(4):
         a, b = ring[i], ring[(i + 1) % 4]
         wall_quad(spec, a, b, top_z, parapet_z, band_strip)
-    cap = cap_strip.quad_uvs(0.0, 2 * hx, 0.0, 1.0)
-    spec.add_quad(
-        (-hx, -hy, parapet_z), (hx, -hy, parapet_z),
-        (hx, -hy + t, parapet_z), (-hx, -hy + t, parapet_z), *cap)
-    spec.add_quad(
-        (hx, hy, parapet_z), (-hx, hy, parapet_z),
-        (-hx, hy - t, parapet_z), (hx, hy - t, parapet_z), *cap)
-    spec.add_quad(
-        (hx, -hy + t, parapet_z), (hx, hy - t, parapet_z),
-        (hx - t, hy - t, parapet_z), (hx - t, -hy + t, parapet_z), *cap)
-    spec.add_quad(
-        (-hx, hy - t, parapet_z), (-hx, -hy + t, parapet_z),
-        (-hx + t, -hy + t, parapet_z), (-hx + t, hy - t, parapet_z), *cap)
-    # Inner parapet faces were dropped in the vertex-budget pass: they are
-    # only visible at close oblique angles, and the cap ring + membrane
-    # already read correctly from the air (saves 4 quads per building).
-    #
-    # The membrane deliberately does NOT tile: capping the U span kills the
-    # texture-coordinate derivative that otherwise pushes big roofs into
-    # deep mip levels at distance, where the strip atlas collapses and
-    # neighboring strips bleed through as rainbow rings.
     u_roof = min((2 * hx) / roof_strip.world_w_m, 0.6)
     v_roof = min(2 * hy / roof_strip.world_h_m, 0.6)
     spec.add_quad(
-        (-hx + t, -hy + t, roof_z), (hx - t, -hy + t, roof_z),
-        (hx - t, hy - t, roof_z), (-hx + t, hy - t, roof_z),
+        (-hx, -hy, parapet_z), (hx, -hy, parapet_z),
+        (hx, hy, parapet_z), (-hx, hy, parapet_z),
         (roof_strip.u(0.0), roof_strip.v(0.0)),
         (u_roof, roof_strip.v(0.0)),
         (u_roof, roof_strip.v(v_roof)),
         (roof_strip.u(0.0), roof_strip.v(v_roof)),
     )
-    return roof_z
+    return parapet_z
 
 
 def box(spec: MeshSpec, x0, x1, y0, y1, z0, z1, strip: StripUV,
