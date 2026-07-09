@@ -64,6 +64,27 @@ class ConfigZoneListTests(unittest.TestCase):
         finally:
             CFG.zone_list = original_zone_list
 
+    def test_read_from_config_allows_equals_inside_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "Ortho4XP_+36+117.cfg"
+            cfg_path.write_text(
+                "\n".join(
+                    [
+                        "sfr_bld_o4sfr_library_assets=facades",
+                        "sfr_bld_yolo_checkpoint=C:/models/name=visual.pt",
+                        "zone_list=[[[36.25, 117.25, 36.25, 117.5], 18, 'Arc=Custom']]",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            tile = CFG.Tile(36, 117, "")
+            self.assertEqual(tile.read_from_config(config_file=str(cfg_path)), 1)
+
+            self.assertEqual(tile.sfr_bld_asset_mode, "facades")
+            self.assertEqual(tile.sfr_bld_yolo_checkpoint, "C:/models/name=visual.pt")
+            self.assertEqual(tile.zone_list[0][2], "Arc=Custom")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,12 +17,18 @@ the GUI path assigns.
 """
 
 import re
+import sys
 import unittest
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import O4_Cfg_Vars as CFGVARS
 
 _ASSIGN_RE = re.compile(r"SFR\.(sfr_bld_\w+)\s*=\s*tile\.")
+_HIDDEN_LEGACY_BLD_VARS = {"sfr_bld_close_k", "sfr_bld_open_k"}
 
 
 def _assigned_sfr_bld_vars(file_name: str) -> set[str]:
@@ -42,6 +48,19 @@ class SfrBldSettingsPropagationTests(unittest.TestCase):
             set(),
             f"O4_Tile_Utils batch build does not propagate these SFR bld "
             f"settings that O4_GUI_Utils does: {sorted(missing)}",
+        )
+
+    def test_every_sfr_bld_config_var_is_listed_for_gui(self):
+        cfg_vars = {
+            name for name in CFGVARS.cfg_tile_vars
+            if name.startswith("sfr_bld_")
+        } - _HIDDEN_LEGACY_BLD_VARS
+        listed = set(CFGVARS.list_sfr_bld_vars)
+        self.assertEqual(
+            cfg_vars - listed,
+            set(),
+            "These sfr_bld_* settings exist but are not displayed in the "
+            f"SegFormer Bld GUI list: {sorted(cfg_vars - listed)}",
         )
 
 

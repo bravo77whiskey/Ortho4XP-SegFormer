@@ -1,8 +1,7 @@
 """Region routing tests for the curated optional building libraries.
 
 Covers the Track-A library additions (FFLibrary, BS2001, RuScenery, ZDP,
-AR_Library, OB_Library, MisterX, Vectors to Final) and the shipped
-``o4sfr`` library that uses an inline ``/<region>/`` path token.
+AR_Library, OB_Library, MisterX, Vectors to Final).
 """
 
 import sys
@@ -116,67 +115,6 @@ class OptionalLibraryRegionsTest(unittest.TestCase):
         self.assertTrue(self._accepted(path, "misterx", "asia"))
         self.assertTrue(self._accepted(path, "misterx", "africa"))
 
-    # --- o4sfr library uses an inline /<region>/ path token -----------------
-
-    def test_o4sfr_europe_path_token(self):
-        path = "o4sfr/europe/residential/townhouse_03.obj"
-        self.assertEqual(
-            BLD._optional_library_asset_regions(path, "o4sfr"),
-            ("europe",),
-        )
-        self.assertTrue(self._accepted(path, "o4sfr", "europe"))
-        self.assertFalse(self._accepted(path, "o4sfr", "north_america"))
-
-    def test_o4sfr_north_america_path_token(self):
-        path = "o4sfr/north_america/residential/ranch_01.obj"
-        self.assertEqual(
-            BLD._optional_library_asset_regions(path, "o4sfr"),
-            ("north_america",),
-        )
-        self.assertTrue(self._accepted(path, "o4sfr", "north_america"))
-        self.assertTrue(self._accepted(path, "o4sfr", "north_america_west"))
-        self.assertFalse(self._accepted(path, "o4sfr", "europe"))
-
-    def test_o4sfr_asia_path_token(self):
-        path = "o4sfr/asia/residential/house_jp_01.obj"
-        regions = BLD._optional_library_asset_regions(path, "o4sfr")
-        self.assertEqual(regions, ("asia",))
-        self.assertTrue(self._accepted(path, "o4sfr", "asia"))
-        self.assertTrue(self._accepted(path, "o4sfr", "se_asia"))
-        self.assertFalse(self._accepted(path, "o4sfr", "europe"))
-
-    def test_o4sfr_southeast_asia_path_token(self):
-        path = "o4sfr/se_asia/residential/stilt_house.obj"
-        self.assertEqual(
-            BLD._optional_library_asset_regions(path, "o4sfr"),
-            ("se_asia",),
-        )
-        self.assertTrue(self._accepted(path, "o4sfr", "asia"))
-        self.assertTrue(self._accepted(path, "o4sfr", "se_asia"))
-        self.assertFalse(self._accepted(path, "o4sfr", "europe"))
-
-    def test_o4sfr_africa_and_oceania_path_tokens(self):
-        for token, tile_region, off_region in (
-            ("africa", "africa", "europe"),
-            ("australia_oceania", "australia_oceania", "asia"),
-            ("mediterranean", "mediterranean", "scandinavia"),
-        ):
-            path = f"o4sfr/{token}/residential/sample.obj"
-            with self.subTest(token=token):
-                regions = BLD._optional_library_asset_regions(path, "o4sfr")
-                self.assertIn(token, regions)
-                self.assertTrue(self._accepted(path, "o4sfr", tile_region))
-                self.assertFalse(self._accepted(path, "o4sfr", off_region))
-
-    def test_o4sfr_without_region_token_is_generic(self):
-        path = "o4sfr/uncategorized/residential/house.obj"
-        self.assertEqual(
-            BLD._optional_library_asset_regions(path, "o4sfr"),
-            ("generic",),
-        )
-        for region in ("europe", "north_america", "asia", "africa"):
-            self.assertTrue(self._accepted(path, "o4sfr", region))
-
     # --- Registry sanity ----------------------------------------------------
 
     def test_curated_libraries_entries_have_required_keys(self):
@@ -254,11 +192,11 @@ class OptionalLibraryRegionsTest(unittest.TestCase):
         expected = {
             "ff-library", "ruscenery", "bs2001", "ar-library",
             "ob-library", "zdp-library", "misterx", "vectors-to-final",
-            "o4sfr",
         }
         registered = set(BLD.CURATED_EXTRA_BUILDING_LIBRARIES)
         missing = expected - registered
         self.assertFalse(missing, msg=f"missing registrations: {sorted(missing)}")
+        self.assertNotIn("o4sfr", registered)
 
 
 if __name__ == "__main__":

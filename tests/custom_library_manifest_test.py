@@ -3,7 +3,7 @@
 Covers:
 - Manifest schema round-trips through build_custom_library.load_manifest()
 - Generated library.txt uses the o4sfr/<region>/<bucket>/<id>.obj scheme
-- Every supported region routes through the SFR overlay taxonomy
+- Every supported region remains in the overlay region taxonomy
 - License gate refuses non-CC0 / non-CC-BY entries
 """
 
@@ -72,25 +72,6 @@ class ManifestRoutingTest(unittest.TestCase):
         for asset in assets:
             with self.subTest(asset=asset.id):
                 self.assertIn(asset.region, valid)
-
-    def test_manifest_virtual_paths_route_to_correct_region(self):
-        assets = PIPE.load_manifest(str(self._write_region_manifest()))
-        for asset in assets:
-            with self.subTest(asset=asset.id):
-                inferred = BLD._optional_library_asset_regions(
-                    asset.virtual_path, "o4sfr"
-                )
-                if asset.region == "generic":
-                    self.assertEqual(inferred, ("generic",))
-                else:
-                    self.assertIn(
-                        asset.region, inferred,
-                        msg=(
-                            f"manifest says {asset.region!r} but "
-                            f"_optional_library_asset_regions returned {inferred!r} "
-                            f"for {asset.virtual_path!r}"
-                        ),
-                    )
 
     def test_manifest_licenses_are_permissive(self):
         assets = PIPE.load_manifest(str(self._write_region_manifest()))

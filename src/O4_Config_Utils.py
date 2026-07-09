@@ -95,17 +95,30 @@ def config_compatibility(value) -> str:
 
 def normalize_config_entry(var: str, value: str) -> tuple[str, str]:
     """Map legacy config keys/values to the current user-facing schema."""
-    aliases = {
+    pixel_radius_aliases = {
         "sfr_bld_close_k": "sfr_bld_close_m",
         "sfr_bld_open_k": "sfr_bld_open_m",
-        "sfr_bld_del": "sfr_bld_disable_cache",
-        "sfr_veg_del": "sfr_veg_disable_cache",
         f"{global_prefix}sfr_bld_close_k": f"{global_prefix}sfr_bld_close_m",
         f"{global_prefix}sfr_bld_open_k": f"{global_prefix}sfr_bld_open_m",
+    }
+    simple_aliases = {
+        "sfr_bld_del": "sfr_bld_disable_cache",
+        "sfr_veg_del": "sfr_veg_disable_cache",
+        "sfr_bld_extra_library_assets": "sfr_bld_asset_mode",
+        "sfr_bld_o4sfr_library_assets": "sfr_bld_asset_mode",
+        "bld_o4sfr_assets": "sfr_bld_asset_mode",
+        "bld_assets": "sfr_bld_asset_mode",
         f"{global_prefix}sfr_bld_del": f"{global_prefix}sfr_bld_disable_cache",
         f"{global_prefix}sfr_veg_del": f"{global_prefix}sfr_veg_disable_cache",
+        f"{global_prefix}sfr_bld_extra_library_assets": f"{global_prefix}sfr_bld_asset_mode",
+        f"{global_prefix}sfr_bld_o4sfr_library_assets": f"{global_prefix}sfr_bld_asset_mode",
+        f"{global_prefix}bld_o4sfr_assets": f"{global_prefix}sfr_bld_asset_mode",
+        f"{global_prefix}bld_assets": f"{global_prefix}sfr_bld_asset_mode",
     }
-    if var not in aliases:
+
+    if var in simple_aliases:
+        return simple_aliases[var], value
+    if var not in pixel_radius_aliases:
         return var, value
 
     try:
@@ -113,7 +126,7 @@ def normalize_config_entry(var: str, value: str) -> tuple[str, str]:
         value = str(float(value) * 2.0)
     except Exception:
         pass
-    return aliases[var], value
+    return pixel_radius_aliases[var], value
 
 ################################################################################
 # Initialization to default values
@@ -140,7 +153,7 @@ try:
         if line[0] == "#":
             continue
         try:
-            (var, value) = line.split("=")
+            (var, value) = line.split("=", 1)
             value = config_compatibility(value)
             var, value = normalize_config_entry(var, value)
             # Set all tile and app config variables
@@ -217,7 +230,7 @@ class Tile:
                 if not line or line[0] == "#":
                     continue
                 try:
-                    (var, value) = line.split("=")
+                    (var, value) = line.split("=", 1)
                     value = config_compatibility(value)
                     var, value = normalize_config_entry(var, value)
                     if cfg_vars[var]["type"] in (bool, list):
@@ -1118,7 +1131,7 @@ class Ortho4XP_Config(tk.Toplevel):
             if not line or line[0] == "#":
                 continue
             try:
-                (var, value) = line.split("=")
+                (var, value) = line.split("=", 1)
                 value = config_compatibility(value)
                 var, value = normalize_config_entry(var, value)
                 self.v_[var].set(value)
@@ -1182,7 +1195,7 @@ class Ortho4XP_Config(tk.Toplevel):
             if line[0] == "#":
                 continue
             try:
-                (var, value) = line.split("=")
+                (var, value) = line.split("=", 1)
                 value = config_compatibility(value)
                 var, value = normalize_config_entry(var, value)
                 self.v_[var].set(value)
@@ -1276,7 +1289,7 @@ class Ortho4XP_Config(tk.Toplevel):
                     line = line.strip()
                     if not line or line[0] == "#":
                         continue
-                    (var, value) = line.split("=")
+                    (var, value) = line.split("=", 1)
                     # Ignore list_app_vars
                     if var in list_app_vars:
                         continue
@@ -1341,7 +1354,7 @@ class Ortho4XP_Config(tk.Toplevel):
                     line = line.strip()
                     if not line or line[0] == "#":
                         continue
-                    (var, value) = line.split("=")
+                    (var, value) = line.split("=", 1)
                     # Ignore global tile vars
                     if var in list_global_tile_vars:
                         continue
@@ -1520,7 +1533,7 @@ class Ortho4XP_Config(tk.Toplevel):
                 ),
                 "r",
             ) as f:
-                file_dict = dict(line.strip().split("=") for line in f if line.strip())
+                file_dict = self.cfg_to_dict(f.name)
                 for var in list_tile_vars:
                     # Skip default_website and default_zl since they're not a part of the tab settings
                     if var == "default_website" or var == "default_zl":
@@ -1550,9 +1563,7 @@ class Ortho4XP_Config(tk.Toplevel):
             # Check Tile Config tab values against tile config values in the global config file
             try:
                 with open(global_cfg_file, "r") as f:
-                    file_dict = dict(
-                        line.strip().split("=") for line in f if line.strip()
-                    )
+                    file_dict = self.cfg_to_dict(f.name)
                     for var in list_global_tile_vars:
                         # Config file doesn't have global_ prefix so we need to remove it
                         _var = var.replace(global_prefix, "")
@@ -1583,9 +1594,7 @@ class Ortho4XP_Config(tk.Toplevel):
             # Check Global Config tab values against the global config file
             try:
                 with open(global_cfg_file, "r") as f:
-                    file_dict = dict(
-                        line.strip().split("=") for line in f if line.strip()
-                    )
+                    file_dict = self.cfg_to_dict(f.name)
                     for var in list_global_tile_vars:
                         # Config file does not have global_ prefix so we need to remove it
                         _var = var.replace(global_prefix, "")
@@ -1702,7 +1711,7 @@ class Ortho4XP_Config(tk.Toplevel):
         with open(file, 'r') as file:
             for line in file:
                 line = line.strip()
-                if line and '=' in line:
+                if line and line[0] != '#' and '=' in line:
                     key, value = line.split('=', 1)
                     key = key.strip()
                     value = config_compatibility(value.strip())

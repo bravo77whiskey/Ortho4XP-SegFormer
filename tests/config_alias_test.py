@@ -42,6 +42,24 @@ class ConfigAliasTests(unittest.TestCase):
             ("global_sfr_bld_open_m", "10.0"),
         )
 
+    def test_building_asset_mode_aliases_map_without_value_conversion(self):
+        self.assertEqual(
+            CFG.normalize_config_entry("sfr_bld_extra_library_assets", "facades"),
+            ("sfr_bld_asset_mode", "facades"),
+        )
+        self.assertEqual(
+            CFG.normalize_config_entry("sfr_bld_o4sfr_library_assets", "facades"),
+            ("sfr_bld_asset_mode", "facades"),
+        )
+        self.assertEqual(
+            CFG.normalize_config_entry("bld_o4sfr_assets", "objects"),
+            ("sfr_bld_asset_mode", "objects"),
+        )
+        self.assertEqual(
+            CFG.normalize_config_entry("global_bld_o4sfr_assets", "both"),
+            ("global_sfr_bld_asset_mode", "both"),
+        )
+
     def test_tile_defaults_inherit_current_global_cache_settings(self):
         old_bld = CFG.global_sfr_bld_disable_cache
         old_veg = CFG.global_sfr_veg_disable_cache

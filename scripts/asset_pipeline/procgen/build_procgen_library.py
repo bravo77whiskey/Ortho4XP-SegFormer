@@ -15,8 +15,6 @@ import argparse
 import datetime as _dt
 import json
 import os
-import sys
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 HEADER = """A
@@ -100,7 +98,8 @@ def main(argv=None) -> int:
 
     print(
         f"library.txt: {exported_paths} virtual paths, {exported_objs} "
-        f"EXPORT lines ({len(missing)} missing skipped)"
+        f"OBJ EXPORT lines "
+        f"({len(missing)} missing skipped)"
     )
     return 0
 

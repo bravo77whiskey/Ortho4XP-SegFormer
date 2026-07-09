@@ -2606,12 +2606,11 @@ FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce o
 # NOT clamped to it (floor-only), height-fit selection picks the nearest
 # available floor variant.
 MAX_GENERATED_BUILDING_HEIGHT_M = 40.0
-# Facade-fallback heights keep their historical envelope: SegFormer zones
-# carry no per-building height prediction, so the randomized facade height
-# stays capped where it always was instead of inheriting the taller pool.
+# SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
+# use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 62      # v62: uncapped HeightNet heights, 40 m pool gate
-BLD_PLACEMENT_FAST_CACHE_VERSION = 64  # v64: uncapped HeightNet heights, 40 m pool gate
+BLD_PLACEMENT_CACHE_VERSION = 63      # v63: direct-YOLO facade fallback + heights
+BLD_PLACEMENT_FAST_CACHE_VERSION = 65  # v65: direct-YOLO facade fallback + heights
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -2695,12 +2694,6 @@ CURATED_EXTRA_BUILDING_LIBRARIES = {
         "virtual_prefixes": ("vectors_to_final/", "v2f/"),
         # Niche Cold-War / vintage thematic — primarily European bases.
         "regions": ("europe",),
-    },
-    "o4sfr": {
-        "label": "O4SFR_Library",
-        "package_patterns": ("o4sfr_library", "o4sfr"),
-        "virtual_prefixes": ("o4sfr/",),
-        # Our shipped library — per-asset region encoded in path token /<region>/.
     },
 }
 
@@ -3892,6 +3885,18 @@ def _randomized_facade_height_m(rng, height_priors_by_class, placement_cls):
     return float(rng.triangular(min_h, mode_h, max_h))
 
 
+def _yolo_facade_height_m(detection, rng, height_priors_by_class, placement_cls):
+    """Return YOLO/HeightNet detection height, falling back to class priors."""
+    if detection:
+        try:
+            height_m = float(detection.get('height_m'))
+            if math.isfinite(height_m) and height_m > 0.0:
+                return height_m
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return _randomized_facade_height_m(rng, height_priors_by_class, placement_cls)
+
+
 def _asset_footprint_span_m(asset):
     """Return the larger raw footprint side for centre-spacing estimates."""
     max_side_m = asset.get('footprint_max_side_m')
@@ -4080,6 +4085,53 @@ def _class_min_fit_inradius_m(asset_pools):
 def _extra_library_policy():
     """Return optional building-library enrichment policy from the environment."""
     return os.environ.get("O4_SFR_BLD_EXTRA_LIBRARIES", "auto").strip() or "auto"
+
+
+def _building_asset_mode(mode=None):
+    """Return which building asset kinds are enabled for generated placement."""
+    raw = (
+        mode if mode is not None
+        else os.environ.get(
+            "O4_SFR_BLD_ASSET_MODE",
+            os.environ.get(
+                "O4_SFR_BLD_O4SFR_LIBRARY_ASSETS",
+                os.environ.get("O4_SFR_BLD_EXTRA_LIBRARY_ASSETS", "both"),
+            ),
+        )
+    )
+    value = str(raw or "both").strip().lower()
+    aliases = {
+        "object": "objects",
+        "obj": "objects",
+        "objs": "objects",
+        "facade": "facades",
+        "fac": "facades",
+        "facs": "facades",
+        "all": "both",
+        "on": "both",
+        "true": "both",
+        "1": "both",
+    }
+    value = aliases.get(value, value)
+    return value if value in {"objects", "facades", "both"} else "both"
+
+
+def _asset_kind_enabled(kind, asset_mode):
+    mode = _building_asset_mode(asset_mode)
+    return mode == "both" or mode == str(kind or "").strip().lower() + "s"
+
+
+def _filter_asset_pools_for_mode(asset_pools, asset_mode):
+    mode = _building_asset_mode(asset_mode)
+    if mode == "both":
+        return asset_pools
+    filtered = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
+    for cls, pool in (asset_pools or {}).items():
+        filtered[cls] = [
+            asset for asset in (pool or ())
+            if _asset_kind_enabled(asset.get('kind'), mode)
+        ]
+    return filtered
 
 
 def _enabled_extra_library_ids(policy=None):
@@ -4598,8 +4650,8 @@ def _optional_asset_region_match(asset_regions, asset_region):
     """Return True when a classified optional asset is valid for a tile region.
 
     The token ``"generic"`` on an asset acts as a wildcard so global libraries
-    (OB_Library, MisterX residual residential subset, the o4sfr generic bucket)
-    can serve tiles in any natural-earth region.
+    (OB_Library, MisterX residual residential subset) can serve tiles in any
+    natural-earth region.
     """
     if not asset_regions:
         return False
@@ -4608,26 +4660,6 @@ def _optional_asset_region_match(asset_regions, asset_region):
     region = (asset_region or "generic").lower()
     allowed = OPTIONAL_ASSET_REGION_ALIASES.get(region, {region})
     return bool(set(asset_regions).intersection(allowed))
-
-
-_O4SFR_PATH_REGION_TOKENS = {
-    "/north_america/": ("north_america",),
-    "/north-america/": ("north_america",),
-    "/america/": ("north_america", "south_america"),
-    "/americas/": ("north_america", "south_america"),
-    "/south_america/": ("south_america",),
-    "/south-america/": ("south_america",),
-    "/latam/": ("south_america",),
-    "/europe/": ("europe",),
-    "/scandinavia/": ("scandinavia",),
-    "/mediterranean/": ("mediterranean",),
-    "/asia/": ("asia",),
-    "/se_asia/": ("se_asia",),
-    "/southeast_asia/": ("se_asia",),
-    "/africa/": ("africa",),
-    "/australia_oceania/": ("australia_oceania",),
-    "/oceania/": ("australia_oceania",),
-}
 
 
 def _load_region_overrides():
@@ -4676,7 +4708,7 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
     Resolution order, first match wins:
 
     1. ``O4_SFR_Region_Overrides.json`` (visual-triage decisions).
-    2. Per-library hand-coded path rules (world-models, cdb-library, o4sfr).
+    2. Per-library hand-coded path rules (world-models, cdb-library).
     3. The library's static ``regions`` registration in
        ``CURATED_EXTRA_BUILDING_LIBRARIES``.
     """
@@ -4730,13 +4762,6 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
         ):
             return ("australia_oceania",)
 
-    # Our shipped library carries the region in a path token: o4sfr/<region>/...
-    if lib_id == "o4sfr" or p.startswith("o4sfr/"):
-        for token, regions in _O4SFR_PATH_REGION_TOKENS.items():
-            if token in p:
-                return regions
-        return ("generic",)
-
     # Fall back to the library's static `regions` registration.  Libraries that
     # leave this empty stay "unclassified" and won't enter the placement pool
     # unless a path branch above promotes them.
@@ -4765,7 +4790,8 @@ def _optional_library_rejection_reason(obj_path, lib_id, asset_region):
     return None
 
 
-def _optional_library_audit_counters(library_exports, enabled_library_ids, asset_region):
+def _optional_library_audit_counters(library_exports, enabled_library_ids,
+                                     asset_region):
     """Return accepted/rejected optional-library candidate counts for diagnostics."""
     counters = {
         "exports": Counter(),
@@ -4887,16 +4913,16 @@ def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports
             continue
         if _optional_library_rejection_reason(obj_path, lib_id, asset_region):
             continue
+        regions = _optional_library_asset_regions(obj_path, lib_id)
+        region_priority = _region_priority_for_asset_regions(
+            regions, asset_region
+        )
         height_m = _object_estimated_height_m(obj_path)
         if _is_very_tall_building_asset(obj_path, height_m):
             continue
         bounds_m = _measured_bounds_for_exports(exports, cache_dir)
         if not _footprint_within_limits(bounds_m, max_area_m2=7_000.0, max_side_m=110.0):
             continue
-        regions = _optional_library_asset_regions(obj_path, lib_id)
-        region_priority = _region_priority_for_asset_regions(
-            regions, asset_region
-        )
         _append_object_asset(
             asset_pools,
             obj_path,
@@ -8794,10 +8820,8 @@ def run(
 ):
     legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
     # Retired feature knobs, still passed by older (frozen-exe) pipeline
-    # callers. Accepted and ignored; the behaviour they selected is now fixed:
-    # overlap removal always on (zero-threshold smallest-first drop),
-    # detection clipping to free area always on, facades and inferred/smart
-    # gap fill never placed.
+    # callers. Accepted and ignored; current placement behaviour is fixed by
+    # the active pipeline settings.
     for _retired in (
         'include_default_assets',
         'include_sfd_assets',
@@ -9279,7 +9303,7 @@ def run(
             f"(asset pool heights up to {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
         )
         print(
-            "YOLO OBB placement: object-only mode (no facade fallback)"
+            "YOLO OBB placement: object/facade mode controlled by bld_assets"
             f" (strict containment, +{YOLO_OBJECT_OUTLINE_MARGIN_M:.2f}m quantisation margin)"
         )
         try:
@@ -9430,6 +9454,7 @@ def run(
         bool(sh_bld_objects) or _find_library_export(custom_scenery_dir, 'simheaven/')
     )
     enabled_extra_library_ids = _enabled_extra_library_ids()
+    building_asset_mode = _building_asset_mode()
     # Filter every scanned export down to the ones X-Plane will actually
     # resolve on this tile: packs like SFD Global ship simHeaven-alias shims
     # inside REGION blocks (e.g. REGION scandinavia), and referencing those
@@ -9558,6 +9583,7 @@ def run(
     if any(extra_asset_pools.values()):
         enabled_asset_pools.append(extra_asset_pools)
     asset_pools = _merge_asset_pools(*enabled_asset_pools)
+    asset_pools = _filter_asset_pools_for_mode(asset_pools, building_asset_mode)
     # Auto-reject library aliases whose resolved mesh is far larger/taller than the
     # footprint their virtual-path name declares (third-party library_txt mistakes,
     # e.g. a small simHeaven residential exported to a tall SFD apartment). This
@@ -9590,6 +9616,7 @@ def run(
     if smallest_asset_only:
         asset_sources_label += " (smallest asset per class)"
     print(f"Building assets: {asset_sources_label}")
+    print(f"Building asset mode: {building_asset_mode}")
     print(
         "Optional building libraries: "
         + _describe_optional_library_diagnostics(
@@ -9730,6 +9757,7 @@ def run(
             residential_poly_sig,
             default_assets_available, sfd_assets_available, simheaven_assets_available,
             tuple(enabled_extra_library_ids),
+            building_asset_mode,
             asset_catalog_signature,
             height_priors_signature,
             natural_asset_region,
@@ -10734,29 +10762,33 @@ def run(
                         residential_area_mask is None or
                         bool(residential_area_mask[jy, jx])
                     )
-                    _t_pf = time.perf_counter() if _pf else 0.0
-                    object_candidate, object_status = _select_yolo_object_candidate(
-                        yolo_object_fit_table,
-                        detection,
-                        yolo_poly,
-                        jx,
-                        jy,
-                        heading,
-                        m_per_px,
-                        residential_context=residential_context,
-                        min_coverage=yolo_min_coverage,
-                        enabled_assets_by_path=enabled_yolo_object_assets_by_path,
-                        static_occ_mask=static_occ_mask,
-                        building_spacing_mask=building_spacing_mask,
-                        scratch_mask=fit_scratch,
-                        static_occ_integral=static_occ_integral,
-                        spacing_occ_integral=building_spacing_integral,
-                        recent_spacing_mask=recent_spacing_mask,
-                        skip_occupancy=not _obj_avoid,
-                        profile_out=_pf_select_acc,
-                    )
-                    if _pf:
-                        _pf_select += time.perf_counter() - _t_pf
+                    object_candidate = None
+                    object_status = 'objects_disabled'
+                    if _asset_kind_enabled('object', building_asset_mode):
+                        _t_pf = time.perf_counter() if _pf else 0.0
+                        object_candidate, object_status = _select_yolo_object_candidate(
+                            yolo_object_fit_table,
+                            detection,
+                            yolo_poly,
+                            jx,
+                            jy,
+                            heading,
+                            m_per_px,
+                            residential_context=residential_context,
+                            min_coverage=yolo_min_coverage,
+                            enabled_assets_by_path=enabled_yolo_object_assets_by_path,
+                            static_occ_mask=static_occ_mask,
+                            building_spacing_mask=building_spacing_mask,
+                            scratch_mask=fit_scratch,
+                            static_occ_integral=static_occ_integral,
+                            spacing_occ_integral=building_spacing_integral,
+                            recent_spacing_mask=recent_spacing_mask,
+                            skip_occupancy=not _obj_avoid,
+                            profile_out=_pf_select_acc,
+                        )
+                        if _pf:
+                            _pf_select += time.perf_counter() - _t_pf
+                    placed_direct_detection = False
                     if object_candidate is not None:
                         asset = object_candidate['asset']
                         final_h = float(object_candidate['heading'])
@@ -10788,26 +10820,64 @@ def run(
                         file_counts['yolo_object_placed'] = (
                             file_counts.get('yolo_object_placed', 0) + 1
                         )
+                        placed_direct_detection = True
                     else:
-                        status_key = {
-                            'no_candidates': 'yolo_object_no_candidates',
-                            'size_reject': 'yolo_object_size_reject',
-                            'coverage_reject': 'yolo_object_coverage_reject',
-                            'outline_reject': 'yolo_object_outline_reject',
-                            'context_skipped': 'yolo_object_context_skipped',
-                            'occupancy_reject': 'yolo_object_occupancy_reject',
-                            'no_dimensions': 'yolo_object_no_dimensions',
-                            'miss': 'yolo_object_lookup_miss',
-                        }.get(object_status, 'yolo_object_lookup_miss')
-                        file_counts[status_key] = file_counts.get(status_key, 0) + 1
+                        if object_status != 'objects_disabled':
+                            status_key = {
+                                'no_candidates': 'yolo_object_no_candidates',
+                                'size_reject': 'yolo_object_size_reject',
+                                'coverage_reject': 'yolo_object_coverage_reject',
+                                'outline_reject': 'yolo_object_outline_reject',
+                                'context_skipped': 'yolo_object_context_skipped',
+                                'occupancy_reject': 'yolo_object_occupancy_reject',
+                                'no_dimensions': 'yolo_object_no_dimensions',
+                                'miss': 'yolo_object_lookup_miss',
+                            }.get(object_status, 'yolo_object_lookup_miss')
+                            file_counts[status_key] = file_counts.get(status_key, 0) + 1
                         if _blkdbg is not None:
                             _blkdbg.append(
                                 ('sel_' + str(object_status), jx, jy, yolo_poly)
                             )
-                        # Object-only placement: when no object fully fits, the
-                        # detection is left empty (no facade fallback).
+                        if (
+                            _asset_kind_enabled('facade', building_asset_mode) and
+                            _poly_fits(building_spacing_mask, yolo_poly, fit_scratch)
+                        ):
+                            facade_path = _facade_for_detection(
+                                facade_cls,
+                                veg_map,
+                                jx,
+                                jy,
+                                m_per_px,
+                                lat=float(o_lat),
+                                lon=float(o_lon),
+                                include_simheaven_assets=simheaven_assets_available,
+                            )
+                            placed_facades.append((
+                                _pixel_ring_to_latlon(
+                                    yolo_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+                                ),
+                                facade_path,
+                                _yolo_facade_height_m(
+                                    detection, height_rng, height_priors_by_class, facade_cls
+                                ),
+                            ))
+                            placed_viz_polys.append((yolo_poly.copy(), facade_cls))
+                            _mark_poly(building_spacing_mask, yolo_poly)
+                            if _obj_avoid:
+                                cv2.fillPoly(recent_spacing_mask, [np.int32(yolo_poly)], 1)
+                                recent_spacing_marks += 1
+                            pts_this.append((jx, jy, heading, facade_cls))
+                            file_counts['yolo_facade_placed'] = (
+                                file_counts.get('yolo_facade_placed', 0) + 1
+                            )
+                            direct_yolo_facade_placements += 1
+                            placed_direct_detection = True
+                        elif _asset_kind_enabled('facade', building_asset_mode):
+                            file_counts['yolo_facade_spacing_reject'] = (
+                                file_counts.get('yolo_facade_spacing_reject', 0) + 1
+                            )
 
-                    yolo_viz_polys[-1] = (yolo_poly.copy(), True)
+                    yolo_viz_polys[-1] = (yolo_poly.copy(), placed_direct_detection)
                     # The placed-OBB mask and the incremental occupancy
                     # integrals are only consumed by the overlap-avoidance
                     # paths (OBB dedup + selector occupancy), both skipped
@@ -10829,7 +10899,8 @@ def run(
                             )
                             recent_spacing_mask.fill(0)
                             recent_spacing_marks = 0
-                    file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
+                    if placed_direct_detection:
+                        file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
                 if _blkdbg is not None:
                     try:
                         import pickle as _blk_pickle
@@ -11128,6 +11199,8 @@ def run(
             def _try_place_yolo_template(
                 jx, jy, zone_label, count_key, template=None, use_center_blockers=True
             ):
+                if not _asset_kind_enabled('facade', building_asset_mode):
+                    return False
                 best = template if template is not None else _zone_yolo_template(jx, jy, zone_label)
                 if best is None:
                     best = _dominant_neighbor_yolo_template(zone_label)
@@ -11185,8 +11258,8 @@ def run(
                         footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
                     ),
                     facade_path,
-                    _randomized_facade_height_m(
-                        height_rng, height_priors_by_class, try_cls
+                    _yolo_facade_height_m(
+                        best, height_rng, height_priors_by_class, try_cls
                     ),
                 ))
                 placed_viz_polys.append((footprint_poly.copy(), try_cls))

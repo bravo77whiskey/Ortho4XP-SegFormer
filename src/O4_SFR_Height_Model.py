@@ -97,7 +97,7 @@ def load_height_model(checkpoint_path=None, device=None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.eval()
-    model._o4sfr_device = device
+    model._sfr_device = device
     return model
 
 
@@ -171,7 +171,7 @@ def predict_detection_heights(model, image, detections, m_per_px,
 
     if not valid_idx:
         return out
-    device = getattr(model, "_o4sfr_device", "cpu")
+    device = getattr(model, "_sfr_device", "cpu")
     crops_np = np.stack(crops)
     scalars_np = np.asarray(scalars, dtype=np.float32)
     preds = np.empty((len(valid_idx),), dtype=np.float64)

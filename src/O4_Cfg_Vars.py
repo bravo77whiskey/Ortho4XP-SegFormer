@@ -501,6 +501,13 @@ cfg_tile_vars = {
         "short_name": "bld_avoid_custom",
         "hint": "Avoid overlapping enabled Custom Scenery objects and facade polygons from scenery_packs.ini when generating SegFormer building overlays.",
     },
+    "sfr_bld_asset_mode": {
+        "type": str,
+        "default": "both",
+        "values": ["objects", "facades", "both"],
+        "short_name": "bld_assets",
+        "hint": "Which building placement assets to use: object models, scalable facades, or object-first placement with facade fallback.",
+    },
     "sfr_bld_yolo_enabled": {
         "type": bool,
         "default": True,
@@ -698,6 +705,7 @@ list_sfr_bld_vars = [
     "sfr_bld_disable_cache",
     "sfr_bld_verbose_log",
     "sfr_bld_avoid_custom_scenery",
+    "sfr_bld_asset_mode",
     "sfr_bld_yolo_enabled",
     "sfr_bld_yolo_checkpoint",
     "sfr_bld_yolo_conf",

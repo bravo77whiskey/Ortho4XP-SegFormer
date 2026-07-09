@@ -403,6 +403,7 @@ def build_tile_list(
             SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
             SFR.sfr_bld_verbose_log = tile.sfr_bld_verbose_log
             SFR.sfr_bld_avoid_custom_scenery = tile.sfr_bld_avoid_custom_scenery
+            SFR.sfr_bld_asset_mode = tile.sfr_bld_asset_mode
             SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
             SFR.sfr_bld_yolo_checkpoint = tile.sfr_bld_yolo_checkpoint
             SFR.sfr_bld_yolo_conf = tile.sfr_bld_yolo_conf
