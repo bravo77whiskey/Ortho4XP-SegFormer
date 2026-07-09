@@ -4,7 +4,8 @@ Runs after YOLO OBB building detection: each detection's fixed 64 m ground
 window is cropped from the source texture, resized to 96x96 and pushed with
 three footprint scalars through a small CNN that outputs log1p(height_m).
 Weights come from the user's external open-buildings-training repo
-(``I:\\building-models\\heightnet.pt``; val MAE 2.45 m over 2.89 M buildings).
+(``I:\\building-models\\heightnet.pt``; updated 2026-07-09, val MAE 2.40 m
+over 2.89 M buildings).
 
 The architecture below was reconstructed from the checkpoint state dict and
 validated against SimHeaven ground-truth heights (MAE 2.58 m, matching the
@@ -14,7 +15,7 @@ probes that pinned the wiring:
     32,32,64,64,128,128,256,256 with stride 2 on the channel-up convs;
     adaptive average pooling to 256 features.
   - head: concat [log10(area_m2+1), log10(long_side_m+1), m_per_px] ->
-    Linear(259,128) -> ReLU -> Linear(128,1).
+    Linear(259,128) -> ReLU -> optional Dropout -> Linear(128,1).
   - input pixels are RGB / 255 (no ImageNet normalization).
 
 Known limitation: buildings much larger than the 64 m window (warehouses,
@@ -36,6 +37,7 @@ DEFAULT_HEIGHT_CHECKPOINT = r"H:\model_training\models\heightnet.pt"
 HEIGHT_MODEL_MIN_M = 2.5
 # Batch size for the tiny CNN; 512 crops is ~18 MB of input on device.
 DEFAULT_HEIGHT_BATCH = 512
+HEAD_DROPOUT_P = 0.20
 
 _BLOCK_CHANNELS = ((3, 32), (32, 32), (32, 64), (64, 64),
                    (64, 128), (128, 128), (128, 256), (256, 256))
@@ -43,7 +45,7 @@ _BLOCK_CHANNELS = ((3, 32), (32, 32), (32, 64), (64, 64),
 _STRIDE_BLOCKS = frozenset({2, 4, 6})
 
 
-def _build_heightnet():
+def _build_heightnet(head_dropout=False):
     import torch.nn as nn
 
     class HeightNet(nn.Module):
@@ -58,9 +60,13 @@ def _build_heightnet():
                     nn.ReLU(inplace=True),
                 ]
             self.body = nn.Sequential(*layers)
-            self.head = nn.Sequential(
-                nn.Linear(256 + 3, 128), nn.ReLU(inplace=True), nn.Linear(128, 1)
-            )
+            head_layers = [nn.Linear(256 + 3, 128), nn.ReLU(inplace=True)]
+            if head_dropout:
+                # Dropout has no parameters and is disabled in eval mode, but
+                # it shifts the final Linear layer to head.3 in new checkpoints.
+                head_layers.append(nn.Dropout(p=HEAD_DROPOUT_P))
+            head_layers.append(nn.Linear(128, 1))
+            self.head = nn.Sequential(*head_layers)
 
         def forward(self, image, scalars):
             import torch.nn.functional as F
@@ -70,6 +76,22 @@ def _build_heightnet():
             return self.head(torch.cat([x, scalars], dim=1)).squeeze(1)
 
     return HeightNet()
+
+
+def _checkpoint_head_uses_dropout(state_dict):
+    has_legacy_head = "head.2.weight" in state_dict or "head.2.bias" in state_dict
+    has_dropout_head = "head.3.weight" in state_dict or "head.3.bias" in state_dict
+    if has_legacy_head and has_dropout_head:
+        raise ValueError(
+            "HeightNet checkpoint has both legacy head.2 and dropout head.3 keys"
+        )
+    if has_dropout_head:
+        return True
+    if has_legacy_head:
+        return False
+    raise ValueError(
+        "HeightNet checkpoint does not contain recognizable head.2 or head.3 keys"
+    )
 
 
 def default_checkpoint_path():
@@ -91,13 +113,16 @@ def load_height_model(checkpoint_path=None, device=None):
         raise ValueError(
             f"HeightNet checkpoint window_m={window_m} != expected {WINDOW_M}"
         )
-    model = _build_heightnet()
-    model.load_state_dict(ckpt["model"], strict=True)
+    state_dict = ckpt["model"]
+    head_dropout = _checkpoint_head_uses_dropout(state_dict)
+    model = _build_heightnet(head_dropout=head_dropout)
+    model.load_state_dict(state_dict, strict=True)
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.eval()
     model._sfr_device = device
+    model._sfr_heightnet_head_layout = "dropout" if head_dropout else "legacy"
     return model
 
 
