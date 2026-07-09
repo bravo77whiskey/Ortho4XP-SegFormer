@@ -61,3 +61,49 @@ def test_yolo_facade_fallback_prefers_detection_height():
         {},
         overlay.BLD_CLASS_TINY_RESIDENTIAL,
     ) == overlay.DEFAULT_FACADE_HEIGHT_M[overlay.BLD_CLASS_TINY_RESIDENTIAL]
+
+
+def test_large_footprint_height_cap_feeds_facade_height():
+    rng = overlay.np.random.default_rng(123)
+    detection = {
+        "height_m": overlay._capped_detection_height_m(
+            {
+                "placement_class": overlay.BLD_CLASS_APARTMENT_BLOCK,
+                "area_m2": 8_000.0,
+                "max_side_m": 120.0,
+            },
+            80.0,
+        ),
+    }
+
+    assert detection["height_m"] == overlay.LARGE_FOOTPRINT_HEIGHT_CAP_M
+    assert overlay._yolo_facade_height_m(
+        detection,
+        rng,
+        {},
+        overlay.BLD_CLASS_LARGE,
+    ) == overlay.LARGE_FOOTPRINT_HEIGHT_CAP_M
+
+
+def test_direct_yolo_facade_rejects_oversized_raw_footprint():
+    assert overlay._direct_yolo_facade_footprint_allowed(
+        {
+            "placement_class": overlay.BLD_CLASS_APARTMENT_BLOCK,
+            "area_m2": 1_200.0,
+            "max_side_m": 45.0,
+        }
+    )
+    assert not overlay._direct_yolo_facade_footprint_allowed(
+        {
+            "placement_class": overlay.BLD_CLASS_APARTMENT_BLOCK,
+            "area_m2": 8_000.0,
+            "max_side_m": 120.0,
+        }
+    )
+    assert not overlay._direct_yolo_facade_footprint_allowed(
+        {
+            "placement_class": overlay.BLD_CLASS_MEDIUM,
+            "length_m": 140.0,
+            "width_m": 70.0,
+        }
+    )

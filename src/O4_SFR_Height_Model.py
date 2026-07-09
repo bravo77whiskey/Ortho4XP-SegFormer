@@ -20,8 +20,8 @@ probes that pinned the wiring:
 
 Known limitation: buildings much larger than the 64 m window (warehouses,
 big-box) can over-predict badly (roof-only crops leave the footprint scalars
-unchecked).  Callers apply a floor only; over-predictions are harmless to
-height-fit selection, which just picks the tallest asset in the class pool.
+unchecked).  Callers apply a floor, and large-footprint placement classes also
+cap outlier heights before object/facade selection.
 """
 
 from __future__ import annotations
@@ -149,8 +149,8 @@ def predict_detection_heights(model, image, detections, m_per_px,
     ``image`` is the RGB uint8 texture array the detections are in pixel
     coordinates of (the same array YOLO inference cropped from), ``m_per_px``
     its ground resolution. Returns a float64 array aligned with
-    ``detections``. Predictions are raw model output (expm1) — callers
-    apply the HEIGHT_MODEL_MIN_M floor.
+    ``detections``. Predictions are raw model output (expm1); callers apply
+    the HEIGHT_MODEL_MIN_M floor and any placement-class-specific caps.
     """
     import cv2
     import torch

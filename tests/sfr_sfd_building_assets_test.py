@@ -382,6 +382,60 @@ class SfdBuildingAssetTests(unittest.TestCase):
             9.0,
         )
 
+    def test_heightnet_caps_large_footprint_detection_heights_only(self):
+        detections = [
+            {
+                "height_m": 8.0,
+                "height_source": "class_default",
+                "placement_class": BLD.BLD_CLASS_LARGE,
+            },
+            {
+                "height_m": 10.0,
+                "height_source": "class_default",
+                "placement_class": BLD.BLD_CLASS_EXTRA_LARGE,
+            },
+            {
+                "height_m": 12.0,
+                "height_source": "class_default",
+                "placement_class": BLD.BLD_CLASS_APARTMENT_BLOCK,
+                "area_m2": 1_200.0,
+                "max_side_m": 45.0,
+            },
+            {
+                "height_m": 13.0,
+                "height_source": "class_default",
+                "placement_class": BLD.BLD_CLASS_APARTMENT_BLOCK,
+                "area_m2": 8_000.0,
+                "max_side_m": 120.0,
+            },
+            {
+                "height_m": 14.0,
+                "height_source": "class_default",
+                "placement_class": BLD.BLD_CLASS_LARGE,
+            },
+        ]
+
+        with mock.patch.object(
+            BLD.HEIGHTMODEL,
+            "predict_detection_heights",
+            return_value=np.asarray(
+                [80.0, 80.0, 80.0, 80.0, np.nan], dtype=np.float64
+            ),
+        ):
+            BLD._apply_heightnet_to_detections(
+                object(), np.zeros((8, 8, 3), dtype=np.uint8), detections, 1.0
+            )
+
+        self.assertEqual(detections[0]["height_raw_m"], 80.0)
+        self.assertEqual(detections[0]["height_m"], BLD.LARGE_FOOTPRINT_HEIGHT_CAP_M)
+        self.assertEqual(detections[0]["height_source"], "heightnet")
+        self.assertEqual(detections[1]["height_m"], BLD.LARGE_FOOTPRINT_HEIGHT_CAP_M)
+        self.assertEqual(detections[2]["height_m"], 80.0)
+        self.assertEqual(detections[3]["height_m"], BLD.LARGE_FOOTPRINT_HEIGHT_CAP_M)
+        self.assertNotIn("height_raw_m", detections[4])
+        self.assertEqual(detections[4]["height_m"], 14.0)
+        self.assertEqual(detections[4]["height_source"], "class_default")
+
     def test_pipeline_yolo_defaults_match_config_defaults(self):
         import O4_Cfg_Vars as CFG
         import O4_SFR_Pipeline as PIPE
@@ -822,6 +876,46 @@ class SfdBuildingAssetTests(unittest.TestCase):
 
         self.assertEqual(dropped, 1)
         self.assertEqual([det["confidence"] for det in kept], [0.90, 0.50])
+
+    def test_oversized_yolo_detection_cannot_suppress_smaller_overlaps(self):
+        detections = [
+            {
+                "id": "small-a",
+                "confidence": 0.70,
+                "area_m2": 400.0,
+                "max_side_m": 20.0,
+                "points": [[10, 10], [30, 10], [30, 30], [10, 30]],
+            },
+            {
+                "id": "small-b",
+                "confidence": 0.65,
+                "area_m2": 400.0,
+                "max_side_m": 20.0,
+                "points": [[55, 55], [75, 55], [75, 75], [55, 75]],
+            },
+            {
+                "id": "oversized-merge",
+                "confidence": 0.95,
+                "area_m2": 9_800.0,
+                "max_side_m": 140.0,
+                "points": [[0, 0], [140, 0], [140, 70], [0, 70]],
+            },
+        ]
+
+        filtered, oversize_dropped = BLD._filter_oversized_direct_yolo_detections(
+            detections
+        )
+        kept, overlap_dropped = BLD._suppress_overlapping_yolo_detections(
+            filtered,
+            coverage_threshold=0.0,
+            min_overlap_m2=0.0,
+            m_per_px=1.0,
+            pair_rule=True,
+        )
+
+        self.assertEqual(oversize_dropped, 1)
+        self.assertEqual(overlap_dropped, 0)
+        self.assertEqual([det["id"] for det in kept], ["small-a", "small-b"])
 
     def test_yolo_obb_detection_clips_bounds(self):
         detection = BLD._yolo_obb_detection_from_points(

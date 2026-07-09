@@ -2602,10 +2602,18 @@ OBJ_FOOTPRINTS: dict = {
 PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 # Tallest generated/pooled non-skyscraper asset (procgen floors <= 12 at
-# 3.2 m).  Gates which library assets may pool -- HeightNet predictions are
-# NOT clamped to it (floor-only), height-fit selection picks the nearest
-# available floor variant.
+# 3.2 m). Gates which library assets may pool.
 MAX_GENERATED_BUILDING_HEIGHT_M = 40.0
+# Large-footprint detections are warehouse/industrial-scale. Modern warehouse
+# clear heights cluster around 32-40 ft; 16 m leaves room for roof structure
+# while preventing HeightNet outliers from becoming tower-height warehouses.
+LARGE_FOOTPRINT_HEIGHT_CAP_M = 16.0
+# Direct-YOLO facade fallback extrudes the detected OBB itself. Keep that path
+# inside the largest sane single-building roof envelope; bigger detections must
+# use a fitting object asset or be skipped, rather than becoming field-sized
+# facades.
+MAX_DIRECT_YOLO_FACADE_AREA_M2 = ASSET_LARGE_MAX_M2
+MAX_DIRECT_YOLO_FACADE_SIDE_M = 115.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
@@ -3895,6 +3903,69 @@ def _yolo_facade_height_m(detection, rng, height_priors_by_class, placement_cls)
         except (AttributeError, TypeError, ValueError):
             pass
     return _randomized_facade_height_m(rng, height_priors_by_class, placement_cls)
+
+
+def _capped_detection_height_m(detection, height_m):
+    """Clamp warehouse/industrial-scale detection heights to realistic boxes."""
+    height_m = float(height_m)
+    try:
+        placement_cls = int(detection.get('placement_class'))
+    except (AttributeError, TypeError, ValueError):
+        placement_cls = None
+    if placement_cls in (BLD_CLASS_LARGE, BLD_CLASS_EXTRA_LARGE):
+        return min(height_m, float(LARGE_FOOTPRINT_HEIGHT_CAP_M))
+    area_m2, max_side_m = _detection_footprint_metrics_m(detection)
+    if area_m2 > 0.0 and max_side_m > 0.0:
+        footprint_cls = _roof_fragment_class(area_m2, max_side_m, 1.0)
+        if footprint_cls in (BLD_CLASS_LARGE, BLD_CLASS_EXTRA_LARGE):
+            return min(height_m, float(LARGE_FOOTPRINT_HEIGHT_CAP_M))
+    return height_m
+
+
+def _detection_footprint_metrics_m(detection):
+    """Return (area_m2, max_side_m) from a YOLO detection record."""
+    try:
+        area_m2 = float(detection.get('area_m2') or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        area_m2 = 0.0
+    try:
+        max_side_m = float(detection.get('max_side_m') or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        max_side_m = 0.0
+    try:
+        length_m = float(detection.get('length_m') or 0.0)
+        width_m = float(detection.get('width_m') or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        length_m = width_m = 0.0
+    if area_m2 <= 0.0 and length_m > 0.0 and width_m > 0.0:
+        area_m2 = length_m * width_m
+    max_side_m = max(max_side_m, length_m, width_m)
+    return area_m2, max_side_m
+
+
+def _direct_yolo_raw_footprint_allowed(detection):
+    """Return False when the raw YOLO OBB footprint is implausibly huge."""
+    area_m2, max_side_m = _detection_footprint_metrics_m(detection)
+    if area_m2 <= 0.0 or max_side_m <= 0.0:
+        return True
+    return (
+        area_m2 <= float(MAX_DIRECT_YOLO_FACADE_AREA_M2) and
+        max_side_m <= float(MAX_DIRECT_YOLO_FACADE_SIDE_M)
+    )
+
+
+def _direct_yolo_facade_footprint_allowed(detection):
+    """Return False when raw OBB facade fallback would be implausibly huge."""
+    return _direct_yolo_raw_footprint_allowed(detection)
+
+
+def _filter_oversized_direct_yolo_detections(detections):
+    """Drop implausibly huge raw detections before overlap suppression."""
+    kept = [
+        det for det in (detections or ())
+        if _direct_yolo_raw_footprint_allowed(det)
+    ]
+    return kept, len(detections or ()) - len(kept)
 
 
 def _asset_footprint_span_m(asset):
@@ -6164,13 +6235,12 @@ def _append_yolo_result_detections(
 
 
 def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
-    """Overwrite detection heights with HeightNet predictions (floor only).
+    """Overwrite detection heights with HeightNet predictions.
 
     Detections whose window/scalars cannot be built keep their decoded or
-    class-default height. Predictions keep no ceiling: heights only rank
-    floor variants in height-fit selection, so an over-predicted warehouse
-    (roof-only 64 m windows) still lands on the tallest asset its class
-    pool offers -- same as a clamped value would.
+    class-default height. Large warehouse/industrial-scale footprints get a
+    realistic ceiling so over-predictions do not extrude giant facades or skew
+    floor-variant ranking; smaller classes keep the raw HeightNet height.
     """
     if height_model is None or not detections or image is None:
         return
@@ -6183,7 +6253,7 @@ def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
         if not math.isfinite(height):
             continue
         det['height_raw_m'] = round(height, 3)
-        det['height_m'] = float(max(height, lo))
+        det['height_m'] = float(_capped_detection_height_m(det, max(height, lo)))
         det['height_source'] = 'heightnet'
 
 
@@ -10221,6 +10291,12 @@ def run(
                     value=getattr(SEGFORMER, 'CLASS_BACKGROUND', 0),
                 )
         raw_yolo_count = len(yolo_detections)
+        if yolo_detections:
+            yolo_detections, yolo_oversize_reject = (
+                _filter_oversized_direct_yolo_detections(yolo_detections)
+            )
+            if yolo_oversize_reject:
+                file_counts['yolo_oversize_reject'] = yolo_oversize_reject
         # Remove overlapping detections so each building area keeps a single
         # object: smallest-first, drop any detection that overlaps an
         # already-kept one, with no minimum-overlap area.
@@ -10838,8 +10914,12 @@ def run(
                             _blkdbg.append(
                                 ('sel_' + str(object_status), jx, jy, yolo_poly)
                             )
+                        facade_footprint_ok = _direct_yolo_facade_footprint_allowed(
+                            detection
+                        )
                         if (
                             _asset_kind_enabled('facade', building_asset_mode) and
+                            facade_footprint_ok and
                             _poly_fits(building_spacing_mask, yolo_poly, fit_scratch)
                         ):
                             facade_path = _facade_for_detection(
@@ -10873,9 +10953,12 @@ def run(
                             direct_yolo_facade_placements += 1
                             placed_direct_detection = True
                         elif _asset_kind_enabled('facade', building_asset_mode):
-                            file_counts['yolo_facade_spacing_reject'] = (
-                                file_counts.get('yolo_facade_spacing_reject', 0) + 1
+                            status_key = (
+                                'yolo_facade_oversize_reject'
+                                if not facade_footprint_ok
+                                else 'yolo_facade_spacing_reject'
                             )
+                            file_counts[status_key] = file_counts.get(status_key, 0) + 1
 
                     yolo_viz_polys[-1] = (yolo_poly.copy(), placed_direct_detection)
                     # The placed-OBB mask and the incremental occupancy
