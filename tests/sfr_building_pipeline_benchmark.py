@@ -116,6 +116,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-stride", type=int, default=None)
     parser.add_argument("--yolo-max-det", type=int, default=None)
     parser.add_argument(
+        "--height-checkpoint",
+        default=None,
+        help="HeightNet checkpoint override for isolated old/new A/B outputs.",
+    )
+    parser.add_argument(
         "--no-custom-scenery-avoidance",
         action="store_true",
         help="Disable avoidance of existing custom-scenery objects/facades "
@@ -265,6 +270,7 @@ def main() -> int:
             yolo_iou=args.yolo_iou,
             yolo_stride=args.yolo_stride,
             yolo_max_det=args.yolo_max_det,
+            height_checkpoint=args.height_checkpoint,
         )
         print(f"[bench] total wall={time.perf_counter() - t0:.2f}s")
     finally:

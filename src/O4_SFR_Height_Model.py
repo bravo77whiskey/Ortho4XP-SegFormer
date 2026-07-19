@@ -1,16 +1,20 @@
-"""Second-stage building-height regressor (HeightNet) for SFR placement.
+"""Second-stage building-height regressors for SFR placement.
 
 Runs after YOLO OBB building detection: each detection's fixed 64 m ground
-window is cropped from the source texture, resized to 96x96 and pushed with
-three footprint scalars through a small CNN that outputs log1p(height_m).
-Weights come from the user's external open-buildings-training repo
-(``I:\\building-models\\heightnet.pt``; updated 2026-07-09, val MAE 2.40 m
-over 2.89 M buildings).
+window is cropped from the source texture and combined with three footprint
+scalars. Checkpoint metadata selects the matching inference contract:
 
-The architecture below was reconstructed from the checkpoint state dict and
-validated against SimHeaven ground-truth heights (MAE 2.58 m, matching the
-reported val MAE) — see tmp/heightnet_tests/heightnet_arch_probe*.py for the
-probes that pinned the wiring:
+* metadata-free legacy checkpoints preserve Ortho4XP's deployed reconstructed
+  96 px CNN and log10 scalar encoding;
+* ``arch=v2`` / ``arch=v2s`` checkpoints use a 64-bin ordinal head on an
+  ImageNet-normalized ConvNeXt-Tiny / ConvNeXt-Small trunk, the checkpoint's
+  ``crop_px``, and normalized natural-log scalars.
+
+Every model returns expected ``log1p(height_m)`` so the public prediction API
+and downstream placement rules stay unchanged.
+
+The legacy architecture below was reconstructed from the checkpoint state
+dict and is retained for backward compatibility:
   - trunk: 8x [Conv3x3(bias=False) -> BN -> ReLU], channels
     32,32,64,64,128,128,256,256 with stride 2 on the channel-up convs;
     adaptive average pooling to 256 features.
@@ -19,15 +23,15 @@ probes that pinned the wiring:
   - input pixels are RGB / 255 (no ImageNet normalization).
 
 Known limitation: buildings much larger than the 64 m window (warehouses,
-big-box) can over-predict badly (roof-only crops leave the footprint scalars
-unchecked).  Callers apply a floor, and large-footprint placement classes also
-cap outlier heights before object/facade selection.
+big-box) can over-predict badly. Callers apply a floor, and large-footprint
+placement classes cap outlier heights before object/facade selection.
 """
 
 from __future__ import annotations
 
 import math
 import os
+from collections.abc import Mapping
 
 import numpy as np
 
@@ -38,6 +42,11 @@ HEIGHT_MODEL_MIN_M = 2.5
 # Batch size for the tiny CNN; 512 crops is ~18 MB of input on device.
 DEFAULT_HEIGHT_BATCH = 512
 HEAD_DROPOUT_P = 0.20
+V2_HEIGHT_BINS = 64
+V2_HEIGHT_MAX_M = 400.0
+
+LEGACY_SCALAR_LAYOUT = "legacy-log10"
+V2_SCALAR_LAYOUT = "v2-normalized-ln"
 
 _BLOCK_CHANNELS = ((3, 32), (32, 32), (32, 64), (64, 64),
                    (64, 128), (128, 128), (128, 256), (256, 256))
@@ -78,6 +87,60 @@ def _build_heightnet(head_dropout=False):
     return HeightNet()
 
 
+def _build_heightnet_v2(backbone="tiny"):
+    """Build the ConvNeXt ordinal model without downloading pretrained weights."""
+    import torch
+    import torch.nn as nn
+
+    if backbone == "small":
+        from torchvision.models import convnext_small
+        body = convnext_small(weights=None).features
+    elif backbone == "tiny":
+        from torchvision.models import convnext_tiny
+        body = convnext_tiny(weights=None).features
+    else:
+        raise ValueError(f"unsupported HeightNet v2 backbone: {backbone!r}")
+
+    class HeightNetV2(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.body = body
+            self.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten())
+            self.head = nn.Sequential(
+                nn.LayerNorm(768 + 3),
+                nn.Linear(768 + 3, 256),
+                nn.SiLU(),
+                nn.Dropout(HEAD_DROPOUT_P),
+                nn.Linear(256, V2_HEIGHT_BINS),
+            )
+            self.register_buffer(
+                "bin_centers",
+                torch.linspace(0.0, math.log1p(V2_HEIGHT_MAX_M), V2_HEIGHT_BINS),
+            )
+            self.register_buffer(
+                "in_mean",
+                torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
+            )
+            self.register_buffer(
+                "in_std",
+                torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
+            )
+
+        def logits(self, image, scalars):
+            normalized = (image - self.in_mean) / self.in_std
+            features = self.pool(self.body(normalized))
+            return self.head(torch.cat([features, scalars], dim=1))
+
+        def expectation(self, logits):
+            probabilities = logits.float().softmax(dim=1)
+            return (probabilities * self.bin_centers).sum(dim=1)
+
+        def forward(self, image, scalars):
+            return self.expectation(self.logits(image, scalars))
+
+    return HeightNetV2()
+
+
 def _checkpoint_head_uses_dropout(state_dict):
     has_legacy_head = "head.2.weight" in state_dict or "head.2.bias" in state_dict
     has_dropout_head = "head.3.weight" in state_dict or "head.3.bias" in state_dict
@@ -100,29 +163,97 @@ def default_checkpoint_path():
     )
 
 
+def _checkpoint_crop_px(ckpt, arch):
+    if arch == "v1-legacy":
+        raw_crop_px = ckpt.get("crop_px", CROP_PX)
+    else:
+        if "crop_px" not in ckpt:
+            raise ValueError(
+                f"HeightNet checkpoint arch={arch!r} is missing required crop_px"
+            )
+        raw_crop_px = ckpt["crop_px"]
+    if isinstance(raw_crop_px, bool):
+        raise ValueError(f"HeightNet checkpoint crop_px is invalid: {raw_crop_px!r}")
+    try:
+        crop_px = int(raw_crop_px)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"HeightNet checkpoint crop_px is invalid: {raw_crop_px!r}"
+        ) from exc
+    if crop_px <= 0 or crop_px != raw_crop_px:
+        raise ValueError(f"HeightNet checkpoint crop_px is invalid: {raw_crop_px!r}")
+    if arch == "v1-legacy" and crop_px != CROP_PX:
+        raise ValueError(
+            f"Legacy HeightNet checkpoint crop_px={crop_px} != expected {CROP_PX}"
+        )
+    return crop_px
+
+
+def _checkpoint_architecture(ckpt):
+    raw_arch = ckpt.get("arch")
+    if raw_arch is None or str(raw_arch).strip() == "":
+        return "v1-legacy"
+    arch = str(raw_arch).strip().lower()
+    if arch not in {"v2", "v2s"}:
+        raise ValueError(f"HeightNet checkpoint has unsupported arch={raw_arch!r}")
+    return arch
+
+
 def load_height_model(checkpoint_path=None, device=None):
-    """Load HeightNet onto ``device``; raises on a bad/missing checkpoint."""
+    """Load an autodetected HeightNet onto ``device``.
+
+    Legacy checkpoints intentionally have no ``arch`` metadata. New ordinal
+    checkpoints must declare ``arch`` and ``crop_px`` so incompatible formats
+    fail explicitly instead of producing plausible-looking wrong heights.
+    """
     import torch
 
     path = checkpoint_path or default_checkpoint_path()
     # weights_only: the checkpoint is a plain tensor/state dict from an
     # external repo — never unpickle arbitrary objects from it.
     ckpt = torch.load(path, map_location="cpu", weights_only=True)
-    window_m = float(ckpt.get("window_m", WINDOW_M))
-    if abs(window_m - WINDOW_M) > 1e-6:
+    if not isinstance(ckpt, Mapping):
+        raise ValueError("HeightNet checkpoint must contain a mapping")
+    try:
+        window_m = float(ckpt.get("window_m", WINDOW_M))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"HeightNet checkpoint window_m is invalid: {ckpt.get('window_m')!r}"
+        ) from exc
+    if not math.isfinite(window_m) or abs(window_m - WINDOW_M) > 1e-6:
         raise ValueError(
             f"HeightNet checkpoint window_m={window_m} != expected {WINDOW_M}"
         )
-    state_dict = ckpt["model"]
-    head_dropout = _checkpoint_head_uses_dropout(state_dict)
-    model = _build_heightnet(head_dropout=head_dropout)
+    arch = _checkpoint_architecture(ckpt)
+    crop_px = _checkpoint_crop_px(ckpt, arch)
+    try:
+        state_dict = ckpt["model"]
+    except KeyError as exc:
+        raise ValueError("HeightNet checkpoint is missing model state dict") from exc
+    if not isinstance(state_dict, Mapping):
+        raise ValueError("HeightNet checkpoint model must be a state dict mapping")
+
+    if arch == "v1-legacy":
+        head_dropout = _checkpoint_head_uses_dropout(state_dict)
+        model = _build_heightnet(head_dropout=head_dropout)
+        head_layout = "dropout" if head_dropout else "legacy"
+        scalar_layout = LEGACY_SCALAR_LAYOUT
+    else:
+        backbone = "small" if arch == "v2s" else "tiny"
+        model = _build_heightnet_v2(backbone=backbone)
+        head_layout = "ordinal"
+        scalar_layout = V2_SCALAR_LAYOUT
     model.load_state_dict(state_dict, strict=True)
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.eval()
     model._sfr_device = device
-    model._sfr_heightnet_head_layout = "dropout" if head_dropout else "legacy"
+    model._sfr_heightnet_arch = arch
+    model._sfr_heightnet_head_layout = head_layout
+    model._sfr_crop_px = crop_px
+    model._sfr_scalar_layout = scalar_layout
+    model._sfr_window_m = window_m
     return model
 
 
@@ -140,6 +271,23 @@ def _detection_scalars(detection, m_per_px):
     if area_m2 <= 0.0 or long_m <= 0.0:
         return None
     return cx, cy, area_m2, long_m
+
+
+def _encode_scalars(area_m2, long_side_m, m_per_px, layout):
+    """Encode the three auxiliary features for one checkpoint family."""
+    if layout == LEGACY_SCALAR_LAYOUT:
+        return (
+            math.log10(area_m2 + 1.0),
+            math.log10(long_side_m + 1.0),
+            m_per_px,
+        )
+    if layout == V2_SCALAR_LAYOUT:
+        return (
+            math.log1p(area_m2) / 8.0,
+            math.log1p(long_side_m) / 5.0,
+            math.log(m_per_px) / 2.0,
+        )
+    raise ValueError(f"unsupported HeightNet scalar layout: {layout!r}")
 
 
 def predict_detection_heights(model, image, detections, m_per_px,
@@ -163,7 +311,10 @@ def predict_detection_heights(model, image, detections, m_per_px,
     m_per_px = float(m_per_px)
     if not math.isfinite(m_per_px) or m_per_px <= 0.0:
         return out
-    half_px = (WINDOW_M / 2.0) / m_per_px
+    window_m = float(getattr(model, "_sfr_window_m", WINDOW_M))
+    crop_px = int(getattr(model, "_sfr_crop_px", CROP_PX))
+    scalar_layout = getattr(model, "_sfr_scalar_layout", LEGACY_SCALAR_LAYOUT)
+    half_px = (window_m / 2.0) / m_per_px
 
     valid_idx = []
     crops = []
@@ -185,12 +336,10 @@ def predict_detection_heights(model, image, detections, m_per_px,
             continue
         window = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
         window[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = image[sy0:sy1, sx0:sx1]
-        crops.append(cv2.resize(window, (CROP_PX, CROP_PX),
+        crops.append(cv2.resize(window, (crop_px, crop_px),
                                 interpolation=cv2.INTER_LINEAR))
-        scalars.append((
-            math.log10(area_m2 + 1.0),
-            math.log10(long_m + 1.0),
-            m_per_px,
+        scalars.append(_encode_scalars(
+            area_m2, long_m, m_per_px, scalar_layout
         ))
         valid_idx.append(i)
 
@@ -200,9 +349,12 @@ def predict_detection_heights(model, image, detections, m_per_px,
     crops_np = np.stack(crops)
     scalars_np = np.asarray(scalars, dtype=np.float32)
     preds = np.empty((len(valid_idx),), dtype=np.float64)
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("HeightNet batch_size must be positive")
     with torch.inference_mode():
-        for start in range(0, len(valid_idx), int(batch_size)):
-            stop = start + int(batch_size)
+        for start in range(0, len(valid_idx), batch_size):
+            stop = start + batch_size
             imgs = torch.from_numpy(
                 crops_np[start:stop].astype(np.float32).transpose(0, 3, 1, 2)
                 / 255.0

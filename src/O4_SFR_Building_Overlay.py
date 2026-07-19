@@ -9513,7 +9513,9 @@ def run(
                 )
                 print(
                     f"HeightNet heights: enabled checkpoint={height_checkpoint} "
-                    f"window={HEIGHTMODEL.WINDOW_M:.0f}m "
+                    f"arch={height_model._sfr_heightnet_arch} "
+                    f"crop={height_model._sfr_crop_px}px "
+                    f"window={height_model._sfr_window_m:.0f}m "
                     f"floor={HEIGHTMODEL.HEIGHT_MODEL_MIN_M:.1f}m (no ceiling)"
                 )
             except Exception as exc:
