@@ -529,6 +529,41 @@ def _rasterize_roads(roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
     return mask
 
 
+def _rasterize_route_exclusion(roads, rails, lat_n, lat_s, lon_w, lon_e,
+                               img_h, img_w, m_per_px):
+    """Rasterize the placement-blocking road/rail surface at true widths.
+
+    Each way is drawn at its physical carriageway width from
+    ``ROAD_EXCLUSION_WIDTH_M`` (metres -> pixels, 1 px minimum); ways whose
+    highway type is not in the table (footpaths, simHeaven 'network'
+    segments, ...) are skipped. Returns None when nothing was drawn.
+    """
+    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+
+    def ll_to_px(lat, lon):
+        x = int((lon - lon_w) / (lon_e - lon_w) * img_w)
+        y = int((lat_n - lat) / (lat_n - lat_s) * img_h)
+        return x, y
+
+    def _draw(ways, width_m):
+        px = max(1, int(round(width_m / max(m_per_px, 1e-6))))
+        for way in ways:
+            pts_px = [ll_to_px(lat, lon) for lat, lon in way['pts']]
+            for i in range(len(pts_px) - 1):
+                cv2.line(mask, pts_px[i], pts_px[i + 1], 1, thickness=px)
+
+    drew = False
+    for road in roads or ():
+        width_m = ROAD_EXCLUSION_WIDTH_M.get(road.get('type'))
+        if width_m:
+            _draw((road,), width_m)
+            drew = True
+    if rails:
+        _draw(rails, RAIL_EXCLUSION_WIDTH_M)
+        drew = True
+    return mask if drew else None
+
+
 def _road_bounds(road):
     pts = road.get('pts', ())
     if not pts:
@@ -2871,12 +2906,43 @@ YOLO_OBJECT_MIN_COVERAGE_BY_CLASS = {
 YOLO_OBJECT_OUTLINE_MARGIN_M = 0.5
 
 
-# Road exclusion is metre-based with a modest pixel floor so higher-ZL tiles
-# don't get an overly aggressive street buffer.
+# Separator-lattice raster: wide, with a pixel floor, so the gap-fill zone
+# stays street-divided even at coarse analysis scales. NOT used for placement
+# blocking (see the route-exclusion constants below).
 ROAD_CENTERLINE_WIDTH_M = 3.0
 ROAD_EXTRA_BUFFER_M = 0.0
 ROAD_WIDTH_PX_MIN = 6
 ROAD_DILATE_PX_MIN = 0
+
+# Placement road exclusion: building *footprints* must stay off the paved
+# surface itself. Widths are physical total carriageway widths per OSM highway
+# class — a residential lane only excludes its own ~4.5 m while a motorway
+# excludes its full width — so there is no user-facing margin/width knob and
+# no coarse pixel floor (the old >=6 px floor made every street >=14 m wide at
+# ZL16 and blocked most of a dense city; see commit ac28808b). Types absent
+# from the table (footway, path, cycleway, ...) never block buildings.
+ROAD_EXCLUSION_WIDTH_M = {
+    'motorway': 15.0, 'motorway_link': 7.0,
+    'trunk': 12.0, 'trunk_link': 6.5,
+    'primary': 9.0, 'primary_link': 6.0,
+    'secondary': 8.0, 'secondary_link': 5.5,
+    'tertiary': 6.5, 'tertiary_link': 5.0,
+    'busway': 6.5, 'bus_guideway': 6.5,
+    'road': 5.0, 'unclassified': 4.5,
+    'residential': 4.5,
+    'living_street': 3.5,
+    'pedestrian': 3.5,
+    'service': 3.0,
+    'track': 2.5,
+}
+RAIL_EXCLUSION_WIDTH_M = 5.0
+# The direct-YOLO facade fallback extrudes the raw detection OBB, which is
+# loose: in dense rows the front edge routinely overhangs the street by a
+# pixel or two even for a perfectly valid building. Tolerate a small fraction
+# of the OBB area on road pixels instead of rejecting on first contact; a
+# detection genuinely straddling a road overlaps far more than this (and is
+# usually caught by the center-on-road check first).
+DIRECT_FACADE_ROAD_OVERLAP_FRAC = 0.15
 
 # Small residential objects should stay inside residential-looking fabric
 # instead of spilling into industrial/commercial zones. Prefer explicit OSM
@@ -8611,6 +8677,33 @@ def _poly_fits_with_integral(
     return cv2.countNonZero(tmp) == 0
 
 
+def _poly_mask_overlap_frac(occ_mask, pts, scratch_mask=None, bbox=None):
+    """Return the fraction of the polygon's area covered by set occ_mask pixels."""
+    if bbox is None:
+        x1 = max(0, int(pts[:, 0].min()))
+        x2 = min(occ_mask.shape[1], int(pts[:, 0].max()) + 1)
+        y1 = max(0, int(pts[:, 1].min()))
+        y2 = min(occ_mask.shape[0], int(pts[:, 1].max()) + 1)
+    else:
+        x1 = max(0, int(bbox[0]))
+        y1 = max(0, int(bbox[1]))
+        x2 = min(occ_mask.shape[1], int(bbox[2]))
+        y2 = min(occ_mask.shape[0], int(bbox[3]))
+    if x1 >= x2 or y1 >= y2:
+        return 0.0
+    if scratch_mask is None:
+        tmp = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    else:
+        tmp = scratch_mask[y1:y2, x1:x2]
+        tmp.fill(0)
+    cv2.fillPoly(tmp, [pts - np.int32([x1, y1])], 1)
+    poly_area = cv2.countNonZero(tmp)
+    if poly_area == 0:
+        return 0.0
+    cv2.bitwise_and(occ_mask[y1:y2, x1:x2], tmp, dst=tmp)
+    return cv2.countNonZero(tmp) / float(poly_area)
+
+
 def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
                         static_occ_mask, building_spacing_mask, fit_scratch,
                         file_counts, mark_pad_m=None, prefer_small=False,
@@ -9317,15 +9410,14 @@ def run(
     yolo_suppress_explain_frac = _env_float(
         "O4_SFR_BLD_SUPPRESS_EXPLAIN_FRAC", 0.60
     )
-    # Roads/railways do NOT block building placement by default. The footprint
-    # gate rejects a detection when ANY pixel of its OBB touches the static
-    # mask, and the road mask is a >=6px-wide lattice through every dense
-    # block, so road blocking killed most of a dense city texture (measured
-    # +22+120 57072_109328_Arc17: 8,544 of 10,900 kept detections blocked
-    # while full custom-scenery avoidance added only ~100 of that). Roads
-    # still street-divide the gap-fill zone; scenery/water/OSM avoidance is
-    # unaffected. Restore road+rail blocking with O4_SFR_BLD_ROAD_AVOIDANCE=1.
-    yolo_road_block = _env_flag("O4_SFR_BLD_ROAD_AVOIDANCE", False)
+    # Road/rail exclusion is always on, but metre-accurate and footprint-only:
+    # the paved surface is rasterized at real per-class carriageway widths
+    # (ROAD_EXCLUSION_WIDTH_M) and blocks only the *placed* footprint (objects,
+    # shrunk facade templates, gap fill) plus detection centers. The loose
+    # detection OBB is never gated on roads — the old all-roads >=6px lattice
+    # with an any-pixel OBB gate killed most of a dense city texture (measured
+    # +22+120 57072_109328_Arc17: 8,544 of 10,900 kept detections blocked;
+    # see commit ac28808b). --allow-road-overlap disables it entirely.
     # Per-candidate object self-avoidance (selector occupancy check + OBB dedup +
     # spacing-mask marking + incremental integral rebuilds) is redundant now that
     # inter-object overlaps are removed tile-wide after placement
@@ -9857,7 +9949,6 @@ def run(
             round(float(yolo_suppress_containment_frac), 6),
             round(float(yolo_suppress_explain_frac), 6),
             # v23: roads/railways no longer in static_occ_mask by default.
-            bool(yolo_road_block),
             # v24: native-ZL YOLO inference (no ZL16 analysis downsample) +
             #      cross-ZL covered regions excluded from detection/placement.
             # v25: retired feature knobs removed (smart gap fill, marginal
@@ -9876,7 +9967,17 @@ def run(
                 )
                 for cls, (ptype, paths, height_m) in stock_yolo_asset_map.items()
             )),
-            "schema=v26-stock-asset-pool-addon-overlap",
+            # v27: metre-accurate per-class road/rail exclusion of placed
+            #      building footprints (loose detection OBBs unaffected);
+            #      replaces the retired all-or-nothing
+            #      O4_SFR_BLD_ROAD_AVOIDANCE lattice blocking.
+            tuple(sorted(
+                (str(k), round(float(v), 3))
+                for k, v in ROAD_EXCLUSION_WIDTH_M.items()
+            )),
+            round(float(RAIL_EXCLUSION_WIDTH_M), 3),
+            round(float(DIRECT_FACADE_ROAD_OVERLAP_FRAC), 6),
+            "schema=v27-road-footprint-exclusion",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -10467,7 +10568,6 @@ def run(
             _t = time.perf_counter()
             bld_raw = np.zeros((img_h, img_w), dtype=np.uint8)
             bld_zone = bld_raw
-            sfr_road_dilated = None
             _record_elapsed(timings, file_timings, 'zone_cleanup', _t)
 
             # Stock placements force the full path: the blocker filter below
@@ -10634,25 +10734,18 @@ def run(
                 stock_yolo_occupied_polys = list(stock_res.occupied_px_polys)
 
             _t = time.perf_counter()
-            # static_occ_mask collects everything a trained-YOLO building must
-            # avoid. With overlap removal disabled (the default), roads and
-            # railways are intentionally NOT included (buildings may sit over
-            # them) and trained-YOLO detections do not avoid each other; water,
-            # OSM building footprints, scenery objects and stock-YOLO placements
-            # are still avoided. `allow_road_overlap` drops road avoidance only.
+            # static_occ_mask collects everything even the *loose* trained-YOLO
+            # detection OBB must avoid: water, OSM building footprints, scenery
+            # objects and stock-YOLO placements. Roads/railways are deliberately
+            # NOT in it — they gate only the placed footprint via
+            # placement_occ_mask below, so a detection whose loose OBB clips a
+            # street edge still places (see the road-exclusion comment in run()).
             static_occ_mask = np.zeros_like(road_mask)
             if allow_road_overlap:
                 file_counts['road_overlap_allowed'] = 1
             else:
-                # Roads always carve the gap-fill zone so it stays street-divided,
-                # but only block trained-YOLO placement when road avoidance is
-                # explicitly restored (O4_SFR_BLD_ROAD_AVOIDANCE=1; see the
-                # yolo_road_block comment in run()).
+                # Roads always carve the gap-fill zone so it stays street-divided.
                 bld_zone = bld_zone & (~road_mask)
-                if yolo_road_block:
-                    static_occ_mask = road_mask.copy()
-                    if sfr_road_dilated is not None and sfr_road_dilated.any():
-                        static_occ_mask = static_occ_mask | sfr_road_dilated
 
             if poly_mask is not None and poly_mask.any():
                 bld_zone  = bld_zone & (~poly_mask)
@@ -10667,8 +10760,6 @@ def run(
 
             if rail_mask.any():
                 bld_zone  = bld_zone & (~rail_mask)
-                if yolo_road_block and not allow_road_overlap:
-                    static_occ_mask  = static_occ_mask | rail_mask
 
             if sh_bld_mask is not None and sh_bld_mask.any():
                 static_occ_mask = static_occ_mask | sh_bld_mask
@@ -10691,6 +10782,29 @@ def run(
             static_occ_integral = (
                 None if strict_fit else cv2.integral(static_occ_mask, sdepth=cv2.CV_32S)
             )
+            # placement_occ_mask = static blockers + the true-width road/rail
+            # surface. It gates candidate centers and every *placed* footprint
+            # (object assets, shrunk facade templates, gap fill) — the loose
+            # detection OBB keeps checking static_occ_mask only. Narrow lanes
+            # exclude just their own few metres of pavement, so dense blocks
+            # keep their placements while buildings stay off the streets.
+            _t_excl = time.perf_counter()
+            route_excl_mask = None
+            if not allow_road_overlap:
+                route_excl_mask = _rasterize_route_exclusion(
+                    local_separator_roads, local_rails,
+                    lat_n, lat_s, lon_w, lon_e, img_h, img_w, m_per_px)
+            _record_elapsed(timings, file_timings, 'road_raster', _t_excl)
+            if route_excl_mask is not None and route_excl_mask.any():
+                placement_occ_mask = static_occ_mask | route_excl_mask
+                placement_occ_integral = (
+                    None if strict_fit
+                    else cv2.integral(placement_occ_mask, sdepth=cv2.CV_32S)
+                )
+            else:
+                route_excl_mask = None
+                placement_occ_mask = static_occ_mask
+                placement_occ_integral = static_occ_integral
             building_spacing_mask = np.zeros_like(static_occ_mask)
             if stock_yolo_occupied_polys:
                 for _quad in stock_yolo_occupied_polys:
@@ -10776,7 +10890,7 @@ def run(
                         if _blkdbg is not None:
                             _blkdbg.append(('outside', jx, jy, yolo_poly))
                         continue
-                    if static_occ_mask[jy, jx]:
+                    if placement_occ_mask[jy, jx]:
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         if _blkdbg is not None:
                             _blkdbg.append(('static_center', jx, jy, yolo_poly))
@@ -10853,10 +10967,10 @@ def run(
                             residential_context=residential_context,
                             min_coverage=yolo_min_coverage,
                             enabled_assets_by_path=enabled_yolo_object_assets_by_path,
-                            static_occ_mask=static_occ_mask,
+                            static_occ_mask=placement_occ_mask,
                             building_spacing_mask=building_spacing_mask,
                             scratch_mask=fit_scratch,
-                            static_occ_integral=static_occ_integral,
+                            static_occ_integral=placement_occ_integral,
                             spacing_occ_integral=building_spacing_integral,
                             recent_spacing_mask=recent_spacing_mask,
                             skip_occupancy=not _obj_avoid,
@@ -10917,9 +11031,20 @@ def run(
                         facade_footprint_ok = _direct_yolo_facade_footprint_allowed(
                             detection
                         )
+                        # The fallback facade extrudes the raw (loose) OBB, so
+                        # tolerate a small road overlap instead of rejecting on
+                        # first contact; see DIRECT_FACADE_ROAD_OVERLAP_FRAC.
+                        facade_road_ok = (
+                            route_excl_mask is None or
+                            _poly_mask_overlap_frac(
+                                route_excl_mask, yolo_poly, fit_scratch,
+                                bbox=yolo_bbox,
+                            ) <= DIRECT_FACADE_ROAD_OVERLAP_FRAC
+                        )
                         if (
                             _asset_kind_enabled('facade', building_asset_mode) and
                             facade_footprint_ok and
+                            facade_road_ok and
                             _poly_fits(building_spacing_mask, yolo_poly, fit_scratch)
                         ):
                             facade_path = _facade_for_detection(
@@ -10953,11 +11078,12 @@ def run(
                             direct_yolo_facade_placements += 1
                             placed_direct_detection = True
                         elif _asset_kind_enabled('facade', building_asset_mode):
-                            status_key = (
-                                'yolo_facade_oversize_reject'
-                                if not facade_footprint_ok
-                                else 'yolo_facade_spacing_reject'
-                            )
+                            if not facade_footprint_ok:
+                                status_key = 'yolo_facade_oversize_reject'
+                            elif not facade_road_ok:
+                                status_key = 'yolo_facade_road_reject'
+                            else:
+                                status_key = 'yolo_facade_spacing_reject'
                             file_counts[status_key] = file_counts.get(status_key, 0) + 1
 
                     yolo_viz_polys[-1] = (yolo_poly.copy(), placed_direct_detection)
@@ -11120,7 +11246,7 @@ def run(
                         continue
 
                     cls_labels = cc_labels[cls_cand_y, cls_cand_x]
-                    open_center = static_occ_mask[cls_cand_y, cls_cand_x] == 0
+                    open_center = placement_occ_mask[cls_cand_y, cls_cand_x] == 0
                     n_initial_blocked += int(
                         cls_cand_x.size - np.count_nonzero(open_center)
                     )
@@ -11301,10 +11427,10 @@ def run(
                     jy,
                     img_w,
                     img_h,
-                    static_occ_mask,
+                    placement_occ_mask,
                     building_spacing_mask,
                     fit_scratch,
-                    static_occ_integral=static_occ_integral,
+                    static_occ_integral=placement_occ_integral,
                 )
                 if footprint_poly is None:
                     file_counts['yolo_template_blocked'] = (
@@ -11560,7 +11686,7 @@ def run(
                 jx = int(jx)
                 jy = int(jy)
                 zone_cls = int(zone_cls)
-                if static_occ_mask[jy, jx]:
+                if placement_occ_mask[jy, jx]:
                     file_counts['dynamic_center_blocked'] = (
                         file_counts.get('dynamic_center_blocked', 0) + 1
                     )
@@ -11590,12 +11716,12 @@ def run(
 
                     asset, final_h, footprint_poly, spacing_poly, skipped = _find_fitting_asset(
                         pool, rng, jx, jy, heading, m_per_px,
-                        static_occ_mask, building_spacing_mask, fit_scratch,
+                        placement_occ_mask, building_spacing_mask, fit_scratch,
                         file_counts, mark_pad_m,
                         prefer_small=(try_cls != zone_cls),
                         residential_context=residential_context,
                         footprint_pad_m=footprint_pad_m,
-                        static_occ_integral=static_occ_integral,
+                        static_occ_integral=placement_occ_integral,
                         fit_cache_enabled=not strict_fit,
                         retry_context=asset_retry_context.get(try_cls),
                         prefer_largest_fit=(zone_label not in yolo_templates_by_zone),
@@ -11724,7 +11850,7 @@ def run(
                         np.asarray(colour, dtype=np.float32) * alpha
                     ).astype(np.uint8)
 
-                _blend_viz_mask(sfr_road_dilated, (255, 150, 0), 0.70)
+                _blend_viz_mask(route_excl_mask, (255, 150, 0), 0.70)
                 _blend_viz_mask(mesh_water_mask, (0, 60, 255), 0.65)
                 _blend_viz_mask(road_mask, (255, 0, 0), 0.75)
                 _blend_viz_mask(rail_mask, (255, 0, 255), 0.75)
@@ -11852,9 +11978,10 @@ def run(
             file_elapsed = time.perf_counter() - file_t0
             if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
                 _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
-            img = veg_map = mesh_water_mask = bld_raw = bld_zone = sfr_road_dilated = None
+            img = veg_map = mesh_water_mask = bld_raw = bld_zone = None
             road_mask = rail_mask = poly_mask = existing_bld_mask = sh_bld_mask = custom_bld_mask = None
             static_occ_mask = static_occ_integral = building_spacing_mask = None
+            route_excl_mask = placement_occ_mask = placement_occ_integral = None
             placed_yolo_mask = fit_scratch = None
             road_divided_zone = fallback_zone = zone_class = roof_evidence = None
             yolo_detections = yolo_guidance = yolo_viz_polys = placed_viz_polys = None

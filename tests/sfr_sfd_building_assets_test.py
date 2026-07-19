@@ -3871,5 +3871,81 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(exports[0].virtual_path, "simheaven/houses/house_04x06x1.obj")
 
 
+class RoadExclusionTests(unittest.TestCase):
+    """Metre-accurate per-class road exclusion of placed building footprints."""
+
+    # A 100x100 px tile spanning a tiny lat/lon box; 1 m/px keeps the
+    # metre->pixel maths readable.
+    BOUNDS = dict(lat_n=0.001, lat_s=0.0, lon_w=0.0, lon_e=0.001,
+                  img_h=100, img_w=100)
+
+    def _way(self, road_type, y_frac=0.5):
+        lat = self.BOUNDS["lat_n"] * (1.0 - y_frac)
+        return {
+            "pts": [(lat, 0.0), (lat, self.BOUNDS["lon_e"])],
+            "type": road_type,
+        }
+
+    def _mask_for(self, roads, rails=(), m_per_px=1.0):
+        return BLD._rasterize_route_exclusion(
+            roads, list(rails), m_per_px=m_per_px, **self.BOUNDS
+        )
+
+    def _band_height(self, mask):
+        rows = np.flatnonzero(mask.any(axis=1))
+        return 0 if rows.size == 0 else int(rows[-1] - rows[0] + 1)
+
+    def test_widths_follow_highway_class(self):
+        residential = self._mask_for([self._way("residential")])
+        motorway = self._mask_for([self._way("motorway")])
+        self.assertLessEqual(
+            self._band_height(residential),
+            round(BLD.ROAD_EXCLUSION_WIDTH_M["residential"]) + 1,
+        )
+        self.assertGreater(
+            self._band_height(motorway), self._band_height(residential)
+        )
+
+    def test_no_coarse_pixel_floor_on_narrow_roads(self):
+        # At 2.4 m/px (~ZL16) a service alley must stay a 1 px sliver, not the
+        # old >=6 px lattice band.
+        mask = self._mask_for([self._way("service")], m_per_px=2.4)
+        self.assertEqual(self._band_height(mask), 1)
+
+    def test_unlisted_types_never_block(self):
+        for road_type in ("footway", "path", "cycleway", "network", None):
+            self.assertIsNone(
+                self._mask_for([self._way(road_type)]), msg=str(road_type)
+            )
+
+    def test_rails_always_block(self):
+        mask = self._mask_for([], rails=[self._way("network")])
+        self.assertIsNotNone(mask)
+        self.assertGreater(int(mask.sum()), 0)
+
+    def test_poly_mask_overlap_frac(self):
+        occ = np.zeros((64, 64), dtype=np.uint8)
+        occ[:, 30:32] = 1  # 2 px vertical road strip
+        poly = np.array([[20, 20], [40, 20], [40, 40], [20, 40]], dtype=np.int32)
+        frac = BLD._poly_mask_overlap_frac(occ, poly)
+        # 2 of the 21 columns covered by the footprint sit on the strip.
+        self.assertAlmostEqual(frac, 2 / 21, delta=0.02)
+        self.assertEqual(BLD._poly_mask_overlap_frac(np.zeros_like(occ), poly), 0.0)
+
+    def test_edge_clip_passes_straddle_fails_facade_tolerance(self):
+        occ = np.zeros((64, 64), dtype=np.uint8)
+        occ[:, 30:32] = 1
+        edge_clip = np.array([[10, 10], [31, 10], [31, 30], [10, 30]], dtype=np.int32)
+        straddling = np.array([[26, 10], [36, 10], [36, 30], [26, 30]], dtype=np.int32)
+        self.assertLessEqual(
+            BLD._poly_mask_overlap_frac(occ, edge_clip),
+            BLD.DIRECT_FACADE_ROAD_OVERLAP_FRAC,
+        )
+        self.assertGreater(
+            BLD._poly_mask_overlap_frac(occ, straddling),
+            BLD.DIRECT_FACADE_ROAD_OVERLAP_FRAC,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
