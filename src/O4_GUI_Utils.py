@@ -20,6 +20,7 @@ from tkinter import (
     CENTER,
     HORIZONTAL,
     filedialog,
+    messagebox,
 )
 import tkinter.ttk as ttk
 from PIL import Image, ImageTk
@@ -42,6 +43,7 @@ import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME
 import O4_Config_Utils as CFG
+import O4_PBF_Utils as PBF
 import O4_SFR_Pipeline as SFR
 import O4_SFR_Remote as SFR_REMOTE
 
@@ -227,6 +229,13 @@ class Ortho4XP_GUI(tk.Tk):
         ).grid(row=0, column=2, padx=0, pady=0, sticky=N + S + E + W)
 
         # Button Icons on top right
+        ttk.Button(
+            self.frame_tile,
+            takefocus=False,
+            text="OSM",
+            command=self.open_osm_data_manager,
+            style="Flat.TButton",
+        ).grid(row=0, column=8, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
@@ -845,6 +854,14 @@ class Ortho4XP_GUI(tk.Tk):
             self.custom_zl_window = Ortho4XP_Custom_ZL(self, lat, lon)
             return 1
 
+    def open_osm_data_manager(self):
+        try:
+            self.osm_data_window.lift()
+            return 1
+        except:
+            self.osm_data_window = Ortho4XP_OSM_Data_Manager(self)
+            return 1
+
     def set_red_flag(self):
         UI.red_flag = True
         # External workers (SFR .venv python, Triangle4XP, DSFTool) never see
@@ -1127,6 +1144,302 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
                         "the machine is on and reachable and that key-based "
                         "login works (try: ssh {0} true).".format(payload)
                     )
+        except queue.Empty:
+            pass
+        try:
+            self.after(120, self._poll)
+        except tk.TclError:
+            pass
+
+
+################################################################################
+class Ortho4XP_OSM_Data_Manager(tk.Toplevel):
+    """Manage the local planet.osm.pbf data source.
+
+    Shows the state of the configured OSM planet directory and runs the
+    long maintenance jobs (tool install, planet download, replication
+    updates, scenery-extract rebuild) in daemon worker threads.  Workers
+    never touch tk directly: they post to a queue polled with after().
+    """
+
+    def __init__(self, parent):
+        tk.Toplevel.__init__(self)
+        self.parent = parent
+        self.title("Local OSM data")
+        self.transient(parent)
+        self.configure(**THEME.frame_options())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
+        self._queue = queue.Queue()
+        self._busy = False
+        self._closed = False
+
+        pad = {"padx": 8, "pady": 4}
+
+        self.info_var = tk.StringVar(value="")
+        tk.Label(
+            self,
+            anchor=W,
+            justify=LEFT,
+            textvariable=self.info_var,
+            **THEME.label_options(),
+        ).grid(row=0, column=0, columnspan=3, sticky=E + W, **pad)
+
+        self.status_var = tk.StringVar(value="")
+        tk.Label(
+            self,
+            anchor=W,
+            justify=LEFT,
+            textvariable=self.status_var,
+            **THEME.label_options(),
+        ).grid(row=1, column=0, columnspan=3, sticky=E + W, **pad)
+
+        self.pgrb_var = tk.IntVar()
+        ttk.Progressbar(
+            self,
+            mode="determinate",
+            orient=HORIZONTAL,
+            variable=self.pgrb_var,
+        ).grid(row=2, column=0, columnspan=3, sticky=E + W, **pad)
+
+        button_row = tk.Frame(self, **THEME.frame_options())
+        button_row.grid(row=3, column=0, columnspan=3, sticky=E + W, **pad)
+        self.action_buttons = []
+
+        def add_button(column, text, command):
+            button = ttk.Button(button_row, text=text, command=command)
+            button.grid(row=0, column=column, padx=4)
+            self.action_buttons.append(button)
+            return button
+
+        add_button(0, "Install tools", self.install_tools)
+        add_button(1, "Download planet", self.download_planet)
+        add_button(2, "Check for updates", self.check_updates)
+        add_button(3, "Install updates", self.install_updates)
+        add_button(4, "Rebuild extract", self.rebuild_extract)
+        ttk.Button(button_row, text="Stop", command=self.stop_job).grid(
+            row=0, column=5, padx=4
+        )
+        ttk.Button(button_row, text="Close", command=self.close).grid(
+            row=0, column=6, padx=4
+        )
+
+        self.columnconfigure(0, weight=1)
+        self.refresh_info()
+        self._poll()
+
+    # ── Status display ────────────────────────────────────────────────────
+
+    def refresh_info(self):
+        status = PBF.planet_status()
+        lines = []
+        if not status["configured"]:
+            lines.append(
+                "No OSM planet directory configured. Set 'osm_pbf_dir' in "
+                "the Application config tab first."
+            )
+        else:
+            lines.append("Directory      : " + PBF.osm_pbf_dir)
+            if status["planet_present"]:
+                lines.append(
+                    "Planet file    : "
+                    + UI.human_print(status["planet_size"], "B")
+                    + (
+                        ", data up to " + status["planet_timestamp"]
+                        if status["planet_timestamp"]
+                        else ""
+                    )
+                )
+            elif status["planet_partial"]:
+                lines.append(
+                    "Planet file    : partial download ("
+                    + UI.human_print(status["planet_size"], "B")
+                    + " so far) - 'Download planet' resumes it."
+                )
+            else:
+                lines.append("Planet file    : not downloaded yet (~90 GB).")
+            lines.append(
+                "Scenery extract: "
+                + (
+                    UI.human_print(status["extract_size"], "B")
+                    if status["extract_present"]
+                    else "not built yet (tile builds use Overpass until it is)."
+                )
+            )
+            lines.append(
+                "osmium-tool    : "
+                + ("installed" if status["tools_present"] else "not installed")
+            )
+        self.info_var.set("\n".join(lines))
+
+    # ── Worker plumbing ───────────────────────────────────────────────────
+
+    def _progress_cb(self):
+        last = [-1]
+
+        def cb(pct):
+            if pct != last[0]:
+                last[0] = pct
+                self._queue.put(("progress", pct))
+
+        return cb
+
+    def _start_worker(self, label, target):
+        if self._busy:
+            self.status_var.set("A job is already running.")
+            return
+        if UI.is_working:
+            self.status_var.set(
+                "A tile build is running - finish or stop it first."
+            )
+            return
+        self._busy = True
+        for button in self.action_buttons:
+            button.state(["disabled"])
+        self.status_var.set(label + " ...")
+        self.pgrb_var.set(0)
+
+        def run():
+            ok = 0
+            try:
+                ok = target()
+            except Exception as exc:
+                self._queue.put(("status", label + " failed: " + str(exc)))
+            finally:
+                UI.red_flag = False
+                self._queue.put(("done", (label, ok)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def stop_job(self):
+        UI.red_flag = True
+        UI.kill_all_subprocesses()
+
+    def close(self):
+        if self._busy and not messagebox.askyesno(
+            "Local OSM data",
+            "A maintenance job is still running. Stop it and close?",
+            parent=self,
+        ):
+            return
+        if self._busy:
+            self.stop_job()
+        self._closed = True
+        self.destroy()
+
+    # ── Actions ───────────────────────────────────────────────────────────
+
+    def install_tools(self):
+        if PBF.tools_available():
+            self.status_var.set("osmium-tool is already installed.")
+            return
+        if not messagebox.askyesno(
+            "Local OSM data",
+            "Ortho4XP will download micromamba and the osmium-tool package "
+            "from conda-forge (~80 MB) into its own tools directory. "
+            "Proceed?",
+            parent=self,
+        ):
+            return
+        self._start_worker(
+            "Installing osmium-tool",
+            lambda: 1 if PBF.ensure_tools(progress_cb=self._progress_cb()) else 0,
+        )
+
+    def download_planet(self):
+        if not PBF.osm_pbf_dir:
+            self.status_var.set(
+                "Set 'osm_pbf_dir' in the Application config tab first."
+            )
+            return
+        if not PBF.tools_available():
+            self.status_var.set("Install the tools first.")
+            return
+        if not messagebox.askyesno(
+            "Local OSM data",
+            "This downloads the full OSM planet file (~90 GB) into\n"
+            + PBF.osm_pbf_dir
+            + "\nand then builds the scenery extract. The download takes "
+            "hours and can be stopped and resumed at any time. Proceed?",
+            parent=self,
+        ):
+            return
+
+        def job():
+            cb = self._progress_cb()
+            if not PBF.download_planet(progress_cb=cb):
+                return 0
+            self._queue.put(("status", "Building the scenery extract ..."))
+            return PBF.regenerate_extract(progress_cb=cb)
+
+        self._start_worker("Downloading the planet file", job)
+
+    def check_updates(self):
+        def job():
+            pending = PBF.pending_updates()
+            if pending is None:
+                self._queue.put(
+                    ("status", "The planet file is up to date.")
+                )
+            else:
+                self._queue.put(
+                    (
+                        "status",
+                        "%d daily diff(s) pending (%s to download), local "
+                        "data ends %s."
+                        % (
+                            pending["count"],
+                            UI.human_print(pending["est_bytes"], "B"),
+                            pending["local_ts"],
+                        ),
+                    )
+                )
+            return 1
+
+        self._start_worker("Checking for updates", job)
+
+    def install_updates(self):
+        if not PBF.tools_available():
+            self.status_var.set("Install the tools first.")
+            return
+        self._start_worker(
+            "Installing updates (downloads diffs, then rewrites the planet "
+            "file and the extract; hours on a HDD)",
+            lambda: PBF.install_updates(progress_cb=self._progress_cb()),
+        )
+
+    def rebuild_extract(self):
+        if not PBF.tools_available():
+            self.status_var.set("Install the tools first.")
+            return
+        self._start_worker(
+            "Rebuilding the scenery extract (one full read of the planet "
+            "file)",
+            lambda: PBF.regenerate_extract(progress_cb=self._progress_cb()),
+        )
+
+    # ── Queue polling ─────────────────────────────────────────────────────
+
+    def _poll(self):
+        if self._closed:
+            return
+        try:
+            while True:
+                kind, payload = self._queue.get_nowait()
+                if kind == "progress":
+                    self.pgrb_var.set(payload)
+                elif kind == "status":
+                    self.status_var.set(payload)
+                elif kind == "done":
+                    label, ok = payload
+                    self._busy = False
+                    for button in self.action_buttons:
+                        button.state(["!disabled"])
+                    self.pgrb_var.set(0)
+                    self.status_var.set(
+                        label + (" - done." if ok else " - failed (see console).")
+                    )
+                    self.refresh_info()
         except queue.Empty:
             pass
         try:

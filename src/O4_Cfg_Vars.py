@@ -35,6 +35,12 @@ cfg_app_vars = {
         "values": ["random"] + sorted(OSM.overpass_servers.keys()),
         "hint": "The (country) of the Overpass OSM server used to grab vector data. It can be modified on the fly (as all _Application_ variables) in case of problem with a particular server.",
     },
+    "osm_pbf_dir": {
+        "module": "PBF",
+        "type": str,
+        "default": "",
+        "hint": "Directory holding your local planet.osm.pbf and its filtered scenery extract. When set (and the extract has been built through the Local OSM data manager window), tile builds slice OSM data locally instead of querying Overpass servers. Leave empty to keep using Overpass.",
+    },
     "skip_downloads": {
         "module": "TILE",
         "type": bool,
@@ -615,11 +621,12 @@ list_app_vars = [
     "custom_scenery_dir",
     "custom_overlay_src",
     "custom_overlay_src_alternate",
+    "osm_pbf_dir",
 ]
 
-gui_app_vars_short = list_app_vars[:-3]
+gui_app_vars_short = list_app_vars[:-4]
 
-gui_app_vars_long = list_app_vars[-3:]
+gui_app_vars_long = list_app_vars[-4:]
 
 list_vector_vars = [
     "apt_smoothing_pix",

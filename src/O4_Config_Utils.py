@@ -15,6 +15,7 @@ import O4_File_Names as FNAMES
 import O4_Imagery_Utils as IMG
 import O4_OSM_Utils as OSM
 import O4_Overlay_Utils as OVL
+import O4_PBF_Utils as PBF
 import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME

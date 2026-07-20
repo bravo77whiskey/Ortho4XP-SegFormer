@@ -275,12 +275,14 @@ def include_roads(vector_map, tile, apt_array, apt_area):
     # tags_for_exclusion=set(["tunnel"])
     road_layer = OSM.OSM_layer()
     queries = [
-        'way["highway"="motorway"]',
-        'way["highway"="trunk"]',
-        'way["highway"="primary"]',
-        'way["highway"="secondary"]',
-        'way["railway"="rail"]',
-        'way["railway"="narrow_gauge"]',
+        (
+            'way["highway"="motorway"]',
+            'way["highway"="trunk"]',
+            'way["highway"="primary"]',
+            'way["highway"="secondary"]',
+            'way["railway"="rail"]',
+            'way["railway"="narrow_gauge"]',
+        )
     ]
     if not OSM.OSM_queries_to_OSM_layer(
         queries,
@@ -303,16 +305,17 @@ def include_roads(vector_map, tile, apt_array, apt_area):
         return 0
     if tile.road_level >= 2:
         road_layer = OSM.OSM_layer()
-        queries = ['way["highway"="tertiary"]']
+        query_strings = ['way["highway"="tertiary"]']
         if tile.road_level >= 3:
-            queries += [
+            query_strings += [
                 'way["highway"="unclassified"]',
                 'way["highway"="residential"]',
             ]
         if tile.road_level >= 4:
-            queries += ['way["highway"="service"]']
+            query_strings += ['way["highway"="service"]']
         if tile.road_level >= 5:
-            queries += ['way["highway"="track"]']
+            query_strings += ['way["highway"="track"]']
+        queries = [tuple(query_strings)]
         if not OSM.OSM_queries_to_OSM_layer(
             queries,
             road_layer,
@@ -539,11 +542,13 @@ def include_water(vector_map, tile):
             water_layer.write_to_file(custom_water)
     else:
         queries = [
-            'rel["natural"="water"]',
-            'rel["waterway"="riverbank"]',
-            'way["natural"="water"]',
-            'way["waterway"="riverbank"]',
-            'way["waterway"="dock"]',
+            (
+                'rel["natural"="water"]',
+                'rel["waterway"="riverbank"]',
+                'way["natural"="water"]',
+                'way["waterway"="riverbank"]',
+                'way["waterway"="dock"]',
+            )
         ]
         tags_of_interest = ["name"]
         if not OSM.OSM_queries_to_OSM_layer(
