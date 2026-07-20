@@ -144,6 +144,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("segformer", "segformer_inference"),
         ("trained_yolo", "trained_yolo_inference"),
         ("yolo_suppress", "yolo_suppress"),
+        ("heightnet", "heightnet"),
         ("stock_yolo", "stock_yolo_inference"),
         ("zone", "zone_cleanup"),
         ("lookup", "lookup"),
@@ -2652,8 +2653,8 @@ MAX_DIRECT_YOLO_FACADE_SIDE_M = 115.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 63      # v63: direct-YOLO facade fallback + heights
-BLD_PLACEMENT_FAST_CACHE_VERSION = 65  # v65: direct-YOLO facade fallback + heights
+BLD_PLACEMENT_CACHE_VERSION = 64      # v64: post-suppression HeightNet (+fp16)
+BLD_PLACEMENT_FAST_CACHE_VERSION = 66  # v66: post-suppression HeightNet (+fp16)
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -2870,7 +2871,11 @@ OPTIONAL_ASSET_REGION_ALIASES = {
     "australia_oceania": {"australia_oceania"},
 }
 
-YOLO_OBB_CACHE_VERSION = 6  # v6: HeightNet heights uncapped (floor-only clamp)
+# v6: HeightNet heights uncapped (floor-only clamp).
+# v7: detections cached WITHOUT heights — HeightNet now runs after overlap
+#     suppression on the survivors only, so cached content is height-free and
+#     the height checkpoint keys the placement cache instead.
+YOLO_OBB_CACHE_VERSION = 7
 YOLO_ANALYSIS_CACHE_VERSION = 1
 YOLO_ANALYSIS_TARGET_ZL = 16
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -5537,11 +5542,10 @@ def _checkpoint_signature(path):
 def _yolo_obb_cache_key(
     fname, img_w, img_h, checkpoint, imgsz, stride, conf, iou, max_det,
     batch_size=1, fused=False, analysis_signature=None, analysis_target_zl=None,
-    covered_rects=None, height_signature=None,
+    covered_rects=None,
 ):
     return {
         'version': YOLO_OBB_CACHE_VERSION,
-        'height': height_signature,
         'covered_rects': (
             None if not covered_rects
             else [[int(v) for v in rect] for rect in covered_rects]
@@ -6325,8 +6329,7 @@ def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
 
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                             device=None, m_per_px=1.0, batch_size=1,
-                            return_metadata=False, skip_rects_px=(),
-                            height_model=None):
+                            return_metadata=False, skip_rects_px=()):
     img_h, img_w = image.shape[:2]
     model_class_count = _yolo_model_class_count(model)
     skip_rects_px = tuple(skip_rects_px or ())
@@ -6409,7 +6412,6 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
             raise
 
     detections.sort(key=lambda item: (float(item['area_m2']), -float(item['confidence'])))
-    _apply_heightnet_to_detections(height_model, image, detections, m_per_px)
     if return_metadata:
         return {
             'detections': detections,
@@ -9979,7 +9981,13 @@ def run(
             )),
             round(float(RAIL_EXCLUSION_WIDTH_M), 3),
             round(float(DIRECT_FACADE_ROAD_OVERLAP_FRAC), 6),
-            "schema=v27-road-footprint-exclusion",
+            # v28: HeightNet moved after overlap suppression; heights are no
+            #      longer stored in the YOLO OBB cache, so the height
+            #      checkpoint must key the placement cache directly (before,
+            #      a checkpoint swap invalidated placements only via the
+            #      heights baked into the YOLO cache).
+            height_signature,
+            "schema=v28-post-suppress-heightnet",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -10205,7 +10213,6 @@ def run(
                 analysis_target_zl=(
                     yolo_analysis_target_zl if _use_analysis else None
                 ),
-                height_signature=height_signature,
                 # Fully covered crops are skipped at inference time on the
                 # native path, so the raw detection set depends on coverage.
                 covered_rects=(
@@ -10271,7 +10278,6 @@ def run(
                                 m_per_px=analysis_m_per_px,
                                 batch_size=yolo_batch_size,
                                 return_metadata=True,
-                                height_model=height_model,
                             )
                             yolo_detections = _scale_yolo_detections_to_image(
                                 yolo_result['detections'],
@@ -10294,7 +10300,6 @@ def run(
                                 batch_size=yolo_batch_size,
                                 return_metadata=True,
                                 skip_rects_px=_covered_rects_px,
-                                height_model=height_model,
                             )
                             yolo_detections = yolo_result['detections']
                         prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
@@ -10325,7 +10330,6 @@ def run(
                                         None if _use_analysis
                                         else (_covered_rects_px or None)
                                     ),
-                                    height_signature=height_signature,
                                 ),
                                 yolo_detections,
                             )
@@ -10419,6 +10423,31 @@ def run(
             _rec('yolo_suppress', _t)
             file_counts['yolo_raw_detections'] = raw_yolo_count
             file_counts['yolo_suppressed_overlap'] = yolo_suppressed
+        # HeightNet runs on the suppression survivors only: nothing between
+        # detection build and here reads height_m (oversize/coverage filters
+        # and suppression are footprint/confidence-only), so predicting after
+        # the drops is output-identical to the old inside-inference call while
+        # skipping every dropped detection. Crops always come from the
+        # native-ZL texture; under the O4_SFR_BLD_YOLO_ANALYSIS_ZL escape
+        # hatch heights previously used the downsampled analysis image.
+        if yolo_detections and height_model is not None:
+            _height_img = img
+            if _height_img is None:
+                # Cached-YOLO path (v7+ caches are height-free): load the
+                # texture just for the height crops, without touching `img`
+                # so downstream cached-run behaviour stays unchanged.
+                _img_t = time.perf_counter()
+                _height_img = _load_source_image(
+                    fname, _source_mode, _orthophoto_dir
+                )
+                if _height_img is not None:
+                    _rec('dds_load', _img_t)
+            if _height_img is not None:
+                _t = time.perf_counter()
+                _apply_heightnet_to_detections(
+                    height_model, _height_img, yolo_detections, m_per_px
+                )
+                _rec('heightnet', _t)
         file_counts['yolo_detections'] = len(yolo_detections)
         if yolo_detections:
             yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)

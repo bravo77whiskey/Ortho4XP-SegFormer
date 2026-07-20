@@ -37,7 +37,7 @@ import numpy as np
 
 WINDOW_M = 64.0
 CROP_PX = 96
-DEFAULT_HEIGHT_CHECKPOINT = r"H:\model_training\models\heightnet.pt"
+DEFAULT_HEIGHT_CHECKPOINT = r"I:\building-models\heightnet.pt"
 HEIGHT_MODEL_MIN_M = 2.5
 # Batch size for the tiny CNN; 512 crops is ~18 MB of input on device.
 DEFAULT_HEIGHT_BATCH = 512
@@ -160,6 +160,15 @@ def _checkpoint_head_uses_dropout(state_dict):
 def default_checkpoint_path():
     return os.environ.get(
         "O4_SFR_BLD_HEIGHT_CHECKPOINT", DEFAULT_HEIGHT_CHECKPOINT
+    )
+
+
+def _fp16_enabled():
+    """CUDA fp16 autocast for the forward pass (O4_SFR_BLD_HEIGHT_FP16=0 to
+    disable). Measured drift vs fp32 is <5 mm on v2s — far below the model's
+    MAE — but parity A/B runs need the exact fp32 numbers."""
+    return os.environ.get("O4_SFR_BLD_HEIGHT_FP16", "1").strip().lower() not in (
+        "0", "false", "no", "off"
     )
 
 
@@ -352,6 +361,7 @@ def predict_detection_heights(model, image, detections, m_per_px,
     batch_size = int(batch_size)
     if batch_size <= 0:
         raise ValueError("HeightNet batch_size must be positive")
+    use_fp16 = _fp16_enabled() and str(device).startswith("cuda")
     with torch.inference_mode():
         for start in range(0, len(valid_idx), batch_size):
             stop = start + batch_size
@@ -360,7 +370,9 @@ def predict_detection_heights(model, image, detections, m_per_px,
                 / 255.0
             ).to(device)
             scal = torch.from_numpy(scalars_np[start:stop]).to(device)
-            pred = model(imgs, scal).float().cpu().numpy()
+            with torch.autocast("cuda", dtype=torch.float16, enabled=use_fp16):
+                pred = model(imgs, scal)
+            pred = pred.float().cpu().numpy()
             # Clip the log-space output before expm1: wrong-regime inputs can
             # otherwise overflow to inf (12 -> ~163 km, far past any clamp).
             preds[start:stop] = np.expm1(np.clip(pred, -2.0, 8.0))

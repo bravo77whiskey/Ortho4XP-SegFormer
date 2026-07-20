@@ -473,7 +473,6 @@ def main(argv=None):
                 device=device,
                 m_per_px=m_per_px,
                 batch_size=args.yolo_batch,
-                height_model=None,
             )
             _cuda_sync(device)
             detect_seconds = time.perf_counter() - detect_started
