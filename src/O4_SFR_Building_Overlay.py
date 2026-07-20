@@ -179,6 +179,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("cand", "candidates"),
                 ("yolo_raw", "yolo_raw_detections"),
                 ("yolo_det", "yolo_detections"),
+                ("heightnet_dets", "heightnet_dets"),
                 ("yolo_supp", "yolo_suppressed_overlap"),
                 ("yolo_placed", "yolo_placed"),
                 ("yolo_obj", "yolo_object_placed"),
@@ -9266,6 +9267,7 @@ def run(
         'segformer_inference': 0.0,
         'trained_yolo_inference': 0.0,
         'yolo_suppress': 0.0,
+        'heightnet': 0.0,
         'stock_yolo_inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
@@ -10423,31 +10425,10 @@ def run(
             _rec('yolo_suppress', _t)
             file_counts['yolo_raw_detections'] = raw_yolo_count
             file_counts['yolo_suppressed_overlap'] = yolo_suppressed
-        # HeightNet runs on the suppression survivors only: nothing between
-        # detection build and here reads height_m (oversize/coverage filters
-        # and suppression are footprint/confidence-only), so predicting after
-        # the drops is output-identical to the old inside-inference call while
-        # skipping every dropped detection. Crops always come from the
-        # native-ZL texture; under the O4_SFR_BLD_YOLO_ANALYSIS_ZL escape
-        # hatch heights previously used the downsampled analysis image.
-        if yolo_detections and height_model is not None:
-            _height_img = img
-            if _height_img is None:
-                # Cached-YOLO path (v7+ caches are height-free): load the
-                # texture just for the height crops, without touching `img`
-                # so downstream cached-run behaviour stays unchanged.
-                _img_t = time.perf_counter()
-                _height_img = _load_source_image(
-                    fname, _source_mode, _orthophoto_dir
-                )
-                if _height_img is not None:
-                    _rec('dds_load', _img_t)
-            if _height_img is not None:
-                _t = time.perf_counter()
-                _apply_heightnet_to_detections(
-                    height_model, _height_img, yolo_detections, m_per_px
-                )
-                _rec('heightnet', _t)
+        # HeightNet no longer runs here: heights are consumed only by object
+        # candidate selection and the facade fallback, both strictly after
+        # the static placement gates, so the placement phase predicts them
+        # lazily for gate-passers only (see the pre-pass above the fit loop).
         file_counts['yolo_detections'] = len(yolo_detections)
         if yolo_detections:
             yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
@@ -10862,6 +10843,68 @@ def run(
             valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
             yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
+
+            if yolo_detections and height_model is not None:
+                # Lazy HeightNet: heights are consumed only inside object
+                # candidate selection and the facade fallback, both of which
+                # run strictly AFTER the static placement gates in the fit
+                # loop below. Those gates read masks that are fully built
+                # above and never mutated inside the loop, so which
+                # detections reach a height read is decidable here, before
+                # anything places. Predict heights for the gate-passers only
+                # (~13% of suppression survivors on dense textures). This
+                # replica MUST stay in sync with the gate sequence at the top
+                # of the fit loop (valid -> in-bounds -> static center ->
+                # static footprint -> in-tile); a stale replica that passes
+                # extra detections only wastes GPU time, but one that drops a
+                # gate-passer would leave its height_m unset and shift the
+                # facade height RNG stream.
+                _t = time.perf_counter()
+                _height_dets = []
+                for _hdet in yolo_detections:
+                    _hprep = _prepare_direct_yolo_detection(_hdet, img_w, img_h)
+                    if not _hprep['valid']:
+                        continue
+                    _hjx = int(_hprep['jx'])
+                    _hjy = int(_hprep['jy'])
+                    if not (0 <= _hjx < img_w and 0 <= _hjy < img_h):
+                        continue
+                    if placement_occ_mask[_hjy, _hjx]:
+                        continue
+                    if not _poly_fits_with_integral(
+                        static_occ_mask, _hprep['poly'], fit_scratch,
+                        static_occ_integral, bbox=_hprep['bbox'],
+                    ):
+                        continue
+                    _ho_lon, _ho_lat = px_to_latlon(
+                        _hjx, _hjy, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+                    )
+                    if not (lon <= _ho_lon < lon + 1 and lat <= _ho_lat < lat + 1):
+                        continue
+                    _height_dets.append(_hdet)
+                if _height_dets:
+                    _height_img = img
+                    if _height_img is None:
+                        # Cached-YOLO path (v7+ caches are height-free): load
+                        # the texture just for the height crops, without
+                        # touching `img` so warm-run behaviour elsewhere
+                        # stays unchanged.
+                        _img_t = time.perf_counter()
+                        _height_img = _load_source_image(
+                            fname, _source_mode, _orthophoto_dir
+                        )
+                        if _height_img is not None:
+                            _record_elapsed(
+                                timings, file_timings, 'dds_load', _img_t
+                            )
+                    if _height_img is not None:
+                        _apply_heightnet_to_detections(
+                            height_model, _height_img, _height_dets, m_per_px
+                        )
+                    _height_img = None
+                    file_counts['heightnet_dets'] = len(_height_dets)
+                _height_dets = None
+                _record_elapsed(timings, file_timings, 'heightnet', _t)
 
             if yolo_detections:
                 _t_yolo_place = time.perf_counter()
