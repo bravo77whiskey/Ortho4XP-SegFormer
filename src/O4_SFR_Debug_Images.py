@@ -599,7 +599,7 @@ def generate_production_building_debug_images(
     spacing_m: float = 20.0,
     close_k: int = 15,
     open_k: int = 5,
-    min_zone_m2: float = 200.0,
+    min_footprint_m2: float = 12.0,
     grid_n: int = BLD.HEADING_GRID_N,
     custom_scenery_dir: str | os.PathLike[str] | None = None,
     skip_osm_excl_download: bool = False,
@@ -637,7 +637,7 @@ def generate_production_building_debug_images(
                 spacing_m=spacing_m,
                 close_k=close_k,
                 open_k=open_k,
-                min_zone_m2=min_zone_m2,
+                min_footprint_m2=min_footprint_m2,
                 make_viz=True,
                 cache_dir=str(runtime_cache),
                 disable_cache=True,
@@ -712,7 +712,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--spacing-m", type=float, default=0.0)
     parser.add_argument("--close-k", type=int, default=15)
     parser.add_argument("--open-k", type=int, default=5)
-    parser.add_argument("--min-zone-m2", type=float, default=200.0)
+    parser.add_argument("--min-footprint-m2", type=float, default=12.0)
     parser.add_argument("--grid-n", type=int, default=BLD.HEADING_GRID_N)
     parser.add_argument("--custom-scenery-dir", default=None)
     parser.add_argument("--skip-osm-excl-download", action="store_true")
@@ -764,7 +764,7 @@ def main(argv: list[str] | None = None) -> int:
             spacing_m=args.spacing_m,
             close_k=args.close_k,
             open_k=args.open_k,
-            min_zone_m2=args.min_zone_m2,
+            min_footprint_m2=args.min_footprint_m2,
             grid_n=args.grid_n,
             custom_scenery_dir=args.custom_scenery_dir,
             skip_osm_excl_download=args.skip_osm_excl_download,

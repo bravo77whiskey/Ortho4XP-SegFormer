@@ -477,11 +477,11 @@ cfg_tile_vars = {
         "short_name": "sfr_bld_open",
         "hint": "Small-feature cleanup size for building zones. On typical ZL16 imagery, 5 removes features around 10 m across. Raise it to suppress more tiny isolated detections.",
     },
-    "sfr_bld_min_zone_m2": {
+    "sfr_bld_min_footprint_m2": {
         "type": float,
-        "default": 200.0,
-        "short_name": "bld_min_area_m2",
-        "hint": "Minimum building zone area in square metres to be filled with objects. Smaller zones are skipped entirely.",
+        "default": 12.0,
+        "short_name": "bld_min_footprint_m2",
+        "hint": "Minimum building footprint area in square metres. Individual detections smaller than this are discarded up front, before any placement. Building zones are otherwise accepted regardless of size.",
     },
     "sfr_bld_grid_n": {
         "type": int,
@@ -707,7 +707,7 @@ list_sfr_bld_vars = [
     "sfr_bld_spacing_m",
     "sfr_bld_close_m",
     "sfr_bld_open_m",
-    "sfr_bld_min_zone_m2",
+    "sfr_bld_min_footprint_m2",
     "sfr_bld_grid_n",
     "sfr_bld_disable_cache",
     "sfr_bld_verbose_log",

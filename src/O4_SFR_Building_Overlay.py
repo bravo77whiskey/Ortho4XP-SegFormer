@@ -8,7 +8,7 @@ Options:
     --spacing   METRES   Object spacing in metres (default 0)
     --close     PIXELS   Morphological close kernel radius (default 15)
     --open      PIXELS   Morphological open  kernel radius (default 5)
-    --min-zone-m2 M2     Min zone area to bother filling   (default 200)
+    --min-footprint-m2 M2  Min per-detection footprint area  (default 12)
     --no-viz             Skip overview image generation
     --cache-dir DIR      Where to store per-DDS inference caches
                           (default: <o4xp_root>/SFR_cache/<tile>)
@@ -384,7 +384,7 @@ def parse_args():
     )
     ap.add_argument('--close',     type=int,   default=15)
     ap.add_argument('--open-k',    type=int,   default=5,  dest='open_k')
-    ap.add_argument('--min-zone', '--min-zone-m2', type=float, default=200.0, dest='min_zone_m2')
+    ap.add_argument('--min-footprint', '--min-footprint-m2', type=float, default=12.0, dest='min_footprint_m2')
     ap.add_argument('--no-viz',    action='store_true')
     ap.add_argument('--debug-image-only', action='store_true', dest='debug_image_only',
                     help='Generate overview/footprint PNGs then exit — no DSF written.')
@@ -8958,7 +8958,7 @@ def run(
     spacing_m,
     close_k,
     open_k,
-    min_zone_m2=None,
+    min_footprint_m2=None,
     make_viz=False,
     cache_dir=None,
     disable_cache=False,
@@ -8984,7 +8984,11 @@ def run(
     height_checkpoint=None,
     **legacy_kwargs,
 ):
-    legacy_min_zone_px = legacy_kwargs.pop('min_zone_px', None)
+    # Zone-area filtering was retired in favour of the up-front min-footprint
+    # gate: all building zones are now accepted regardless of area. Older
+    # (frozen-exe) callers still pass these; accept and ignore them.
+    legacy_kwargs.pop('min_zone_px', None)
+    legacy_kwargs.pop('min_zone_m2', None)
     # Retired feature knobs, still passed by older (frozen-exe) pipeline
     # callers. Accepted and ignored; current placement behaviour is fixed by
     # the active pipeline settings.
@@ -9008,12 +9012,9 @@ def run(
         bad_keys = ", ".join(sorted(legacy_kwargs))
         raise TypeError(f"run() got unexpected keyword argument(s): {bad_keys}")
 
-    if min_zone_m2 is None:
-        if legacy_min_zone_px is None:
-            raise TypeError("run() missing required argument: 'min_zone_m2'")
-        # Older callers passed native-ZL16 pixel area; convert back to the
-        # canonical square-metre config value used by the UI.
-        min_zone_m2 = float(legacy_min_zone_px) * (2.0 ** 2)
+    if min_footprint_m2 is None:
+        min_footprint_m2 = 12.0
+    min_footprint_m2 = max(0.0, float(min_footprint_m2))
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", _re.IGNORECASE)
@@ -9176,7 +9177,7 @@ def run(
     print(f"Tile: lat={lat} lon={lon}  DDS: {len(files)} ({_zl_str})  Grid: {n_cols}×{n_rows}")
     print(
         f"Params: edge_spacing={spacing_m}m  close={close_k}px  open={open_k}px  "
-        f"min_zone={min_zone_m2}m²"
+        f"min_footprint={min_footprint_m2}m²"
     )
 
     # ── Load OSM roads ────────────────────────────────────────────────────────
@@ -9900,7 +9901,7 @@ def run(
                 BLD_PLACEMENT_CACHE_VERSION
                 if strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
             ),
-            spacing_m, close_k, open_k, min_zone_m2,
+            spacing_m, close_k, open_k, min_footprint_m2,
             max_candidates_per_dds,
             PLACE_UNKNOWN_OBJECTS,
             footprint_pad_m,
@@ -10429,6 +10430,20 @@ def run(
         # candidate selection and the facade fallback, both strictly after
         # the static placement gates, so the placement phase predicts them
         # lazily for gate-passers only (see the pre-pass above the fit loop).
+        # Min-footprint gate — the earliest per-detection filter. Detections
+        # whose footprint is below the configured area are dropped here, before
+        # guidance, HeightNet, zone building and placement ever see them. It
+        # runs after the raw YOLO cache is written (line above), so the cache
+        # stays footprint-complete and tuning this value needs no cache rebuild.
+        if yolo_detections and min_footprint_m2 > 0.0:
+            _pre_footprint_n = len(yolo_detections)
+            yolo_detections = [
+                _d for _d in yolo_detections
+                if float(_d.get('area_m2', 0.0)) >= min_footprint_m2
+            ]
+            _footprint_dropped = _pre_footprint_n - len(yolo_detections)
+            if _footprint_dropped:
+                file_counts['yolo_min_footprint_dropped'] = _footprint_dropped
         file_counts['yolo_detections'] = len(yolo_detections)
         if yolo_detections:
             yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
@@ -10834,13 +10849,15 @@ def run(
                 (bld_zone != 0) &
                 (static_occ_mask == 0)
             ).astype(np.uint8)
-            min_zone_px = max(1, int(min_zone_m2 / max(m_per_px * m_per_px, 1e-6)))
             n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(
                 road_divided_zone, connectivity=8
             )
             cc_area = cc_stats[:, cv2.CC_STAT_AREA]
             cc_area_m2 = cc_area.astype(np.float32) * float(m_per_px * m_per_px)
-            valid_labels = np.flatnonzero((np.arange(n_cc) != 0) & (cc_area >= min_zone_px))
+            # Every building zone is accepted regardless of area; small buildings
+            # are already removed up front by the min-footprint gate applied to
+            # the raw detections during inference prep.
+            valid_labels = np.flatnonzero(np.arange(n_cc) != 0)
             yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
@@ -12296,7 +12313,7 @@ def main():
         spacing_m  = args.spacing,
         close_k    = args.close,
         open_k     = args.open_k,
-        min_zone_m2= args.min_zone_m2,
+        min_footprint_m2=args.min_footprint_m2,
         make_viz   = not args.no_viz,
         debug_image_only = args.debug_image_only,
         cache_dir  = cache_dir,

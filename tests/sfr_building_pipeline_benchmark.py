@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spacing", type=float, default=0.0)
     parser.add_argument("--close-k", type=int, default=15)
     parser.add_argument("--open-k", type=int, default=5)
-    parser.add_argument("--min-zone-m2", type=float, default=200.0)
+    parser.add_argument("--min-footprint-m2", type=float, default=12.0)
     parser.add_argument("--grid-n", type=int, default=16)
     parser.add_argument("--yolo-conf", type=float, default=None)
     parser.add_argument("--yolo-iou", type=float, default=None)
@@ -256,7 +256,7 @@ def main() -> int:
             spacing_m=args.spacing,
             close_k=args.close_k,
             open_k=args.open_k,
-            min_zone_m2=args.min_zone_m2,
+            min_footprint_m2=args.min_footprint_m2,
             make_viz=False,
             cache_dir=str(cache_dir),
             disable_cache=not args.use_cache,

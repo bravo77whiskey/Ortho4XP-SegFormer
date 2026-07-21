@@ -223,7 +223,7 @@ sfr_veg_disable_cache = False
 sfr_bld_spacing_m     = 0.0
 sfr_bld_close_m       = 30.0
 sfr_bld_open_m        = 10.0
-sfr_bld_min_zone_m2   = 200.0
+sfr_bld_min_footprint_m2 = 12.0
 sfr_bld_grid_n        = 16
 sfr_bld_disable_cache = False
 sfr_bld_verbose_log   = False
@@ -625,7 +625,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    spacing_m    = {sfr_bld_spacing_m!r},\n"
         f"    close_k      = {close_k!r},\n"
         f"    open_k       = {open_k!r},\n"
-        f"    min_zone_m2  = {sfr_bld_min_zone_m2!r},\n"
+        f"    min_footprint_m2 = {sfr_bld_min_footprint_m2!r},\n"
         f"    make_viz                 = False,\n"
         f"    disable_cache            = {sfr_bld_disable_cache!r},\n"
         f"    verbose_log              = {sfr_bld_verbose_log!r},\n"

@@ -737,7 +737,7 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
         SFR.sfr_bld_close_m     = tile.sfr_bld_close_m
         SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
-        SFR.sfr_bld_min_zone_m2 = tile.sfr_bld_min_zone_m2
+        SFR.sfr_bld_min_footprint_m2 = tile.sfr_bld_min_footprint_m2
         SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
         SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
         SFR.sfr_bld_verbose_log = tile.sfr_bld_verbose_log
