@@ -2645,17 +2645,21 @@ MAX_GENERATED_BUILDING_HEIGHT_M = 40.0
 # clear heights cluster around 32-40 ft; 16 m leaves room for roof structure
 # while preventing HeightNet outliers from becoming tower-height warehouses.
 LARGE_FOOTPRINT_HEIGHT_CAP_M = 16.0
-# Direct-YOLO facade fallback extrudes the detected OBB itself. Keep that path
-# inside the largest sane single-building roof envelope; bigger detections must
-# use a fitting object asset or be skipped, rather than becoming field-sized
-# facades.
-MAX_DIRECT_YOLO_FACADE_AREA_M2 = ASSET_LARGE_MAX_M2
-MAX_DIRECT_YOLO_FACADE_SIDE_M = 115.0
+# Upper footprint gate for raw YOLO detections (hard drop in inference prep,
+# and the plausibility test for the direct-OBB facade fallback). It is no
+# longer a "sane single building" envelope — real buildings go far beyond
+# warehouse scale, so the bound is now the largest building on earth by
+# footprint (Aalsmeer Flower Auction, ~518,000 m², roughly 1 km across) with a
+# little headroom. In practice this only rejects OBBs that could not be a
+# building at all; genuine mega-footprints survive and are placed as
+# extra-large facades/objects.
+MAX_DIRECT_YOLO_FACADE_AREA_M2 = 520_000.0
+MAX_DIRECT_YOLO_FACADE_SIDE_M = 1_300.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 64      # v64: post-suppression HeightNet (+fp16)
-BLD_PLACEMENT_FAST_CACHE_VERSION = 66  # v66: post-suppression HeightNet (+fp16)
+BLD_PLACEMENT_CACHE_VERSION = 65      # v65: world-scale max-footprint gate
+BLD_PLACEMENT_FAST_CACHE_VERSION = 67  # v67: world-scale max-footprint gate
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {

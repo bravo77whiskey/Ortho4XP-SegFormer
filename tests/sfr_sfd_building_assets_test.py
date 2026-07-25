@@ -877,8 +877,9 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(dropped, 1)
         self.assertEqual([det["confidence"] for det in kept], [0.90, 0.50])
 
-    def test_oversized_yolo_detection_cannot_suppress_smaller_overlaps(self):
-        detections = [
+    @staticmethod
+    def _small_pair_with(big_detection):
+        return [
             {
                 "id": "small-a",
                 "confidence": 0.70,
@@ -893,14 +894,46 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 "max_side_m": 20.0,
                 "points": [[55, 55], [75, 55], [75, 75], [55, 75]],
             },
-            {
-                "id": "oversized-merge",
-                "confidence": 0.95,
-                "area_m2": 9_800.0,
-                "max_side_m": 140.0,
-                "points": [[0, 0], [140, 0], [140, 70], [0, 70]],
-            },
+            big_detection,
         ]
+
+    def test_warehouse_scale_detection_survives_max_footprint_gate(self):
+        # The max-footprint gate now sits at the world's largest building, so
+        # warehouse-scale OBBs reach overlap suppression instead of being
+        # dropped up front; the pair rule decides who wins from there.
+        detections = self._small_pair_with({
+            "id": "warehouse",
+            "confidence": 0.95,
+            "area_m2": 9_800.0,
+            "max_side_m": 140.0,
+            "points": [[0, 0], [140, 0], [140, 70], [0, 70]],
+        })
+
+        filtered, oversize_dropped = BLD._filter_oversized_direct_yolo_detections(
+            detections
+        )
+        kept, overlap_dropped = BLD._suppress_overlapping_yolo_detections(
+            filtered,
+            coverage_threshold=0.0,
+            min_overlap_m2=0.0,
+            m_per_px=1.0,
+            pair_rule=True,
+        )
+
+        self.assertEqual(oversize_dropped, 0)
+        # The two smalls explain far too little of its ground to be the real
+        # buildings, so it survives and evicts them as sub-structure boxes.
+        self.assertEqual(overlap_dropped, 2)
+        self.assertEqual([det["id"] for det in kept], ["warehouse"])
+
+    def test_above_world_scale_detection_cannot_suppress_smaller_overlaps(self):
+        detections = self._small_pair_with({
+            "id": "field-sized",
+            "confidence": 0.95,
+            "area_m2": 900_000.0,
+            "max_side_m": 1_500.0,
+            "points": [[0, 0], [1500, 0], [1500, 600], [0, 600]],
+        })
 
         filtered, oversize_dropped = BLD._filter_oversized_direct_yolo_detections(
             detections

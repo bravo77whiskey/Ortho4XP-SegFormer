@@ -93,17 +93,35 @@ def test_direct_yolo_facade_rejects_oversized_raw_footprint():
             "max_side_m": 45.0,
         }
     )
-    assert not overlay._direct_yolo_facade_footprint_allowed(
+    # Warehouse / mega-factory scale is a real building, not an artefact:
+    # the gate now sits at the world's largest footprint, so these pass.
+    assert overlay._direct_yolo_facade_footprint_allowed(
         {
             "placement_class": overlay.BLD_CLASS_APARTMENT_BLOCK,
             "area_m2": 8_000.0,
             "max_side_m": 120.0,
         }
     )
-    assert not overlay._direct_yolo_facade_footprint_allowed(
+    assert overlay._direct_yolo_facade_footprint_allowed(
         {
             "placement_class": overlay.BLD_CLASS_MEDIUM,
             "length_m": 140.0,
             "width_m": 70.0,
+        }
+    )
+    # Boeing Everett (~398,000 m², ~1.1 km long) still fits under the gate.
+    assert overlay._direct_yolo_facade_footprint_allowed(
+        {
+            "placement_class": overlay.BLD_CLASS_EXTRA_LARGE,
+            "length_m": 1_100.0,
+            "width_m": 360.0,
+        }
+    )
+    # Beyond any building on earth — that is an OBB spanning a whole field.
+    assert not overlay._direct_yolo_facade_footprint_allowed(
+        {
+            "placement_class": overlay.BLD_CLASS_EXTRA_LARGE,
+            "area_m2": 900_000.0,
+            "max_side_m": 1_500.0,
         }
     )
