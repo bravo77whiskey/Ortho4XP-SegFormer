@@ -21,6 +21,25 @@ import O4_SFR_Asset_Inventory as ASSETINV
 import O4_SFR_DSF_Utils as DSF
 
 
+def _max_corner_deviation_deg(points):
+    """Largest departure from a right angle across a quad's four corners."""
+    pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
+    worst = 0.0
+    for idx in range(4):
+        a = pts[(idx - 1) % 4] - pts[idx]
+        b = pts[(idx + 1) % 4] - pts[idx]
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na < 1e-9 or nb < 1e-9:
+            return 90.0
+        cos_ang = float(np.clip(np.dot(a, b) / (na * nb), -1.0, 1.0))
+        worst = max(worst, abs(math.degrees(math.acos(cos_ang)) - 90.0))
+    return worst
+
+
+def _is_rectangle(points, tol_deg=0.5):
+    return _max_corner_deviation_deg(points) <= tol_deg
+
+
 def _paths_for_classes(pools, classes):
     return {
         asset["path"]
@@ -970,6 +989,69 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertGreaterEqual(points.min(), 0.0)
         self.assertLessEqual(points[:, 0].max(), 15.0)
         self.assertLessEqual(points[:, 1].max(), 15.0)
+
+    def test_yolo_obb_detection_stays_rectangular_when_clipped(self):
+        # A rotated box hanging off the texture border used to be clamped
+        # corner-by-corner, which sheared it into an irregular quad and — via
+        # the direct-YOLO facade fallback, which extrudes these corners
+        # verbatim — produced facades with non-right angles in the sim.
+        rot = math.radians(30.0)
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        half_long, half_short = 30.0, 12.0
+        center = np.array([12.0, 40.0])
+        corners = np.array([
+            center + s * half_long * np.array([cos_r, sin_r])
+                   + t * half_short * np.array([-sin_r, cos_r])
+            for s, t in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ])
+
+        detection = BLD._yolo_obb_detection_from_points(
+            corners,
+            confidence=0.9,
+            cls=0,
+            img_w=128,
+            img_h=128,
+            m_per_px=1.0,
+        )
+
+        self.assertIsNotNone(detection)
+        points = np.asarray(detection["points"], dtype=np.float64)
+        self.assertGreaterEqual(points.min(), 0.0)
+        self.assertLessEqual(points.max(), 127.0)
+        self.assertTrue(_is_rectangle(points))
+        # Orientation is preserved: the box is trimmed along its own axes.
+        self.assertAlmostEqual(
+            float(detection["heading"]), (30.0 + 90.0) % 180.0, places=3
+        )
+
+    def test_rect_clip_obb_leaves_in_bounds_box_untouched(self):
+        corners = np.array([
+            [10.0, 10.0], [40.0, 20.0], [35.0, 35.0], [5.0, 25.0],
+        ], dtype=np.float32)
+        clipped = BLD._rect_clip_obb_to_image(corners, 128, 128)
+        np.testing.assert_allclose(clipped, corners)
+
+    def test_rect_clip_obb_survives_axis_aligned_and_corner_overhang(self):
+        for corners in (
+            # axis-aligned, overhanging left and top
+            np.array([[-5.0, -5.0], [20.0, -5.0], [20.0, 10.0], [-5.0, 10.0]]),
+            # 45 deg, poking out of the bottom-right corner
+            np.array([[50.0, 40.0], [70.0, 60.0], [60.0, 70.0], [40.0, 50.0]]),
+        ):
+            with self.subTest(corners=corners.tolist()):
+                clipped = BLD._rect_clip_obb_to_image(corners, 64, 64)
+                self.assertIsNotNone(clipped)
+                clipped = np.asarray(clipped, dtype=np.float64)
+                self.assertGreaterEqual(clipped.min(), -1e-4)
+                self.assertLessEqual(clipped.max(), 63.0 + 1e-4)
+                self.assertTrue(_is_rectangle(clipped))
+
+    def test_rect_clip_obb_drops_box_that_cannot_be_trimmed(self):
+        # Entirely outside the image: no same-orientation sub-rectangle fits.
+        corners = np.array([
+            [200.0, 200.0], [260.0, 220.0], [255.0, 240.0], [195.0, 220.0],
+        ])
+        self.assertIsNone(BLD._rect_clip_obb_to_image(corners, 64, 64))
 
     def test_yolo_guidance_prefers_nearby_detection_heading_and_class(self):
         guidance = BLD._build_yolo_guidance(

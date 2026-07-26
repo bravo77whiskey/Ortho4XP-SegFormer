@@ -1,3 +1,4 @@
+import math
 import sys
 import tempfile
 import unittest
@@ -279,6 +280,60 @@ class StockYoloFacadeGeometryTests(unittest.TestCase):
         self.assertEqual(ring[0], ring[-1])
         self.assertGreater(STOCK._signed_lonlat_ring_area(ring), 0.0)
         self.assertEqual(result.occupied_px_polys[0].shape[0], 4)
+
+    def test_rect_clip_keeps_border_crossing_obb_rectangular(self):
+        # Per-corner clamping sheared boxes that hang off the texture border
+        # into irregular quads, and the facade ring is written straight from
+        # these corners.
+        rot = math.radians(35.0)
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        long_axis = np.array([cos_r, sin_r])
+        short_axis = np.array([-sin_r, cos_r])
+        center = np.array([14.0, 60.0])
+        corners = np.array([
+            center + s * 26.0 * long_axis + t * 11.0 * short_axis
+            for s, t in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ])
+
+        clipped = STOCK._rect_clip_obb_to_image(corners, 256, 256)
+
+        self.assertIsNotNone(clipped)
+        clipped = np.asarray(clipped, dtype=np.float64)
+        self.assertGreaterEqual(clipped.min(), -1e-4)
+        self.assertLessEqual(clipped.max(), 255.0 + 1e-4)
+        for idx in range(4):
+            a = clipped[(idx - 1) % 4] - clipped[idx]
+            b = clipped[(idx + 1) % 4] - clipped[idx]
+            cos_ang = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+            self.assertAlmostEqual(cos_ang, 0.0, places=5)
+
+    def test_storage_tank_radius_shrinks_instead_of_flattening(self):
+        # A tank overlapping the texture border must stay round: clamping the
+        # circle's vertices would flatten the crossing arc into a straight edge.
+        radius = STOCK._circle_radius_within_image(20.0, 128.0, 50.0, 256, 256)
+        self.assertAlmostEqual(radius, 20.0)
+
+        ring = STOCK._pixel_circle_polygon(20.0, 128.0, radius)
+        self.assertGreaterEqual(ring.min(), -1e-4)
+        self.assertLessEqual(ring.max(), 255.0 + 1e-4)
+        distances = np.linalg.norm(
+            np.asarray(ring[:-1], dtype=np.float64) - np.array([20.0, 128.0]),
+            axis=1,
+        )
+        self.assertAlmostEqual(float(distances.max()), float(distances.min()), places=4)
+
+    def test_storage_tank_radius_untouched_when_circle_fits(self):
+        self.assertAlmostEqual(
+            STOCK._circle_radius_within_image(128.0, 128.0, 40.0, 256, 256), 40.0
+        )
+
+    def test_rect_clip_leaves_in_bounds_obb_untouched(self):
+        corners = np.array([
+            [100.0, 100.0], [140.0, 100.0], [140.0, 120.0], [100.0, 120.0],
+        ], dtype=np.float32)
+        np.testing.assert_allclose(
+            STOCK._rect_clip_obb_to_image(corners, 256, 256), corners
+        )
 
     def test_custom_asset_map_can_disable_detected_class(self):
         result = self._run_fake_detection(

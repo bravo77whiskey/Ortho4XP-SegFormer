@@ -2658,8 +2658,8 @@ MAX_DIRECT_YOLO_FACADE_SIDE_M = 1_300.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 65      # v65: world-scale max-footprint gate
-BLD_PLACEMENT_FAST_CACHE_VERSION = 67  # v67: world-scale max-footprint gate
+BLD_PLACEMENT_CACHE_VERSION = 66      # v66: rectangle-preserving OBB clip
+BLD_PLACEMENT_FAST_CACHE_VERSION = 68  # v68: rectangle-preserving OBB clip
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -2880,7 +2880,9 @@ OPTIONAL_ASSET_REGION_ALIASES = {
 # v7: detections cached WITHOUT heights — HeightNet now runs after overlap
 #     suppression on the survivors only, so cached content is height-free and
 #     the height checkpoint keys the placement cache instead.
-YOLO_OBB_CACHE_VERSION = 7
+# v8: image-edge clipping keeps the OBB rectangular (was a per-corner clamp
+#     that sheared boxes crossing the texture border into irregular quads).
+YOLO_OBB_CACHE_VERSION = 8
 YOLO_ANALYSIS_CACHE_VERSION = 1
 YOLO_ANALYSIS_TARGET_ZL = 16
 DEFAULT_YOLO_OBB_CHECKPOINT = (
@@ -5791,12 +5793,27 @@ def _scale_yolo_detections_to_image(detections, scale_x, scale_y, img_w, img_h):
     for detection in detections:
         item = dict(detection)
         points = np.asarray(item.get('points', ()), dtype=np.float32).reshape(-1, 2)
+        rect_center = None
         if points.size:
-            points[:, 0] = np.clip(points[:, 0] * float(scale_x), 0, max(0, img_w - 1))
-            points[:, 1] = np.clip(points[:, 1] * float(scale_y), 0, max(0, img_h - 1))
+            points[:, 0] *= float(scale_x)
+            points[:, 1] *= float(scale_y)
+            if points.shape[0] == 4:
+                # Keep the box rectangular: per-corner clamping would shear it
+                # (see _rect_clip_obb_to_image).
+                rect = _rect_clip_obb_to_image(points, img_w, img_h)
+                if rect is None:
+                    continue
+                points = rect
+                rect_center = points.mean(axis=0)
+            else:
+                points[:, 0] = np.clip(points[:, 0], 0, max(0, img_w - 1))
+                points[:, 1] = np.clip(points[:, 1], 0, max(0, img_h - 1))
             item['points'] = points.tolist()
         center = np.asarray(item.get('center', ()), dtype=np.float32).reshape(-1)
-        if center.size >= 2:
+        if rect_center is not None:
+            # Anchor on the clipped box the overlay actually places.
+            item['center'] = [float(rect_center[0]), float(rect_center[1])]
+        elif center.size >= 2:
             item['center'] = [
                 float(np.clip(center[0] * float(scale_x), 0, max(0, img_w - 1))),
                 float(np.clip(center[1] * float(scale_y), 0, max(0, img_h - 1))),
@@ -6173,6 +6190,112 @@ def _decode_yolo_obb_detection_class(model_cls_int, model_class_count=None):
     return None, None
 
 
+def _rect_clip_obb_to_image(points, img_w, img_h, min_extent_px=0.5):
+    """Clip an oriented box to the image while keeping it a true rectangle.
+
+    Clamping the four corners independently (``np.clip`` per coordinate) shears
+    a rotated rectangle into an irregular quad: the corners that were already
+    inside keep the building's real orientation while the out-of-bounds ones
+    slide along the image border, so two sides stay right and the other two run
+    off at arbitrary angles. The direct-YOLO facade fallback extrudes these
+    corners verbatim into the DSF winding, which is exactly how a sheared quad
+    becomes a visibly non-rectangular facade in the sim.
+
+    Trim the box along its own axes instead: keep the heading, then shrink the
+    long/short extents (each side independently) by the least area needed for
+    every corner to land inside the image. Returns the clipped 4x2 corners in
+    the input winding order, or None when nothing of usable size survives.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
+    x_max = float(max(0, int(img_w) - 1))
+    y_max = float(max(0, int(img_h) - 1))
+    if (
+        pts[:, 0].min() >= 0.0 and pts[:, 0].max() <= x_max and
+        pts[:, 1].min() >= 0.0 and pts[:, 1].max() <= y_max
+    ):
+        return pts.astype(np.float32)
+
+    center = pts.mean(axis=0)
+    u = pts[1] - pts[0]
+    u_len = float(np.linalg.norm(u))
+    if u_len < 1e-6:
+        return None
+    u = u / u_len
+    v = pts[3] - pts[0]
+    v = v - float(np.dot(v, u)) * u       # orthonormalise against float noise
+    v_len = float(np.linalg.norm(v))
+    if v_len < 1e-6:
+        return None
+    v = v / v_len
+
+    rel = pts - center
+    s = rel @ u
+    t = rel @ v
+    s_lo, s_hi = float(s.min()), float(s.max())
+    t_lo, t_hi = float(t.min()), float(t.max())
+    min_extent = float(min_extent_px)
+
+    # (axis, sign, bound): max over corners of sign*coord must stay <= bound.
+    constraints = (
+        (0, 1.0, x_max), (0, -1.0, 0.0),
+        (1, 1.0, y_max), (1, -1.0, 0.0),
+    )
+    for _ in range(16):
+        worst = None
+        for axis, sign, bound in constraints:
+            a = sign * float(u[axis])
+            b = sign * float(v[axis])
+            reach = (
+                sign * float(center[axis]) +
+                max(s_lo * a, s_hi * a) +
+                max(t_lo * b, t_hi * b)
+            )
+            violation = reach - bound
+            if violation > 1e-9 and (worst is None or violation > worst[0]):
+                worst = (violation, a, b)
+        if worst is None:
+            break
+        violation, a, b = worst
+        s_span = s_hi - s_lo
+        t_span = t_hi - t_lo
+        # Cost of killing the violation on each axis = shrink distance * the
+        # other axis' span, i.e. the footprint area given up.
+        s_shrink = violation / abs(a) if abs(a) > 1e-9 else math.inf
+        t_shrink = violation / abs(b) if abs(b) > 1e-9 else math.inf
+        if s_shrink > s_span - min_extent:
+            s_shrink = math.inf
+        if t_shrink > t_span - min_extent:
+            t_shrink = math.inf
+        if not math.isfinite(s_shrink) and not math.isfinite(t_shrink):
+            return None
+        if s_shrink * t_span <= t_shrink * s_span:
+            # Pull in whichever end of the long axis reaches past the border.
+            if a > 0.0:
+                s_hi -= s_shrink
+            else:
+                s_lo += s_shrink
+        else:
+            if b > 0.0:
+                t_hi -= t_shrink
+            else:
+                t_lo += t_shrink
+    else:
+        return None
+
+    s_mid = (s_lo + s_hi) * 0.5
+    t_mid = (t_lo + t_hi) * 0.5
+    clipped = np.empty((4, 2), dtype=np.float64)
+    for idx in range(4):
+        s_idx = s_hi if s[idx] > s_mid else s_lo
+        t_idx = t_hi if t[idx] > t_mid else t_lo
+        clipped[idx] = center + s_idx * u + t_idx * v
+    # Absorb residual float error; the shrink above already put every corner on
+    # or inside the border, so this moves nothing far enough to shear the box.
+    clipped[:, 0] = np.clip(clipped[:, 0], 0.0, x_max)
+    clipped[:, 1] = np.clip(clipped[:, 1], 0.0, y_max)
+    return clipped.astype(np.float32)
+
+
 def _yolo_obb_detection_from_points(
     points,
     confidence,
@@ -6193,12 +6316,15 @@ def _yolo_obb_detection_from_points(
     if not np.any(valid) and not (0 <= center[0] < img_w and 0 <= center[1] < img_h):
         return None
 
-    clipped = pts.copy()
-    clipped[:, 0] = np.clip(clipped[:, 0], 0, max(0, img_w - 1))
-    clipped[:, 1] = np.clip(clipped[:, 1], 0, max(0, img_h - 1))
+    clipped = _rect_clip_obb_to_image(pts, img_w, img_h)
+    if clipped is None:
+        return None
     area_px = abs(float(cv2.contourArea(clipped.astype(np.float32))))
     if area_px <= 1.0:
         return None
+    # The clipped box is the footprint the overlay actually places, so anchor
+    # the detection on its centre rather than on the clamped raw centre.
+    center = clipped.mean(axis=0)
 
     # Use the polygon corners for heading rather than Ultralytics ``xywhr``.
     # ``xywhr`` uses a normalized OBB representation whose angle can flip with

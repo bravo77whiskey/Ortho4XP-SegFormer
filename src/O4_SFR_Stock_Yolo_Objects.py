@@ -366,6 +366,119 @@ def _pixel_circle_polygon(cx: float, cy: float, radius_px: float,
     return np.vstack((pts, pts[:1]))
 
 
+def _circle_radius_within_image(cx: float, cy: float, radius_px: float,
+                                img_w: int, img_h: int) -> float:
+    """Largest radius keeping a circle centred on (cx, cy) inside the image.
+
+    Clamping a circle's vertices per coordinate (the rectangle bug in circular
+    form) flattens whichever arc crosses the border into a straight edge, so a
+    storage tank at a texture seam renders as a squashed blob instead of a
+    cylinder. Shrinking the radius keeps the tank round and keeps it centred on
+    the detection, which also keeps the two halves seen from neighbouring
+    textures concentric rather than offset.
+    """
+    fit = min(
+        float(cx),
+        float(cy),
+        float(max(0, int(img_w) - 1)) - float(cx),
+        float(max(0, int(img_h) - 1)) - float(cy),
+    )
+    return max(0.0, min(float(radius_px), fit))
+
+
+def _rect_clip_obb_to_image(points, img_w: int, img_h: int, min_extent_px: float = 0.5):
+    """Clip an oriented box to the image while keeping it a true rectangle.
+
+    keep in sync with O4_SFR_Building_Overlay._rect_clip_obb_to_image: clamping
+    the four corners independently shears a rotated rectangle into an irregular
+    quad, and facade rings are written straight from these corners. Trim along
+    the box's own axes instead. Returns clipped 4x2 corners in the input
+    winding order, or None when nothing of usable size survives.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
+    x_max = float(max(0, int(img_w) - 1))
+    y_max = float(max(0, int(img_h) - 1))
+    if (
+        pts[:, 0].min() >= 0.0 and pts[:, 0].max() <= x_max and
+        pts[:, 1].min() >= 0.0 and pts[:, 1].max() <= y_max
+    ):
+        return pts.astype(np.float32)
+
+    center = pts.mean(axis=0)
+    u = pts[1] - pts[0]
+    u_len = float(np.linalg.norm(u))
+    if u_len < 1e-6:
+        return None
+    u = u / u_len
+    v = pts[3] - pts[0]
+    v = v - float(np.dot(v, u)) * u
+    v_len = float(np.linalg.norm(v))
+    if v_len < 1e-6:
+        return None
+    v = v / v_len
+
+    rel = pts - center
+    s = rel @ u
+    t = rel @ v
+    s_lo, s_hi = float(s.min()), float(s.max())
+    t_lo, t_hi = float(t.min()), float(t.max())
+    min_extent = float(min_extent_px)
+
+    constraints = (
+        (0, 1.0, x_max), (0, -1.0, 0.0),
+        (1, 1.0, y_max), (1, -1.0, 0.0),
+    )
+    for _ in range(16):
+        worst = None
+        for axis, sign, bound in constraints:
+            a = sign * float(u[axis])
+            b = sign * float(v[axis])
+            reach = (
+                sign * float(center[axis]) +
+                max(s_lo * a, s_hi * a) +
+                max(t_lo * b, t_hi * b)
+            )
+            violation = reach - bound
+            if violation > 1e-9 and (worst is None or violation > worst[0]):
+                worst = (violation, a, b)
+        if worst is None:
+            break
+        violation, a, b = worst
+        s_span = s_hi - s_lo
+        t_span = t_hi - t_lo
+        s_shrink = violation / abs(a) if abs(a) > 1e-9 else math.inf
+        t_shrink = violation / abs(b) if abs(b) > 1e-9 else math.inf
+        if s_shrink > s_span - min_extent:
+            s_shrink = math.inf
+        if t_shrink > t_span - min_extent:
+            t_shrink = math.inf
+        if not math.isfinite(s_shrink) and not math.isfinite(t_shrink):
+            return None
+        if s_shrink * t_span <= t_shrink * s_span:
+            if a > 0.0:
+                s_hi -= s_shrink
+            else:
+                s_lo += s_shrink
+        else:
+            if b > 0.0:
+                t_hi -= t_shrink
+            else:
+                t_lo += t_shrink
+    else:
+        return None
+
+    s_mid = (s_lo + s_hi) * 0.5
+    t_mid = (t_lo + t_hi) * 0.5
+    clipped = np.empty((4, 2), dtype=np.float64)
+    for idx in range(4):
+        s_idx = s_hi if s[idx] > s_mid else s_lo
+        t_idx = t_hi if t[idx] > t_mid else t_lo
+        clipped[idx] = center + s_idx * u + t_idx * v
+    clipped[:, 0] = np.clip(clipped[:, 0], 0.0, x_max)
+    clipped[:, 1] = np.clip(clipped[:, 1], 0.0, y_max)
+    return clipped.astype(np.float32)
+
+
 def _quad_geometry(quad_px: np.ndarray, m_per_px: float) -> tuple[float, float, float, float, float]:
     """Return (center_x, center_y, long_side_m, short_side_m, heading_deg)."""
     pts = np.asarray(quad_px, dtype=np.float32).reshape(4, 2)
@@ -443,9 +556,11 @@ def run_stock_yolo_pass(
             quad = np.asarray(points, dtype=np.float32).reshape(4, 2)
             quad[:, 0] += float(ox)
             quad[:, 1] += float(oy)
-            # Clip to image bounds
-            quad[:, 0] = np.clip(quad[:, 0], 0, max(0, img_w - 1))
-            quad[:, 1] = np.clip(quad[:, 1], 0, max(0, img_h - 1))
+            # Clip to image bounds, keeping the box rectangular (a per-corner
+            # clamp would shear it — see _rect_clip_obb_to_image).
+            quad = _rect_clip_obb_to_image(quad, img_w, img_h)
+            if quad is None:
+                continue
             cx, cy, long_m, short_m, heading_deg = _quad_geometry(quad, m_per_px)
             if not (0 <= cx < img_w and 0 <= cy < img_h):
                 continue
@@ -480,9 +595,12 @@ def run_stock_yolo_pass(
                 facade_poly = quad
                 if cls_i == STORAGE_TANK_DOTA_CLASS:
                     radius_px = 0.5 * min(long_m, short_m) / max(float(m_per_px), 1e-6)
+                    # Shrink rather than clamp the vertices, which would flatten
+                    # the arc crossing the border (see the docstring).
+                    radius_px = _circle_radius_within_image(
+                        cx, cy, radius_px, img_w, img_h
+                    )
                     facade_poly = _pixel_circle_polygon(cx, cy, radius_px)
-                    facade_poly[:, 0] = np.clip(facade_poly[:, 0], 0, max(0, img_w - 1))
-                    facade_poly[:, 1] = np.clip(facade_poly[:, 1], 0, max(0, img_h - 1))
                     occupied_poly = facade_poly
                 ring = _pixel_quad_to_lonlat(facade_poly, img_w, img_h,
                                              lat_n, lat_s, lon_w, lon_e)

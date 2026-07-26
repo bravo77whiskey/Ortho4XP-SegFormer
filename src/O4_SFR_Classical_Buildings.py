@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-ALGO_VERSION = 3
+ALGO_VERSION = 4
 DEFAULT_CLASSICAL_CONF = 0.30
 
 # ── Tables kept in sync with O4_SFR_Building_Overlay.py ─────────────────────
@@ -263,6 +263,99 @@ def m_per_px_for_texture_stem(stem: str, img_w: int, img_h: int):
     return (lon_span_m / img_w + lat_span_m / img_h) / 2
 
 
+def _rect_clip_obb_to_image(points, img_w, img_h, min_extent_px=0.5):
+    """Clip an oriented box to the image while keeping it a true rectangle.
+
+    keep in sync with O4_SFR_Building_Overlay._rect_clip_obb_to_image: clamping
+    the four corners independently shears a rotated rectangle into an irregular
+    quad, which downstream extrudes into a non-rectangular facade. Trim along
+    the box's own axes instead. Returns clipped 4x2 corners in the input
+    winding order, or None when nothing of usable size survives.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
+    x_max = float(max(0, int(img_w) - 1))
+    y_max = float(max(0, int(img_h) - 1))
+    if (
+        pts[:, 0].min() >= 0.0 and pts[:, 0].max() <= x_max and
+        pts[:, 1].min() >= 0.0 and pts[:, 1].max() <= y_max
+    ):
+        return pts.astype(np.float32)
+
+    center = pts.mean(axis=0)
+    u = pts[1] - pts[0]
+    u_len = float(np.linalg.norm(u))
+    if u_len < 1e-6:
+        return None
+    u = u / u_len
+    v = pts[3] - pts[0]
+    v = v - float(np.dot(v, u)) * u
+    v_len = float(np.linalg.norm(v))
+    if v_len < 1e-6:
+        return None
+    v = v / v_len
+
+    rel = pts - center
+    s = rel @ u
+    t = rel @ v
+    s_lo, s_hi = float(s.min()), float(s.max())
+    t_lo, t_hi = float(t.min()), float(t.max())
+    min_extent = float(min_extent_px)
+
+    constraints = (
+        (0, 1.0, x_max), (0, -1.0, 0.0),
+        (1, 1.0, y_max), (1, -1.0, 0.0),
+    )
+    for _ in range(16):
+        worst = None
+        for axis, sign, bound in constraints:
+            a = sign * float(u[axis])
+            b = sign * float(v[axis])
+            reach = (
+                sign * float(center[axis]) +
+                max(s_lo * a, s_hi * a) +
+                max(t_lo * b, t_hi * b)
+            )
+            violation = reach - bound
+            if violation > 1e-9 and (worst is None or violation > worst[0]):
+                worst = (violation, a, b)
+        if worst is None:
+            break
+        violation, a, b = worst
+        s_span = s_hi - s_lo
+        t_span = t_hi - t_lo
+        s_shrink = violation / abs(a) if abs(a) > 1e-9 else math.inf
+        t_shrink = violation / abs(b) if abs(b) > 1e-9 else math.inf
+        if s_shrink > s_span - min_extent:
+            s_shrink = math.inf
+        if t_shrink > t_span - min_extent:
+            t_shrink = math.inf
+        if not math.isfinite(s_shrink) and not math.isfinite(t_shrink):
+            return None
+        if s_shrink * t_span <= t_shrink * s_span:
+            if a > 0.0:
+                s_hi -= s_shrink
+            else:
+                s_lo += s_shrink
+        else:
+            if b > 0.0:
+                t_hi -= t_shrink
+            else:
+                t_lo += t_shrink
+    else:
+        return None
+
+    s_mid = (s_lo + s_hi) * 0.5
+    t_mid = (t_lo + t_hi) * 0.5
+    clipped = np.empty((4, 2), dtype=np.float64)
+    for idx in range(4):
+        s_idx = s_hi if s[idx] > s_mid else s_lo
+        t_idx = t_hi if t[idx] > t_mid else t_lo
+        clipped[idx] = center + s_idx * u + t_idx * v
+    clipped[:, 0] = np.clip(clipped[:, 0], 0.0, x_max)
+    clipped[:, 1] = np.clip(clipped[:, 1], 0.0, y_max)
+    return clipped.astype(np.float32)
+
+
 # ── Detection-dict builder (mirrors _yolo_obb_detection_from_points) ────────
 def _detection_from_box_points(points, confidence, img_w, img_h, m_per_px,
                                features=None):
@@ -281,12 +374,13 @@ def _detection_from_box_points(points, confidence, img_w, img_h, m_per_px,
     if not np.any(valid) and not (0 <= center[0] < img_w and 0 <= center[1] < img_h):
         return None
 
-    clipped = pts.copy()
-    clipped[:, 0] = np.clip(clipped[:, 0], 0, max(0, img_w - 1))
-    clipped[:, 1] = np.clip(clipped[:, 1], 0, max(0, img_h - 1))
+    clipped = _rect_clip_obb_to_image(pts, img_w, img_h)
+    if clipped is None:
+        return None
     area_px = abs(float(cv2.contourArea(clipped.astype(np.float32))))
     if area_px <= 1.0:
         return None
+    center = clipped.mean(axis=0)
 
     edges = np.roll(clipped, -1, axis=0) - clipped
     edge_lengths = np.linalg.norm(edges, axis=1)
