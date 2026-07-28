@@ -100,11 +100,21 @@ def iter_library_txt_files(custom_scenery_dir=None, xplane_root=None,
 
 
 def parse_library_exports(library_txt, package_name=None, package_dir=None,
-                          suffixes=(".obj", ".fac")):
+                          suffixes=(".obj", ".fac"),
+                          target_virtual_paths=None):
     """Parse X-Plane library exports from one ``library.txt`` file."""
     package_dir = os.path.abspath(package_dir or os.path.dirname(library_txt))
     package_name = package_name or os.path.basename(package_dir.rstrip("\\/"))
     suffixes = tuple(suffix.lower() for suffix in suffixes)
+    target_keys = (
+        None
+        if target_virtual_paths is None
+        else {
+            normalize_library_path(path)
+            for path in target_virtual_paths
+            if path
+        }
+    )
 
     try:
         handle = open(library_txt, "r", encoding="utf-8", errors="ignore")
@@ -154,6 +164,8 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
 
             virt = virtual_path.replace("\\", "/")
             phys = physical_path.replace("\\", "/")
+            if target_keys is not None and normalize_library_path(virt) not in target_keys:
+                continue
             if suffixes and not (
                 virt.lower().endswith(suffixes) or phys.lower().endswith(suffixes)
             ):
@@ -176,7 +188,8 @@ def parse_library_exports(library_txt, package_name=None, package_dir=None,
 
 def scan_library_exports(custom_scenery_dir=None, xplane_root=None,
                          include_default=False, package_name_patterns=None,
-                         suffixes=(".obj", ".fac"), recursive_custom=False):
+                         suffixes=(".obj", ".fac"), recursive_custom=False,
+                         target_virtual_paths=None):
     """Return parsed exports from Custom Scenery and optionally default scenery."""
     exports = []
     for package_name, package_dir, library_txt in iter_library_txt_files(
@@ -192,6 +205,7 @@ def scan_library_exports(custom_scenery_dir=None, xplane_root=None,
                 package_name=package_name,
                 package_dir=package_dir,
                 suffixes=suffixes,
+                target_virtual_paths=target_virtual_paths,
             )
         )
     return exports

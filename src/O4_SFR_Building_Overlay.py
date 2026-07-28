@@ -33,7 +33,7 @@ import numpy as np
 import cv2
 import torch
 from math import pi, atan, exp, log, tan
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 Image.MAX_IMAGE_PIXELS = None
 
 import O4_SFR_Bounds_Index as BBOX
@@ -41,6 +41,7 @@ import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
+import O4_SFR_Roof_Color as ROOFCOLOR
 import O4_SFR_Height_Model as HEIGHTMODEL
 from O4_SFR_DSF_Utils import (
     active_scenery_pack_dirs,
@@ -184,6 +185,9 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("yolo_placed", "yolo_placed"),
                 ("yolo_obj", "yolo_object_placed"),
                 ("yolo_fac", "yolo_facade_placed"),
+                ("roof_color_match", "roof_color_matched"),
+                ("roof_color_fallback", "roof_color_fit_fallback"),
+                ("roof_color_unavailable", "roof_color_unavailable"),
                 ("yolo_obj_no_cand", "yolo_object_no_candidates"),
                 ("yolo_obj_nodim", "yolo_object_no_dimensions"),
                 ("yolo_obj_size", "yolo_object_size_reject"),
@@ -2658,8 +2662,8 @@ MAX_DIRECT_YOLO_FACADE_SIDE_M = 1_300.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 66      # v66: rectangle-preserving OBB clip
-BLD_PLACEMENT_FAST_CACHE_VERSION = 68  # v68: rectangle-preserving OBB clip
+BLD_PLACEMENT_CACHE_VERSION = 67      # v67: rooftop colour-aware object selection
+BLD_PLACEMENT_FAST_CACHE_VERSION = 69  # v69: rooftop colour-aware object selection
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -3503,6 +3507,88 @@ ZONE_COLOURS = {
     BLD_CLASS_EXTRA_LARGE: np.array([135,  90, 255]),
 }
 
+ROOF_COLOR_VIZ_STYLES = {
+    "match": (65, 235, 125),
+    "fallback": (255, 165, 45),
+    "unavailable": (185, 190, 200),
+}
+
+
+def _asset_roof_viz_rgb(asset):
+    """Return a representative physical roof RGB for debug-image fills."""
+    colors = []
+    for descriptor in (asset or {}).get("roof_color_variants") or ():
+        rgb = descriptor.get("rgb") if isinstance(descriptor, dict) else None
+        if rgb is None or len(rgb) != 3:
+            continue
+        try:
+            colors.append(tuple(float(value) for value in rgb))
+        except (TypeError, ValueError):
+            continue
+    if not colors:
+        return (235, 232, 220)
+    median = np.median(np.asarray(colors, dtype=np.float32), axis=0)
+    return tuple(int(np.clip(round(float(value)), 0, 255)) for value in median)
+
+
+def _roof_color_viz_font(size):
+    for name in ("DejaVuSans.ttf", "arial.ttf"):
+        try:
+            return ImageFont.truetype(name, max(10, int(size)))
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_roof_color_viz_legend(draw, records, viz_size):
+    """Draw per-texture roof-selection counts on production debug overlays."""
+    if not records:
+        return
+    counts = {
+        status: sum(1 for _poly, item_status, _rgb in records if item_status == status)
+        for status in ROOF_COLOR_VIZ_STYLES
+    }
+    scale = max(1.0, float(viz_size) / 800.0)
+    pad = int(round(8 * scale))
+    line_h = int(round(22 * scale))
+    swatch = int(round(13 * scale))
+    width = int(round(260 * scale))
+    height = pad * 2 + line_h * 4
+    draw.rounded_rectangle(
+        (pad, pad, pad + width, pad + height),
+        radius=max(3, int(round(5 * scale))),
+        fill=(16, 18, 22, 205),
+        outline=(225, 228, 234, 190),
+        width=max(1, int(round(scale))),
+    )
+    title_font = _roof_color_viz_font(13 * scale)
+    body_font = _roof_color_viz_font(11 * scale)
+    draw.text(
+        (pad * 2, pad * 2),
+        "Selected asset roof colour",
+        fill=(245, 245, 245, 255),
+        font=title_font,
+    )
+    labels = (
+        ("match", "family match"),
+        ("fallback", "fit fallback"),
+        ("unavailable", "source unavailable"),
+    )
+    for row, (status, label) in enumerate(labels, start=1):
+        y = pad * 2 + row * line_h
+        color = ROOF_COLOR_VIZ_STYLES[status]
+        draw.rectangle(
+            (pad * 2, y + 2, pad * 2 + swatch, y + 2 + swatch),
+            fill=color + (255,),
+        )
+        draw.text(
+            (pad * 2 + swatch + pad, y),
+            f"{label}: {counts[status]}",
+            fill=(235, 238, 242, 255),
+            font=body_font,
+        )
+
+
 def _natural_asset_region(tile_lat, tile_lon):
     """Return the asset region key from Natural Earth boundary polygons."""
     return asset_region_for_latlon(tile_lat, tile_lon)
@@ -4340,6 +4426,43 @@ def _scan_runtime_library_exports(custom_scenery_dir, *, include_sfd=False,
     )
 
 
+def _scan_default_object_exports(custom_scenery_dir, asset_pools):
+    """Resolve only the default-library aliases active in object pools.
+
+    Parsing default scenery without a virtual-path filter materialises hundreds
+    of thousands of unrelated exports.  The targeted inventory scan still
+    honours every physical variant behind the handful of aliases the overlay
+    can actually place.
+    """
+    virtual_paths = sorted({
+        asset.get("path")
+        for pool in (asset_pools or {}).values()
+        for asset in pool
+        if (
+            asset.get("kind") == "object"
+            and _norm_library_path(asset.get("path", "")).startswith("lib/")
+        )
+    })
+    if not virtual_paths:
+        return []
+    resolved_custom = resolve_custom_scenery_dir(custom_scenery_dir)
+    if not resolved_custom:
+        return []
+    xplane_root = (
+        os.path.dirname(resolved_custom)
+        if os.path.basename(resolved_custom).lower() == "custom scenery"
+        else None
+    )
+    if not xplane_root or not os.path.isdir(xplane_root):
+        return []
+    return ASSETINV.scan_library_exports(
+        xplane_root=xplane_root,
+        include_default=True,
+        suffixes=(".obj",),
+        target_virtual_paths=virtual_paths,
+    )
+
+
 def _library_exports_by_virtual_path(library_exports):
     return ASSETINV.unique_virtual_exports(library_exports or (), suffix=".obj")
 
@@ -5097,6 +5220,7 @@ def _asset_pools_signature(asset_pools):
                 asset.get("source", ""),
                 tuple(round(float(v), 3) for v in bounds) if bounds is not None else (),
                 round(float(asset.get("height_m") or 0.0), 3),
+                ROOFCOLOR.roof_metadata_signature(asset),
             ))
     digest = hashlib.sha1(repr(sorted(rows)).encode("utf-8")).hexdigest()
     return digest, len(rows)
@@ -7372,6 +7496,8 @@ def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_co
             f"accepted={int(yolo_counts.get('yolo_placed', 0))} "
             f"obj={int(yolo_counts.get('yolo_object_placed', 0))} "
             f"facade={int(yolo_counts.get('yolo_facade_placed', 0))} "
+            f"roofmatch={int(yolo_counts.get('roof_color_matched', 0))} "
+            f"fitfallback={int(yolo_counts.get('roof_color_fit_fallback', 0))} "
             f"blocked={int(yolo_counts.get('yolo_blocked', 0))} "
             f"overlap={int(yolo_counts.get('yolo_overlap_blocked', 0))}  "
         )
@@ -7960,9 +8086,10 @@ def _bundle_enabled_view(bundle, enabled_assets_by_path, zone_class):
     tie behaviour. Cached on the bundle keyed by map identity (a strong ref is
     kept, so the id cannot be recycled while cached).
     """
-    view = bundle.get('enabled_view')
-    if view is not None and view['map_ref'] is enabled_assets_by_path:
-        return view
+    views = bundle.setdefault('enabled_views', [])
+    for view in views:
+        if view['map_ref'] is enabled_assets_by_path:
+            return view
     entries = bundle['entries']
     n = len(entries)
     resolved = [None] * n
@@ -7998,7 +8125,7 @@ def _bundle_enabled_view(bundle, enabled_assets_by_path, zone_class):
         'requires_res': requires_res,
         'static_rank': static_rank,
     }
-    bundle['enabled_view'] = view
+    views.append(view)
     return view
 
 
@@ -8081,7 +8208,7 @@ def _global_yolo_object_fit_table():
     return _GLOBAL_YOLO_OBJECT_FIT_TABLE
 
 
-def _select_yolo_object_candidate(
+def _select_yolo_object_candidate_once(
     fit_table,
     detection,
     yolo_poly,
@@ -8100,6 +8227,7 @@ def _select_yolo_object_candidate(
     recent_spacing_mask=None,
     skip_occupancy=False,
     profile_out=None,
+    roof_color=None,
 ):
     """Return a mapped object candidate that fits inside the YOLO polygon.
 
@@ -8300,16 +8428,23 @@ def _select_yolo_object_candidate(
                 abs(math.log(aspect_list[idx] / det_aspect_c)),
                 0.0 if det_height_m is None
                 else abs(height_list[idx] - det_height_m),
+                (
+                    0.0
+                    if roof_color is None
+                    else ROOFCOLOR.asset_roof_color_distance(asset, roof_color)
+                ),
                 static_rank[idx],
                 idx,
                 asset,
             ))
         counters['seen'] += j - i
-        # (aspect_error, height_error, static_rank) is a total order
+        # (aspect_error, height_error, colour distance, static_rank) is a total order
         # (static_rank unique), so the sort never reaches the trailing
         # idx/asset elements.
+        if roof_color is not None:
+            group = [item for item in group if item[2] is not None]
         group.sort()
-        for _aspect_error, _height_error, _srank, idx, asset in group:
+        for _aspect_error, _height_error, _color_error, _srank, idx, asset in group:
             candidate = entries[idx][2]
             heading_delta = float(candidate['heading_delta'])
             bounds_m = asset['bounds_m']
@@ -8379,6 +8514,90 @@ def _select_yolo_object_candidate(
         if counters[status]:
             return None, status
     return None, 'no_candidates'
+
+
+def _select_yolo_object_candidate(
+    fit_table,
+    detection,
+    yolo_poly,
+    jx,
+    jy,
+    heading,
+    m_per_px,
+    residential_context=True,
+    enabled_assets_by_path=None,
+    min_coverage=YOLO_OBJECT_MIN_COVERAGE,
+    static_occ_mask=None,
+    building_spacing_mask=None,
+    scratch_mask=None,
+    static_occ_integral=None,
+    spacing_occ_integral=None,
+    recent_spacing_mask=None,
+    skip_occupancy=False,
+    profile_out=None,
+    roof_color=None,
+    color_assets_by_family=None,
+):
+    """Prefer a colour-compatible fit, then preserve legacy fit selection.
+
+    The first pass receives only aliases whose every physical OBJ variant is
+    in the sampled rooftop's family.  When that pass cannot place anything,
+    the second call is the old selector over the complete enabled map with no
+    colour term, preserving the previous choice and failure status.
+    """
+    family_assets = None
+    if roof_color and color_assets_by_family:
+        family_assets = color_assets_by_family.get(roof_color.get("family"))
+    if family_assets:
+        selected, status = _select_yolo_object_candidate_once(
+            fit_table,
+            detection,
+            yolo_poly,
+            jx,
+            jy,
+            heading,
+            m_per_px,
+            residential_context=residential_context,
+            enabled_assets_by_path=family_assets,
+            min_coverage=min_coverage,
+            static_occ_mask=static_occ_mask,
+            building_spacing_mask=building_spacing_mask,
+            scratch_mask=scratch_mask,
+            static_occ_integral=static_occ_integral,
+            spacing_occ_integral=spacing_occ_integral,
+            recent_spacing_mask=recent_spacing_mask,
+            skip_occupancy=skip_occupancy,
+            profile_out=profile_out,
+            roof_color=roof_color,
+        )
+        if selected is not None:
+            selected["roof_color_match"] = True
+            return selected, status
+
+    selected, status = _select_yolo_object_candidate_once(
+        fit_table,
+        detection,
+        yolo_poly,
+        jx,
+        jy,
+        heading,
+        m_per_px,
+        residential_context=residential_context,
+        enabled_assets_by_path=enabled_assets_by_path,
+        min_coverage=min_coverage,
+        static_occ_mask=static_occ_mask,
+        building_spacing_mask=building_spacing_mask,
+        scratch_mask=scratch_mask,
+        static_occ_integral=static_occ_integral,
+        spacing_occ_integral=spacing_occ_integral,
+        recent_spacing_mask=recent_spacing_mask,
+        skip_occupancy=skip_occupancy,
+        profile_out=profile_out,
+        roof_color=None,
+    )
+    if selected is not None and roof_color is not None:
+        selected["roof_color_match"] = False
+    return selected, status
 
 
 
@@ -9901,6 +10120,14 @@ def run(
     smallest_asset_only = _env_flag("O4_SFR_BLD_SMALLEST_ASSET_ONLY")
     if smallest_asset_only:
         _keep_smallest_asset_per_class(asset_pools)
+    default_object_exports = _scan_default_object_exports(
+        custom_scenery_dir, asset_pools
+    )
+    roof_color_counts = ROOFCOLOR.enrich_asset_roof_colors(
+        asset_pools,
+        list(runtime_library_exports or ()) + list(default_object_exports or ()),
+        cache_dir=sidecar_cache_dir,
+    )
     asset_sources_label = _describe_asset_sources(
         default_assets_available,
         sfd_assets_available,
@@ -9928,6 +10155,12 @@ def run(
     asset_pool_counts = _describe_asset_pool_counts(asset_pools)
     if asset_pool_counts:
         print(f"Building asset pool counts: {asset_pool_counts}")
+    print(
+        "Roof-colour object aliases: "
+        f"match-safe={roof_color_counts['safe']}  "
+        f"inconsistent={roof_color_counts['inconsistent']}  "
+        f"unavailable={roof_color_counts['unavailable']}"
+    )
     if not any(asset_pools.values()):
         print("Building assets: none available for placement")
         return 0
@@ -9966,6 +10199,9 @@ def run(
         for asset in pool
         if asset.get('kind') == 'object' and asset.get('path')
     }
+    enabled_yolo_color_assets_by_family = ROOFCOLOR.color_assets_by_family(
+        asset_pools
+    )
 
     osm_roads = _prepare_roads(osm_roads)
     osm_roads_index = BBOX.build_bounds_index(osm_roads)
@@ -10120,7 +10356,10 @@ def run(
             #      a checkpoint swap invalidated placements only via the
             #      heights baked into the YOLO cache).
             height_signature,
-            "schema=v28-post-suppress-heightnet",
+            # v29: physical OBJ roof descriptors and per-detection orthophoto
+            #      colours influence direct-YOLO object choice.  Raw YOLO
+            #      geometry remains unchanged, so only placement caches bump.
+            "schema=v29-rooftop-colour-selection",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -10691,6 +10930,8 @@ def run(
             m_per_px = _prep['m_per_px']
             yolo_detections = _prep['yolo_detections']
             yolo_guidance = _prep['yolo_guidance']
+            roof_color_image = img
+            roof_color_load_attempted = img is not None
             _effective_bld_params = _building_cache_params(
                 _prep['effective_yolo_batch_size'],
                 _prep['effective_stock_yolo_batch_size'],
@@ -10974,6 +11215,7 @@ def run(
                 for cls in BLD_PLACEMENT_CLASSES
             }
             placed_viz_polys = []
+            roof_color_viz_polys = []
             yolo_viz_polys = []
             road_divided_zone = (
                 (bld_zone != 0) &
@@ -11048,6 +11290,15 @@ def run(
                         _apply_heightnet_to_detections(
                             height_model, _height_img, _height_dets, m_per_px
                         )
+                        if (
+                            roof_color_image is None and
+                            enabled_yolo_color_assets_by_family
+                        ):
+                            # Reuse the one warm-cache image load for rooftop
+                            # sampling instead of decoding the DDS again in
+                            # the placement loop.
+                            roof_color_image = _height_img
+                            roof_color_load_attempted = True
                     _height_img = None
                     file_counts['heightnet_dets'] = len(_height_dets)
                 _height_dets = None
@@ -11176,6 +11427,31 @@ def run(
                     object_candidate = None
                     object_status = 'objects_disabled'
                     if _asset_kind_enabled('object', building_asset_mode):
+                        roof_color = None
+                        if enabled_yolo_color_assets_by_family:
+                            if (
+                                roof_color_image is None and
+                                not roof_color_load_attempted
+                            ):
+                                roof_color_load_attempted = True
+                                _img_t = time.perf_counter()
+                                roof_color_image = _load_source_image(
+                                    fname, _source_mode, _orthophoto_dir
+                                )
+                                if roof_color_image is not None:
+                                    _record_elapsed(
+                                        timings, file_timings, 'dds_load', _img_t
+                                    )
+                            if roof_color_image is not None:
+                                roof_color = ROOFCOLOR.sample_rooftop_color(
+                                    roof_color_image, yolo_poly
+                                )
+                                if roof_color is not None:
+                                    detection['roof_color'] = roof_color
+                            if roof_color is None:
+                                file_counts['roof_color_unavailable'] = (
+                                    file_counts.get('roof_color_unavailable', 0) + 1
+                                )
                         _t_pf = time.perf_counter() if _pf else 0.0
                         object_candidate, object_status = _select_yolo_object_candidate(
                             yolo_object_fit_table,
@@ -11196,6 +11472,8 @@ def run(
                             recent_spacing_mask=recent_spacing_mask,
                             skip_occupancy=not _obj_avoid,
                             profile_out=_pf_select_acc,
+                            roof_color=roof_color,
+                            color_assets_by_family=enabled_yolo_color_assets_by_family,
                         )
                         if _pf:
                             _pf_select += time.perf_counter() - _t_pf
@@ -11206,6 +11484,17 @@ def run(
                         footprint_poly = object_candidate['footprint_poly']
                         placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
                         placed_viz_polys.append((footprint_poly.copy(), facade_cls))
+                        if object_candidate.get('roof_color_match'):
+                            roof_viz_status = "match"
+                        elif detection.get('roof_color') is not None:
+                            roof_viz_status = "fallback"
+                        else:
+                            roof_viz_status = "unavailable"
+                        roof_color_viz_polys.append((
+                            footprint_poly.copy(),
+                            roof_viz_status,
+                            _asset_roof_viz_rgb(asset),
+                        ))
                         # Spacing/center-block marks only feed per-candidate
                         # self-avoidance; skip them when relying on tile-wide dedup.
                         if _obj_avoid:
@@ -11231,6 +11520,14 @@ def run(
                         file_counts['yolo_object_placed'] = (
                             file_counts.get('yolo_object_placed', 0) + 1
                         )
+                        if object_candidate.get('roof_color_match'):
+                            file_counts['roof_color_matched'] = (
+                                file_counts.get('roof_color_matched', 0) + 1
+                            )
+                        elif detection.get('roof_color') is not None:
+                            file_counts['roof_color_fit_fallback'] = (
+                                file_counts.get('roof_color_fit_fallback', 0) + 1
+                            )
                         placed_direct_detection = True
                     else:
                         if object_status != 'objects_disabled':
@@ -12118,6 +12415,23 @@ def run(
                             for p in pts
                         ]
                         draw.polygon(inner, outline=footprint_fill)
+                for poly, roof_status, roof_rgb in roof_color_viz_polys:
+                    pts = [
+                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        status_color = ROOF_COLOR_VIZ_STYLES[roof_status]
+                        draw.polygon(
+                            pts,
+                            fill=tuple(roof_rgb) + (72,),
+                            outline=status_color + (255,),
+                        )
+                        draw.line(
+                            pts + [pts[0]],
+                            fill=status_color + (255,),
+                            width=max(2, yolo_line_w * 2),
+                        )
                 for px2, py2, _, cls2 in pts_this:
                     sx, sy = int(px2*scale), int(py2*scale)
                     draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
@@ -12132,6 +12446,7 @@ def run(
                             fill=(255, 245, 80, 255 if placed else 190),
                             width=yolo_line_w,
                         )
+                _draw_roof_color_viz_legend(draw, roof_color_viz_polys, TILE_VIZ)
                 composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
 
                 if footprint_composite is not None:
@@ -12168,6 +12483,26 @@ def run(
                         if len(pts) >= 3:
                             outline = dot_colours.get(cls2, (0, 220, 0))
                             fp_draw.polygon(pts, fill=(245, 242, 232, 170), outline=outline + (255,))
+                    for poly, roof_status, roof_rgb in roof_color_viz_polys:
+                        pts = [
+                            (
+                                int(round(float(px2) * scale)),
+                                int(round(float(py2) * scale)),
+                            )
+                            for px2, py2 in poly
+                        ]
+                        if len(pts) >= 3:
+                            status_color = ROOF_COLOR_VIZ_STYLES[roof_status]
+                            fp_draw.polygon(
+                                pts,
+                                fill=tuple(roof_rgb) + (150,),
+                                outline=status_color + (255,),
+                            )
+                            fp_draw.line(
+                                pts + [pts[0]],
+                                fill=status_color + (255,),
+                                width=max(2, yolo_line_w * 2),
+                            )
                     for poly, placed in yolo_viz_polys:
                         if not placed:
                             continue
@@ -12184,6 +12519,9 @@ def run(
                                 fill=(255, 245, 80, 255 if placed else 190),
                                 width=yolo_line_w,
                             )
+                    _draw_roof_color_viz_legend(
+                        fp_draw, roof_color_viz_polys, TILE_VIZ
+                    )
                     fp_img = Image.alpha_composite(fp_base, fp_layer).convert('RGB')
                     footprint_composite[
                         row*TILE_VIZ:(row+1)*TILE_VIZ,
@@ -12199,13 +12537,14 @@ def run(
             file_elapsed = time.perf_counter() - file_t0
             if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
                 _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
-            img = veg_map = mesh_water_mask = bld_raw = bld_zone = None
+            img = roof_color_image = veg_map = mesh_water_mask = bld_raw = bld_zone = None
             road_mask = rail_mask = poly_mask = existing_bld_mask = sh_bld_mask = custom_bld_mask = None
             static_occ_mask = static_occ_integral = building_spacing_mask = None
             route_excl_mask = placement_occ_mask = placement_occ_integral = None
             placed_yolo_mask = fit_scratch = None
             road_divided_zone = fallback_zone = zone_class = roof_evidence = None
             yolo_detections = yolo_guidance = yolo_viz_polys = placed_viz_polys = None
+            roof_color_viz_polys = None
             cc_labels = cc_stats = cc_centroids = valid_labels = None
             local_separator_roads = local_rails = local_excl_polys = None
             local_existing_bld_polys = local_sh_bld_objects = local_custom_bld_objects = None

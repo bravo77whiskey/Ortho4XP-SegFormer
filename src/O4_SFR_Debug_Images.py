@@ -610,6 +610,7 @@ def generate_production_building_debug_images(
     yolo_stride: int | None = None,
     yolo_max_det: int | None = None,
     allow_road_overlap: bool = False,
+    verbose_log: bool = False,
 ) -> list[dict]:
     """Run the real building placement pipeline and stop after debug images."""
     output_dir = Path(output_dir)
@@ -653,6 +654,7 @@ def generate_production_building_debug_images(
                 yolo_iou=yolo_iou,
                 yolo_stride=yolo_stride,
                 yolo_max_det=yolo_max_det,
+                verbose_log=verbose_log,
             )
             results.append({
                 "tile": tile_label,
@@ -732,6 +734,11 @@ def parse_args(argv: list[str] | None = None):
         default=1600,
         help="Per-DDS production overview/footprint image size.",
     )
+    parser.add_argument(
+        "--verbose-log",
+        action="store_true",
+        help="Print detailed production placement and roof-colour counters.",
+    )
     return parser.parse_args(argv)
 
 
@@ -775,6 +782,7 @@ def main(argv: list[str] | None = None) -> int:
             yolo_stride=args.yolo_stride,
             yolo_max_det=args.yolo_max_det,
             allow_road_overlap=args.allow_road_overlap,
+            verbose_log=args.verbose_log,
         )
         summary_name = "summary.json"
     summary_path = Path(args.output_dir) / summary_name
