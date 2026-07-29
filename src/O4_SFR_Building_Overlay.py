@@ -405,6 +405,8 @@ def parse_args():
                     help='Disable active custom scenery object/facade overlap avoidance.')
     ap.add_argument('--allow-road-overlap', action='store_true',
                     help='Allow generated building footprints to overlap road masks.')
+    ap.add_argument('--roof-color-matching', action='store_true',
+                    help='Prefer roof-color-compatible objects. Disabled by default.')
     ap.add_argument('--no-yolo', action='store_true',
                     help='Disable YOLO OBB direct building placements.')
     ap.add_argument('--yolo-checkpoint', default=None,
@@ -2662,8 +2664,8 @@ MAX_DIRECT_YOLO_FACADE_SIDE_M = 1_300.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 67      # v67: rooftop colour-aware object selection
-BLD_PLACEMENT_FAST_CACHE_VERSION = 69  # v69: rooftop colour-aware object selection
+BLD_PLACEMENT_CACHE_VERSION = 68      # v68: optional rooftop colour selection
+BLD_PLACEMENT_FAST_CACHE_VERSION = 70  # v70: optional rooftop colour selection
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -4463,6 +4465,26 @@ def _scan_default_object_exports(custom_scenery_dir, asset_pools):
     )
 
 
+def _prepare_asset_roof_colors(
+    enabled,
+    custom_scenery_dir,
+    asset_pools,
+    runtime_library_exports,
+    cache_dir,
+):
+    """Enrich object aliases only when the opt-in color feature is active."""
+    if not enabled:
+        return None
+    default_object_exports = _scan_default_object_exports(
+        custom_scenery_dir, asset_pools
+    )
+    return ROOFCOLOR.enrich_asset_roof_colors(
+        asset_pools,
+        list(runtime_library_exports or ()) + list(default_object_exports or ()),
+        cache_dir=cache_dir,
+    )
+
+
 def _library_exports_by_virtual_path(library_exports):
     return ASSETINV.unique_virtual_exports(library_exports or (), suffix=".obj")
 
@@ -5207,7 +5229,7 @@ def _build_optional_library_asset_pools(custom_scenery_dir=None, library_exports
     return asset_pools
 
 
-def _asset_pools_signature(asset_pools):
+def _asset_pools_signature(asset_pools, include_roof_color=False):
     """Return a compact signature of active placement assets for cache keys."""
     rows = []
     for zone_class in BLD_PLACEMENT_CLASSES:
@@ -5220,7 +5242,11 @@ def _asset_pools_signature(asset_pools):
                 asset.get("source", ""),
                 tuple(round(float(v), 3) for v in bounds) if bounds is not None else (),
                 round(float(asset.get("height_m") or 0.0), 3),
-                ROOFCOLOR.roof_metadata_signature(asset),
+                (
+                    ROOFCOLOR.roof_metadata_signature(asset)
+                    if include_roof_color
+                    else ()
+                ),
             ))
     digest = hashlib.sha1(repr(sorted(rows)).encode("utf-8")).hexdigest()
     return digest, len(rows)
@@ -9331,6 +9357,7 @@ def run(
     yolo_imgsz=DEFAULT_YOLO_OBB_IMGSZ,
     yolo_min_coverage=YOLO_OBJECT_MIN_COVERAGE,
     height_checkpoint=None,
+    roof_color_matching=False,
     **legacy_kwargs,
 ):
     # Zone-area filtering was retired in favour of the up-front min-footprint
@@ -9973,6 +10000,14 @@ def run(
     )
     enabled_extra_library_ids = _enabled_extra_library_ids()
     building_asset_mode = _building_asset_mode()
+    roof_color_matching = _env_flag(
+        "O4_SFR_BLD_ROOF_COLOR_MATCHING", bool(roof_color_matching)
+    )
+    roof_color_matching_active = bool(
+        roof_color_matching
+        and yolo_enabled
+        and _asset_kind_enabled("object", building_asset_mode)
+    )
     # Filter every scanned export down to the ones X-Plane will actually
     # resolve on this tile: packs like SFD Global ship simHeaven-alias shims
     # inside REGION blocks (e.g. REGION scandinavia), and referencing those
@@ -10120,13 +10155,12 @@ def run(
     smallest_asset_only = _env_flag("O4_SFR_BLD_SMALLEST_ASSET_ONLY")
     if smallest_asset_only:
         _keep_smallest_asset_per_class(asset_pools)
-    default_object_exports = _scan_default_object_exports(
-        custom_scenery_dir, asset_pools
-    )
-    roof_color_counts = ROOFCOLOR.enrich_asset_roof_colors(
+    roof_color_counts = _prepare_asset_roof_colors(
+        roof_color_matching_active,
+        custom_scenery_dir,
         asset_pools,
-        list(runtime_library_exports or ()) + list(default_object_exports or ()),
-        cache_dir=sidecar_cache_dir,
+        runtime_library_exports,
+        sidecar_cache_dir,
     )
     asset_sources_label = _describe_asset_sources(
         default_assets_available,
@@ -10155,12 +10189,15 @@ def run(
     asset_pool_counts = _describe_asset_pool_counts(asset_pools)
     if asset_pool_counts:
         print(f"Building asset pool counts: {asset_pool_counts}")
-    print(
-        "Roof-colour object aliases: "
-        f"match-safe={roof_color_counts['safe']}  "
-        f"inconsistent={roof_color_counts['inconsistent']}  "
-        f"unavailable={roof_color_counts['unavailable']}"
-    )
+    if roof_color_counts is None:
+        print("Roof-colour object matching: disabled (fit-only selection)")
+    else:
+        print(
+            "Roof-colour object aliases: "
+            f"match-safe={roof_color_counts['safe']}  "
+            f"inconsistent={roof_color_counts['inconsistent']}  "
+            f"unavailable={roof_color_counts['unavailable']}"
+        )
     if not any(asset_pools.values()):
         print("Building assets: none available for placement")
         return 0
@@ -10190,7 +10227,9 @@ def run(
     if disable_center_blockers:
         class_min_fit_inradius_m = {cls: 0.0 for cls in BLD_PLACEMENT_CLASSES}
     yolo_object_fit_table = _build_yolo_object_candidate_index(asset_pools)
-    asset_catalog_signature = _asset_pools_signature(asset_pools)
+    asset_catalog_signature = _asset_pools_signature(
+        asset_pools, include_roof_color=roof_color_matching_active
+    )
     height_priors_by_class = _height_priors_by_class(asset_pools)
     height_priors_signature = _height_priors_signature(height_priors_by_class)
     enabled_yolo_object_assets_by_path = {
@@ -10199,8 +10238,10 @@ def run(
         for asset in pool
         if asset.get('kind') == 'object' and asset.get('path')
     }
-    enabled_yolo_color_assets_by_family = ROOFCOLOR.color_assets_by_family(
-        asset_pools
+    enabled_yolo_color_assets_by_family = (
+        ROOFCOLOR.color_assets_by_family(asset_pools)
+        if roof_color_matching_active
+        else {}
     )
 
     osm_roads = _prepare_roads(osm_roads)
@@ -10293,6 +10334,7 @@ def run(
             default_assets_available, sfd_assets_available, simheaven_assets_available,
             tuple(enabled_extra_library_ids),
             building_asset_mode,
+            roof_color_matching_active,
             asset_catalog_signature,
             height_priors_signature,
             natural_asset_region,
@@ -10356,10 +10398,9 @@ def run(
             #      a checkpoint swap invalidated placements only via the
             #      heights baked into the YOLO cache).
             height_signature,
-            # v29: physical OBJ roof descriptors and per-detection orthophoto
-            #      colours influence direct-YOLO object choice.  Raw YOLO
-            #      geometry remains unchanged, so only placement caches bump.
-            "schema=v29-rooftop-colour-selection",
+            # v30: rooftop colour selection is opt-in and keys placement
+            #      caches separately. Raw YOLO geometry remains unchanged.
+            "schema=v30-optional-rooftop-colour-selection",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -10930,8 +10971,10 @@ def run(
             m_per_px = _prep['m_per_px']
             yolo_detections = _prep['yolo_detections']
             yolo_guidance = _prep['yolo_guidance']
-            roof_color_image = img
-            roof_color_load_attempted = img is not None
+            roof_color_image = img if roof_color_matching_active else None
+            roof_color_load_attempted = (
+                img is not None or not roof_color_matching_active
+            )
             _effective_bld_params = _building_cache_params(
                 _prep['effective_yolo_batch_size'],
                 _prep['effective_stock_yolo_batch_size'],
@@ -12792,6 +12835,7 @@ def main():
         custom_scenery_dir = args.custom_scenery_dir,
         avoid_custom_scenery = not args.no_custom_scenery_avoidance,
         allow_road_overlap = args.allow_road_overlap,
+        roof_color_matching = args.roof_color_matching,
         yolo_enabled = not args.no_yolo,
         yolo_checkpoint = args.yolo_checkpoint,
         yolo_conf = args.yolo_conf,

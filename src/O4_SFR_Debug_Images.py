@@ -611,6 +611,7 @@ def generate_production_building_debug_images(
     yolo_max_det: int | None = None,
     allow_road_overlap: bool = False,
     verbose_log: bool = False,
+    roof_color_matching: bool = False,
 ) -> list[dict]:
     """Run the real building placement pipeline and stop after debug images."""
     output_dir = Path(output_dir)
@@ -655,6 +656,7 @@ def generate_production_building_debug_images(
                 yolo_stride=yolo_stride,
                 yolo_max_det=yolo_max_det,
                 verbose_log=verbose_log,
+                roof_color_matching=roof_color_matching,
             )
             results.append({
                 "tile": tile_label,
@@ -739,6 +741,11 @@ def parse_args(argv: list[str] | None = None):
         action="store_true",
         help="Print detailed production placement and roof-colour counters.",
     )
+    parser.add_argument(
+        "--roof-color-matching",
+        action="store_true",
+        help="Enable opt-in roof-color-aware object selection.",
+    )
     return parser.parse_args(argv)
 
 
@@ -783,6 +790,7 @@ def main(argv: list[str] | None = None) -> int:
             yolo_max_det=args.yolo_max_det,
             allow_road_overlap=args.allow_road_overlap,
             verbose_log=args.verbose_log,
+            roof_color_matching=args.roof_color_matching,
         )
         summary_name = "summary.json"
     summary_path = Path(args.output_dir) / summary_name

@@ -91,6 +91,17 @@ class ConfigAliasTests(unittest.TestCase):
         self.assertTrue(global_var["file_picker"])
         self.assertEqual(global_var["filetypes"], tile_var["filetypes"])
 
+    def test_roof_color_matching_is_disabled_by_default(self):
+        tile_var = CFG.cfg_tile_vars["sfr_bld_roof_color_matching"]
+        global_var = CFG.cfg_global_tile_vars[
+            "global_sfr_bld_roof_color_matching"
+        ]
+
+        self.assertFalse(tile_var["default"])
+        self.assertFalse(global_var["default"])
+        self.assertFalse(CFG.global_sfr_bld_roof_color_matching)
+        self.assertFalse(CFG.Tile(12, 34, "").sfr_bld_roof_color_matching)
+
 
 if __name__ == "__main__":
     unittest.main()

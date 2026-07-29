@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -120,6 +121,28 @@ def test_rooftop_sampler_falls_back_to_full_tiny_polygon():
     assert descriptor is not None
     assert descriptor["family"] == "green"
     assert descriptor["pixel_count"] < 9
+
+
+def test_rooftop_sampler_allocates_only_the_polygon_roi():
+    image = np.zeros((4096, 4096, 3), dtype=np.uint8)
+    image[2000:2020, 2000:2020] = (190, 55, 35)
+    polygon = np.array(
+        [[2000, 2000], [2019, 2000], [2019, 2019], [2000, 2019]],
+        dtype=np.float32,
+    )
+    original_fill = ROOF.cv2.fillPoly
+    mask_shapes = []
+
+    def _record_fill(mask, *args, **kwargs):
+        mask_shapes.append(mask.shape)
+        return original_fill(mask, *args, **kwargs)
+
+    with mock.patch.object(ROOF.cv2, "fillPoly", side_effect=_record_fill):
+        descriptor = ROOF.sample_rooftop_color(image, polygon)
+
+    assert descriptor["family"] == "warm"
+    assert mask_shapes
+    assert max(max(shape) for shape in mask_shapes) <= 20
 
 
 def test_obj_analyzer_keeps_top_roof_and_supports_wrapped_uvs():
@@ -413,6 +436,41 @@ def test_targeted_library_export_filter_keeps_only_requested_alias():
         )
 
         assert [export.virtual_path for export in exports] == ["test/two.obj"]
+
+
+def test_disabled_feature_skips_all_physical_roof_analysis():
+    pools = {BLD.BLD_CLASS_MEDIUM: []}
+    with (
+        mock.patch.object(BLD, "_scan_default_object_exports") as scan,
+        mock.patch.object(ROOF, "enrich_asset_roof_colors") as enrich,
+    ):
+        counts = BLD._prepare_asset_roof_colors(
+            False, "unused", pools, (), "unused"
+        )
+
+    assert counts is None
+    scan.assert_not_called()
+    enrich.assert_not_called()
+
+
+def test_asset_signature_ignores_roof_metadata_when_feature_is_disabled():
+    plain = _asset("house.obj", (-5.0, 5.0, -5.0, 5.0))
+    colored = _asset(
+        "house.obj", (-5.0, 5.0, -5.0, 5.0), "warm", (45, 30, 20)
+    )
+    plain_pools = {BLD.BLD_CLASS_MEDIUM: [plain]}
+    colored_pools = {BLD.BLD_CLASS_MEDIUM: [colored]}
+
+    assert BLD._asset_pools_signature(
+        plain_pools, include_roof_color=False
+    ) == BLD._asset_pools_signature(
+        colored_pools, include_roof_color=False
+    )
+    assert BLD._asset_pools_signature(
+        plain_pools, include_roof_color=True
+    ) != BLD._asset_pools_signature(
+        colored_pools, include_roof_color=True
+    )
 
 
 def test_visual_diagnostic_exercises_match_and_fit_fallback():

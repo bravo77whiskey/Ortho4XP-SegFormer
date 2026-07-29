@@ -229,6 +229,7 @@ sfr_bld_disable_cache = False
 sfr_bld_verbose_log   = False
 sfr_bld_avoid_custom_scenery = True
 sfr_bld_asset_mode = "both"
+sfr_bld_roof_color_matching = False
 sfr_bld_yolo_enabled = True
 sfr_bld_yolo_checkpoint = r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
 sfr_bld_yolo_conf = 0.18
@@ -592,6 +593,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"stride={sfr_bld_yolo_stride!r} max_det={sfr_bld_yolo_max_det!r} "
         f"min_coverage={sfr_bld_yolo_min_coverage!r} "
         f"asset_mode={sfr_bld_asset_mode!r} "
+        f"roof_color_matching={sfr_bld_roof_color_matching!r} "
         f"disable_cache={sfr_bld_disable_cache!r} "
         f"verbose_log={sfr_bld_verbose_log!r} "
         f"out_dsf={out_dsf!r}",
@@ -630,6 +632,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    disable_cache            = {sfr_bld_disable_cache!r},\n"
         f"    verbose_log              = {sfr_bld_verbose_log!r},\n"
         f"    avoid_custom_scenery     = {sfr_bld_avoid_custom_scenery!r},\n"
+        f"    roof_color_matching      = {sfr_bld_roof_color_matching!r},\n"
         f"    cache_dir                = {cache_dir!r},\n"
         f"    grid_n                   = {sfr_bld_grid_n!r},\n"
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"

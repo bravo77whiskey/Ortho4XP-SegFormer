@@ -20,6 +20,13 @@ import O4_SFR_Inference as SEGFORMER
 
 
 class SfrDebugImagesTests(unittest.TestCase):
+    def test_roof_color_matching_debug_flag_is_opt_in(self):
+        disabled = DBG.parse_args(["example.dds"])
+        enabled = DBG.parse_args(["example.dds", "--roof-color-matching"])
+
+        self.assertFalse(disabled.roof_color_matching)
+        self.assertTrue(enabled.roof_color_matching)
+
     def test_parse_texture_metadata_from_fixture_style_path(self):
         meta = DBG.parse_texture_metadata(
             r"H:\XP12 Addons\Applications\Ortho4XP\Tiles\zOrtho4XP_+36+117\textures\25680_54080_BI16.dds"

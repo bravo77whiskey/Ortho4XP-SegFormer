@@ -514,6 +514,12 @@ cfg_tile_vars = {
         "short_name": "bld_assets",
         "hint": "Which building placement assets to use: object models, scalable facades, or object-first placement with facade fallback.",
     },
+    "sfr_bld_roof_color_matching": {
+        "type": bool,
+        "default": False,
+        "short_name": "bld_roof_color",
+        "hint": "Prefer object assets whose analyzed roof texture color matches each detected rooftop. Disabled by default. Existing fit, containment, occupancy, height, and fallback selection rules remain authoritative.",
+    },
     "sfr_bld_yolo_enabled": {
         "type": bool,
         "default": True,
@@ -713,6 +719,7 @@ list_sfr_bld_vars = [
     "sfr_bld_verbose_log",
     "sfr_bld_avoid_custom_scenery",
     "sfr_bld_asset_mode",
+    "sfr_bld_roof_color_matching",
     "sfr_bld_yolo_enabled",
     "sfr_bld_yolo_checkpoint",
     "sfr_bld_yolo_conf",

@@ -152,10 +152,18 @@ def sample_rooftop_color(image_rgb, polygon):
     inset = center + (points - center) * 0.80
 
     def _pixels_for(poly):
-        mask = np.zeros((height, width), dtype=np.uint8)
         rounded = np.rint(poly).astype(np.int32)
-        cv2.fillPoly(mask, [rounded], 1)
-        return image[:, :, :3][mask.astype(bool)]
+        x0 = max(0, int(rounded[:, 0].min()))
+        y0 = max(0, int(rounded[:, 1].min()))
+        x1 = min(width - 1, int(rounded[:, 0].max()))
+        y1 = min(height - 1, int(rounded[:, 1].max()))
+        if x1 < x0 or y1 < y0:
+            return np.empty((0, 3), dtype=image.dtype)
+        local = rounded - np.asarray((x0, y0), dtype=np.int32)
+        mask = np.zeros((y1 - y0 + 1, x1 - x0 + 1), dtype=np.uint8)
+        cv2.fillPoly(mask, [local], 1)
+        roi = image[y0:y1 + 1, x0:x1 + 1, :3]
+        return roi[mask.astype(bool)]
 
     pixels = _pixels_for(inset)
     if pixels.shape[0] < 9:
@@ -200,9 +208,11 @@ def _resolve_diffuse_texture(obj_path, texture_name):
 
 
 def _file_signature(path):
+    if not path:
+        return None
     try:
         stat = os.stat(path)
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return None
     return (
         os.path.realpath(path),
