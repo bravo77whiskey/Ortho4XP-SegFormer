@@ -33,18 +33,20 @@ def download_textures(
     UI.vprint(1, f"-> Opening download queue with {worker_count} worker(s).")
 
     progress_lock = threading.Lock()
-    progress_state = {"done": 0, "pending": 0}
+    progress_state = {"done": 0, "failed": 0, "pending": 0}
     attempts = defaultdict(int)
     interrupted = False
     max_attempts = 3
+    stop_worker = object()
 
     def _update_progress_locked():
+        completed = progress_state["done"] + progress_state["failed"]
         denom = (
-            progress_state["done"]
+            completed
             + progress_state["pending"]
             + download_queue.qsize()
         )
-        UI.progress_bar(2, int(100 * progress_state["done"] / denom) if denom else 100)
+        UI.progress_bar(2, int(100 * completed / denom) if denom else 100)
 
     def _download_task(*attrs):
         nonlocal interrupted
@@ -76,6 +78,7 @@ def download_textures(
                 should_retry = attempt < max_attempts and not UI.red_flag
                 if not should_retry:
                     attempts.pop(attrs, None)
+                    progress_state["failed"] += 1
             _update_progress_locked()
 
         if ok:
@@ -90,25 +93,42 @@ def download_textures(
 
         return 1 if ok else 0
 
+    def _download_worker():
+        while True:
+            attrs = download_queue.get()
+            try:
+                if attrs is stop_worker:
+                    return
+                _download_task(*attrs)
+            finally:
+                download_queue.task_done()
+
     if producer_done_event is None:
         producer_done_event = threading.Event()
         producer_done_event.set()
 
-    workers_list = parallel_launch(_download_task, download_queue, worker_count)
+    workers_list = []
+    for worker_idx in range(worker_count):
+        worker = threading.Thread(
+            target=_download_worker,
+            name=f"texture-download-{worker_idx + 1}",
+        )
+        worker.start()
+        workers_list.append(worker)
 
-    while not producer_done_event.is_set() and not UI.red_flag:
-        time.sleep(0.05)
+    # The producer can continue adding textures while workers are active. Wait
+    # for it to finish before joining the queue so no late work can arrive.
+    producer_done_event.wait()
 
-    while not UI.red_flag:
-        with progress_lock:
-            pending = progress_state["pending"]
-        if download_queue.empty() and pending == 0:
-            break
-        time.sleep(0.05)
+    # A retry is queued before its original task calls task_done(), keeping the
+    # unfinished-task count non-zero across the handoff. This avoids the prior
+    # empty()/pending polling race that could strand a retry behind sentinels.
+    download_queue.join()
 
     for _ in range(worker_count):
-        download_queue.put("quit")
+        download_queue.put(stop_worker)
 
+    download_queue.join()
     parallel_join(workers_list)
 
     UI.progress_bar(2, 100)
@@ -117,6 +137,13 @@ def download_textures(
         return 0
     if progress_state["done"]:
         UI.vprint(1, " *Download of textures completed.")
+    if progress_state["failed"]:
+        UI.vprint(
+            1,
+            f"WARNING: {progress_state['failed']} texture download(s) failed "
+            f"after {max_attempts} attempts.",
+        )
+        return 0
     return 1
 
 ################################################################################

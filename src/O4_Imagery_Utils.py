@@ -1589,8 +1589,7 @@ def download_jpeg_ortho(
         )
         tile_coords = Path(file_dir).parent.name
         incomplete_imgs.setdefault(tile_coords, []).append(file_name)
-    if not os.path.exists(file_dir):
-        os.makedirs(file_dir)
+    os.makedirs(file_dir, exist_ok=True)
     try:
         if super_resol_factor == 1:
             big_image.save(os.path.join(file_dir, file_name))
@@ -1754,8 +1753,7 @@ def build_jpeg_ortho(
             big_img = combine_textures(
                 tile, til_x_left, til_y_top, zoomlevel, provider_code
             )
-            if not os.path.exists(file_dir):
-                os.makedirs(file_dir)
+            os.makedirs(file_dir, exist_ok=True)
             try:
                 big_img.convert("RGB").save(os.path.join(file_dir, file_name))
             except Exception as e:

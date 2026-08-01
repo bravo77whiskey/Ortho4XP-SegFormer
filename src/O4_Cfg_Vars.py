@@ -57,7 +57,9 @@ cfg_app_vars = {
         "module": "TILE",
         "type": int,
         "default": 1,
-        "hint": "Each orthophoto being constructed uses 16 threads for network requests by default (unless specified otherwise in the provider file). This setting allows multiple orthophotos to be constructed in parallel, meaning increasing it to 2 will result in 32 threads for request across. If running Ortho4XP from an external drive, errors may occur at settings higher than 4.",
+        "values": tuple(range(1, 9)),
+        "short_name": "Concurrent texture downloads",
+        "hint": "Number of 4096x4096 orthophotos to download concurrently. Each orthophoto normally uses 16 network-request threads, so a value of 2 can issue up to 32 requests at once. Start with 1 or 2; higher values use more memory, may overload slower drives, and can trigger provider limits.",
     },
     "max_convert_slots": {
         "module": "TILE",
