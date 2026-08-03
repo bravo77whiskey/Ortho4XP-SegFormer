@@ -2664,8 +2664,33 @@ MAX_DIRECT_YOLO_FACADE_SIDE_M = 1_300.0
 # SegFormer-only facade heights stay capped; YOLO/HeightNet fallback facades
 # use the per-detection height carried by the detection record.
 FACADE_HEIGHT_PRIOR_CAP_M = 24.0
-BLD_PLACEMENT_CACHE_VERSION = 68      # v68: optional rooftop colour selection
-BLD_PLACEMENT_FAST_CACHE_VERSION = 70  # v70: optional rooftop colour selection
+# ── Evidence gate for large raw YOLO detections ─────────────────────────────
+# The world-scale footprint bound above keeps real mega-buildings, but it also
+# lets through the model's systematic large-rectangle false positives: sports
+# pitches, striped/row-crop farmland, plantations and solar farms all read as
+# warehouse roofs. Instead of a size cap, every raw detection at or above this
+# scope must be corroborated: enough SegFormer CLASS_BUILDING coverage under
+# the OBB accepts it, anything else is dropped as uncorroborated. Validated on
+# +16+107 (Hue) imagery: real large roofs score 0.36-0.99 building coverage,
+# while row-crop fields, plantations, a solar farm, scrubland and a grass
+# pitch all score <= 0.05 — no perimeter-gradient "edge support" rescue is
+# safe there (structured farmland is full of crisp parallel boundaries), so
+# there deliberately is none. When no zone map exists for the DDS (mesh-water
+# shortcut), a grass-green interior still rejects and anything else passes —
+# one absent signal must not drop real buildings. Below the scope the tests
+# are unreliable (few pixels) and slabs are not visible artefacts, so small
+# detections pass ungated. Disable with O4_SFR_BLD_EVIDENCE_GATE=0;
+# thresholds have matching env overrides.
+BLD_EVIDENCE_MIN_AREA_M2 = 3_000.0
+BLD_EVIDENCE_MIN_SIDE_M = 70.0
+BLD_EVIDENCE_SEGFORMER_FRAC = 0.20
+BLD_EVIDENCE_GREEN_FRAC = 0.45
+# Excess-green index (2G - R - B, uint8 domain) at or above which a pixel
+# counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
+# below zero. Deliberately high enough that olive/dry scrub does not trigger.
+BLD_EVIDENCE_GREEN_EXG = 40
+BLD_PLACEMENT_CACHE_VERSION = 69      # v69: large-detection evidence gate
+BLD_PLACEMENT_FAST_CACHE_VERSION = 71  # v71: large-detection evidence gate
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -4110,10 +4135,14 @@ def _detection_footprint_metrics_m(detection):
 
 
 def _direct_yolo_raw_footprint_allowed(detection):
-    """Return False when the raw YOLO OBB footprint is implausibly huge."""
+    """Return False when the raw YOLO OBB footprint is implausibly huge.
+
+    Detections whose size metrics are missing or non-positive fail closed:
+    the size of a footprint about to become geometry must be knowable.
+    """
     area_m2, max_side_m = _detection_footprint_metrics_m(detection)
     if area_m2 <= 0.0 or max_side_m <= 0.0:
-        return True
+        return False
     return (
         area_m2 <= float(MAX_DIRECT_YOLO_FACADE_AREA_M2) and
         max_side_m <= float(MAX_DIRECT_YOLO_FACADE_SIDE_M)
@@ -4125,12 +4154,132 @@ def _direct_yolo_facade_footprint_allowed(detection):
     return _direct_yolo_raw_footprint_allowed(detection)
 
 
-def _filter_oversized_direct_yolo_detections(detections):
-    """Drop implausibly huge raw detections before overlap suppression."""
-    kept = [
-        det for det in (detections or ())
-        if _direct_yolo_raw_footprint_allowed(det)
-    ]
+def _build_detection_evidence_context(image, image_loader, veg_map, m_per_px):
+    """Assemble the lazy per-DDS context for the large-detection evidence gate.
+
+    Returns None when the gate is disabled. ``image`` may be None on warm runs
+    (veg/YOLO caches hit without loading the DDS); ``image_loader`` then loads
+    pixels on demand — like HeightNet's ``_height_img`` — so gate decisions do
+    not depend on which caches happened to be warm.
+    """
+    if _env_float('O4_SFR_BLD_EVIDENCE_GATE', 1.0) == 0.0:
+        return None
+    return {
+        'image': image,
+        'image_loader': image_loader,
+        'image_load_attempted': image is not None,
+        'veg_map': veg_map,
+        'm_per_px': float(m_per_px),
+        'min_area_m2': _env_float(
+            'O4_SFR_BLD_EVIDENCE_MIN_AREA_M2', BLD_EVIDENCE_MIN_AREA_M2),
+        'min_side_m': _env_float(
+            'O4_SFR_BLD_EVIDENCE_MIN_SIDE_M', BLD_EVIDENCE_MIN_SIDE_M),
+        'segformer_frac': _env_float(
+            'O4_SFR_BLD_EVIDENCE_SEGFORMER_FRAC', BLD_EVIDENCE_SEGFORMER_FRAC),
+        'green_frac': _env_float(
+            'O4_SFR_BLD_EVIDENCE_GREEN_FRAC', BLD_EVIDENCE_GREEN_FRAC),
+    }
+
+
+def _evidence_context_image(ctx):
+    """Return the RGB source image for the gate, loading it lazily once."""
+    if not ctx['image_load_attempted']:
+        ctx['image_load_attempted'] = True
+        loader = ctx.get('image_loader')
+        if loader is not None:
+            ctx['image'] = loader()
+    return ctx['image']
+
+
+def _detection_evidence_allows(detection, ctx):
+    """Corroborate one scoped raw detection against pixel evidence.
+
+    Returns (allowed, reason); reason is None when the detection is out of
+    scope or evidence is unavailable, 'segformer' for a corroborated accept,
+    and 'green'/'uncorroborated' for rejects. With a zone map present the
+    verdict is SegFormer's alone; the green-interior test only serves the
+    zone-map-less fallback, where it still stops pitches/parks while letting
+    everything else through (one absent signal must not drop real buildings).
+    """
+    area_m2, max_side_m = _detection_footprint_metrics_m(detection)
+    if (
+        area_m2 < ctx['min_area_m2'] and
+        max_side_m < ctx['min_side_m']
+    ):
+        return True, None
+    pts = np.asarray(detection.get('points', ()), dtype=np.float32)
+    if pts.shape != (4, 2):
+        return True, None
+
+    veg_map = ctx.get('veg_map')
+    image = None
+    if veg_map is not None:
+        h, w = veg_map.shape[:2]
+    else:
+        image = _evidence_context_image(ctx)
+        if image is None:
+            # No evidence source at all — cannot corroborate or refute.
+            return True, None
+        h, w = image.shape[:2]
+    bx1 = max(0, int(math.floor(float(pts[:, 0].min()))))
+    by1 = max(0, int(math.floor(float(pts[:, 1].min()))))
+    bx2 = min(w, int(math.ceil(float(pts[:, 0].max()))) + 1)
+    by2 = min(h, int(math.ceil(float(pts[:, 1].max()))) + 1)
+    if bx2 - bx1 < 2 or by2 - by1 < 2:
+        return True, None
+    poly_mask = np.zeros((by2 - by1, bx2 - bx1), dtype=np.uint8)
+    cv2.fillPoly(poly_mask, [np.round(pts - (bx1, by1)).astype(np.int32)], 1)
+    interior_px = int(np.count_nonzero(poly_mask))
+    if interior_px < 16:
+        return True, None
+    interior = poly_mask.astype(bool)
+
+    if veg_map is not None:
+        building_cls = int(getattr(SEGFORMER, 'CLASS_BUILDING', 8))
+        veg_crop = veg_map[by1:by2, bx1:bx2]
+        building_px = int(np.count_nonzero(
+            interior & (veg_crop == building_cls)
+        ))
+        if building_px / float(interior_px) >= ctx['segformer_frac']:
+            return True, 'segformer'
+        return False, 'uncorroborated'
+
+    crop = image[by1:by2, bx1:bx2].astype(np.int16)
+    exg = 2 * crop[..., 1] - crop[..., 0] - crop[..., 2]
+    green_px = int(np.count_nonzero(interior & (exg >= BLD_EVIDENCE_GREEN_EXG)))
+    if green_px / float(interior_px) >= ctx['green_frac']:
+        return False, 'green'
+    return True, None
+
+
+_EVIDENCE_COUNT_KEYS = {
+    'segformer': 'yolo_evidence_segformer_pass',
+    'green': 'yolo_evidence_reject_green',
+    'uncorroborated': 'yolo_evidence_reject_uncorroborated',
+}
+
+
+def _filter_oversized_direct_yolo_detections(
+    detections, evidence_ctx=None, file_counts=None
+):
+    """Drop implausibly huge and evidence-refuted raw detections.
+
+    Runs before overlap suppression so a refuted mega-OBB can never evict the
+    real per-building boxes inside it. Returns (kept, dropped_total); the
+    per-reason evidence tallies go into ``file_counts`` when provided.
+    """
+    kept = []
+    for det in detections or ():
+        if not _direct_yolo_raw_footprint_allowed(det):
+            continue
+        if evidence_ctx is not None:
+            allowed, reason = _detection_evidence_allows(det, evidence_ctx)
+            if reason is not None and file_counts is not None:
+                key = _EVIDENCE_COUNT_KEYS[reason]
+                file_counts[key] = file_counts.get(key, 0) + 1
+            if not allowed:
+                continue
+        kept.append(det)
     return kept, len(detections or ()) - len(kept)
 
 
@@ -10812,8 +10961,20 @@ def run(
                 )
         raw_yolo_count = len(yolo_detections)
         if yolo_detections:
+            # Pixels load lazily (warm runs reach here with img=None), so gate
+            # decisions do not depend on which caches happened to be warm.
+            _evidence_ctx = _build_detection_evidence_context(
+                img,
+                lambda: _load_source_image(fname, _source_mode, _orthophoto_dir),
+                veg_map if not mesh_water_full else None,
+                m_per_px,
+            )
             yolo_detections, yolo_oversize_reject = (
-                _filter_oversized_direct_yolo_detections(yolo_detections)
+                _filter_oversized_direct_yolo_detections(
+                    yolo_detections,
+                    evidence_ctx=_evidence_ctx,
+                    file_counts=file_counts,
+                )
             )
             if yolo_oversize_reject:
                 file_counts['yolo_oversize_reject'] = yolo_oversize_reject
