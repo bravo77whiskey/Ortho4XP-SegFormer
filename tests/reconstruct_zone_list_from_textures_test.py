@@ -15,6 +15,50 @@ SPEC.loader.exec_module(RECON)
 
 
 class ReconstructZoneListFromTexturesTests(unittest.TestCase):
+    def test_discover_tile_dirs_accepts_gui_string_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            tile_dir.mkdir()
+
+            discovered = RECON.discover_tile_dirs([tmpdir])
+
+        self.assertEqual(discovered, [tile_dir])
+
+    def test_reconstruct_leaves_existing_zone_list_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            tile_dir.mkdir()
+            existing_zone = [
+                [36.1, 117.1, 36.1, 117.2, 36.2, 117.2, 36.2, 117.1, 36.1, 117.1],
+                18,
+                "GO2",
+            ]
+            (tile_dir / "Ortho4XP_+36+117.cfg").write_text(
+                f"default_website=BI\ndefault_zl=16\nzone_list={[existing_zone]!r}\n",
+                encoding="utf-8",
+            )
+
+            result = RECON.reconstruct_zone_list(tile_dir)
+
+        self.assertEqual(result["source"], "current")
+        self.assertEqual(result["zone_list"], [existing_zone])
+
+    def test_reconstruct_omits_default_provider_and_zoomlevel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            textures_dir = tile_dir / "textures"
+            textures_dir.mkdir(parents=True)
+            (tile_dir / "Ortho4XP_+36+117.cfg").write_text(
+                "default_website=BI\ndefault_zl=16\nzone_list=[]\n",
+                encoding="utf-8",
+            )
+            (textures_dir / "25680_54080_BI16.dds").write_bytes(b"default")
+
+            result = RECON.reconstruct_zone_list(tile_dir)
+
+        self.assertEqual(result["source"], "textures")
+        self.assertEqual(result["zone_count"], 0)
+
     def test_reconstruct_picks_newest_provider_for_duplicate_footprint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
@@ -83,6 +127,16 @@ class ReconstructZoneListFromTexturesTests(unittest.TestCase):
             self.assertEqual(bak_path.read_text(encoding="utf-8"), original_bak)
             self.assertIn("zone_list=[]", backup_path.read_text(encoding="utf-8"))
             self.assertIn(f"zone_list={zone_list!r}", cfg_path.read_text(encoding="utf-8"))
+
+    def test_zone_intersection_does_not_include_shared_boundary_only(self):
+        east_tile_zone = [
+            [36.1, 118.0, 36.1, 118.2, 36.2, 118.2, 36.2, 118.0, 36.1, 118.0],
+            18,
+            "GO2",
+        ]
+
+        self.assertFalse(RECON.zone_intersects_tile(east_tile_zone, 36, 117))
+        self.assertTrue(RECON.zone_intersects_tile(east_tile_zone, 36, 118))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME
 import O4_Vector_Map as VMAP
+import O4_Zone_Utils as ZONE
 from O4_Cfg_Vars import (
     cfg_app_vars,
     cfg_global_tile_vars,
@@ -454,6 +455,7 @@ class Ortho4XP_Config(tk.Toplevel):
             self.btn_restore_tile_cfg.config(state=state)
             self.btn_load_tile_cfg.config(state=state)
             self.btn_write_tile_cfg.config(state=state)
+            self.btn_recover_tile_zones.config(state=state)
         else:
             self.tile_cfg_msg.set(
                 f"No tile configuration for " \
@@ -470,6 +472,7 @@ class Ortho4XP_Config(tk.Toplevel):
             self.btn_reset_tile_cfg.config(state=state)
             self.btn_restore_tile_cfg.config(state=state)
             self.btn_load_tile_cfg.config(state=state)
+            self.btn_recover_tile_zones.config(state=state)
 
     def tile_config(self, frame: tk.Frame) -> None:
         """Tile configuration section."""
@@ -654,6 +657,15 @@ class Ortho4XP_Config(tk.Toplevel):
         row += 1
 
         # Bottom row buttons
+        self.btn_recover_tile_zones = ttk.Button(
+            frame_lastbtn,
+            text="Recover ZL Zones",
+            command=self.recover_tile_zones,
+        )
+        self.btn_recover_tile_zones.grid(
+            row=0, column=0, padx=5, pady=self.pady, sticky=N + S + E + W
+        )
+
         self.btn_reset_tile_cfg = ttk.Button(
             frame_lastbtn,
             text="Reset to Global",
@@ -1272,6 +1284,107 @@ class Ortho4XP_Config(tk.Toplevel):
             f"Configuration saved for tile at {self.parent.lat.get()} {self.parent.lon.get()}",
         )
         return
+
+    def recover_tile_zones(self) -> None:
+        """Restore active-tile zones from its config backup or DDS textures."""
+        try:
+            lat, lon = self.parent.get_lat_lon()
+        except Exception:
+            return
+        build_dir = FNAMES.build_dir(
+            lat,
+            lon,
+            self.parent.custom_build_dir_entry.get(),
+        )
+        try:
+            result = ZONE.reconstruct_zone_list(
+                build_dir,
+                lat=lat,
+                lon=lon,
+            )
+        except Exception as exc:
+            _LOGGER.exception("Could not recover tile zones")
+            messagebox.showerror("Zone recovery failed", str(exc), parent=self)
+            return
+
+        runtime_zones = [
+            zone
+            for zone in globals()["zone_list"]
+            if ZONE.zone_intersects_tile(zone, lat, lon)
+        ]
+        if runtime_zones and result["source"] != "current":
+            messagebox.showinfo(
+                "Zone recovery",
+                f"This tile has {len(runtime_zones)} zone(s) in the current editing "
+                "session. Save or discard those zones before running recovery.",
+                parent=self,
+            )
+            return
+
+        if result["source"] == "skip":
+            messagebox.showinfo(
+                "Zone recovery",
+                "No tile configuration was found.",
+                parent=self,
+            )
+            return
+        if result["source"] == "current":
+            messagebox.showinfo(
+                "Zone recovery",
+                f"This tile already has {result['zone_count']} saved ZL zone(s).",
+                parent=self,
+            )
+            return
+        if not result["zone_count"]:
+            messagebox.showinfo(
+                "Zone recovery",
+                "No recoverable custom ZL zones were found in the backup or textures.",
+                parent=self,
+            )
+            return
+
+        source = "the config backup" if result["source"] == "backup" else "DDS textures"
+        duplicate_note = ""
+        if result["duplicate_footprints"]:
+            duplicate_note = (
+                f"\n\n{result['duplicate_footprints']} duplicate texture footprint(s) "
+                "were resolved using the newest file."
+            )
+        if not messagebox.askyesno(
+            "Recover ZL zones",
+            f"Recover {result['zone_count']} zone(s) from {source}?"
+            f"{duplicate_note}\n\nThe current tile config will be backed up.",
+            parent=self,
+        ):
+            return
+
+        try:
+            backup_path = ZONE.write_zone_list(
+                result["cfg_path"],
+                result["zone_list"],
+            )
+            globals()["zone_list"] = [
+                zone
+                for zone in globals()["zone_list"]
+                if not ZONE.zone_intersects_tile(zone, lat, lon)
+            ]
+            self.load_tile_cfg()
+            self.tile_cfg_status()
+        except Exception as exc:
+            _LOGGER.exception("Could not save recovered tile zones")
+            messagebox.showerror("Zone recovery failed", str(exc), parent=self)
+            return
+
+        UI.vprint(
+            1,
+            f"Recovered {result['zone_count']} ZL zone(s) for "
+            f"{FNAMES.short_latlon(lat, lon)}. Backup: {backup_path}",
+        )
+        messagebox.showinfo(
+            "Zone recovery complete",
+            f"Recovered {result['zone_count']} ZL zone(s).",
+            parent=self,
+        )
 
     def reset_global_cfg(self) -> None:
         """Reset global tile settings to defaults."""

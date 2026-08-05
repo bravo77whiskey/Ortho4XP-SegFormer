@@ -133,6 +133,7 @@ hidden = [
     "O4_DEM_Utils",
     "O4_Vector_Utils",
     "O4_Version",
+    "O4_Zone_Utils",
     # SFR scripts are bundled as .py data files (see added_datas) and imported
     # lazily at runtime after _activate_venv() — not via the import graph.
 ]

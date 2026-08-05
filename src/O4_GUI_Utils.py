@@ -43,6 +43,7 @@ import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME
 import O4_Config_Utils as CFG
+import O4_Zone_Utils as ZONE
 import O4_PBF_Utils as PBF
 import O4_SFR_Pipeline as SFR
 import O4_SFR_Remote as SFR_REMOTE
@@ -2172,6 +2173,12 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.frame_left, text="  Batch Build   ", command=self.batch_build
         ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row += 1
+        ttk.Button(
+            self.frame_left,
+            text="Recover ZL Zones",
+            command=self.recover_zones,
+        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        row += 1
         ttk.Separator(self.frame_left, orient=HORIZONTAL).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row +=1
         tk.Label(
@@ -2901,6 +2908,170 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             target=TILE.build_tile_list, args=args, daemon=True
         ).start()
         return
+
+    def _zone_recovery_targets(self) -> list[tuple[int, int, object]]:
+        """Return selected tiles, or every tile when none are selected."""
+        if self.dico_tiles_todo:
+            coordinates = sorted(self.dico_tiles_todo)
+            targets = []
+            for lat, lon in coordinates:
+                if not self.grouped and (lat, lon) in self.dico_tiles_done:
+                    tile_dir = os.path.join(
+                        self.working_dir,
+                        self.dico_tiles_done[(lat, lon)][-1],
+                    )
+                else:
+                    tile_dir = FNAMES.build_dir(lat, lon, self.custom_build_dir)
+                targets.append((lat, lon, tile_dir))
+            return targets
+
+        if self.grouped:
+            return [
+                (lat, lon, self.working_dir)
+                for lat, lon in sorted(self.dico_tiles_done)
+            ]
+
+        targets = []
+        for tile_dir in ZONE.discover_tile_dirs([self.working_dir]):
+            try:
+                lat, lon = ZONE.tile_coordinates(tile_dir)
+            except ValueError:
+                continue
+            targets.append((lat, lon, tile_dir))
+        return targets
+
+    def recover_zones(self) -> None:
+        """Recover missing ZL zones for selected tiles, or all tiles."""
+        targets = self._zone_recovery_targets()
+        if not targets:
+            messagebox.showinfo(
+                "Zone recovery",
+                "No tile directories were found.",
+                parent=self,
+            )
+            return
+
+        scope = "selected" if self.dico_tiles_todo else "all"
+        if not messagebox.askyesno(
+            "Recover ZL zones",
+            f"Scan {len(targets)} {scope} tile(s) for missing ZL zones?\n\n"
+            "Tiles that already have saved zones will be left unchanged.",
+            parent=self,
+        ):
+            return
+
+        results = []
+        failures = []
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            for lat, lon, tile_dir in targets:
+                try:
+                    results.append(
+                        ZONE.reconstruct_zone_list(
+                            tile_dir,
+                            lat=lat,
+                            lon=lon,
+                        )
+                    )
+                    runtime_zones = [
+                        zone
+                        for zone in CFG.zone_list
+                        if ZONE.zone_intersects_tile(zone, lat, lon)
+                    ]
+                    if runtime_zones and results[-1]["source"] != "current":
+                        results[-1]["source"] = "runtime"
+                        results[-1]["zone_count"] = len(runtime_zones)
+                except Exception as exc:
+                    failures.append((lat, lon, str(exc)))
+                    _LOGGER.exception(
+                        "Could not scan zones for %s",
+                        FNAMES.short_latlon(lat, lon),
+                    )
+        finally:
+            self.config(cursor="")
+
+        recoverable = [
+            result
+            for result in results
+            if result["source"] in ("backup", "textures")
+            and result["zone_count"]
+        ]
+        existing = sum(
+            result["source"] in ("current", "runtime") for result in results
+        )
+        empty = sum(
+            result["source"] == "textures" and not result["zone_count"]
+            for result in results
+        )
+        missing = sum(result["source"] == "skip" for result in results)
+
+        if not recoverable:
+            messagebox.showinfo(
+                "Zone recovery",
+                f"No missing ZL zones could be recovered.\n\n"
+                f"Already configured: {existing}\n"
+                f"No custom textures or backup zones: {empty}\n"
+                f"Missing config: {missing}\n"
+                f"Errors: {len(failures)}",
+                parent=self,
+            )
+            return
+
+        recovered_zone_count = sum(result["zone_count"] for result in recoverable)
+        if not messagebox.askyesno(
+            "Confirm zone recovery",
+            f"Recover {recovered_zone_count} zone(s) in "
+            f"{len(recoverable)} tile config(s)?\n\n"
+            "Each changed config will be backed up first.",
+            parent=self,
+        ):
+            return
+
+        written = []
+        for result in recoverable:
+            try:
+                backup_path = ZONE.write_zone_list(
+                    result["cfg_path"],
+                    result["zone_list"],
+                )
+                written.append((result, backup_path))
+            except Exception as exc:
+                failures.append((result["lat"], result["lon"], str(exc)))
+                _LOGGER.exception(
+                    "Could not write recovered zones for %s",
+                    result["tile"],
+                )
+
+        active_coords = (self.active_lat, self.active_lon)
+        if any(
+            (result["lat"], result["lon"]) == active_coords
+            for result, _ in written
+        ):
+            CFG.zone_list = [
+                zone
+                for zone in CFG.zone_list
+                if not ZONE.zone_intersects_tile(zone, *active_coords)
+            ]
+            self.parent.load_tile_cfg(*active_coords)
+
+        self.threaded_preview()
+        total_written_zones = sum(result["zone_count"] for result, _ in written)
+        UI.vprint(
+            1,
+            f"Recovered {total_written_zones} ZL zone(s) in "
+            f"{len(written)} tile config(s).",
+        )
+        messagebox.showinfo(
+            "Zone recovery complete",
+            f"Updated tile configs: {len(written)}\n"
+            f"Recovered zones: {total_written_zones}\n"
+            f"Already configured: {existing}\n"
+            f"No recoverable zones: {empty}\n"
+            f"Missing config: {missing}\n"
+            f"Errors: {len(failures)}",
+            parent=self,
+        )
 
     def scroll_start(self, event):
         self.canvas.scan_mark(event.x, event.y)
