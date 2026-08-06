@@ -14,12 +14,14 @@ if str(SRC) not in sys.path:
 
 from O4_Zone_Utils import (  # noqa: E402
     DDS_RE,
+    MASK_RE,
     TILE_RE,
     TextureRecord,
     TileConfig,
     discover_tile_dirs,
     gtile_to_wgs84,
     parse_cfg,
+    parse_mask,
     parse_texture,
     reconstruct_zone_list,
     short_latlon,
@@ -34,8 +36,9 @@ from O4_Zone_Utils import (  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Recover Ortho4XP zone_list entries from a config backup or DDS "
-            "textures. Duplicate x/y/ZL footprints use the newest file."
+            "Recover Ortho4XP zone_list entries from a config backup, DDS "
+            "textures, or PNG masks. Higher zoom levels are ordered first; "
+            "duplicate x/y/ZL footprints use the newest file."
         )
     )
     parser.add_argument(

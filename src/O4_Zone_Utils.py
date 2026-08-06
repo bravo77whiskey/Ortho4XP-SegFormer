@@ -1,4 +1,4 @@
-"""Recover Ortho4XP custom zoom-level zones from config backups or DDS files."""
+"""Recover Ortho4XP custom zones from backups and texture artifacts."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import ast
 import math
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +14,10 @@ from pathlib import Path
 TILE_RE = re.compile(r"^zOrtho4XP_(?P<lat>[+-]\d{2})(?P<lon>[+-]\d{3})$")
 DDS_RE = re.compile(
     r"^(?P<y>\d+)_(?P<x>\d+)_(?P<provider>.+?)(?P<zl>\d{2})\.dds$",
+    re.IGNORECASE,
+)
+MASK_RE = re.compile(
+    r"^(?P<y>\d+)_(?P<x>\d+)_ZL(?P<zl>\d{2})\.png$",
     re.IGNORECASE,
 )
 
@@ -108,23 +112,50 @@ def parse_texture(path: Path) -> TextureRecord | None:
     )
 
 
+def parse_mask(path: Path) -> TextureRecord | None:
+    """Parse a texture mask; its provider is inferred during reconstruction."""
+    match = MASK_RE.match(path.name)
+    if not match:
+        return None
+    return TextureRecord(
+        path=path,
+        x_left=int(match.group("x")),
+        y_top=int(match.group("y")),
+        provider="",
+        zoomlevel=int(match.group("zl")),
+        mtime=path.stat().st_mtime,
+    )
+
+
 def winning_textures(textures_dir: Path) -> tuple[list[TextureRecord], int]:
     by_footprint: dict[tuple[int, int, int], TextureRecord] = {}
     duplicate_count = 0
     if not textures_dir.is_dir():
         return [], 0
-    for path in textures_dir.glob("*.dds"):
-        record = parse_texture(path)
+    paths = list(textures_dir.glob("*.dds")) + list(textures_dir.glob("*.png"))
+    for path in paths:
+        record = (
+            parse_texture(path)
+            if path.suffix.lower() == ".dds"
+            else parse_mask(path)
+        )
         if record is None:
             continue
         current = by_footprint.get(record.footprint_key)
         if current is not None:
             duplicate_count += 1
-        if current is None or (record.mtime, record.path.name) > (
-            current.mtime,
-            current.path.name,
-        ):
+        if current is None:
             by_footprint[record.footprint_key] = record
+            continue
+        if (record.mtime, record.path.name) > (current.mtime, current.path.name):
+            if not record.provider and current.provider:
+                record = replace(record, provider=current.provider)
+            by_footprint[record.footprint_key] = record
+        elif not current.provider and record.provider:
+            by_footprint[record.footprint_key] = replace(
+                current,
+                provider=record.provider,
+            )
     return list(by_footprint.values()), duplicate_count
 
 
@@ -194,6 +225,7 @@ def reconstruct_zone_list(
         "lon": lon,
         "cfg_path": str(cfg_path),
         "duplicate_footprints": 0,
+        "default_matching_textures": 0,
         "zone_count": 0,
         "zone_list": [],
         "selected_textures": [],
@@ -203,12 +235,20 @@ def reconstruct_zone_list(
 
     cfg = parse_cfg(cfg_path)
     textures_dir = tile_dir / "textures"
-    texture_count = len(list(textures_dir.glob("*.dds"))) if textures_dir.is_dir() else 0
+    if textures_dir.is_dir():
+        texture_count = len(list(textures_dir.glob("*.dds")))
+        mask_count = len(
+            [path for path in textures_dir.glob("*.png") if MASK_RE.match(path.name)]
+        )
+    else:
+        texture_count = 0
+        mask_count = 0
     common = {
         **base_result,
         "default_website": cfg.default_website,
         "default_zl": cfg.default_zl,
         "textures": texture_count,
+        "texture_masks": mask_count,
     }
     if cfg.zone_list:
         return {
@@ -232,6 +272,7 @@ def reconstruct_zone_list(
     winners, duplicate_count = winning_textures(textures_dir)
     zones: list[list[object]] = []
     selected: list[dict[str, object]] = []
+    default_matching_textures = 0
     ordered = sorted(
         winners,
         key=lambda item: (
@@ -243,20 +284,25 @@ def reconstruct_zone_list(
         ),
     )
     for record in ordered:
-        if (
-            not include_default_textures
-            and record.provider == cfg.default_website
-            and record.zoomlevel == cfg.default_zl
-        ):
-            continue
+        provider = record.provider or cfg.default_website
         zone = texture_to_zone(record, lat, lon)
         if zone is None:
             continue
+        matches_defaults = (
+            provider == cfg.default_website
+            and record.zoomlevel == cfg.default_zl
+        )
+        if matches_defaults:
+            default_matching_textures += 1
+        if not include_default_textures and matches_defaults:
+            continue
+        zone[2] = provider
         zones.append(zone)
         selected.append(
             {
                 "file": record.path.name,
-                "provider": record.provider,
+                "provider": provider,
+                "format": record.path.suffix.lower().lstrip("."),
                 "zoomlevel": record.zoomlevel,
                 "x_left": record.x_left,
                 "y_top": record.y_top,
@@ -269,6 +315,7 @@ def reconstruct_zone_list(
         **common,
         "source": "textures",
         "duplicate_footprints": duplicate_count,
+        "default_matching_textures": default_matching_textures,
         "zone_count": len(zones),
         "zone_list": zones,
         "selected_textures": selected,

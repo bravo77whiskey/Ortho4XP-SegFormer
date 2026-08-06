@@ -58,6 +58,87 @@ class ReconstructZoneListFromTexturesTests(unittest.TestCase):
 
         self.assertEqual(result["source"], "textures")
         self.assertEqual(result["zone_count"], 0)
+        self.assertEqual(result["default_matching_textures"], 1)
+
+    def test_reconstruct_can_include_default_provider_and_zoomlevel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            textures_dir = tile_dir / "textures"
+            textures_dir.mkdir(parents=True)
+            (tile_dir / "Ortho4XP_+36+117.cfg").write_text(
+                "default_website=BI\ndefault_zl=16\nzone_list=[]\n",
+                encoding="utf-8",
+            )
+            (textures_dir / "25680_54080_BI16.dds").write_bytes(b"default")
+
+            result = RECON.reconstruct_zone_list(
+                tile_dir,
+                include_default_textures=True,
+            )
+
+        self.assertEqual(result["source"], "textures")
+        self.assertEqual(result["zone_count"], 1)
+        self.assertEqual(result["default_matching_textures"], 1)
+        self.assertEqual(result["zone_list"][0][1:], [16, "BI"])
+
+    def test_reconstruct_uses_mask_png_zoomlevel_with_default_provider(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            textures_dir = tile_dir / "textures"
+            textures_dir.mkdir(parents=True)
+            (tile_dir / "Ortho4XP_+36+117.cfg").write_text(
+                "default_website=BI\ndefault_zl=16\nzone_list=[]\n",
+                encoding="utf-8",
+            )
+            (textures_dir / "102400_216512_ZL18.png").write_bytes(b"mask")
+
+            result = RECON.reconstruct_zone_list(tile_dir)
+
+        self.assertEqual(result["zone_count"], 1)
+        self.assertEqual(result["zone_list"][0][1:], [18, "BI"])
+        self.assertEqual(result["selected_textures"][0]["format"], "png")
+
+    def test_reconstruct_orders_higher_zoom_before_newer_lower_zoom(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            textures_dir = tile_dir / "textures"
+            textures_dir.mkdir(parents=True)
+            (tile_dir / "Ortho4XP_+36+117.cfg").write_text(
+                "default_website=BI\ndefault_zl=15\nzone_list=[]\n",
+                encoding="utf-8",
+            )
+            older_high_zl = textures_dir / "102400_216512_ZL18.png"
+            newer_low_zl = textures_dir / "51328_108256_BI17.dds"
+            older_high_zl.write_bytes(b"mask")
+            newer_low_zl.write_bytes(b"texture")
+            os.utime(older_high_zl, (100.0, 100.0))
+            os.utime(newer_low_zl, (300.0, 300.0))
+
+            result = RECON.reconstruct_zone_list(tile_dir)
+
+        self.assertEqual([zone[1] for zone in result["zone_list"]], [18, 17])
+
+    def test_newer_mask_keeps_provider_from_matching_dds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_dir = Path(tmpdir) / "zOrtho4XP_+36+117"
+            textures_dir = tile_dir / "textures"
+            textures_dir.mkdir(parents=True)
+            (tile_dir / "Ortho4XP_+36+117.cfg").write_text(
+                "default_website=BI\ndefault_zl=16\nzone_list=[]\n",
+                encoding="utf-8",
+            )
+            dds = textures_dir / "102400_216512_Arc18.dds"
+            mask = textures_dir / "102400_216512_ZL18.png"
+            dds.write_bytes(b"texture")
+            mask.write_bytes(b"mask")
+            os.utime(dds, (100.0, 100.0))
+            os.utime(mask, (300.0, 300.0))
+
+            result = RECON.reconstruct_zone_list(tile_dir)
+
+        self.assertEqual(result["zone_count"], 1)
+        self.assertEqual(result["zone_list"][0][1:], [18, "Arc"])
+        self.assertEqual(result["selected_textures"][0]["file"], mask.name)
 
     def test_reconstruct_picks_newest_provider_for_duplicate_footprint(self):
         with tempfile.TemporaryDirectory() as tmpdir:

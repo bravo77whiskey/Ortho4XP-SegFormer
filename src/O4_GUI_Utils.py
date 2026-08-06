@@ -2991,6 +2991,52 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         finally:
             self.config(cursor="")
 
+        ambiguous = [
+            result
+            for result in results
+            if result["source"] == "textures"
+            and not result["zone_count"]
+            and result["default_matching_textures"]
+        ]
+        if ambiguous:
+            default_count = sum(
+                result["default_matching_textures"] for result in ambiguous
+            )
+            if messagebox.askyesno(
+                "Recover default-matching textures?",
+                f"{len(ambiguous)} tile(s) have no non-default textures, but "
+                f"{default_count} texture footprint(s) match their current "
+                "provider and ZL defaults.\n\n"
+                "If those defaults were reset with the zone lists, these may be "
+                "the missing zones. If the defaults are correct, recovering them "
+                "will create redundant zone entries.\n\n"
+                "Include these footprints in recovery?",
+                parent=self,
+            ):
+                targets_by_coordinates = {
+                    (lat, lon): tile_dir for lat, lon, tile_dir in targets
+                }
+                rescanned = {}
+                for result in ambiguous:
+                    coordinates = (result["lat"], result["lon"])
+                    try:
+                        rescanned[coordinates] = ZONE.reconstruct_zone_list(
+                            targets_by_coordinates[coordinates],
+                            include_default_textures=True,
+                            lat=result["lat"],
+                            lon=result["lon"],
+                        )
+                    except Exception as exc:
+                        failures.append((*coordinates, str(exc)))
+                        _LOGGER.exception(
+                            "Could not scan default-matching zones for %s",
+                            result["tile"],
+                        )
+                results = [
+                    rescanned.get((result["lat"], result["lon"]), result)
+                    for result in results
+                ]
+
         recoverable = [
             result
             for result in results

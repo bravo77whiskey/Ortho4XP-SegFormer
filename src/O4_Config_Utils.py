@@ -1336,14 +1336,43 @@ class Ortho4XP_Config(tk.Toplevel):
             )
             return
         if not result["zone_count"]:
-            messagebox.showinfo(
-                "Zone recovery",
-                "No recoverable custom ZL zones were found in the backup or textures.",
+            default_count = result["default_matching_textures"]
+            if not default_count:
+                messagebox.showinfo(
+                    "Zone recovery",
+                    "No recoverable custom ZL zones were found in the backup or textures.",
+                    parent=self,
+                )
+                return
+            if not messagebox.askyesno(
+                "Recover default-matching textures?",
+                f"No non-default textures were found, but {default_count} texture "
+                f"footprint(s) match the current defaults "
+                f"({result['default_website']} ZL{result['default_zl']}).\n\n"
+                "If those defaults were reset along with the zone list, these may "
+                "be the missing zones. If the defaults are correct, recovering them "
+                "will create redundant zone entries.\n\n"
+                "Recover these footprints anyway?",
                 parent=self,
-            )
-            return
+            ):
+                return
+            try:
+                result = ZONE.reconstruct_zone_list(
+                    build_dir,
+                    include_default_textures=True,
+                    lat=lat,
+                    lon=lon,
+                )
+            except Exception as exc:
+                _LOGGER.exception("Could not recover default-matching tile zones")
+                messagebox.showerror("Zone recovery failed", str(exc), parent=self)
+                return
 
-        source = "the config backup" if result["source"] == "backup" else "DDS textures"
+        source = (
+            "the config backup"
+            if result["source"] == "backup"
+            else "DDS textures and PNG masks"
+        )
         duplicate_note = ""
         if result["duplicate_footprints"]:
             duplicate_note = (
