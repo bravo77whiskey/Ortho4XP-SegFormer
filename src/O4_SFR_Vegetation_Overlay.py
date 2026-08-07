@@ -73,7 +73,8 @@ OPEN_M        = 3.0    # open  kernel radius — remove sub-pixel noise
 MIN_AREA_M2   = 50.0   # minimum polygon area (~7×7 m)
 SIMPLIFY_M    = 3.0    # Douglas-Peucker tolerance
 TREELINE_RATIO= 5.0    # perimeter² / (4π × area) ≥ this → candidate treeline
-TREELINE_MAX_WIDTH_M = 30.0  # broad irregular blobs should stay filled forest
+TREELINE_MAX_WIDTH_M = 30.0  # max inscribed width — wider cores stay filled forest
+TREELINE_MIN_ASPECT  = 3.0   # min length/width — compact patches stay filled forest
 MAX_RING_PTS  = 8000   # hard vertex cap per DSF winding
 EXCL_BUFFER_M = 5.0    # dilation buffer around SegFormer buildings/roads before exclusion
 
@@ -708,7 +709,7 @@ def _dds_polygon_cache_key(
     covered_fracs=None,
 ):
     return {
-        'version': 5,
+        'version': 6,
         'gfv2_type_sig': gfv2_type_sig,
         'covered_fracs': covered_fracs,
         'fname': fname,
@@ -1104,9 +1105,27 @@ def _contour_shape(cnt, min_area_px, m_per_px):
     if perim == 0:
         return 'tiny', area
     ratio = (perim ** 2) / (4 * pi * area)
-    width_m = (2.0 * area / perim) * m_per_px
-    is_treeline = ratio >= TREELINE_RATIO and width_m <= TREELINE_MAX_WIDTH_M
-    return ('treeline' if is_treeline else 'area'), area
+    if ratio < TREELINE_RATIO:
+        return 'area', area
+    # The raw pixel perimeter overstates elongation for jagged or dendritic
+    # blobs (treelines render edge-only via the +256 DSF param, hollowing out
+    # any misclassified patch), so candidates must also have a genuinely
+    # narrow core: max inscribed width via distance transform, plus a minimum
+    # length/width aspect.
+    stats = _contour_fill_stats(cnt, m_per_px, include_ring=False)
+    if stats is None:
+        return 'tiny', area
+    padded = cv2.copyMakeBorder(stats['fill'], 1, 1, 1, 1,
+                                cv2.BORDER_CONSTANT, value=0)
+    dist = cv2.distanceTransform(padded, cv2.DIST_L2, 5)
+    core_width_m = 2.0 * float(dist.max()) * m_per_px
+    if core_width_m > TREELINE_MAX_WIDTH_M or core_width_m <= 0:
+        return 'area', area
+    area_m2 = stats['area_px'] * m_per_px * m_per_px
+    length_m = area_m2 / core_width_m
+    if length_m / core_width_m < TREELINE_MIN_ASPECT:
+        return 'area', area
+    return 'treeline', area
 
 
 def _classify_tree_cover(cnt, frac, shape, m_per_px, context_masks, prepared_stats=None):
