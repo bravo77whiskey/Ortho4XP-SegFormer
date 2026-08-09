@@ -2775,6 +2775,16 @@ CURATED_EXTRA_BUILDING_LIBRARIES = {
         # Niche Cold-War / vintage thematic — primarily European bases.
         "regions": ("europe",),
     },
+    "xpc-luimor": {
+        "label": "XPC LuiMor",
+        "package_patterns": ("l_xpc_luimor", "xpc_luimor", "luimor"),
+        "virtual_prefixes": ("lib_xpc_luimor_free/",),
+        # Scanned for its sports objects (`.../deportes/cancha_*.obj`), which
+        # the stock-YOLO pitch classes place. Contributes nothing to the
+        # building pool: _is_optional_library_building_candidate requires a
+        # residential/commercial include token these paths do not carry.
+        # library.txt declares no REGION blocks, so exports are global.
+    },
 }
 
 OPTIONAL_LIBRARY_INCLUDE_TOKENS = (
@@ -10549,7 +10559,12 @@ def run(
             height_signature,
             # v30: rooftop colour selection is opt-in and keys placement
             #      caches separately. Raw YOLO geometry remains unchanged.
-            "schema=v30-optional-rooftop-colour-selection",
+            # v31: sports classes (baseball diamond / ground track field /
+            #      soccer ball field) place size-matched OBJECTS instead of a
+            #      stadium facade ring, take the OBB heading, and skip
+            #      entirely when no asset matches the detected footprint.
+            #      Behavioural, so it is not captured by the asset-map tuple.
+            "schema=v31-sports-classes-size-matched-objects",
         )
 
     _requested_bld_params = _building_cache_params(

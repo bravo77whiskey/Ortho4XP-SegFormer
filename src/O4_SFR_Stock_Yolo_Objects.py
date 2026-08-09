@@ -36,14 +36,21 @@ Asset mapping is in `STOCK_YOLO_ASSET_MAP` — easy to edit. Each entry is
     a stable hash of (lat, lon, jx, jy) — same approach as the building
     overlay's context-facade picker. Paths may reference any installed
     library (simHeaven, SFD Global, OpenSceneryX, Handy Objects, MisterX,
-    world-models, …): the building overlay filters the map down to paths the
-    installed library set actually exports before the pass runs, so missing
-    libraries simply shrink the pool instead of producing dangling DSF refs.
+    world-models, XPC LuiMor, …): the building overlay filters the map down to
+    paths the installed library set actually exports before the pass runs, so
+    missing libraries simply shrink the pool instead of producing dangling
+    DSF refs.
+  - Sports classes (3/6/13) instead pick by real-world size via
+    `_SPORT_SIZE_LADDER_M`, and place nothing when no surviving asset matches
+    the detected footprint closely enough. Their models are fixed-size, so a
+    hash pick would drop a 145 m stadium onto an 80 m pitch.
   - 'object' placements emit DSF `OBJECT path lon lat heading` at the OBB
     center. Heading is taken from the OBB only when the class is marked
     directional in `_USE_OBB_HEADING_PER_CLASS`.
   - 'facade' placements emit DSF `BEGIN_POLYGON path height_m 2` using the OBB
-    as the polygon ring — good for extruded structures (tanks, stadium walls).
+    as the polygon ring. Only the storage tank uses this: a facade wraps a
+    wall around the whole OBB, which is right for a tank but produced a
+    warehouse ring around every pitch when the sports classes used it.
   - Draped `.pol` polygons are NOT supported by design: the project disabled
     ground polygons globally and the disable should not be re-introduced here.
 """
@@ -110,27 +117,41 @@ STATIC_DOTA_CLASSES = (2, 3, 4, 5, 6, 13, 14)
 #   asset_paths    = tuple of X-Plane library-virtual paths (resolved by sim
 #                    at load time). When more than one entry is given, the
 #                    picker chooses one deterministically per detection via a
-#                    stable hash of (lat, lon, jx, jy).
+#                    stable hash of (lat, lon, jx, jy) — EXCEPT for classes
+#                    listed in `_SPORT_SIZE_LADDER_M`, where the variant is
+#                    chosen by real-world size instead (see below).
 #   default_height = facade height in metres (only used for 'facade'); ignored
 #                    for 'object' (height is asset-intrinsic).
+#
+# Sports classes (3/6/13) are deliberately OBJECT placements, never facades.
+# A facade extrudes a wall around the whole OBB, which produced a warehouse
+# ring around every pitch: simHeaven aliases `grandstand.fac`, `stadium_01.fac`
+# and `stadium_02.fac` all to one `objects/facades/stadium.fac` textured with
+# `commercial_1.dds`, so the "variant pool" was a single commercial shell.
 #
 # Paths verified present in the user's installed library set:
 #   - simHeaven X-World region libraries (`simheaven/...`)
 #   - X-Plane 12 default scenery (`lib/constructions/grandstands/...`,
 #     `lib/public_area/sports/...`, `lib/garden/pools/...`).
+#   - L_XPC_LuiMor_free (`lib_XPC_LuiMor_free/...`) — pitch objects; the
+#     library exports globally (no REGION blocks). When it is not installed
+#     the overlay's availability filter drops these paths and the class falls
+#     back to whatever else survives, or stops placing entirely.
 STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = {
     # Storage tank — vertical extruded structure → use facade with tank texture.
     # simHeaven's `tank.fac` provides a cylindrical-tank visual.
     2:  ('facade', ('simheaven/facades/tank.fac',), 10.0),
 
-    # Baseball diamond — stadium-scale rectangular OBB (~80-120 m). Use a
-    # simHeaven stadium facade extruded around the OBB so the surrounding
-    # geometry resembles grandstand walls.
-    3:  ('facade', (
-        'simheaven/facades/stadium_01.fac',
-        'simheaven/facades/stadium_02.fac',
-        'simheaven/facades/grandstand.fac',
-    ), 10.0),
+    # Baseball diamond — ballpark object sized to the detection. The XP12
+    # grandstand bowls carry their own draped infield, so the stands read as
+    # real geometry rather than a wall wrapped round the OBB. No plain-object
+    # asset exists for a *bare* diamond, so small detections place nothing
+    # (the size ladder below rejects them).
+    3:  ('object', (
+        'lib/constructions/grandstands/baseball_1.obj',
+        'lib/constructions/grandstands/baseball_2.obj',
+        'lib/constructions/grandstands/baseball_3.obj',
+    ), None),
 
     # Tennis court — small (~24×11 m). Full-court OBJs from Handy Objects /
     # OpenSceneryX / MisterX when those libraries are installed; XP-default
@@ -155,22 +176,20 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
         'handyobjects/sports/basketball_hoop_with_stand.obj',
     ), None),
 
-    # Ground track field — stadium-scale (~120×80 m). Use stadium facade
-    # extruded around the OBB.
-    6:  ('facade', (
-        'simheaven/facades/stadium_01.fac',
-        'simheaven/facades/stadium_02.fac',
-        'simheaven/facades/grandstand.fac',
-        'simheaven/facades/sports.fac',
-        'simheaven/facades/sports_hall.fac',
-    ), 12.0),
+    # Ground track field — a running track almost always rings a football
+    # pitch, so the pitch object goes in the middle. Surround-free variant:
+    # the track itself is the surround. Stadium-scale tracks get the bowl.
+    6:  ('object', (
+        'lib_XPC_LuiMor_free/comunes/objects/deportes/cancha_football.obj',
+        'lib/constructions/grandstands/soccer_1.obj',
+    ), None),
 
-    # Soccer ball field — stadium-scale (~105×68 m). Stadium facade.
-    13: ('facade', (
-        'simheaven/facades/stadium_01.fac',
-        'simheaven/facades/stadium_02.fac',
-        'simheaven/facades/grandstand.fac',
-    ), 12.0),
+    # Soccer ball field — the pitch itself, placed as a pitch object with its
+    # surround. Genuinely stadium-scale detections get the grandstand bowl.
+    13: ('object', (
+        'lib_XPC_LuiMor_free/comunes/objects/deportes/cancha_football_borde.obj',
+        'lib/constructions/grandstands/soccer_1.obj',
+    ), None),
 
     # Swimming pool — small OBB, varied size. Use a residential pool OBJ at
     # center; SFD Global has an Australia-flavoured variant too.
@@ -181,15 +200,14 @@ STOCK_YOLO_ASSET_MAP: dict[int, tuple[str, tuple[str, ...], Optional[float]]] = 
 }
 
 # Heading clamp: for 'object' placements, OBB rotation is meaningful only for
-# directional assets. Full-surface courts (tennis, basketball) and
-# rectangular pools should follow the OBB long axis so the 3D asset lines
-# up with the feature painted in the ortho (180° ambiguity is harmless — the
-# assets are end-symmetric). Tanks are rotationally symmetric and the stadium
-# classes are facades (the ring itself carries the orientation), so heading
-# stays 0 there.
+# directional assets. Full-surface courts (tennis, basketball), pitches and
+# ballparks (3/6/13) and rectangular pools should follow the OBB long axis so
+# the 3D asset lines up with the feature painted in the ortho (180° ambiguity
+# is harmless — the assets are end-symmetric). Only the tank stays at 0: it is
+# a rotationally symmetric facade, so a heading would be meaningless.
 _USE_OBB_HEADING_PER_CLASS = {
-    2: False, 3: False, 4: True, 5: True,
-    6: False, 13: False, 14: True,
+    2: False, 3: True, 4: True, 5: True,
+    6: True, 13: True, 14: True,
 }
 
 # Per-class footprint sanity limits (metres), long-side. Filters detections
@@ -216,6 +234,34 @@ _MIN_LONG_SIDE_M = {
     14: 5.0,
 }
 
+# ── Size-matched variant ladders (sports classes) ───────────────────────────
+# Sports assets are fixed-size models, so the variant is chosen by real-world
+# size rather than by the location hash: an 80 m detection must not receive a
+# 145 m stadium bowl. Values are each OBJ's long-side bounding-box extent in
+# metres, measured from the shipped models.
+#
+# When no surviving variant lands within `_SPORT_SIZE_TOLERANCE_FRAC` of the
+# detection's long side, the detection places NOTHING. That is deliberate: no
+# plain-object asset exists for a bare pitch or diamond at every scale, and a
+# wrong-scale model is worse than leaving the pitch the ortho already shows.
+_SPORT_SIZE_LADDER_M: dict[int, dict[str, float]] = {
+    3: {
+        'lib/constructions/grandstands/baseball_1.obj':   77.0,
+        'lib/constructions/grandstands/baseball_2.obj':   94.0,
+        'lib/constructions/grandstands/baseball_3.obj':  161.6,
+    },
+    6: {
+        'lib_XPC_LuiMor_free/comunes/objects/deportes/cancha_football.obj': 110.0,
+        'lib/constructions/grandstands/soccer_1.obj':                       145.2,
+    },
+    13: {
+        'lib_XPC_LuiMor_free/comunes/objects/deportes/cancha_football_borde.obj': 110.0,
+        'lib/constructions/grandstands/soccer_1.obj':                             145.2,
+    },
+}
+# Accept an asset whose long side is within ±35% of the detected long side.
+_SPORT_SIZE_TOLERANCE_FRAC = 0.35
+
 
 # ── Variant picker ──────────────────────────────────────────────────────────
 def _pick_variant(asset_paths: tuple[str, ...], lat: float, lon: float,
@@ -233,6 +279,34 @@ def _pick_variant(asset_paths: tuple[str, ...], lat: float, lon: float,
     digest = hashlib.sha1(key.encode("utf-8")).digest()
     idx = int.from_bytes(digest[:8], "big") % len(asset_paths)
     return asset_paths[idx]
+
+
+def _pick_variant_by_size(asset_paths: tuple[str, ...],
+                          ladder: dict[str, float],
+                          long_m: float) -> Optional[str]:
+    """Choose the asset whose real-world long side best matches `long_m`.
+
+    Only paths that survived the caller's availability filter are considered,
+    so an uninstalled library simply removes its rungs from the ladder.
+
+    Returns None when nothing lands within `_SPORT_SIZE_TOLERANCE_FRAC`; the
+    caller must then skip the detection rather than place a wrong-scale model.
+    """
+    long_m = float(long_m)
+    if long_m <= 0.0:
+        return None
+    best_path = None
+    best_err = None
+    for path in asset_paths:
+        nominal = ladder.get(path)
+        if nominal is None:
+            continue
+        err = abs(float(nominal) - long_m) / long_m
+        if best_err is None or err < best_err:
+            best_err, best_path = err, path
+    if best_path is None or best_err > _SPORT_SIZE_TOLERANCE_FRAC:
+        return None
+    return best_path
 
 
 @dataclass
@@ -582,7 +656,17 @@ def run_stock_yolo_pass(
             # Bounds check
             if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
                 continue
-            asset_path = _pick_variant(asset_paths, o_lat, o_lon, cx, cy)
+            size_ladder = _SPORT_SIZE_LADDER_M.get(cls_i)
+            if size_ladder is not None:
+                asset_path = _pick_variant_by_size(
+                    asset_paths, size_ladder, long_m
+                )
+                if asset_path is None:
+                    # No sports asset within tolerance of this footprint —
+                    # placing a wrong-scale pitch/ballpark is worse than none.
+                    continue
+            else:
+                asset_path = _pick_variant(asset_paths, o_lat, o_lon, cx, cy)
             use_heading = _USE_OBB_HEADING_PER_CLASS.get(cls_i, True)
             placement_heading = float(heading_deg) if use_heading else 0.0
             occupied_poly = quad
