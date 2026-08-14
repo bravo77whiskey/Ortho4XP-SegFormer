@@ -46,6 +46,7 @@ import O4_SFR_Climate_Regions as CLIMATE_REGIONS
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
+import O4_SFR_Texture_Selection as TEXSEL
 from O4_SFR_Building_Overlay import (
     _load_simheaven_building_exclusions,
     _load_mesh_water_index,
@@ -56,7 +57,6 @@ from O4_SFR_Building_Overlay import (
     _rasterize_simheaven_objects,
     _simheaven_objects_for_bounds,
     _transient_cache_peer_path,
-    compute_covered_fractions,
     covered_rects_to_px,
     mask_covered_regions,
 )
@@ -1347,65 +1347,25 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             except OSError:
                 pass
 
-    # Collect all DDS files; resolve overlapping zoom levels.
-    # Texture names use raw web-mercator tile indices in steps of 16 (one DDS
-    # spans 16x16 tiles), so the 4 children of texture (y,x) at ZL+1 sit at
-    # (2y,2x), (2y,2x+16), (2y+16,2x), (2y+16,2x+16).
-    # A lower-ZL tile is skipped only when ALL 4 of its ZL+1 children are present
-    # or themselves fully covered — otherwise it is kept to fill the missing area.
-    _by_zl = {}
+    # Pick the textures that actually render, and the part of each one they own.
+    # The tile cfg is the source of truth: it is what Ortho4XP turned into the
+    # per-mesh-cell texture assignment at build time, so replaying it drops
+    # leftovers from earlier builds with a different provider and resolves both
+    # kinds of overlap — a zone boundary splitting one footprint between two
+    # providers, and a higher-ZL texture covering part of a lower-ZL one. The
+    # regions another texture owns generate their forest polygons from that
+    # texture instead, so they are blanked out of this one's mask; otherwise
+    # the forests there are emitted twice (double density).
     _source_files, _source_mode, _orthophoto_dir = _collect_source_files()
-    for _f in _source_files:
-        _m = STD_RE.match(_f)
-        if not _m: continue
-        _by_zl.setdefault(int(_m.group(4)), []).append(
-            (int(_m.group(1)), int(_m.group(2)), _f))
-    if not _by_zl:
-        print("No DDS files found."); return 0
-    _tiles_at_zl = {zl: {(y, x) for y, x, _ in tiles} for zl, tiles in _by_zl.items()}
-    _all_zls = sorted(_by_zl)
-    _max_zl   = _all_zls[-1]
-    _fc_memo  = {}
-    def _fully_covered(y, x, zl):
-        """True iff all 4 children of (y,x,zl) exist or are themselves fully covered."""
-        key = (y, x, zl)
-        if key in _fc_memo: return _fc_memo[key]
-        if zl >= _max_zl:
-            _fc_memo[key] = False; return False
-        result = all(
-            (cy, cx) in _tiles_at_zl.get(zl + 1, set()) or _fully_covered(cy, cx, zl + 1)
-            for cy, cx in ((2*y, 2*x), (2*y, 2*x+16), (2*y+16, 2*x), (2*y+16, 2*x+16))
-        )
-        _fc_memo[key] = result; return result
-    files = sorted(
-        _f for _zl in _all_zls
-        for _y, _x, _f in _by_zl[_zl]
-        if not _fully_covered(_y, _x, _zl)
+    files, _covered_fracs_by_file, _selection_report = TEXSEL.select_textures(
+        _source_files, tex_dir, lat, lon
     )
     if not files:
         print("No DDS files found."); return 0
-    _n_skipped_covered = sum(len(v) for v in _by_zl.values()) - len(files)
-    if _n_skipped_covered:
-        print(
-            f"Zoom-level coverage: skipped {_n_skipped_covered} lower-ZL texture(s) "
-            "fully covered by higher-ZL textures"
-        )
-    # Sub-regions of kept lower-ZL textures that are covered by kept higher-ZL
-    # textures generate their forest polygons at the higher ZL; blank them out
-    # of the lower-ZL masks so forests are not emitted twice (double density).
-    _covered_fracs_by_file = compute_covered_fractions(
-        (
-            (int(_m.group(1)), int(_m.group(2)), int(_m.group(4)), _f)
-            for _f in files
-            for _m in (STD_RE.match(_f),)
-            if _m
-        ),
-    )
-    if _covered_fracs_by_file:
-        print(
-            f"Zoom-level coverage: {len(_covered_fracs_by_file)} partially covered "
-            "lower-ZL texture(s); covered regions excluded from vegetation masks"
-        )
+    for _line in TEXSEL.format_selection_report(
+        _selection_report, region_label="vegetation masks"
+    ):
+        print(_line)
     _used_zls = sorted(set(int(STD_RE.match(_f).group(4)) for _f in files))
     _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
 

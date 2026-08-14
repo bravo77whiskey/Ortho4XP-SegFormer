@@ -43,6 +43,8 @@ import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
 import O4_SFR_Roof_Color as ROOFCOLOR
 import O4_SFR_Height_Model as HEIGHTMODEL
+import O4_SFR_Texture_Selection as TEXSEL
+from O4_SFR_Texture_Selection import compute_covered_fractions
 from O4_SFR_DSF_Utils import (
     active_scenery_pack_dirs,
     ensure_cached_dsf_text,
@@ -6131,49 +6133,13 @@ def _scale_yolo_detections_to_image(detections, scale_x, scale_y, img_w, img_h):
     return scaled
 
 
-# ── Cross-ZL texture coverage ────────────────────────────────────────────────
-# On mixed-ZL tiles a lower-ZL texture image spans its full footprint even
-# where the scenery actually renders kept higher-ZL textures. Those covered
-# sub-regions must be skipped at the lower ZL or everything in them would be
-# detected and placed twice (once per ZL). Shared with the vegetation overlay.
-
-def compute_covered_fractions(entries):
-    """Map texture filename -> regions covered by kept higher-ZL textures.
-
-    ``entries`` yields ``(til_y_top, til_x_left, zl, fname)`` for every KEPT
-    texture. Returns ``{fname: ((fx0, fy0, fx1, fy1), ...)}`` where the rects
-    are fractions of the texture footprint (x right, y down, matching image
-    pixel orientation). Textures with no covered region are absent.
-    """
-    kept = [tuple(entry) for entry in entries]
-    by_zl = {}
-    for til_y, til_x, zl, fname in kept:
-        by_zl.setdefault(int(zl), []).append((int(til_y), int(til_x), fname))
-    covered = {}
-    for zl, tiles in by_zl.items():
-        higher = [
-            (czl, ctiles) for czl, ctiles in by_zl.items() if czl > zl
-        ]
-        if not higher:
-            continue
-        for til_y, til_x, fname in tiles:
-            rects = []
-            for czl, ctiles in higher:
-                scale = float(2 ** (czl - zl))
-                for c_y, c_x, _cf in ctiles:
-                    fy = (c_y / scale - til_y) / 16.0
-                    fx = (c_x / scale - til_x) / 16.0
-                    fs = 1.0 / scale
-                    if fx >= 1.0 or fy >= 1.0 or fx + fs <= 0.0 or fy + fs <= 0.0:
-                        continue
-                    rects.append((
-                        max(0.0, fx), max(0.0, fy),
-                        min(1.0, fx + fs), min(1.0, fy + fs),
-                    ))
-            if rects:
-                covered[fname] = tuple(sorted(rects))
-    return covered
-
+# ── Texture coverage ─────────────────────────────────────────────────────────
+# A texture image spans its full footprint even where the scenery actually
+# renders a different texture there — a higher-ZL one on a mixed-ZL tile, or a
+# second provider on a footprint that a zone_list boundary splits. Those
+# regions must be skipped or everything in them would be detected and placed
+# twice. O4_SFR_Texture_Selection decides them; these helpers apply them, and
+# are shared with the vegetation overlay.
 
 def covered_rects_to_px(fracs, img_w, img_h):
     """Convert fractional covered rects to integer pixel rects (x0,y0,x1,y1)."""
@@ -9623,67 +9589,25 @@ def run(
             except OSError:
                 pass
 
-    # Collect all DDS files; resolve overlapping zoom levels.
-    # Texture names use raw web-mercator tile indices in steps of 16 (one DDS
-    # spans 16x16 tiles), so the 4 children of texture (y,x) at ZL+1 sit at
-    # (2y,2x), (2y,2x+16), (2y+16,2x), (2y+16,2x+16).
-    # A lower-ZL tile is skipped only when ALL 4 of its ZL+1 children are present
-    # or themselves fully covered — otherwise it is kept to fill the missing area.
-    _by_zl = {}
+    # Pick the textures that actually render, and the part of each one they own.
+    # The tile cfg is the source of truth: it is what Ortho4XP turned into the
+    # per-mesh-cell texture assignment at build time, so replaying it drops
+    # leftovers from earlier builds with a different provider and resolves both
+    # kinds of overlap — a zone boundary splitting one footprint between two
+    # providers, and a higher-ZL texture covering part of a lower-ZL one. The
+    # regions another texture owns are recorded as (x0,y0,x1,y1) fractions of
+    # this texture's footprint and excluded from detection/placement, which was
+    # the dominant source of the duplicate placements the tile-wide dedup pass
+    # had to mop up. Computed from the pre-filter kept set so debug/benchmark
+    # file filters see the same per-texture behaviour as a full production run.
     _source_files, _source_mode, _orthophoto_dir = _collect_source_files()
-    for _f in _source_files:
-        _m = STD_RE.match(_f)
-        if not _m: continue
-        _by_zl.setdefault(int(_m.group(4)), []).append(
-            (int(_m.group(1)), int(_m.group(2)), _f))
-    if not _by_zl:
+    files, _covered_fracs_by_file, _selection_report = TEXSEL.select_textures(
+        _source_files, tex_dir, lat, lon
+    )
+    if not files:
         print("No DDS files found."); return
-    _tiles_at_zl = {zl: {(y, x) for y, x, _ in tiles} for zl, tiles in _by_zl.items()}
-    _all_zls = sorted(_by_zl)
-    _max_zl   = _all_zls[-1]
-    _fc_memo  = {}
-    def _fully_covered(y, x, zl):
-        """True iff all 4 children of (y,x,zl) exist or are themselves fully covered."""
-        key = (y, x, zl)
-        if key in _fc_memo: return _fc_memo[key]
-        if zl >= _max_zl:
-            _fc_memo[key] = False; return False
-        result = all(
-            (cy, cx) in _tiles_at_zl.get(zl + 1, set()) or _fully_covered(cy, cx, zl + 1)
-            for cy, cx in ((2*y, 2*x), (2*y, 2*x+16), (2*y+16, 2*x), (2*y+16, 2*x+16))
-        )
-        _fc_memo[key] = result; return result
-    files = sorted(
-        _f for _zl in _all_zls
-        for _y, _x, _f in _by_zl[_zl]
-        if not _fully_covered(_y, _x, _zl)
-    )
-    _n_skipped_covered = sum(len(v) for v in _by_zl.values()) - len(files)
-    if _n_skipped_covered:
-        print(
-            f"Zoom-level coverage: skipped {_n_skipped_covered} lower-ZL texture(s) "
-            "fully covered by higher-ZL textures"
-        )
-    # Partially covered lower-ZL textures stay in the list, but the sub-regions
-    # that ARE covered by kept higher-ZL textures must not be inferenced/placed
-    # again at the lower ZL — that double coverage was the dominant source of
-    # duplicate placements that the tile-wide dedup pass had to mop up.
-    # Record those regions as (x0,y0,x1,y1) fractions of each texture footprint.
-    # Computed from the pre-filter kept set so debug/benchmark file filters see
-    # the same per-texture behaviour as a full production run.
-    _covered_fracs_by_file = compute_covered_fractions(
-        (
-            (int(_m.group(1)), int(_m.group(2)), int(_m.group(4)), _f)
-            for _f in files
-            for _m in (STD_RE.match(_f),)
-            if _m
-        ),
-    )
-    if _covered_fracs_by_file:
-        print(
-            f"Zoom-level coverage: {len(_covered_fracs_by_file)} partially covered "
-            "lower-ZL texture(s); covered regions excluded from detection/placement"
-        )
+    for _line in TEXSEL.format_selection_report(_selection_report):
+        print(_line)
     file_filter = _env_patterns("O4_SFR_FILE_FILTER")
     if dds_filter:
         dds_filter = [os.path.basename(str(name)) for name in dds_filter]
