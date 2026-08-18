@@ -75,7 +75,6 @@ class StockYoloAssetMapTests(unittest.TestCase):
             "opensceneryx/",      # OpenSceneryX
             "MisterX_Library/",   # MisterX Library
             "objects/",           # world-models
-            "lib_XPC_LuiMor_free/",  # XPC LuiMor (sports pitch objects)
         )
         for cls, (_kind, paths, _h) in STOCK.STOCK_YOLO_ASSET_MAP.items():
             for p in paths:
@@ -102,41 +101,35 @@ class StockYoloAssetMapTests(unittest.TestCase):
                           f"_USE_OBB_HEADING_PER_CLASS missing class {cls}")
             self.assertIsInstance(STOCK._USE_OBB_HEADING_PER_CLASS[cls], bool)
 
-    def test_sports_classes_are_objects_with_a_size_ladder(self):
-        # Regression guard for the stadium-facade bug: simHeaven aliases
-        # grandstand.fac / stadium_01.fac / stadium_02.fac to one
-        # commercial-textured shell, so a facade ring wrapped every pitch in
-        # what looked like a warehouse.
-        for cls in STOCK._SPORT_SIZE_LADDER_M:
-            placement_type, paths, _h = STOCK.STOCK_YOLO_ASSET_MAP[cls]
-            self.assertEqual(placement_type, "object",
-                             f"DOTA class {cls} must place an object")
-            for path in paths:
-                self.assertIn(
-                    path, STOCK._SPORT_SIZE_LADDER_M[cls],
-                    f"class {cls}: {path!r} has no size-ladder entry, so it "
-                    f"could never be selected",
-                )
-            self.assertNotIn(
-                cls, [c for c, (k, _p, _hh) in
-                      STOCK.STOCK_YOLO_ASSET_MAP.items() if k == "facade"],
-            )
+    def test_no_sports_class_is_ever_placed(self):
+        # Sports fields were removed from the stock-YOLO pass entirely: the
+        # available assets are fixed-size models that never matched the pitch
+        # already painted in the ortho.
+        sports_classes = {3, 4, 5, 6, 13}
+        self.assertFalse(
+            sports_classes.intersection(STOCK.STATIC_DOTA_CLASSES),
+            "STATIC_DOTA_CLASSES still detects sports classes: "
+            f"{sorted(sports_classes.intersection(STOCK.STATIC_DOTA_CLASSES))}",
+        )
+        self.assertFalse(
+            sports_classes.intersection(STOCK.STOCK_YOLO_ASSET_MAP),
+            "STOCK_YOLO_ASSET_MAP still maps sports classes: "
+            f"{sorted(sports_classes.intersection(STOCK.STOCK_YOLO_ASSET_MAP))}",
+        )
 
-    def test_no_sports_asset_is_a_simheaven_stadium_facade(self):
-        banned = {
-            "simheaven/facades/grandstand.fac",
-            "simheaven/facades/stadium_01.fac",
-            "simheaven/facades/stadium_02.fac",
-            "simheaven/facades/sports.fac",
-            "simheaven/facades/sports_hall.fac",
-        }
+    def test_no_sports_assets_remain_in_the_map(self):
+        sports_tokens = (
+            "grandstand", "stadium", "sports", "cancha", "deportes",
+            "baseball", "soccer", "tennis", "basketball", "football",
+        )
         for cls, (_kind, paths, _h) in STOCK.STOCK_YOLO_ASSET_MAP.items():
             for path in paths:
-                self.assertNotIn(
-                    path, banned,
-                    f"DOTA class {cls}: {path!r} is the commercial-textured "
-                    f"stadium shell that this mapping replaced",
-                )
+                lowered = path.lower()
+                for token in sports_tokens:
+                    self.assertNotIn(
+                        token, lowered,
+                        f"DOTA class {cls}: {path!r} is a sports asset",
+                    )
 
     def test_facade_entries_carry_positive_default_height(self):
         for cls, (placement_type, _paths, height_m) in STOCK.STOCK_YOLO_ASSET_MAP.items():
@@ -149,37 +142,6 @@ class StockYoloAssetMapTests(unittest.TestCase):
 
 
 class StockYoloVariantPickerTests(unittest.TestCase):
-    def test_size_picker_returns_nearest_rung(self):
-        ladder = {"small.obj": 77.0, "mid.obj": 94.0, "big.obj": 161.6}
-        paths = tuple(ladder)
-        self.assertEqual(
-            STOCK._pick_variant_by_size(paths, ladder, 80.0), "small.obj")
-        self.assertEqual(
-            STOCK._pick_variant_by_size(paths, ladder, 96.0), "mid.obj")
-        self.assertEqual(
-            STOCK._pick_variant_by_size(paths, ladder, 150.0), "big.obj")
-
-    def test_size_picker_rejects_when_nothing_within_tolerance(self):
-        ladder = {"pitch.obj": 110.0}
-        # 40 m detection vs a 110 m asset -> 175% off.
-        self.assertIsNone(
-            STOCK._pick_variant_by_size(("pitch.obj",), ladder, 40.0))
-
-    def test_size_picker_ignores_paths_filtered_out_by_availability(self):
-        # The pitch library is not installed, so only the bowl survives the
-        # caller's filter; a pitch-sized detection must then place nothing
-        # rather than fall back to the oversized bowl.
-        ladder = {"pitch.obj": 110.0, "bowl.obj": 145.2}
-        self.assertIsNone(
-            STOCK._pick_variant_by_size(("bowl.obj",), ladder, 105.0))
-        self.assertEqual(
-            STOCK._pick_variant_by_size(("pitch.obj", "bowl.obj"), ladder, 105.0),
-            "pitch.obj")
-
-    def test_size_picker_handles_degenerate_size(self):
-        self.assertIsNone(
-            STOCK._pick_variant_by_size(("a.obj",), {"a.obj": 100.0}, 0.0))
-
     def test_single_entry_pool_returns_that_entry(self):
         self.assertEqual(
             STOCK._pick_variant(("only.fac",), 22.5, 120.5, 100, 200),
@@ -215,7 +177,7 @@ class StockYoloVariantPickerTests(unittest.TestCase):
 
     def test_picker_keys_on_pixel_coordinates(self):
         # Different pixel coordinates within the same tile must be able to
-        # land on different assets — otherwise stadium variety collapses to
+        # land on different assets — otherwise asset variety collapses to
         # one-per-tile.
         pool = ("a.fac", "b.fac", "c.fac", "d.fac")
         seen = {
@@ -338,35 +300,17 @@ class StockYoloFacadeGeometryTests(unittest.TestCase):
         self.assertEqual(occupied.shape[0], STOCK.STORAGE_TANK_CIRCLE_SEGMENTS + 1)
         self.assertTrue(np.array_equal(occupied[0], occupied[-1]))
 
-    def test_sports_class_places_object_never_a_facade(self):
-        # The fake OBB is 40x20 px; at 2.35 m/px its long side is 94 m, which
-        # matches the mid baseball bowl exactly.
-        result = self._run_fake_detection(3, m_per_px=2.35)
-
-        self.assertEqual(len(result.placed_facades), 0,
-                         "sports classes must never emit a facade ring")
-        self.assertEqual(len(result.placed_objects), 1)
-        _lon, _lat, _heading, path = result.placed_objects[0]
-        self.assertEqual(path, 'lib/constructions/grandstands/baseball_2.obj')
-        self.assertEqual(result.occupied_px_polys[0].shape[0], 4)
-
-    def test_sports_class_scales_up_to_stadium_bowl(self):
-        # 40 px * 3.63 m/px = 145.2 m -> the soccer grandstand bowl.
-        result = self._run_fake_detection(13, m_per_px=3.63)
-
-        self.assertEqual(len(result.placed_objects), 1)
-        self.assertEqual(result.placed_objects[0][3],
-                         'lib/constructions/grandstands/soccer_1.obj')
-
-    def test_sports_detection_off_every_asset_size_places_nothing(self):
-        # 40 px * 2.0 m/px = 80 m. It clears the class size bounds, but the
-        # nearest asset (110 m pitch) is 37.5% away, outside tolerance — so
-        # nothing is placed rather than a wrong-scale pitch.
-        result = self._run_fake_detection(13, m_per_px=2.0)
-
-        self.assertEqual(len(result.placed_objects), 0)
-        self.assertEqual(len(result.placed_facades), 0)
-        self.assertEqual(len(result.occupied_px_polys), 0)
+    def test_sports_detections_place_nothing(self):
+        # Sports classes are no longer detected or mapped, so a detection at
+        # any scale must leave the results (and the occupancy masks that feed
+        # the building pass) untouched.
+        for cls, m_per_px in ((3, 2.35), (4, 0.6), (5, 0.6), (6, 3.5), (13, 3.63)):
+            with self.subTest(dota_class=cls):
+                result = self._run_fake_detection(cls, m_per_px=m_per_px)
+                self.assertEqual(len(result.placed_objects), 0)
+                self.assertEqual(len(result.placed_facades), 0)
+                self.assertEqual(len(result.occupied_px_polys), 0)
+                self.assertEqual(result.counts_by_class, {})
 
     def test_rect_clip_keeps_border_crossing_obb_rectangular(self):
         # Per-corner clamping sheared boxes that hang off the texture border

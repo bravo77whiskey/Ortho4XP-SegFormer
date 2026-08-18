@@ -2777,16 +2777,6 @@ CURATED_EXTRA_BUILDING_LIBRARIES = {
         # Niche Cold-War / vintage thematic — primarily European bases.
         "regions": ("europe",),
     },
-    "xpc-luimor": {
-        "label": "XPC LuiMor",
-        "package_patterns": ("l_xpc_luimor", "xpc_luimor", "luimor"),
-        "virtual_prefixes": ("lib_xpc_luimor_free/",),
-        # Scanned for its sports objects (`.../deportes/cancha_*.obj`), which
-        # the stock-YOLO pitch classes place. Contributes nothing to the
-        # building pool: _is_optional_library_building_candidate requires a
-        # residential/commercial include token these paths do not carry.
-        # library.txt declares no REGION blocks, so exports are global.
-    },
 }
 
 OPTIONAL_LIBRARY_INCLUDE_TOKENS = (
@@ -9991,7 +9981,7 @@ def run(
                 height_signature = None
 
     # ── Stock YOLO-OBB (DOTAv1) for static objects pre-step ───────────────────
-    # Detects storage tanks, sports fields, pools etc. BEFORE
+    # Detects storage tanks and swimming pools BEFORE
     # the trained-YOLO facade pass so their footprints can occupy static_occ_mask.
     # The loader downloads the checkpoint from ultralytics/assets when it is
     # absent locally, so first-run installs don't need a manual sync step.
@@ -10487,8 +10477,10 @@ def run(
             #      soccer ball field) place size-matched OBJECTS instead of a
             #      stadium facade ring, take the OBB heading, and skip
             #      entirely when no asset matches the detected footprint.
-            #      Behavioural, so it is not captured by the asset-map tuple.
-            "schema=v31-sports-classes-size-matched-objects",
+            # v32: every sports class dropped from the stock-YOLO pass —
+            #      pitches, diamonds, tracks and courts place nothing at all,
+            #      and their OBBs no longer occupy the building masks.
+            "schema=v32-no-sports-classes",
         )
 
     _requested_bld_params = _building_cache_params(
@@ -11313,7 +11305,7 @@ def run(
             if lat_s <= lat     + DEGREE_TOL:   static_occ_mask[-edge_px:, :]  = 1
             if lon_w <= lon     + DEGREE_TOL:   static_occ_mask[:,  :edge_px]  = 1
             if lon_e >= lon + 1 - DEGREE_TOL:   static_occ_mask[:, -edge_px:]  = 1
-            # Mark stock-YOLO OBBs (storage tanks, sports fields, pools) into
+            # Mark stock-YOLO OBBs (storage tanks, swimming pools) into
             # both static_occ_mask and building_spacing_mask BEFORE the
             # trained-YOLO facade loop runs, so building facades don't
             # overlap the static objects we just placed.
