@@ -62,6 +62,7 @@ from O4_SFR_Building_Overlay import (
 )
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
+    find_active_custom_scenery_dsfs,
     find_global_forests_dsfs,
     find_simheaven_network_dsfs,
 )
@@ -630,9 +631,10 @@ def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
                         road_sig, res_road_sig, tree_row_sig, context_poly_sigs,
                         forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
                         bld_excl_m, bld_cache_stat,
-                        simheaven_building_buffer_m, mesh_water_sig=None):
+                        simheaven_building_buffer_m, mesh_water_sig=None,
+                        excl_zone_sig=None):
     return {
-        'version': 2,
+        'version': 3,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -642,6 +644,7 @@ def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
         'tree_row_sig': tree_row_sig,
         'context_poly_sigs': tuple(sorted(context_poly_sigs.items())),
         'forest_layer_sigs': forest_layer_sigs,
+        'excl_zone_sig': excl_zone_sig,
         'sh_bld_poly_sig': sh_bld_poly_sig,
         'sh_bld_obj_sig': sh_bld_obj_sig,
         'bld_excl_m': round(float(bld_excl_m), 4),
@@ -846,6 +849,182 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
             print(f"  [{layer_name}] failed {dsf_path}: {exc}")
 
     return polys
+
+
+# ── Custom-scenery exclusion zones ───────────────────────────────────────────
+# A DSF exclusion zone is a header property, one per excluded type:
+#
+#     PROPERTY sim/exclude_for  lon_west/lat_south/lon_east/lat_north
+#
+# WED writes one such line per type ticked on a single exclusion rectangle, so
+# one zone that excludes forests, objects and facades appears here as three
+# lines sharing the same rectangle under three different keys. Only the keys in
+# `FOREST_EXCLUSION_PROPERTY_KEYS` suppress vegetation: this overlay emits
+# nothing but `.for` polygons, so an object- or facade-only zone must be left
+# alone, and a mixed zone counts once.
+FOREST_EXCLUSION_PROPERTY_KEYS = ("sim/exclude_for",)
+_EXCLUSION_PROPERTY_KEY_PREFIX = "sim/exclude_"
+
+
+def _parse_exclusion_rect(value):
+    """Parse an exclusion property value into a lon/lat ring, or None."""
+    parts = (value or "").split("/")
+    if len(parts) != 4:
+        return None
+    try:
+        west, south, east, north = (float(part) for part in parts)
+    except ValueError:
+        return None
+    west, east = min(west, east), max(west, east)
+    south, north = min(south, north), max(south, north)
+    if east <= west or north <= south:
+        return None
+    return [(west, south), (east, south), (east, north), (west, north)]
+
+
+def _zones_from_property_pairs(pairs):
+    """Group ``(key, value)`` header properties into exclusion rings by type."""
+    zones = {}
+    for key, value in pairs:
+        if not key.startswith(_EXCLUSION_PROPERTY_KEY_PREFIX):
+            continue
+        ring = _parse_exclusion_rect(value)
+        if ring is None:
+            continue
+        zones.setdefault(key, []).append(ring)
+    return zones
+
+
+def _read_dsf_binary_properties(dsf_path):
+    """Read the header key/value properties straight out of a binary DSF.
+
+    Exclusion zones live in the HEAD/PROP atom at the very start of the file,
+    so this reads a few kilobytes instead of asking DSFTool to disassemble a
+    whole mesh tile. Returns None when the file is not a plain uncompressed
+    DSF (7z-packed global scenery, for instance) so the caller can fall back
+    to a text disassembly.
+    """
+    import struct
+
+    with open(dsf_path, "rb") as handle:
+        if handle.read(8) != b"XPLNEDSF":
+            return None
+        handle.read(4)  # format version
+        while True:
+            atom_header = handle.read(8)
+            if len(atom_header) < 8:
+                return None
+            atom_id = atom_header[:4]
+            atom_len = struct.unpack("<I", atom_header[4:])[0]
+            if atom_len < 8:
+                return None
+            if atom_id != b"DAEH":  # 'HEAD', stored little-endian
+                handle.seek(atom_len - 8, os.SEEK_CUR)
+                continue
+            head = handle.read(atom_len - 8)
+            break
+
+    offset = 0
+    while offset + 8 <= len(head):
+        sub_id = head[offset:offset + 4]
+        sub_len = struct.unpack("<I", head[offset + 4:offset + 8])[0]
+        if sub_len < 8:
+            return None
+        payload = head[offset + 8:offset + sub_len]
+        offset += sub_len
+        if sub_id != b"PORP":  # 'PROP', stored little-endian
+            continue
+        strings = payload.split(b"\0")
+        if strings and strings[-1] == b"":
+            strings.pop()
+        decoded = [item.decode("utf-8", "replace") for item in strings]
+        return list(zip(decoded[0::2], decoded[1::2]))
+    return []
+
+
+def _read_dsf_text_properties(text_path):
+    """Read header key/value properties from a DSFTool text disassembly."""
+    pairs = []
+    with open(text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+        for raw_line in text_file:
+            line = raw_line.strip()
+            if not line.startswith("PROPERTY "):
+                continue
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            pairs.append((parts[1], parts[2].strip()))
+    return pairs
+
+
+def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lon,
+                                           out_dsf, dsftool_path, cache_dir):
+    """Collect forest exclusion rectangles from the active scenery packs.
+
+    Returns ``(rings, type_counts)`` where ``rings`` are the zones that exclude
+    forests and ``type_counts`` tallies every exclusion type seen, so the caller
+    can report how much of a mixed zone set actually applies to vegetation.
+    """
+    rings = []
+    type_counts = {}
+    seen_rects = set()
+    dsf_name = os.path.basename(out_dsf or "")
+    if not dsf_name:
+        lat_i, lon_i = int(tile_lat), int(tile_lon)
+        dsf_name = (
+            f"{'+' if lat_i >= 0 else '-'}{abs(lat_i):02d}"
+            f"{'+' if lon_i >= 0 else '-'}{abs(lon_i):03d}.dsf"
+        )
+
+    dsf_matches = find_active_custom_scenery_dsfs(
+        custom_scenery_dir,
+        dsf_name,
+        skip_dsf_path=out_dsf,
+    )
+    for folder_name, dsf_path, _package_dir in dsf_matches:
+        try:
+            pairs = _read_dsf_binary_properties(dsf_path)
+            if pairs is None:
+                # Not a plain DSF (7z-packed, or a format we don't recognise) —
+                # pay for a full disassembly only in that case.
+                if not dsftool_path or not os.path.exists(dsftool_path):
+                    print(
+                        f"  [excl zones] {folder_name}: unreadable DSF and no "
+                        f"DSFTool at {dsftool_path} — zones ignored"
+                    )
+                    continue
+                cached_text_path = ensure_cached_dsf_text(
+                    dsf_path,
+                    dsftool_path,
+                    cache_dir,
+                    create_no_window=SEGFORMER._CREATE_NO_WINDOW,
+                )
+                pairs = _read_dsf_text_properties(cached_text_path)
+            zones = _zones_from_property_pairs(pairs)
+        except Exception as exc:
+            print(f"  [excl zones] failed {dsf_path}: {exc}")
+            continue
+
+        n_pack_forest = 0
+        for key, key_rings in (zones or {}).items():
+            type_counts[key] = type_counts.get(key, 0) + len(key_rings)
+            if key not in FOREST_EXCLUSION_PROPERTY_KEYS:
+                continue
+            for ring in key_rings:
+                # The same rectangle can arrive from several packs (and, for a
+                # mixed zone, under several keys); one copy is enough.
+                rect_key = tuple(round(coord, 9) for pt in ring for coord in pt)
+                if rect_key in seen_rects:
+                    continue
+                seen_rects.add(rect_key)
+                rings.append(ring)
+                n_pack_forest += 1
+        if zones:
+            print(
+                f"  [excl zones] {folder_name}: {n_pack_forest} forest zones "
+                f"of {sum(len(v) for v in zones.values())} exclusion properties"
+            )
+    return rings, type_counts
 
 
 def _dominant_acceptable_gfv2_path(records):
@@ -1410,6 +1589,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'road_excl': 0.0,
         'bld_excl': 0.0,
         'forest_layer_excl': 0.0,
+        'excl_zones': 0.0,
         'contours': 0.0,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
@@ -1575,6 +1755,31 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         for layer in forest_layers
     )
     gfv2_type_source_path = gfv2_type_path if use_gfv2_asset_proximity else None
+
+    # ── Custom-scenery forest exclusion zones ───────────────────────────────
+    # Always honoured, with no buffer and no opt-out: a `sim/exclude_for` zone
+    # is the scenery author stating that nothing may grow forests there, so it
+    # outranks every heuristic layer above. Zones that exclude only other types
+    # (objects, facades, roads, …) leave vegetation untouched.
+    _t = time.perf_counter()
+    excl_zone_rings, excl_zone_types = _load_custom_scenery_forest_exclusions(
+        custom_scenery_dir, lat, lon, out_dsf, dsftool_path, sidecar_cache_dir
+    )
+    timings['scenery_parse'] += time.perf_counter() - _t
+    excl_zone_polys = _prepare_polygons(excl_zone_rings)
+    excl_zone_index = BBOX.build_bounds_index(excl_zone_polys)
+    excl_zone_sig = _polys_signature(excl_zone_polys)
+    if excl_zone_types:
+        type_summary = ", ".join(
+            f"{key.rsplit('_', 1)[-1]}={count}"
+            for key, count in sorted(excl_zone_types.items())
+        )
+        print(
+            f"Custom scenery exclusion zones: {len(excl_zone_polys)} forest "
+            f"({type_summary})"
+        )
+    else:
+        print("Custom scenery exclusion zones: none")
 
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
@@ -1784,6 +1989,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             forest_layer_sigs, sh_bld_poly_sig, sh_bld_obj_sig,
             bld_excl_m, _bld_cache_stat, simheaven_building_buffer_m,
             mesh_water_sig,
+            excl_zone_sig=excl_zone_sig,
         )
         _mask_cached = None
         if not disable_cache:
@@ -1796,6 +2002,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             sh_bld_poly_mask = _mask_cached.get('sh_bld_poly_mask')
             sh_bld_obj_mask = _mask_cached.get('sh_bld_obj_mask')
             forest_excl_mask = _mask_cached.get('forest_excl_mask')
+            excl_zone_mask = _mask_cached.get('excl_zone_mask')
             cached_context_masks = _mask_cached.get('context_masks', {})
             if _bld_cache_stat is not None:
                 n_bld_excl_used += 1
@@ -1807,6 +2014,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             sh_bld_poly_mask = None
             sh_bld_obj_mask = None
             forest_excl_mask = None
+            excl_zone_mask = None
             cached_context_masks = {}
 
         # ── Exclusion layer 2: OSM roads + SimHeaven network + railways
@@ -1911,6 +2119,20 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if forest_excl_mask is not None:
             excl_mask = cv2.bitwise_or(excl_mask, forest_excl_mask)
 
+        # ── Exclusion layer 5: custom-scenery forest exclusion zones ────────
+        if excl_zone_mask is None and excl_zone_polys:
+            _t = time.perf_counter()
+            local_excl_zones = _polys_for_bounds(
+                excl_zone_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0
+            )
+            if local_excl_zones:
+                excl_zone_mask = _rasterize_polygons(
+                    local_excl_zones, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+            timings['excl_zones'] += time.perf_counter() - _t
+        if excl_zone_mask is not None:
+            excl_mask = cv2.bitwise_or(excl_mask, excl_zone_mask)
+
         local_context_masks = {
             'developed': segformer_excl_mask,
             'agriculture': (veg_map == SEGFORMER.CLASS_AGRICULTURE).astype(np.uint8),
@@ -1970,6 +2192,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         'sh_bld_poly_mask': sh_bld_poly_mask,
                         'sh_bld_obj_mask': sh_bld_obj_mask,
                         'forest_excl_mask': forest_excl_mask,
+                        'excl_zone_mask': excl_zone_mask,
                         'context_masks': {
                             key: local_context_masks.get(key)
                             for key in (
@@ -2156,6 +2379,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"road_excl={timings['road_excl']:.1f}s  "
         f"bld_excl={timings['bld_excl']:.1f}s  "
         f"forest_excl={timings['forest_layer_excl']:.1f}s  "
+        f"excl_zones={timings['excl_zones']:.1f}s  "
         f"contours={timings['contours']:.1f}s  "
         f"dsf_text={timings['dsf_text']:.1f}s  "
         f"dsf_compile={timings['dsf_compile']:.1f}s"

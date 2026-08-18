@@ -404,7 +404,35 @@ class ForestAssetPolicyTests(unittest.TestCase):
         key_b = SFR_VEG._dds_mask_cache_key(*base_args, ("mesh-b", 10, 20))
 
         self.assertNotEqual(key_a, key_b)
-        self.assertEqual(key_a["version"], 2)
+        self.assertEqual(key_a["version"], 3)
+
+    def test_vegetation_aux_cache_key_tracks_exclusion_zones(self):
+        base_args = (
+            "34336_26384_BI16.dds",
+            1.0,
+            0.9,
+            2.0,
+            2.1,
+            64,
+            64,
+            2.4,
+            ("roads",),
+            ("res-roads",),
+            ("tree-rows",),
+            {"water_polys": (0, 0, 0.0)},
+            (),
+            (0, 0, 0.0),
+            (0, 0.0),
+            12.0,
+            None,
+            10.0,
+            ("mesh-a", 10, 20),
+        )
+
+        key_a = SFR_VEG._dds_mask_cache_key(*base_args, excl_zone_sig=(0, 0, 0.0, 0))
+        key_b = SFR_VEG._dds_mask_cache_key(*base_args, excl_zone_sig=(1, 4, 3.5, 7))
+
+        self.assertNotEqual(key_a, key_b)
 
     def test_vegetation_polygon_cache_key_tracks_asset_selection_mode(self):
         base_args = (
@@ -460,7 +488,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertNotEqual(dominant_key, other_dominant_key)
         self.assertNotEqual(dominant_key, closest_key)
         self.assertNotEqual(climate_key, covered_key)
-        self.assertEqual(climate_key["version"], 5)
+        self.assertEqual(climate_key["version"], 6)
 
     def test_dominant_gfv2_path_ignores_cropland_votes(self):
         records = [
