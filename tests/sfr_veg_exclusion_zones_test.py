@@ -16,6 +16,11 @@ if str(SRC) not in sys.path:
 import O4_SFR_Vegetation_Overlay as VEG
 
 
+# Only the presence of Earth nav data/apt.dat marks a pack as an airport,
+# so a marker line is enough here.
+_APT_DAT = "I 1100 Generated test apt.dat"
+
+
 def _dsf_bytes(properties):
     """Build a minimal binary DSF carrying only a HEAD/PROP atom."""
     prop = b"".join(
@@ -119,6 +124,8 @@ class ForestExclusionLoaderTests(unittest.TestCase):
             nav = custom / name / "Earth nav data" / "+50+012"
             nav.mkdir(parents=True)
             (nav / "+50+012.dsf").write_bytes(_dsf_bytes(properties))
+            # These stand in for custom airports; only those are consulted.
+            (nav.parent / "apt.dat").write_text(_APT_DAT, encoding="utf-8")
         (custom / "scenery_packs.ini").write_text(
             "\n".join(
                 f"SCENERY_PACK Custom Scenery/{name}/" for name in packs
@@ -154,6 +161,7 @@ class ForestExclusionLoaderTests(unittest.TestCase):
             (nav / "+50+012.dsf").write_bytes(
                 _dsf_bytes((("sim/exclude_net", "12.2/50.1/12.3/50.2"),))
             )
+            (nav.parent / "apt.dat").write_text(_APT_DAT, encoding="utf-8")
             (custom / "scenery_packs.ini").write_text(
                 "SCENERY_PACK Custom Scenery/Roads Pack/\n", encoding="utf-8"
             )
@@ -163,6 +171,72 @@ class ForestExclusionLoaderTests(unittest.TestCase):
 
         self.assertEqual(rings, [])
         self.assertEqual(type_counts, {"sim/exclude_net": 1})
+
+
+class AirportPackOnlyTests(unittest.TestCase):
+    """Only custom airports may veto vegetation — not regional/global scenery."""
+
+    WHOLE_TILE = (("sim/exclude_for", "12.0/50.0/13.0/51.0"),)
+
+    def _pack(self, custom, name, properties, apt_dat, n_dsf=1):
+        nav = custom / name / "Earth nav data"
+        (nav / "+50+012").mkdir(parents=True)
+        (nav / "+50+012" / "+50+012.dsf").write_bytes(_dsf_bytes(properties))
+        # Extra tiles decide regional-vs-airport; their contents are irrelevant.
+        for i in range(1, n_dsf):
+            grid = nav / "+50+013"
+            grid.mkdir(parents=True, exist_ok=True)
+            (grid / f"+50+{13 + i:03d}.dsf").write_bytes(_dsf_bytes(()))
+        if apt_dat:
+            (nav / "apt.dat").write_text(_APT_DAT, encoding="utf-8")
+
+    def _load(self, tmpdir, name, properties, apt_dat, n_dsf=1):
+        custom = Path(tmpdir) / "Custom Scenery"
+        self._pack(custom, name, properties, apt_dat, n_dsf)
+        (custom / "scenery_packs.ini").write_text(
+            f"SCENERY_PACK Custom Scenery/{name}/\n", encoding="utf-8"
+        )
+        return VEG._load_custom_scenery_forest_exclusions(
+            str(custom), 50, 12, "", "dsftool-not-used", tmpdir
+        )
+
+    def test_global_forest_pack_without_apt_dat_is_ignored(self):
+        # Global Forests v2 stamps a whole-tile sim/exclude_for on every tile to
+        # take over the stock forests. Honouring it wipes the whole overlay.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rings, type_counts = self._load(
+                tmpdir, "Global_Forests_v2", self.WHOLE_TILE, apt_dat=False
+            )
+        self.assertEqual(rings, [])
+        self.assertEqual(type_counts, {})
+
+    def test_regional_pack_with_apt_dat_is_ignored(self):
+        # A regional VFR pack ships an apt.dat too, so the tile footprint is
+        # what separates it from an airport (Bhutan_VFR spans 15 tiles).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rings, _ = self._load(
+                tmpdir,
+                "Bhutan_VFR",
+                self.WHOLE_TILE,
+                apt_dat=True,
+                n_dsf=VEG.AIRPORT_PACK_MAX_DSFS + 1,
+            )
+        self.assertEqual(rings, [])
+
+    def test_airport_pack_at_the_tile_limit_is_honoured(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rings, _ = self._load(
+                tmpdir,
+                "HADC_Scenery_Pack",
+                (("sim/exclude_for", "12.20/50.10/12.21/50.11"),),
+                apt_dat=True,
+                n_dsf=VEG.AIRPORT_PACK_MAX_DSFS,
+            )
+        self.assertEqual(len(rings), 1)
+
+    def test_pack_without_earth_nav_data_is_not_an_airport(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(VEG._is_airport_scenery_pack(tmpdir))
 
 
 def _repo_dsftool():

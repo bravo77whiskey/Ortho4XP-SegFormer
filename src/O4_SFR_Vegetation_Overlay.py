@@ -865,6 +865,33 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
 FOREST_EXCLUSION_PROPERTY_KEYS = ("sim/exclude_for",)
 _EXCLUSION_PROPERTY_KEY_PREFIX = "sim/exclude_"
 
+# Only a custom scenery *airport* may veto vegetation. Regional and global packs
+# use a tile-sized `sim/exclude_for` as a "my forests replace the stock ones"
+# marker rather than as an authored keep-out zone — Global Forests v2 stamps
+# `38/11/39/12` on every one of its 37k tiles — and honouring that erases the
+# whole generated overlay instead of a clearing inside it.
+#
+# A pack counts as an airport when it defines airports (`Earth nav data/apt.dat`)
+# and stays inside a handful of degree tiles. Both halves are needed: regional
+# VFR packs ship an apt.dat too, and at least one of them (Bhutan_VFR, 15 tiles)
+# declares a whole-tile forest exclusion.
+AIRPORT_PACK_MAX_DSFS = 8
+
+
+def _is_airport_scenery_pack(package_dir):
+    """True when a scenery package is a custom airport rather than area scenery."""
+    earth_nav_data = os.path.join(package_dir, "Earth nav data")
+    if not os.path.isfile(os.path.join(earth_nav_data, "apt.dat")):
+        return False
+    n_dsf = 0
+    for _root, _dirs, files in os.walk(earth_nav_data):
+        for name in files:
+            if name.lower().endswith(".dsf"):
+                n_dsf += 1
+                if n_dsf > AIRPORT_PACK_MAX_DSFS:
+                    return False
+    return True
+
 
 def _parse_exclusion_rect(value):
     """Parse an exclusion property value into a lon/lat ring, or None."""
@@ -959,15 +986,20 @@ def _read_dsf_text_properties(text_path):
 
 def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lon,
                                            out_dsf, dsftool_path, cache_dir):
-    """Collect forest exclusion rectangles from the active scenery packs.
+    """Collect forest exclusion rectangles from the active airport scenery packs.
 
     Returns ``(rings, type_counts)`` where ``rings`` are the zones that exclude
     forests and ``type_counts`` tallies every exclusion type seen, so the caller
     can report how much of a mixed zone set actually applies to vegetation.
+
+    Only custom airports are consulted (see ``_is_airport_scenery_pack``); the
+    zones of regional and global packs describe layer ownership, not ground the
+    author cleared, and cover whole tiles.
     """
     rings = []
     type_counts = {}
     seen_rects = set()
+    skipped_packs = []
     dsf_name = os.path.basename(out_dsf or "")
     if not dsf_name:
         lat_i, lon_i = int(tile_lat), int(tile_lon)
@@ -981,7 +1013,12 @@ def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lo
         dsf_name,
         skip_dsf_path=out_dsf,
     )
-    for folder_name, dsf_path, _package_dir in dsf_matches:
+    for folder_name, dsf_path, package_dir in dsf_matches:
+        # Checked before the header is read: it also spares us a DSFTool
+        # disassembly of the 7z-packed global packs, which is the slow path.
+        if not _is_airport_scenery_pack(package_dir):
+            skipped_packs.append(folder_name)
+            continue
         try:
             pairs = _read_dsf_binary_properties(dsf_path)
             if pairs is None:
@@ -1024,6 +1061,11 @@ def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lo
                 f"  [excl zones] {folder_name}: {n_pack_forest} forest zones "
                 f"of {sum(len(v) for v in zones.values())} exclusion properties"
             )
+    if skipped_packs:
+        print(
+            f"  [excl zones] {len(skipped_packs)} non-airport pack(s) not "
+            f"consulted: {', '.join(sorted(skipped_packs))}"
+        )
     return rings, type_counts
 
 
@@ -1757,10 +1799,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     gfv2_type_source_path = gfv2_type_path if use_gfv2_asset_proximity else None
 
     # ── Custom-scenery forest exclusion zones ───────────────────────────────
-    # Always honoured, with no buffer and no opt-out: a `sim/exclude_for` zone
-    # is the scenery author stating that nothing may grow forests there, so it
-    # outranks every heuristic layer above. Zones that exclude only other types
-    # (objects, facades, roads, …) leave vegetation untouched.
+    # An airport's `sim/exclude_for` zone is honoured with no buffer and no
+    # opt-out: it is the scenery author stating that nothing may grow forests
+    # there, so it outranks every heuristic layer above. Zones that exclude only
+    # other types (objects, facades, roads, …) leave vegetation untouched, and
+    # regional/global packs are not consulted at all.
     _t = time.perf_counter()
     excl_zone_rings, excl_zone_types = _load_custom_scenery_forest_exclusions(
         custom_scenery_dir, lat, lon, out_dsf, dsftool_path, sidecar_cache_dir
