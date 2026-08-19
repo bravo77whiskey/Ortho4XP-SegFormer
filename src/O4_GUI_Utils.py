@@ -47,6 +47,7 @@ import O4_Zone_Utils as ZONE
 import O4_PBF_Utils as PBF
 import O4_SFR_Pipeline as SFR
 import O4_SFR_Remote as SFR_REMOTE
+import O4_Scenery_Links as SLINK
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
@@ -2250,137 +2251,81 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         self.threaded_preview()
         return
 
-    def add_symlink(self, lat: int, lon: int) -> None:
-        """Add symlink to custom_scenery_dir."""
-        custom_scenery_dir = os.path.normpath(CFG.custom_scenery_dir)
-        custom_build_dir = os.path.normpath(self.custom_build_dir)
-        # Check if scenery and build directory are the same (symlinks not applicable)
-        if custom_scenery_dir == custom_build_dir:
-            return
+    def tile_link_target(self, lat: int, lon: int) -> str:
+        """Directory a Custom Scenery link for this tile should point at."""
+        if self.grouped:
+            return os.path.realpath(self.working_dir)
+        return os.path.realpath(
+            os.path.join(self.working_dir, self.dico_tiles_done[(lat, lon)][-1])
+        )
 
-        if not self.grouped:
-            link = os.path.join(
-                CFG.custom_scenery_dir,
-                "zOrtho4XP_" + FNAMES.short_latlon(lat, lon),
-            )
-            target = os.path.realpath(
-                os.path.join(self.working_dir, self.dico_tiles_done[(lat, lon)][-1])
-            )
-        elif self.grouped:
-            link = os.path.join(
-                CFG.custom_scenery_dir,
-                "zOrtho4XP_" + os.path.basename(self.working_dir),
-            )
-            target = os.path.realpath(self.working_dir)
-        if ("dar" in sys.platform) or ("win" not in sys.platform):
-            # Mac and Linux
-            os.system("ln -s " + ' "' + target + '" "' + link + '"')
-        else:
-            os.system('MKLINK /J "' + link + '" "' + target + '"')
-        if not self.grouped:
+    def mark_linked(self, lat: int | None, lon: int | None, linked: bool) -> None:
+        """Shade the tile(s) according to their Custom Scenery link state."""
+        tiles = list(self.dico_tiles_done) if self.grouped else [(lat, lon)]
+        for (lat0, lon0) in tiles:
+            if (lat0, lon0) not in self.dico_tiles_done:
+                continue
             if not OsX:
                 self.canvas.itemconfig(
-                    self.dico_tiles_done[(lat, lon)][0], stipple="gray50"
+                    self.dico_tiles_done[(lat0, lon0)][0],
+                    stipple="gray50" if linked else "gray12",
                 )
             else:
                 self.canvas.itemconfig(
-                    self.dico_tiles_done[(lat, lon)][1],
-                    font=("Helvetica", "12", "bold underline"),
+                    self.dico_tiles_done[(lat0, lon0)][1],
+                    font=(
+                        "Helvetica",
+                        "12",
+                        "bold underline" if linked else "normal",
+                    ),
                 )
-        else:
-            for lat0, lon0 in self.dico_tiles_done:
-                if not OsX:
-                    self.canvas.itemconfig(
-                        self.dico_tiles_done[(lat0, lon0)][0], stipple="gray50"
-                    )
-                else:
-                    self.canvas.itemconfig(
-                        self.dico_tiles_done[(lat, lon)][1],
-                        font=("Helvetica", "12", "bold underline"),
-                    )
+
+    def add_symlink(self, lat: int, lon: int) -> None:
+        """Add symlink to custom_scenery_dir."""
+        result = SLINK.ensure_tile_link(
+            CFG.custom_scenery_dir,
+            self.tile_link_target(lat, lon),
+            lat,
+            lon,
+            self.grouped,
+        )
+        if result.status != SLINK.ALREADY_LINKED:
+            UI.vprint(1, result.message)
+        if result:
+            self.mark_linked(lat, lon, True)
 
     def remove_symlink(self, lat: int, lon: int) -> None:
         """Remove symlink from custom_scenery_dir."""
-        custom_scenery_dir = os.path.normpath(CFG.custom_scenery_dir)
-        custom_build_dir = os.path.normpath(self.custom_build_dir)
-        # Check if scenery and build directory are the same (symlinks not applicable)
-        if custom_scenery_dir == custom_build_dir:
+        removed = SLINK.remove_tile_link(
+            CFG.custom_scenery_dir,
+            self.tile_link_target(lat, lon),
+            lat,
+            lon,
+            self.grouped,
+        )
+        if not removed:
             return
-
-        if not self.grouped:
-            link = os.path.join(
-                CFG.custom_scenery_dir,
-                "zOrtho4XP_" + FNAMES.short_latlon(lat, lon),
+        for link in removed:
+            UI.vprint(
+                1,
+                f"{os.path.basename(link)} link removed from: "
+                f"{CFG.custom_scenery_dir}",
             )
-            target = os.path.realpath(
-                os.path.join(self.working_dir, self.dico_tiles_done[(lat, lon)][-1])
-            )
-            if os.path.isdir(link) and os.path.samefile(os.path.realpath(link), target):
-                os.remove(link)
-                if not OsX:
-                    self.canvas.itemconfig(
-                        self.dico_tiles_done[(lat, lon)][0], stipple="gray12"
-                    )
-                else:
-                    self.canvas.itemconfig(
-                        self.dico_tiles_done[(lat, lon)][1],
-                        font=("Helvetica", "12", "normal"),
-                    )
-                return True
-
-        elif self.grouped:
-            link = os.path.join(
-                CFG.custom_scenery_dir,
-                "zOrtho4XP_" + os.path.basename(self.working_dir),
-            )
-            target = os.path.realpath(self.working_dir)
-            if os.path.isdir(link) and os.path.samefile(
-                os.path.realpath(link), os.path.realpath(self.working_dir)
-            ):
-                os.remove(link)
-                for lat, lon in self.dico_tiles_done:
-                    if not OsX:
-                        self.canvas.itemconfig(
-                            self.dico_tiles_done[(lat, lon)][0],
-                            stipple="gray12",
-                        )
-                    else:
-                        self.canvas.itemconfig(
-                            self.dico_tiles_done[(lat, lon)][1],
-                            font=("Helvetica", "12", "normal"),
-                        )
-                return True
-        # in case this was a broken link
-        try:
-            os.remove(link)
-        except:
-            pass
+        self.mark_linked(lat, lon, False)
+        return True
 
     def add_overlay_symlink(self, *args) -> None:
         """Add/remove symlink for overlays to custom_scenery_dir."""
-        if not CFG.custom_scenery_dir:
-            UI.vprint(1, "Custom Scenery directory not set.")
+        removed = SLINK.remove_overlay_link(CFG.custom_scenery_dir)
+        if removed:
+            for link in removed:
+                UI.vprint(
+                    1,
+                    f"{os.path.basename(link)} link removed from: "
+                    f"{CFG.custom_scenery_dir}",
+                )
             return
-        link = os.path.join(CFG.custom_scenery_dir, "yOrtho4XP_Overlays")
-        # Remove symlink if it already exists
-        if os.path.isdir(link) and os.path.samefile(
-            os.path.realpath(link), FNAMES.Overlay_dir
-        ):
-            os.remove(link)
-            UI.vprint(
-                1,
-                f"yOrtho4XP_Overlays link removed from: {CFG.custom_scenery_dir}",
-            )
-            return
-        # Add symlink if it doesn't exist
-        if ("dar" in sys.platform) or ("win" not in sys.platform):
-            # Mac and Linux
-            os.system("ln -s " + ' "' + FNAMES.Overlay_dir + '" "' + link + '"')
-        else:
-            os.system('MKLINK /J "' + link + '" "' + FNAMES.Overlay_dir + '"')
-        UI.vprint(
-            1, f"yOrtho4XP_Overlays link added to: {CFG.custom_scenery_dir}"
-        )
+        UI.vprint(1, SLINK.ensure_overlay_link(CFG.custom_scenery_dir).message)
 
     def set_working_dir(self):
         self.custom_build_dir = self.parent.custom_build_dir.get()
@@ -2424,6 +2369,9 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 for objid in self.dico_tiles_done[tile][:2]:
                     self.canvas.delete(objid)
             self.dico_tiles_done = {}
+        # Read Custom Scenery once: links are matched by target, so a tile the
+        # user renamed by hand still shows up as linked.
+        linked_targets = SLINK.linked_targets(CFG.custom_scenery_dir)
         if not self.grouped:
             for dir_name in os.listdir(self.working_dir):
                 if "XP_" in dir_name:
@@ -2515,31 +2463,11 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                             ),
                             dir_name,
                         )
-                        link = os.path.join(
-                            CFG.custom_scenery_dir,
-                            "zOrtho4XP_" + FNAMES.short_latlon(lat, lon),
-                        )
-                        if os.path.isdir(link):
-                            if os.path.samefile(
-                                os.path.realpath(link),
-                                os.path.realpath(
-                                    os.path.join(self.working_dir, dir_name)
-                                ),
-                            ):
-                                if not OsX:
-                                    self.canvas.itemconfig(
-                                        self.dico_tiles_done[(lat, lon)][0],
-                                        stipple="gray50",
-                                    )
-                                else:
-                                    self.canvas.itemconfig(
-                                        self.dico_tiles_done[(lat, lon)][1],
-                                        font=(
-                                            "Helvetica",
-                                            "12",
-                                            "bold underline",
-                                        ),
-                                    )
+                        if SLINK.in_linked_targets(
+                            linked_targets,
+                            os.path.join(self.working_dir, dir_name),
+                        ):
+                            self.mark_linked(lat, lon, True)
         elif self.grouped and os.path.isdir(
             os.path.join(self.working_dir, "Earth nav data")
         ):
@@ -2607,25 +2535,9 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                         ),
                         dir_name,
                     )
-            link = os.path.join(
-                CFG.custom_scenery_dir,
-                "zOrtho4XP_" + os.path.basename(self.working_dir),
-            )
-            if os.path.isdir(link):
-                if os.path.samefile(
-                    os.path.realpath(link), os.path.realpath(self.working_dir)
-                ):
-                    for (lat0, lon0) in self.dico_tiles_done:
-                        if "dar" not in sys.platform:
-                            self.canvas.itemconfig(
-                                self.dico_tiles_done[(lat, lon)][0],
-                                stipple="gray50",
-                            )
-                        else:
-                            self.canvas.itemconfig(
-                                self.dico_tiles_done[(lat, lon)][1],
-                                font=("Helvetica", "12", "bold underline"),
-                            )
+            if SLINK.in_linked_targets(linked_targets, self.working_dir):
+                # Grouped builds are one pack: lat/lon are unused there.
+                self.mark_linked(None, None, True)
         for (lat, lon) in self.dico_tiles_todo:
             [x0, y0] = GEO.wgs84_to_pix(lat + 1, lon, self.earthzl)
             [x1, y1] = GEO.wgs84_to_pix(lat, lon + 1, self.earthzl)

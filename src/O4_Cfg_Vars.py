@@ -103,10 +103,16 @@ cfg_app_vars = {
         "default": [],
         "hint": "Indices of road types which one would like to left aside in the extraction of overlays. The list of these indices is can be in the roads.net file within X-Plane Resources, but some sceneries use their own corresponding net definition file. Powerlines have index 22001 in XP11 roads.net default file.",
     },
+    "auto_link_custom_scenery": {
+        "type": bool,
+        "default": True,
+        "short_name": "auto_link_scenery",
+        "hint": "When set, every tile whose DSF has just been built is automatically linked into custom_scenery_dir (a junction on Windows, a symlink on Mac/Linux). Existing links are matched by their target, so a tile you renamed by hand is never linked twice. Requires custom_scenery_dir to be set; has no effect otherwise.",
+    },
     "custom_scenery_dir": {
         "type": str,
         "default": "",
-        "hint": 'Your X-Plane Custom Scenery. Used only for "1-click" creation (or deletion) of symbolic links from Ortho4XP tiles to there.',
+        "hint": 'Your X-Plane Custom Scenery. Used for the automatic linking of built tiles (see auto_link_custom_scenery) and for "1-click" creation (or deletion) of symbolic links from Ortho4XP tiles to there.',
     },
     "custom_overlay_src": {
         "module": "OVL",
@@ -626,6 +632,7 @@ list_app_vars = [
     "max_baddata_retries",
     "ovl_exclude_pol",
     "ovl_exclude_net",
+    "auto_link_custom_scenery",
     "custom_scenery_dir",
     "custom_overlay_src",
     "custom_overlay_src_alternate",

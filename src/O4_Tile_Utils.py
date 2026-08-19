@@ -14,6 +14,7 @@ import O4_Mask_Utils as MASK
 import O4_DSF_Utils as DSF
 import O4_Overlay_Utils as OVL
 import O4_SFR_Pipeline as SFR
+import O4_Scenery_Links as SLINK
 from O4_Parallel_Utils import parallel_launch, parallel_join
 
 max_download_slots = 1
@@ -305,6 +306,7 @@ def build_tile(tile):
             pass
     if UI.cleaning_level > 1 and not tile.grouped:
         remove_unwanted_textures(tile)
+    SLINK.auto_link_tile(tile)
     UI.timings_and_bottom_line(timer)
     UI.logprint(
         "Step 3 for tile lat=", tile.lat, ", lon=", tile.lon, ": normal exit."
@@ -479,6 +481,10 @@ def build_tile_list(
             if UI.red_flag:
                 UI.exit_message_and_bottom_line()
                 return 0
+        if not do_dsf:
+            # build_tile() links the tile itself; catch the runs which only
+            # refreshed overlays over an already built tile.
+            SLINK.auto_link_tile(tile)
         try:
             UI.gui.earth_window.canvas.delete(
                 UI.gui.earth_window.dico_tiles_todo[(lat, lon)]

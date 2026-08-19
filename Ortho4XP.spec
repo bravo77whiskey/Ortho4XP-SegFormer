@@ -129,6 +129,7 @@ hidden = [
     "O4_SFR_Stock_Yolo_Objects",
     "O4_SFR_DSF_Utils",
     "O4_SFR_Vegetation_Overlay",
+    "O4_Scenery_Links",
     "O4_Parallel_Utils",
     "O4_OSM_Utils",
     "O4_Geo_Utils",
