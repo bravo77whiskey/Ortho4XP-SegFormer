@@ -229,13 +229,14 @@ def find_simheaven_building_dsfs(custom_scenery_dir, lat, lon):
     )
 
 
-def find_global_forests_dsfs(custom_scenery_dir, lat, lon):
-    """Return Global Forests v2 DSFs for a tile from Custom Scenery."""
+def find_simheaven_forest_dsfs(custom_scenery_dir, lat, lon):
+    """Return enabled simHeaven X-World ``7-forests`` DSFs for a tile."""
     tile_dsf_relpath = _tile_dsf_relpath(lat, lon)
     return _scan_custom_scenery(
         custom_scenery_dir,
         tile_dsf_relpath,
-        lambda folder_name: "global" in folder_name and "forest" in folder_name,
+        lambda folder_name: "simheaven" in folder_name
+        and "7-forests" in folder_name,
     )
 
 

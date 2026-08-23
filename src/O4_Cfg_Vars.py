@@ -406,23 +406,43 @@ cfg_tile_vars = {
         "short_name": "sfr_veg_simh_bd_b",
         "hint": "Extra exclusion buffer in metres around simHeaven building footprints and objects.",
     },
-    "sfr_veg_avoid_gfv2": {
+    "sfr_veg_avoid_simheaven_forests": {
         "type": bool,
         "default": True,
+        "short_name": "sfr_veg_simh_for",
+        "hint": "Avoid overlapping polygons from enabled simHeaven X-World 7-forests packages.",
+    },
+    "sfr_veg_simheaven_forest_buffer_m": {
+        "type": float,
+        "default": 0.0,
+        "short_name": "sfr_veg_simh_for_b",
+        "hint": "Extra exclusion buffer in metres around simHeaven X-World forest polygons.",
+    },
+    "sfr_veg_use_simheaven_asset_proximity": {
+        "type": bool,
+        "default": True,
+        "short_name": "sfr_veg_simh_typ",
+        "hint": "Choose broadleaf, conifer, or mixed assets from the nearest "
+                "simHeaven forest polygon, with the tile's most common tree "
+                "family as fallback.",
+    },
+    "sfr_veg_avoid_gfv2": {
+        "type": bool,
+        "default": False,
         "short_name": "sfr_veg_gfv2",
-        "hint": "Avoid overlapping existing Global Forests v2 forest polygons when generating SegFormer vegetation. Applied before simHeaven and default forest layers.",
+        "hint": "Legacy compatibility setting. Global Forests is no longer read by the vegetation pipeline.",
     },
     "sfr_veg_gfv2_buffer_m": {
         "type": float,
         "default": 0.0,
         "short_name": "sfr_veg_gfv2_b",
-        "hint": "Extra exclusion buffer in metres around Global Forests v2 polygons. Raise this slightly if generated trees still crowd GFv2 forest edges.",
+        "hint": "Legacy compatibility setting. Global Forests is no longer read by the vegetation pipeline.",
     },
     "sfr_veg_use_gfv2_asset_proximity": {
         "type": bool,
         "default": False,
         "short_name": "sfr_veg_gfv2_typ",
-        "hint": "Choose generated tree asset types from Global Forests v2 coverage: each polygon inherits the nearest tree-type GFv2 polygon's asset family (tile-most-common as fallback; cropland never drives tree types). Density still follows the polygon's own canopy. Disabled = climate-based asset selection.",
+        "hint": "Legacy compatibility setting. New vegetation always uses simHeaven X-World forest assets.",
     },
     "sfr_veg_res_m": {
         "type": float,
@@ -708,14 +728,23 @@ list_sfr_veg_vars = [
     "sfr_veg_use_simheaven",
     "sfr_veg_avoid_simheaven_buildings",
     "sfr_veg_simheaven_building_buffer_m",
-    "sfr_veg_avoid_gfv2",
-    "sfr_veg_gfv2_buffer_m",
-    "sfr_veg_use_gfv2_asset_proximity",
+    "sfr_veg_avoid_simheaven_forests",
+    "sfr_veg_simheaven_forest_buffer_m",
+    "sfr_veg_use_simheaven_asset_proximity",
     "sfr_veg_res_m",
     "sfr_veg_disable_cache",
     "sfr_patch_size",
     "sfr_overlap",
     "sfr_batch_size",
+]
+
+# Keep removed Global Forests settings loadable so old tile/global config files
+# remain valid and code that copies a Tile object does not lose attributes. They
+# are intentionally excluded from the SegFormer vegetation settings UI above.
+list_sfr_veg_legacy_vars = [
+    "sfr_veg_avoid_gfv2",
+    "sfr_veg_gfv2_buffer_m",
+    "sfr_veg_use_gfv2_asset_proximity",
 ]
 
 list_sfr_bld_vars = [
@@ -749,6 +778,7 @@ list_tile_vars = (
     + list_mask_vars
     + list_dsf_vars
     + list_overlay_vars
+    + list_sfr_veg_legacy_vars
     + list_other_vars
     + ["default_website", "default_zl", "zone_list"]
 )
@@ -761,6 +791,7 @@ list_global_tile_vars = [
         + list_mask_vars
         + list_dsf_vars
         + list_sfr_overlay_vars
+        + list_sfr_veg_legacy_vars
         + list_other_vars
     )
 ]

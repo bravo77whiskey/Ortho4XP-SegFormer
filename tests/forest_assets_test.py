@@ -50,42 +50,33 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertIn("Permission denied", out.getvalue())
         self.assertIn("skipping", out.getvalue())
 
-    def test_allowlist_contains_default_and_gfv2_assets(self):
+    def test_allowlist_contains_only_simheaven_assets(self):
         approved = set(FOREST_ASSETS.APPROVED_GENERATED_FOREST_PATHS)
         self.assertEqual(FOREST_ASSETS.HEIGHT_CUTOFF_METERS, 24.0)
-        self.assertIn("lib/vegetation/forests/broadleaves/warm_dry.for", approved)
-        self.assertIn("lib/vegetation/forests/broadleaves/cold_low.for", approved)
-        self.assertNotIn("lib/vegetation/forests/conifers/warm_dry.for", approved)
-        self.assertIn(
-            "forests/tropical/woodland/tropical_woodland_100_y2.for",
+        self.assertEqual(
             approved,
-        )
-        self.assertIn(
-            "forests/northmiddle/cropland/northmiddle_cropland_25_y2.for",
-            approved,
-        )
-        self.assertIn(
-            "forests/northnorth/mixed/northnorth_mixed_25_y1.for",
-            approved,
+            {
+                "simheaven/forests/broad.for",
+                "simheaven/forests/coni.for",
+                "simheaven/forests/mixed.for",
+            },
         )
 
-    def test_allowlist_excludes_known_tall_default_and_gfv2_assets(self):
+    def test_allowlist_excludes_known_tall_default_assets(self):
         approved = set(FOREST_ASSETS.APPROVED_GENERATED_FOREST_PATHS)
         for path in FOREST_ASSETS.KNOWN_TALL_DEFAULT_FOREST_PATHS:
             self.assertNotIn(path, approved)
-        for path in FOREST_ASSETS.KNOWN_TALL_GFV2_FOREST_PATHS:
-            self.assertNotIn(path, approved)
 
-    def test_default_assets_stay_in_tree_mix(self):
+    def test_tree_candidates_are_simheaven_only(self):
         candidates = SFR_VEG._short_tree_candidates("subtropical", 75)
-        self.assertTrue(any(path.startswith("lib/vegetation/") for path in candidates))
-        self.assertTrue(any(path.startswith("forests/") for path in candidates))
+        self.assertTrue(candidates)
+        self.assertTrue(all(path.startswith("simheaven/") for path in candidates))
         northnorth = SFR_VEG._short_tree_candidates("northnorth", 75)
         self.assertIn(
-            "forests/northnorth/mixed/northnorth_mixed_75_y1.for",
+            "simheaven/forests/mixed.for",
             northnorth,
         )
-        self.assertTrue(any(path.startswith("lib/vegetation/") for path in northnorth))
+        self.assertTrue(all(path.startswith("simheaven/") for path in northnorth))
 
     def test_koppen_grid_drives_vegetation_climate_region(self):
         self.assertEqual(CLIMATE_REGIONS.koppen_code(1.35, 103.8), "Af")
@@ -99,7 +90,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertEqual(FOREST_ASSETS.climate_region(0.0), "tropical")
         self.assertEqual(FOREST_ASSETS.climate_region(34.0), "northsouth")
 
-    def test_tree_selection_biases_toward_lighter_gfv2_assets(self):
+    def test_tree_selection_uses_simheaven_assets(self):
         region = "northsouth"
         dlevel = 75
         candidates = FOREST_ASSETS.short_tree_candidates(region, dlevel)
@@ -107,48 +98,19 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertEqual(
             candidates,
             (
-                "forests/northsouth/woodland/northsouth_woodland_75_y1.for",
-                "lib/vegetation/forests/broadleaves/warm_dry.for",
+                "simheaven/forests/broad.for",
+                "simheaven/forests/mixed.for",
             ),
         )
-        self.assertEqual(weights, (48, 15))
-        for rng_index in range(48):
-            choice = FOREST_ASSETS.choose_tree_path(
-                region,
-                dlevel,
-                _IndexRng(rng_index),
-                context="managed",
-            )
-            self.assertEqual(
-                choice,
-                "forests/northsouth/woodland/northsouth_woodland_75_y1.for",
-            )
-        self.assertEqual(
-            FOREST_ASSETS.choose_tree_path(
-                region,
-                dlevel,
-                _IndexRng(48),
-                context="managed",
-            ),
-            "lib/vegetation/forests/broadleaves/warm_dry.for",
-        )
-        self.assertEqual(
-            FOREST_ASSETS.mesh_defs_for_path(
-                "lib/vegetation/forests/broadleaves/warm_dry.for"
-            ),
-            45,
-        )
+        self.assertEqual(weights, (15, 11))
         for rng_index in range(20):
             choice = FOREST_ASSETS.choose_tree_path(
                 region,
                 dlevel,
                 _IndexRng(rng_index),
-                context="bulk",
+                context="managed",
             )
-            self.assertEqual(
-                choice,
-                "forests/northsouth/woodland/northsouth_woodland_75_y1.for",
-            )
+            self.assertIn(choice, candidates)
 
     def test_sfr_for_entry_emits_only_allowlisted_paths(self):
         cases = (
@@ -177,7 +139,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
                         msg=path,
                     )
 
-    def test_dense_area_tree_polygons_use_gfv2_only(self):
+    def test_dense_area_tree_polygons_use_simheaven_assets_only(self):
         for rng_index in range(20):
             path, _density = SFR_VEG._for_entry(
                 SEGFORMER.CLASS_TREE,
@@ -188,24 +150,34 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 density_override=None,
                 veg_type=None,
             )
-            self.assertTrue(path.startswith("forests/"), msg=path)
+            self.assertTrue(path.startswith("simheaven/"), msg=path)
 
-    def test_gfv2_path_parser_rejects_palm_coconut_and_shrub_type_sources(self):
+    def test_gfv2_path_parser_remains_available_for_legacy_alias_installer(self):
         self.assertEqual(
             FOREST_ASSETS.parse_gfv2_path(
                 "forests/tropical/woodland/tropical_woodland_75_y1.for"
             )["family"],
             "woodland",
         )
-        for path in (
-            "forests/tropical/palm/tropical_palm_75_y1.for",
-            "forests/tropical/coconut/tropical_coconut_75_y1.for",
-            "forests/subtropical/shrub/subtropical_shrub_50_y1.for",
-            "forests/northmiddle/scrub/northmiddle_scrub_50_y1.for",
-        ):
-            self.assertFalse(FOREST_ASSETS.is_acceptable_gfv2_type_source(path))
 
-    def test_sfr_for_entry_uses_gfv2_type_hint_when_available(self):
+    def test_simheaven_tree_path_normalization_rejects_non_tree_families(self):
+        self.assertEqual(
+            FOREST_ASSETS.normalize_simheaven_tree_path(
+                r"SIMHEAVEN\FORESTS\MIXED.FOR"
+            ),
+            "simheaven/forests/mixed.for",
+        )
+        for path in (
+            "simheaven/forests/orchard.for",
+            "simheaven/forests/vineyard.for",
+            "simheaven/forests/shrubs.for",
+            "simheaven/forests/wetland.for",
+        ):
+            self.assertIsNone(
+                FOREST_ASSETS.normalize_simheaven_tree_path(path)
+            )
+
+    def test_sfr_for_entry_uses_nearby_simheaven_tree_family(self):
         for rng_index in range(8):
             path, _density = SFR_VEG._for_entry(
                 SEGFORMER.CLASS_TREE,
@@ -215,65 +187,65 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 _IndexRng(rng_index),
                 density_override=None,
                 veg_type="natural_forest_closed",
-                gfv2_type_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
+                simheaven_type_path="simheaven/forests/mixed.for",
             )
-            self.assertTrue(path.startswith("forests/tropical/woodland/"), msg=path)
+            self.assertEqual(path, "simheaven/forests/mixed.for")
 
-    def test_dominant_gfv2_type_hint_picks_most_common_acceptable_path(self):
+    def test_dominant_simheaven_type_picks_most_common_tree_path(self):
         records = [
-            {"path": "forests/tropical/woodland/tropical_woodland_75_y1.for"},
-            {"path": "forests/tropical/woodland/tropical_woodland_75_y2.for"},
-            {"path": "forests/tropical/woodland/tropical_woodland_75_y2.for"},
-            {"path": "forests/tropical/palm/tropical_palm_75_y1.for"},
+            {"path": "simheaven/forests/broad.for"},
+            {"path": "simheaven/forests/mixed.for"},
+            {"path": "simheaven/forests/mixed.for"},
+            {"path": "simheaven/forests/orchard.for"},
         ]
 
         self.assertEqual(
-            SFR_VEG._dominant_acceptable_gfv2_path(records),
-            "forests/tropical/woodland/tropical_woodland_75_y2.for",
+            SFR_VEG._dominant_simheaven_tree_path(records),
+            "simheaven/forests/mixed.for",
         )
 
-    def test_dominant_gfv2_type_hint_skips_rejected_sources(self):
+    def test_dominant_simheaven_type_skips_non_tree_sources(self):
         records = [
-            {"path": "forests/tropical/palm/tropical_palm_75_y1.for"},
-            {"path": "forests/tropical/coconut/tropical_coconut_75_y1.for"},
-            {"path": "forests/subtropical/shrub/subtropical_shrub_50_y1.for"},
-            {"path": "forests/northmiddle/scrub/northmiddle_scrub_50_y1.for"},
-            {"path": "forests/tropical/woodland/tropical_woodland_75_y1.for"},
+            {"path": "simheaven/forests/orchard.for"},
+            {"path": "simheaven/forests/vineyard.for"},
+            {"path": "simheaven/forests/shrubs.for"},
+            {"path": "simheaven/forests/wetland.for"},
+            {"path": "simheaven/forests/coni.for"},
         ]
 
         self.assertEqual(
-            SFR_VEG._dominant_acceptable_gfv2_path(records),
-            "forests/tropical/woodland/tropical_woodland_75_y1.for",
+            SFR_VEG._dominant_simheaven_tree_path(records),
+            "simheaven/forests/coni.for",
         )
 
-    def test_dominant_gfv2_type_hint_tie_breaks_by_path(self):
+    def test_dominant_simheaven_type_tie_breaks_by_path(self):
         records = [
-            {"path": "forests/tropical/woodland/tropical_woodland_75_y2.for"},
-            {"path": "forests/tropical/woodland/tropical_woodland_75_y1.for"},
+            {"path": "simheaven/forests/mixed.for"},
+            {"path": "simheaven/forests/broad.for"},
         ]
 
         self.assertEqual(
-            SFR_VEG._dominant_acceptable_gfv2_path(records),
-            "forests/tropical/woodland/tropical_woodland_75_y1.for",
+            SFR_VEG._dominant_simheaven_tree_path(records),
+            "simheaven/forests/broad.for",
         )
 
-    def test_dominant_gfv2_type_hint_returns_none_without_acceptable_sources(self):
+    def test_dominant_simheaven_type_returns_none_without_tree_sources(self):
         records = [
-            {"path": "forests/tropical/palm/tropical_palm_75_y1.for"},
-            {"path": "lib/vegetation/forests/broadleaves/warm_dry.for"},
+            {"path": "simheaven/forests/orchard.for"},
+            {"path": "simheaven/forests/shrubs.for"},
             {"path": None},
         ]
 
-        self.assertIsNone(SFR_VEG._dominant_acceptable_gfv2_path(records))
+        self.assertIsNone(SFR_VEG._dominant_simheaven_tree_path(records))
 
-    def test_climate_mode_does_not_call_gfv2_type_hint_mapping(self):
+    def test_climate_mode_does_not_call_simheaven_type_hint_mapping(self):
         mask = np.zeros((20, 20), dtype=np.uint8)
         mask[2:18, 2:18] = 255
 
         with mock.patch.object(
             FOREST_ASSETS,
-            "gfv2_type_hint_candidates",
-            side_effect=AssertionError("GFv2 type mapping should be disabled"),
+            "simheaven_type_hint_candidates",
+            side_effect=AssertionError("simHeaven type mapping should be disabled"),
         ):
             polygons = SFR_VEG._process_dds_mask(
                 mask,
@@ -294,13 +266,13 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 density_override=None,
                 context_masks={},
                 type_counts={},
-                gfv2_type_path=None,
+                simheaven_type_path=None,
             )
 
         self.assertTrue(polygons)
-        self.assertTrue(polygons[0][0].startswith("forests/northsouth/"))
+        self.assertTrue(polygons[0][0].startswith("simheaven/"))
 
-    def test_process_dds_mask_uses_tile_dominant_gfv2_type_hint_for_all_tree_polygons(self):
+    def test_process_dds_mask_uses_simheaven_type_hint(self):
         mask = np.zeros((40, 40), dtype=np.uint8)
         mask[2:16, 2:16] = 255
         mask[22:36, 22:36] = 255
@@ -324,29 +296,63 @@ class ForestAssetPolicyTests(unittest.TestCase):
             density_override=None,
             context_masks={},
             type_counts={},
-            gfv2_type_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
+            simheaven_type_path="simheaven/forests/coni.for",
         )
 
         self.assertEqual(len(polygons), 2)
         for path, _density, _ring in polygons:
-            self.assertTrue(path.startswith("forests/tropical/woodland/"), msg=path)
+            self.assertEqual(path, "simheaven/forests/coni.for")
 
-    def test_cli_accepts_gfv2_asset_proximity_flag(self):
+    def test_process_dds_mask_asks_resolver_for_each_tree_polygon(self):
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        mask[2:16, 2:16] = 255
+        mask[22:36, 22:36] = 255
+        resolver = mock.Mock()
+        resolver.resolve.return_value = "simheaven/forests/mixed.for"
+
+        polygons = SFR_VEG._process_dds_mask(
+            mask,
+            SEGFORMER.CLASS_TREE,
+            img_w=40,
+            img_h=40,
+            lat_n=1.0,
+            lat_s=0.99,
+            lon_w=2.0,
+            lon_e=2.01,
+            tile_lat=0.0,
+            tile_lon=2.0,
+            m_per_px=2.0,
+            min_area_px=1.0,
+            simplify_px=1.0,
+            region="northsouth",
+            rng=_IndexRng(0),
+            density_override=None,
+            context_masks={},
+            type_counts={},
+            simheaven_type_path="simheaven/forests/broad.for",
+            simheaven_type_resolver=resolver,
+        )
+
+        self.assertEqual(len(polygons), 2)
+        self.assertEqual(resolver.resolve.call_count, 2)
+        self.assertTrue(
+            all(path == "simheaven/forests/mixed.for" for path, _, _ in polygons)
+        )
+
+    def test_cli_uses_simheaven_asset_proximity_by_default(self):
         argv = [
             "generate_veg_overlay.py",
             "textures",
             "1",
             "2",
-            "--gfv2-asset-proximity",
         ]
 
         with mock.patch.object(sys, "argv", argv):
             args = SFR_VEG.parse_args()
 
-        self.assertTrue(args.gfv2_asset_proximity)
+        self.assertFalse(args.no_simheaven_asset_proximity)
 
-    def test_managed_tree_context_can_still_use_defaults(self):
-        default_seen = False
+    def test_managed_tree_context_uses_simheaven(self):
         for rng_index in range(80):
             path, _density = SFR_VEG._for_entry(
                 SEGFORMER.CLASS_TREE,
@@ -361,9 +367,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 FOREST_ASSETS.is_approved_generated_forest_path(path),
                 msg=path,
             )
-            if path.startswith("lib/vegetation/"):
-                default_seen = True
-        self.assertTrue(default_seen)
+            self.assertTrue(path.startswith("simheaven/"), msg=path)
 
     def test_spec_does_not_bundle_library_txt(self):
         spec_text = (ROOT / "Ortho4XP.spec").read_text(encoding="utf-8")
@@ -457,30 +461,30 @@ class ForestAssetPolicyTests(unittest.TestCase):
 
         climate_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
-            asset_selection_mode="climate",
-            gfv2_type_source_path=None,
+            asset_selection_mode="simheaven_climate_v1",
+            forest_type_source_path=None,
         )
         dominant_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
-            asset_selection_mode="gfv2_tile_dominant",
-            gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y1.for",
+            asset_selection_mode="simheaven_tile_dominant",
+            forest_type_source_path="simheaven/forests/broad.for",
         )
         other_dominant_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
-            asset_selection_mode="gfv2_tile_dominant",
-            gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y2.for",
+            asset_selection_mode="simheaven_tile_dominant",
+            forest_type_source_path="simheaven/forests/mixed.for",
         )
 
         closest_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
-            asset_selection_mode="gfv2_closest",
-            gfv2_type_source_path="forests/tropical/woodland/tropical_woodland_75_y1.for",
-            gfv2_type_sig=(12, 34, 5.6, 78),
+            asset_selection_mode="simheaven_closest_v1",
+            forest_type_source_path="simheaven/forests/broad.for",
+            forest_type_sig=(12, 34, 5.6, 78),
         )
         covered_key = SFR_VEG._dds_polygon_cache_key(
             *base_args,
-            asset_selection_mode="climate",
-            gfv2_type_source_path=None,
+            asset_selection_mode="simheaven_climate_v1",
+            forest_type_source_path=None,
             covered_fracs=((0.5, 0.5, 1.0, 1.0),),
         )
 
@@ -488,72 +492,86 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertNotEqual(dominant_key, other_dominant_key)
         self.assertNotEqual(dominant_key, closest_key)
         self.assertNotEqual(climate_key, covered_key)
-        self.assertEqual(climate_key["version"], 6)
+        self.assertEqual(climate_key["version"], 7)
 
-    def test_dominant_gfv2_path_ignores_cropland_votes(self):
+    def test_dominant_simheaven_path_ignores_non_tree_votes(self):
         records = [
-            {"path": "forests/northsouth/cropland/northsouth_cropland_25_y2.for"},
+            {"path": "simheaven/forests/orchard.for"},
         ] * 50 + [
-            {"path": "forests/northsouth/woodland/northsouth_woodland_50_y2.for"},
+            {"path": "simheaven/forests/mixed.for"},
         ] * 3 + [
-            {"path": "forests/northsouth/woodland/northsouth_woodland_25_y2.for"},
+            {"path": "simheaven/forests/broad.for"},
         ] * 2
         self.assertEqual(
-            SFR_VEG._dominant_acceptable_gfv2_path(records),
-            "forests/northsouth/woodland/northsouth_woodland_50_y2.for",
+            SFR_VEG._dominant_simheaven_tree_path(records),
+            "simheaven/forests/mixed.for",
         )
 
-    def test_dominant_gfv2_path_none_when_only_cropland(self):
+    def test_dominant_simheaven_path_none_when_only_non_tree_sources(self):
         records = [
-            {"path": "forests/northsouth/cropland/northsouth_cropland_25_y2.for"},
+            {"path": "simheaven/forests/orchard.for"},
         ] * 10
-        self.assertIsNone(SFR_VEG._dominant_acceptable_gfv2_path(records))
+        self.assertIsNone(SFR_VEG._dominant_simheaven_tree_path(records))
 
-    def test_gfv2_type_resolver_prefers_nearest_tree_polygon(self):
+    def test_simheaven_type_resolver_prefers_nearest_tree_polygon(self):
         records = [
-            {   # woodland bbox around (119.10, 23.10)
-                "path": "forests/subtropical/woodland/subtropical_woodland_75_y1.for",
+            {
+                "path": "simheaven/forests/broad.for",
                 "_bounds": (23.09, 23.11, 119.09, 119.11),
             },
-            {   # different woodland far away
-                "path": "forests/subtropical/woodland/subtropical_woodland_25_y2.for",
+            {
+                "path": "simheaven/forests/coni.for",
                 "_bounds": (23.49, 23.51, 119.49, 119.51),
             },
-            {   # cropland right on top of the query point: must be ignored
-                "path": "forests/subtropical/cropland/subtropical_cropland_25_y1.for",
+            {
+                "path": "simheaven/forests/orchard.for",
                 "_bounds": (23.0, 23.3, 119.0, 119.3),
             },
         ]
-        resolver = SFR_VEG._GFv2TypeResolver(
-            records, dominant_path="dominant.for", tile_lat=23
+        resolver = SFR_VEG._SimHeavenTypeResolver(
+            records,
+            dominant_path="simheaven/forests/mixed.for",
+            tile_lat=23,
         )
         self.assertEqual(resolver.n, 2)
         self.assertEqual(
             resolver.resolve(119.10, 23.10),
-            "forests/subtropical/woodland/subtropical_woodland_75_y1.for",
+            "simheaven/forests/broad.for",
         )
         self.assertEqual(
             resolver.resolve(119.50, 23.50),
-            "forests/subtropical/woodland/subtropical_woodland_25_y2.for",
+            "simheaven/forests/coni.for",
         )
 
-    def test_gfv2_type_resolver_falls_back_to_dominant_beyond_radius(self):
+    def test_simheaven_type_resolver_falls_back_to_dominant_beyond_radius(self):
         records = [
             {
-                "path": "forests/subtropical/woodland/subtropical_woodland_75_y1.for",
+                "path": "simheaven/forests/broad.for",
                 "_bounds": (23.0, 23.001, 119.0, 119.001),
             },
         ]
-        resolver = SFR_VEG._GFv2TypeResolver(
-            records, dominant_path="dominant.for", tile_lat=23,
+        resolver = SFR_VEG._SimHeavenTypeResolver(
+            records,
+            dominant_path="simheaven/forests/mixed.for",
+            tile_lat=23,
             max_radius_m=1000.0,
         )
         # ~50 km away -> dominant fallback
-        self.assertEqual(resolver.resolve(119.5, 23.5), "dominant.for")
+        self.assertEqual(
+            resolver.resolve(119.5, 23.5),
+            "simheaven/forests/mixed.for",
+        )
 
-    def test_gfv2_type_resolver_empty_records_returns_dominant(self):
-        resolver = SFR_VEG._GFv2TypeResolver([], "dominant.for", tile_lat=23)
-        self.assertEqual(resolver.resolve(119.1, 23.1), "dominant.for")
+    def test_simheaven_type_resolver_empty_records_returns_dominant(self):
+        resolver = SFR_VEG._SimHeavenTypeResolver(
+            [],
+            "simheaven/forests/mixed.for",
+            tile_lat=23,
+        )
+        self.assertEqual(
+            resolver.resolve(119.1, 23.1),
+            "simheaven/forests/mixed.for",
+        )
 
     def test_vegetation_optional_mask_or_handles_missing_masks(self):
         lhs = None

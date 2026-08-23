@@ -11,7 +11,7 @@ Pipeline
 4. Morphological close → open (kernel sizes in metres)
 5. Vectorise (OpenCV contours) → Douglas-Peucker → lat/lon polygons
 6. Per polygon: shape ratio → area-fill | treeline
-7. Pixel fill fraction → Global Forests v2 .for file + DSF density
+7. Pixel fill fraction + nearest X-World family → simHeaven .for path + density
 8. Write DSF text, compile with DSFTool
 
 Usage:
@@ -63,7 +63,7 @@ from O4_SFR_Building_Overlay import (
 from O4_SFR_DSF_Utils import (
     ensure_cached_dsf_text,
     find_active_custom_scenery_dsfs,
-    find_global_forests_dsfs,
+    find_simheaven_forest_dsfs,
     find_simheaven_network_dsfs,
 )
 from O4_SFR_Region_Boundaries import asset_region_for_latlon
@@ -706,14 +706,14 @@ def _dds_polygon_cache_key(
     excl_buffer_m,
     region,
     climate_code=None,
-    asset_selection_mode="climate",
-    gfv2_type_source_path=None,
-    gfv2_type_sig=None,
+    asset_selection_mode="simheaven_climate",
+    forest_type_source_path=None,
+    forest_type_sig=None,
     covered_fracs=None,
 ):
     return {
-        'version': 6,
-        'gfv2_type_sig': gfv2_type_sig,
+        'version': 7,
+        'forest_type_sig': forest_type_sig,
         'covered_fracs': covered_fracs,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
@@ -729,7 +729,7 @@ def _dds_polygon_cache_key(
         'region': region,
         'climate_code': climate_code,
         'asset_selection_mode': asset_selection_mode,
-        'gfv2_type_source_path': gfv2_type_source_path,
+        'forest_type_source_path': forest_type_source_path,
     }
 
 
@@ -1069,34 +1069,27 @@ def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lo
     return rings, type_counts
 
 
-def _dominant_acceptable_gfv2_path(records):
-    """Return the most common tree-type GFv2 source path in a tile.
-
-    Only tree-like families vote: cropland windbreaks dominate the raw polygon
-    count in agricultural tiles and previously turned every generated forest
-    into near-empty cropland assets.
-    """
+def _dominant_simheaven_tree_path(records):
+    """Return the most common selectable X-World tree path in a tile."""
     counts = {}
     for record in records or ():
         path = record.get('path') if isinstance(record, dict) else None
-        metadata = FOREST_ASSETS.parse_gfv2_path(path)
-        if metadata is None or not FOREST_ASSETS.is_tree_gfv2_type_source(path):
+        normalized = FOREST_ASSETS.normalize_simheaven_tree_path(path)
+        if normalized is None:
             continue
-        normalized = metadata['path']
         counts[normalized] = counts.get(normalized, 0) + 1
     if not counts:
         return None
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-class _GFv2TypeResolver:
-    """Per-polygon GFv2 type source: nearest tree-type GFv2 polygon.
+class _SimHeavenTypeResolver:
+    """Resolve the nearest selectable X-World forest family per polygon.
 
     ``resolve(lon, lat)`` returns the source path of the nearest acceptable
-    tree-type GFv2 polygon within ``max_radius_m`` (bbox distance), falling
-    back to the tile-dominant path when none is close enough. Lookups are
-    vectorised over all candidate bboxes and memoised on a ~250 m grid, so the
-    per-polygon cost is effectively zero at tile scale.
+    X-World tree polygon within ``max_radius_m`` by bounding-box distance. It
+    falls back to the tile-dominant path when none is close enough. Lookups are
+    vectorised over all candidate bounds and memoised on a roughly 250 m grid.
     """
 
     def __init__(self, records, dominant_path, tile_lat,
@@ -1113,13 +1106,13 @@ class _GFv2TypeResolver:
                 continue
             path = record.get('path')
             bounds = record.get('_bounds')
-            if bounds is None or not FOREST_ASSETS.is_tree_gfv2_type_source(path):
+            normalized = FOREST_ASSETS.normalize_simheaven_tree_path(path)
+            if bounds is None or normalized is None:
                 continue
-            metadata = FOREST_ASSETS.parse_gfv2_path(path)
             south, north, west, east = bounds
             souths.append(float(south)); norths.append(float(north))
             wests.append(float(west)); easts.append(float(east))
-            paths.append(metadata['path'])
+            paths.append(normalized)
         self.n = len(paths)
         if self.n:
             self._south = np.asarray(souths)
@@ -1164,75 +1157,63 @@ def _for_density_level(override):
 
 
 def _short_tree_candidates(region, dlevel):
-    """Combine the measured short-tree GFv2 and default asset pools."""
+    """Return stable simHeaven forest library paths."""
     return FOREST_ASSETS.short_tree_candidates(region, dlevel)
 
 
 def _for_entry(veg_cls, frac, shape, region, rng,
-               density_override=None, veg_type=None, gfv2_type_path=None):
+               density_override=None, veg_type=None,
+               simheaven_type_path=None):
     """Return (for_path, dsf_density) for a polygon."""
     dlevel  = _for_density_level(density_override) if density_override is not None \
               else _density_level(frac)
 
     if veg_cls == SEGFORMER.CLASS_TREE:
         if veg_type in {'natural_woodland_open', 'uncertain_tree_cover'}:
-            ftype = 'woodland'
             base_key = 'woodland'
         elif veg_type == 'riparian_trees':
-            ftype = 'woodland'
             base_key = 'woodland'
             dlevel = min(dlevel, 50 if shape == 'treeline' else 75)
         elif veg_type in {'settlement_trees', 'park_or_managed_green'}:
             # Keep coverage, but bias managed/settlement canopy toward the safer
             # woodland assets instead of full mixed-forest sets.
-            ftype = 'woodland'
             base_key = 'woodland'
             dlevel = min(dlevel, 50)
         elif veg_type in {'orchard_or_plantation', 'tree_row_linear'}:
-            ftype = 'woodland'
             base_key = 'woodland'
             dlevel = 25 if shape == 'treeline' else min(dlevel, 50)
         else:
             # Future generated overlays stay under the Brazilian-nut height cap.
             # Dense forest gets denser placement, not taller asset families.
-            ftype = 'woodland'
             base_key = 'tree' if shape == 'area' and dlevel >= 75 else 'woodland'
         base     = _BASE_DENSITY[base_key][dlevel]
     elif veg_cls == SEGFORMER.CLASS_RANGELAND:
-        ftype    = 'woodland'
         base_key = 'woodland' if dlevel >= 50 else 'shrub'
         base     = _BASE_DENSITY[base_key][dlevel]
     else:   # AGRICULTURE treelines only
-        ftype  = 'cropland'
         base   = _BASE_DENSITY['shrub'][25]
         dlevel = 25
 
     if density_override is not None:
         base = int(round(density_override * 255))
 
-    if veg_cls == SEGFORMER.CLASS_TREE:
-        tree_context = 'bulk'
-        if shape == 'treeline':
-            tree_context = 'treeline'
-        elif veg_type in {'settlement_trees', 'park_or_managed_green'}:
-            tree_context = 'managed'
-        if gfv2_type_path:
-            candidates = FOREST_ASSETS.gfv2_type_hint_candidates(
-                gfv2_type_path,
-                region,
-                dlevel,
-            )
-            path = FOREST_ASSETS.choose_path(candidates, rng)
-        else:
-            path = FOREST_ASSETS.choose_tree_path(
-                region,
-                dlevel,
-                rng,
-                context=tree_context,
-            )
-    else:
-        candidates = FOREST_ASSETS.short_gfv2_candidates(region, ftype, dlevel)
+    tree_context = 'treeline' if shape == 'treeline' else 'bulk'
+    if veg_type in {'settlement_trees', 'park_or_managed_green'}:
+        tree_context = 'managed'
+    if veg_cls == SEGFORMER.CLASS_TREE and simheaven_type_path:
+        candidates = FOREST_ASSETS.simheaven_type_hint_candidates(
+            simheaven_type_path,
+            region,
+            dlevel,
+        )
         path = FOREST_ASSETS.choose_path(candidates, rng)
+    else:
+        path = FOREST_ASSETS.choose_tree_path(
+            region,
+            dlevel,
+            rng,
+            context=tree_context,
+        )
     dsf_density = base + 256 if shape == 'treeline' else base
     return path, dsf_density
 
@@ -1427,7 +1408,8 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       m_per_px, min_area_px, simplify_px,
                       region, rng, density_override,
                       context_masks=None, type_counts=None,
-                      gfv2_type_path=None, gfv2_type_resolver=None):
+                      simheaven_type_path=None,
+                      simheaven_type_resolver=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring)."""
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
@@ -1470,17 +1452,21 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         else:
             frac = _polygon_fill_frac(mask, cnt)
 
-        poly_gfv2_type_path = gfv2_type_path
-        if veg_cls == SEGFORMER.CLASS_TREE and gfv2_type_resolver is not None:
+        poly_simheaven_type_path = simheaven_type_path
+        if (
+            veg_cls == SEGFORMER.CLASS_TREE
+            and simheaven_type_resolver is not None
+        ):
             c_lon = sum(p[0] for p in ring) / len(ring)
             c_lat = sum(p[1] for p in ring) / len(ring)
-            poly_gfv2_type_path = (
-                gfv2_type_resolver.resolve(c_lon, c_lat) or gfv2_type_path
+            poly_simheaven_type_path = (
+                simheaven_type_resolver.resolve(c_lon, c_lat)
+                or simheaven_type_path
             )
         fpath, dsf_den = _for_entry(
             veg_cls, frac, shape, region, rng, density_override,
             veg_type=veg_type,
-            gfv2_type_path=poly_gfv2_type_path,
+            simheaven_type_path=poly_simheaven_type_path,
         )
         if not fpath:
             continue
@@ -1498,7 +1484,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         download_veg_context=True,
         custom_scenery_dir=None,
         avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
-        avoid_gfv2=True, gfv2_buffer_m=0.0,
+        avoid_simheaven_forests=True, simheaven_forest_buffer_m=0.0,
+        use_simheaven_asset_proximity=True,
+        avoid_gfv2=False, gfv2_buffer_m=0.0,
         use_gfv2_asset_proximity=False):
 
     import re as _re
@@ -1594,13 +1582,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     print(f"Tile: lat={lat} lon={lon}  DDS: {len(files)} ({_zl_str})")
     print(f"close={close_m}m  open={open_m}m  min_area={min_area_m2}m²  "
           f"simplify={simplify_m}m  density={dens_str}  excl_buffer={excl_buffer_m}m")
+    if avoid_gfv2 or use_gfv2_asset_proximity or gfv2_buffer_m:
+        print("Legacy Global Forests settings ignored; the pipeline is simHeaven-only")
+    print("vegetation asset selection: simHeaven X-World forests")
     print(
-        "forest overlap avoid:"
-        f" GFv2={'on' if avoid_gfv2 else 'off'} ({gfv2_buffer_m}m)"
-    )
-    print(
-        "vegetation asset selection:"
-        f" {'GFv2-derived' if use_gfv2_asset_proximity else 'climate default'}"
+        "simHeaven forest overlap avoid:"
+        f" {'on' if avoid_simheaven_forests else 'off'}"
+        f" ({simheaven_forest_buffer_m}m); closest asset:"
+        f" {'on' if use_simheaven_asset_proximity else 'off'}"
     )
     print(
         f"building overlap avoid: SFR cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
@@ -1728,75 +1717,74 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     tree_row_sig = _roads_signature(veg_context_tree_rows)
 
     forest_layers = []
-    gfv2_type_path = None
-    gfv2_type_resolver = None
-    gfv2_type_sig = None
-    # Per-polygon nearest-GFv2 type selection ("closest") vs one tile-dominant
-    # path for every polygon ("dominant"). Closest is the default: the lookup
-    # is a memoised vectorised bbox scan, measured ~free at tile scale.
-    gfv2_type_mode = (
-        os.environ.get("O4_SFR_VEG_GFV2_TYPE_MODE", "closest").strip().lower()
+    simheaven_type_source_path = None
+    simheaven_type_resolver = None
+    simheaven_type_sig = None
+    need_simheaven_forests = (
+        avoid_simheaven_forests or use_simheaven_asset_proximity
     )
-    if gfv2_type_mode not in ("closest", "dominant"):
-        gfv2_type_mode = "closest"
-    if dsftool_path and os.path.exists(dsftool_path):
-        layer_specs = [
-            (
-                "Global Forests v2",
-                avoid_gfv2,
-                find_global_forests_dsfs(custom_scenery_dir, lat, lon),
-                gfv2_buffer_m,
-            ),
-        ]
-        for layer_name, enabled, dsf_matches, buffer_m in layer_specs:
-            is_gfv2_layer = layer_name == "Global Forests v2"
-            # GFv2 polygons are parsed for asset-type selection even when the
-            # avoidance layer itself is disabled.
-            need_for_types = is_gfv2_layer and use_gfv2_asset_proximity
-            if not enabled and not need_for_types:
-                print(f"{layer_name} forests: disabled")
-                continue
+    if need_simheaven_forests and dsftool_path and os.path.exists(dsftool_path):
+        forest_matches = find_simheaven_forest_dsfs(
+            custom_scenery_dir,
+            lat,
+            lon,
+        )
+        if forest_matches:
             _t = time.perf_counter()
-            polys = _load_forest_polygons(layer_name, dsf_matches, dsftool_path, sidecar_cache_dir)
+            forest_records = _prepare_polygons(
+                _load_forest_polygons(
+                    "simHeaven X-World",
+                    forest_matches,
+                    dsftool_path,
+                    sidecar_cache_dir,
+                )
+            )
             timings['scenery_parse'] += time.perf_counter() - _t
-            prepared = _prepare_polygons(polys)
-            if is_gfv2_layer:
-                if use_gfv2_asset_proximity:
-                    gfv2_type_path = _dominant_acceptable_gfv2_path(prepared)
-                    gfv2_type_sig = _polys_signature(prepared)
-                    if gfv2_type_path:
-                        print(f"{layer_name} tile-dominant type source: {gfv2_type_path}")
-                    else:
-                        print(f"{layer_name} type sources: no acceptable tree-type polygons")
-                    if gfv2_type_mode == "closest":
-                        gfv2_type_resolver = _GFv2TypeResolver(
-                            prepared, gfv2_type_path, lat
-                        )
-                        print(
-                            "GFv2 type selection: per-polygon closest "
-                            f"({gfv2_type_resolver.n} tree-type source polygons, "
-                            "tile-dominant fallback)"
-                        )
-                else:
-                    print(f"{layer_name} type sources: disabled (climate asset selection)")
-            if enabled:
+            if use_simheaven_asset_proximity:
+                simheaven_type_source_path = (
+                    _dominant_simheaven_tree_path(forest_records)
+                )
+                simheaven_type_sig = _polys_signature(forest_records)
+                simheaven_type_resolver = _SimHeavenTypeResolver(
+                    forest_records,
+                    simheaven_type_source_path,
+                    lat,
+                )
+                print(
+                    "simHeaven closest-asset sources:"
+                    f" {simheaven_type_resolver.n} tree polygons;"
+                    f" tile fallback={simheaven_type_source_path or 'climate'}"
+                )
+            if avoid_simheaven_forests:
                 forest_layers.append(
                     {
-                        'name': layer_name,
-                        'buffer_m': max(0.0, float(buffer_m)),
-                        'polys': prepared,
-                        'index': BBOX.build_bounds_index(prepared),
+                        'name': 'simHeaven X-World',
+                        'buffer_m': max(
+                            0.0,
+                            float(simheaven_forest_buffer_m),
+                        ),
+                        'polys': forest_records,
+                        'index': BBOX.build_bounds_index(forest_records),
                     }
                 )
-                print(f"{layer_name} forests: {len(prepared)} polygons")
-    else:
-        if avoid_gfv2:
-            print(f"Forest overlap layers: skipped (DSFTool unavailable at {dsftool_path})")
+                print(
+                    f"simHeaven forest overlap: {len(forest_records)} polygons"
+                )
+        else:
+            print("simHeaven forests: no enabled 7-forests DSF for this tile")
+    elif need_simheaven_forests:
+        print(
+            "simHeaven forests: skipped "
+            f"(DSFTool unavailable at {dsftool_path})"
+        )
     forest_layer_sigs = tuple(
-        (layer['name'], round(float(layer['buffer_m']), 4), _polys_signature(layer['polys']))
+        (
+            layer['name'],
+            round(float(layer['buffer_m']), 4),
+            _polys_signature(layer['polys']),
+        )
         for layer in forest_layers
     )
-    gfv2_type_source_path = gfv2_type_path if use_gfv2_asset_proximity else None
 
     # ── Custom-scenery forest exclusion zones ───────────────────────────────
     # An airport's `sim/exclude_for` zone is honoured with no buffer and no
@@ -2275,12 +2263,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             )
 
         _poly_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_vegpoly.pkl'))
-        if not use_gfv2_asset_proximity:
-            _asset_mode = 'climate'
-        elif gfv2_type_resolver is not None:
-            _asset_mode = 'gfv2_closest'
-        else:
-            _asset_mode = 'gfv2_tile_dominant'
+        _asset_mode = (
+            'simheaven_closest_v1'
+            if simheaven_type_resolver is not None
+            else 'simheaven_climate_v1'
+        )
         _poly_cache_key = _dds_polygon_cache_key(
             fname,
             lat_n,
@@ -2300,8 +2287,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             region,
             koppen_code,
             _asset_mode,
-            gfv2_type_source_path,
-            gfv2_type_sig=gfv2_type_sig,
+            simheaven_type_source_path,
+            forest_type_sig=simheaven_type_sig,
             covered_fracs=_covered_fracs,
         )
         _poly_cached = None
@@ -2335,11 +2322,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       density_override=density_override,
                       context_masks=local_context_masks,
                       type_counts=None)
-        if gfv2_type_source_path:
-            kwargs['gfv2_type_path'] = gfv2_type_source_path
-        if gfv2_type_resolver is not None:
-            kwargs['gfv2_type_resolver'] = gfv2_type_resolver
-
+        if simheaven_type_source_path:
+            kwargs['simheaven_type_path'] = simheaven_type_source_path
+        if simheaven_type_resolver is not None:
+            kwargs['simheaven_type_resolver'] = simheaven_type_resolver
         dds_seed = int.from_bytes(
             hashlib.sha1(f"veg-poly:{fname}".encode("utf-8")).digest()[:8],
             "big",
@@ -2467,13 +2453,22 @@ def parse_args():
     ap.add_argument('--simheaven-building-buffer-m', type=float, default=10.0,
                     dest='simheaven_building_buffer_m',
                     help='Extra exclusion buffer in metres around simHeaven building footprints/objects.')
+    ap.add_argument('--no-avoid-simheaven-forests', action='store_true',
+                    dest='no_avoid_simheaven_forests',
+                    help='Do not exclude enabled X-World 7-forests polygons.')
+    ap.add_argument('--simheaven-forest-buffer-m', type=float, default=0.0,
+                    dest='simheaven_forest_buffer_m',
+                    help='Extra exclusion buffer in metres around X-World forests.')
+    ap.add_argument('--no-simheaven-asset-proximity', action='store_true',
+                    dest='no_simheaven_asset_proximity',
+                    help='Use climate assets instead of the nearest X-World tree family.')
     ap.add_argument('--no-avoid-gfv2', action='store_true', dest='no_avoid_gfv2',
-                    help='Do not exclude Global Forests v2 polygons from generated vegetation.')
+                    help='Legacy no-op retained for command-line compatibility.')
     ap.add_argument('--gfv2-buffer-m', type=float, default=0.0, dest='gfv2_buffer_m',
-                    help='Extra exclusion buffer in metres around Global Forests v2 polygons.')
+                    help='Legacy no-op retained for command-line compatibility.')
     ap.add_argument('--gfv2-asset-proximity', action='store_true',
                     dest='gfv2_asset_proximity',
-                    help='Use the tile-dominant Global Forests v2 polygon type to choose generated vegetation asset types.')
+                    help='Legacy no-op retained for command-line compatibility.')
     ap.add_argument('--no-viz',     action='store_true')
     return ap.parse_args()
 
@@ -2526,9 +2521,12 @@ def main():
         custom_scenery_dir = args.custom_scenery_dir,
         avoid_simheaven_buildings = not args.no_avoid_simheaven_buildings,
         simheaven_building_buffer_m = args.simheaven_building_buffer_m,
-        avoid_gfv2       = not args.no_avoid_gfv2,
-        gfv2_buffer_m    = args.gfv2_buffer_m,
-        use_gfv2_asset_proximity = args.gfv2_asset_proximity,
+        avoid_simheaven_forests = not args.no_avoid_simheaven_forests,
+        simheaven_forest_buffer_m = args.simheaven_forest_buffer_m,
+        use_simheaven_asset_proximity = not args.no_simheaven_asset_proximity,
+        avoid_gfv2       = False,
+        gfv2_buffer_m    = 0.0,
+        use_gfv2_asset_proximity = False,
     )
     print(f"\nDone: {n} vegetation polygons in {(time.time()-t0)/60:.1f}min")
     return n
@@ -2536,4 +2534,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

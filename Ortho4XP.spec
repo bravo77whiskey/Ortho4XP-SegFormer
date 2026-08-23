@@ -44,6 +44,7 @@ added_datas = [
     (os.path.join(SPEC_DIR, "src", "scripts", "__init__.py"),            "sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_overlay.py"),    "sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_veg_overlay.py"),"sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "scripts", "install_gfv2_simheaven_redirects.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_bld_overlay.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_sfr_overlay.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "audit_sfr_building_assets.py"),"sfr_scripts/src/scripts"),

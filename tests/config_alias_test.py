@@ -81,6 +81,13 @@ class ConfigAliasTests(unittest.TestCase):
         tile = CFG.Tile(12, 34, "")
         self.assertFalse(tile.sfr_veg_use_gfv2_asset_proximity)
 
+    def test_simheaven_forest_avoidance_and_proximity_default_on(self):
+        tile = CFG.Tile(12, 34, "")
+
+        self.assertTrue(tile.sfr_veg_avoid_simheaven_forests)
+        self.assertEqual(tile.sfr_veg_simheaven_forest_buffer_m, 0.0)
+        self.assertTrue(tile.sfr_veg_use_simheaven_asset_proximity)
+
     def test_yolo_checkpoint_uses_file_picker_metadata(self):
         tile_var = CFG.cfg_tile_vars["sfr_bld_yolo_checkpoint"]
         global_var = CFG.cfg_global_tile_vars["global_sfr_bld_yolo_checkpoint"]

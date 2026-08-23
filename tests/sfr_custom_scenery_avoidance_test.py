@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 
 import O4_SFR_DSF_Utils as DSF
 import O4_SFR_Building_Overlay as BLD
+import O4_SFR_Vegetation_Overlay as VEG
 
 
 def _write_obj(path: Path):
@@ -90,6 +91,86 @@ class CustomSceneryAvoidanceTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0][0], "Active Pack")
         self.assertTrue(matches[0][1].endswith(os.path.join("+20+120", "+22+120.dsf")))
+
+    def test_simheaven_forest_search_uses_only_enabled_7_forests_pack(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom = Path(tmpdir) / "Custom Scenery"
+            enabled = custom / "simHeaven_X-World_Asia-7-forests"
+            disabled = custom / "simHeaven_X-World_Europe-7-forests"
+            for package in (enabled, disabled):
+                dsf = package / "Earth nav data" / "+20+120" / "+22+120.dsf"
+                dsf.parent.mkdir(parents=True)
+                dsf.write_bytes(b"dsf")
+            (custom / "scenery_packs.ini").write_text(
+                "\n".join(
+                    [
+                        "SCENERY_PACK Custom Scenery/"
+                        "simHeaven_X-World_Asia-7-forests/",
+                        "SCENERY_PACK_DISABLED Custom Scenery/"
+                        "simHeaven_X-World_Europe-7-forests/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            matches = DSF.find_simheaven_forest_dsfs(custom, 22, 120)
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0][0], enabled.name)
+
+    def test_simheaven_forest_parser_keeps_all_families_for_overlap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            dsf = tmp / "+22+120.dsf"
+            dsf.write_bytes(b"dsf")
+            text = tmp / "+22+120.txt"
+            text.write_text(
+                "\n".join(
+                    [
+                        "POLYGON_DEF simheaven/forests/broad.for",
+                        "POLYGON_DEF simheaven/forests/orchard.for",
+                        "BEGIN_POLYGON 0 255 2",
+                        "BEGIN_WINDING",
+                        "POLYGON_POINT 120.1 22.1",
+                        "POLYGON_POINT 120.2 22.1",
+                        "POLYGON_POINT 120.2 22.2",
+                        "END_WINDING",
+                        "END_POLYGON",
+                        "BEGIN_POLYGON 1 180 2",
+                        "BEGIN_WINDING",
+                        "POLYGON_POINT 120.3 22.3",
+                        "POLYGON_POINT 120.4 22.3",
+                        "POLYGON_POINT 120.4 22.4",
+                        "END_WINDING",
+                        "END_POLYGON",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                VEG,
+                "ensure_cached_dsf_text",
+                return_value=str(text),
+            ), mock.patch.object(
+                VEG.PCACHE,
+                "load_or_build",
+                side_effect=lambda _path, _cache, _kind, build, **_kwargs: build(),
+            ):
+                records = VEG._load_forest_polygons(
+                    "simHeaven X-World",
+                    [("simHeaven_X-World_Asia-7-forests", str(dsf))],
+                    "DSFTool.exe",
+                    tmpdir,
+                )
+
+        self.assertEqual(
+            [record["path"] for record in records],
+            [
+                "simheaven/forests/broad.for",
+                "simheaven/forests/orchard.for",
+            ],
+        )
 
     def test_obj8_bounds_and_library_resolution(self):
         with tempfile.TemporaryDirectory() as tmpdir:

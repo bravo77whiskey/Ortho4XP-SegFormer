@@ -219,7 +219,7 @@ def _grid_bytes():
 
 
 def latitude_band_region(lat):
-    """Return the legacy GFv2 latitude-band region."""
+    """Return the legacy latitude-band forest region."""
     a = abs(lat)
     if a < 15:
         return "tropical"
@@ -251,7 +251,7 @@ def koppen_code(lat, lon):
 
 
 def forest_region_for_koppen(class_id, lat):
-    """Map a Koppen class id to the existing GFv2 forest asset region names."""
+    """Map a Koppen class id to the vegetation climate-region names."""
     entry = KOPPEN_CLASSES.get(class_id)
     if not entry:
         return latitude_band_region(lat)
@@ -283,5 +283,5 @@ def forest_region_for_koppen(class_id, lat):
 
 
 def forest_region_for_latlon(lat, lon):
-    """Return the GFv2 forest region selected from real Koppen climate data."""
+    """Return the forest region selected from real Koppen climate data."""
     return forest_region_for_koppen(koppen_class_id(lat, lon), lat)

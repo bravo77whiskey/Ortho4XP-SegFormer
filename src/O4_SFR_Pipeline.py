@@ -214,7 +214,10 @@ sfr_veg_excl_buffer_m = 5.0
 sfr_veg_use_simheaven = True
 sfr_veg_avoid_simheaven_buildings = True
 sfr_veg_simheaven_building_buffer_m = 10.0
-sfr_veg_avoid_gfv2    = True
+sfr_veg_avoid_simheaven_forests = True
+sfr_veg_simheaven_forest_buffer_m = 0.0
+sfr_veg_use_simheaven_asset_proximity = True
+sfr_veg_avoid_gfv2    = False
 sfr_veg_gfv2_buffer_m = 0.0
 sfr_veg_use_gfv2_asset_proximity = False
 sfr_veg_res_m         = 0.0     # 0 = native DDS resolution
@@ -486,7 +489,7 @@ def _auto_setup():
 
 
 def process_veg_tile(lat, lon, build_dir):
-    """Run SegFormer+GFv2 vegetation overlay for one tile in the .venv subprocess."""
+    """Run the simHeaven-asset SegFormer vegetation overlay for one tile."""
     print(f"[SFR Veg] Starting for tile +{lat:02d}+{lon:03d} …", flush=True)
     tex_dir   = os.path.join(build_dir, 'textures')
     cache_dir = _sfr_cache_dir(lat, lon)
@@ -534,9 +537,9 @@ def process_veg_tile(lat, lon, build_dir):
         f"    use_simheaven    = {sfr_veg_use_simheaven!r},\n"
         f"    avoid_simheaven_buildings = {sfr_veg_avoid_simheaven_buildings!r},\n"
         f"    simheaven_building_buffer_m = {sfr_veg_simheaven_building_buffer_m!r},\n"
-        f"    avoid_gfv2       = {sfr_veg_avoid_gfv2!r},\n"
-        f"    gfv2_buffer_m    = {sfr_veg_gfv2_buffer_m!r},\n"
-        f"    use_gfv2_asset_proximity = {sfr_veg_use_gfv2_asset_proximity!r},\n"
+        f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"
+        f"    simheaven_forest_buffer_m = {sfr_veg_simheaven_forest_buffer_m!r},\n"
+        f"    use_simheaven_asset_proximity = {sfr_veg_use_simheaven_asset_proximity!r},\n"
         f"    bld_excl_m       = {0.0 if sfr_veg_disable_cache else 10.0!r},\n"
         f"    dsftool_path     = {dsftool!r},\n"
         f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
