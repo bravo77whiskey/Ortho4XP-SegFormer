@@ -71,6 +71,7 @@ def test_large_footprint_height_cap_feeds_facade_height():
                 "placement_class": overlay.BLD_CLASS_APARTMENT_BLOCK,
                 "area_m2": 8_000.0,
                 "max_side_m": 120.0,
+                "height_landcover_class": overlay._SF_BARELAND,
             },
             80.0,
         ),
@@ -83,6 +84,14 @@ def test_large_footprint_height_cap_feeds_facade_height():
         {},
         overlay.BLD_CLASS_LARGE,
     ) == overlay.LARGE_FOOTPRINT_HEIGHT_CAP_M
+
+    assert overlay._capped_detection_height_m(
+        {
+            "placement_class": overlay.BLD_CLASS_LARGE,
+            "height_landcover_class": overlay._SF_DEVELOPED,
+        },
+        80.0,
+    ) == 80.0
 
 
 def test_direct_yolo_facade_rejects_oversized_raw_footprint():

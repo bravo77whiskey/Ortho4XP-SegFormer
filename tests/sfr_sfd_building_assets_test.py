@@ -401,17 +401,68 @@ class SfdBuildingAssetTests(unittest.TestCase):
             9.0,
         )
 
-    def test_heightnet_caps_large_footprint_detection_heights_only(self):
+    def test_regional_height_fallback_replaces_only_class_defaults(self):
+        detections = [
+            {
+                "height_m": 7.0,
+                "height_source": "class_default",
+                "placement_class": BLD.BLD_CLASS_MEDIUM,
+            },
+            {
+                "height_m": 18.0,
+                "height_source": "height_bins",
+                "placement_class": BLD.BLD_CLASS_MEDIUM,
+            },
+        ]
+
+        BLD._apply_regional_height_fallbacks(detections, "africa")
+
+        prior = BLD.HEIGHTPRIORS.height_prior("africa", BLD.BLD_CLASS_MEDIUM)
+        self.assertAlmostEqual(detections[0]["height_m"], prior.median_m)
+        self.assertEqual(detections[0]["height_source"], "regional_class_default")
+        self.assertEqual(detections[0]["height_prior_region"], "africa")
+        self.assertEqual(detections[1]["height_m"], 18.0)
+        self.assertEqual(detections[1]["height_source"], "height_bins")
+
+    def test_unknown_region_uses_generic_height_prior(self):
+        detection = {
+            "height_m": 7.0,
+            "height_source": "class_default",
+            "placement_class": BLD.BLD_CLASS_SMALL_RESIDENTIAL,
+        }
+
+        BLD._apply_regional_height_fallbacks([detection], "not-a-region")
+
+        prior = BLD.HEIGHTPRIORS.height_prior(
+            "generic", BLD.BLD_CLASS_SMALL_RESIDENTIAL
+        )
+        self.assertAlmostEqual(detection["height_m"], prior.median_m)
+        self.assertEqual(detection["height_prior_region"], "generic")
+
+    def test_dominant_detection_landcover_ignores_buildings_and_background(self):
+        veg_map = np.full((9, 9), BLD._SF_BUILDING, dtype=np.int16)
+        veg_map[1:8, 1:8] = BLD._SF_BARELAND
+        veg_map[4, 4] = 0
+
+        dominant = BLD._dominant_detection_landcover(
+            veg_map, 4, 4, m_per_px=20.0
+        )
+
+        self.assertEqual(dominant, BLD._SF_BARELAND)
+
+    def test_heightnet_uses_regional_limits_and_contextual_industrial_cap(self):
         detections = [
             {
                 "height_m": 8.0,
                 "height_source": "class_default",
                 "placement_class": BLD.BLD_CLASS_LARGE,
+                "center": (2.0, 2.0),
             },
             {
                 "height_m": 10.0,
                 "height_source": "class_default",
                 "placement_class": BLD.BLD_CLASS_EXTRA_LARGE,
+                "center": (5.0, 5.0),
             },
             {
                 "height_m": 12.0,
@@ -419,6 +470,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 "placement_class": BLD.BLD_CLASS_APARTMENT_BLOCK,
                 "area_m2": 1_200.0,
                 "max_side_m": 45.0,
+                "center": (5.0, 2.0),
             },
             {
                 "height_m": 13.0,
@@ -426,13 +478,17 @@ class SfdBuildingAssetTests(unittest.TestCase):
                 "placement_class": BLD.BLD_CLASS_APARTMENT_BLOCK,
                 "area_m2": 8_000.0,
                 "max_side_m": 120.0,
+                "center": (2.0, 5.0),
             },
             {
                 "height_m": 14.0,
                 "height_source": "class_default",
                 "placement_class": BLD.BLD_CLASS_LARGE,
+                "center": (4.0, 4.0),
             },
         ]
+        veg_map = np.full((8, 8), BLD._SF_DEVELOPED, dtype=np.int16)
+        veg_map[:4, :4] = BLD._SF_BARELAND
 
         with mock.patch.object(
             BLD.HEIGHTMODEL,
@@ -442,18 +498,69 @@ class SfdBuildingAssetTests(unittest.TestCase):
             ),
         ):
             BLD._apply_heightnet_to_detections(
-                object(), np.zeros((8, 8, 3), dtype=np.uint8), detections, 1.0
+                object(),
+                np.zeros((8, 8, 3), dtype=np.uint8),
+                detections,
+                20.0,
+                region="europe",
+                veg_map=veg_map,
             )
 
         self.assertEqual(detections[0]["height_raw_m"], 80.0)
         self.assertEqual(detections[0]["height_m"], BLD.LARGE_FOOTPRINT_HEIGHT_CAP_M)
         self.assertEqual(detections[0]["height_source"], "heightnet")
-        self.assertEqual(detections[1]["height_m"], BLD.LARGE_FOOTPRINT_HEIGHT_CAP_M)
-        self.assertEqual(detections[2]["height_m"], 80.0)
-        self.assertEqual(detections[3]["height_m"], BLD.LARGE_FOOTPRINT_HEIGHT_CAP_M)
+        self.assertEqual(
+            detections[1]["height_m"],
+            BLD.HEIGHTPRIORS.height_prior(
+                "europe", BLD.BLD_CLASS_EXTRA_LARGE
+            ).hard_ceiling_m,
+        )
+        self.assertEqual(
+            detections[2]["height_m"],
+            BLD.HEIGHTPRIORS.height_prior(
+                "europe", BLD.BLD_CLASS_APARTMENT_BLOCK
+            ).hard_ceiling_m,
+        )
+        self.assertEqual(
+            detections[3]["height_m"],
+            BLD.HEIGHTPRIORS.height_prior(
+                "europe", BLD.BLD_CLASS_APARTMENT_BLOCK
+            ).hard_ceiling_m,
+        )
         self.assertNotIn("height_raw_m", detections[4])
         self.assertEqual(detections[4]["height_m"], 14.0)
         self.assertEqual(detections[4]["height_source"], "class_default")
+
+    def test_heightnet_softly_reduces_only_p95_excess(self):
+        class_id = BLD.BLD_CLASS_TINY_RESIDENTIAL
+        prior = BLD.HEIGHTPRIORS.height_prior("europe", class_id)
+        raw_above_p95 = prior.p95_m + 4.0
+        detections = [
+            {"placement_class": class_id, "height_m": 3.0},
+            {"placement_class": class_id, "height_m": 3.0},
+        ]
+
+        with mock.patch.object(
+            BLD.HEIGHTMODEL,
+            "predict_detection_heights",
+            return_value=np.asarray(
+                [prior.p95_m - 1.0, raw_above_p95], dtype=np.float64
+            ),
+        ):
+            BLD._apply_heightnet_to_detections(
+                object(),
+                np.zeros((8, 8, 3), dtype=np.uint8),
+                detections,
+                1.0,
+                region="europe",
+            )
+
+        self.assertAlmostEqual(detections[0]["height_m"], prior.p95_m - 1.0)
+        self.assertAlmostEqual(
+            detections[1]["height_m"],
+            prior.p95_m + 4.0 * BLD.HEIGHTPRIORS.P95_EXCESS_RETAIN,
+        )
+        self.assertEqual(detections[1]["height_adjustment"], "soft_p95")
 
     def test_pipeline_yolo_defaults_match_config_defaults(self):
         import O4_Cfg_Vars as CFG

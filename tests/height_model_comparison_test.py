@@ -22,7 +22,12 @@ class HeightModelComparisonTests(unittest.TestCase):
     def test_final_heights_apply_floor_and_large_footprint_cap(self):
         detections = [
             {"placement_class": 0, "area_m2": 80.0, "max_side_m": 12.0},
-            {"placement_class": 4, "area_m2": 4_000.0, "max_side_m": 90.0},
+            {
+                "placement_class": 4,
+                "area_m2": 4_000.0,
+                "max_side_m": 90.0,
+                "height_landcover_class": COMPARE.BLD._SF_BARELAND,
+            },
         ]
 
         final, floored, capped = COMPARE.finalize_heights(

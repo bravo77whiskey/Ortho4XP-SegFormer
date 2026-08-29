@@ -43,6 +43,7 @@ import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
 import O4_SFR_Roof_Color as ROOFCOLOR
 import O4_SFR_Height_Model as HEIGHTMODEL
+import O4_SFR_Height_Priors as HEIGHTPRIORS
 import O4_SFR_Texture_Selection as TEXSEL
 from O4_SFR_Texture_Selection import compute_covered_fractions
 from O4_SFR_DSF_Utils import (
@@ -2649,9 +2650,8 @@ FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce o
 # Tallest generated/pooled non-skyscraper asset (procgen floors <= 12 at
 # 3.2 m). Gates which library assets may pool.
 MAX_GENERATED_BUILDING_HEIGHT_M = 40.0
-# Large-footprint detections are warehouse/industrial-scale. Modern warehouse
-# clear heights cluster around 32-40 ft; 16 m leaves room for roof structure
-# while preventing HeightNet outliers from becoming tower-height warehouses.
+# Large footprints in bareland or agricultural context are likely warehouses
+# or industrial sheds. The cap does not apply to equally large urban buildings.
 LARGE_FOOTPRINT_HEIGHT_CAP_M = 16.0
 # Upper footprint gate for raw YOLO detections (hard drop in inference prep,
 # and the plausibility test for the direct-OBB facade fallback). It is no
@@ -2691,8 +2691,8 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 69      # v69: large-detection evidence gate
-BLD_PLACEMENT_FAST_CACHE_VERSION = 71  # v71: large-detection evidence gate
+BLD_PLACEMENT_CACHE_VERSION = 70      # v70: regional height regularization
+BLD_PLACEMENT_FAST_CACHE_VERSION = 72  # v72: regional height regularization
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -3145,6 +3145,7 @@ _SF_TREE        = 5
 _SF_WATER       = 6
 _SF_AGRICULTURE = 7
 _SF_BUILDING    = 8
+_INDUSTRIAL_HEIGHT_LANDCOVER = frozenset((_SF_BARELAND, _SF_AGRICULTURE))
 
 # simHeaven facade library group exports (resolve to a pool of variants at sim load time)
 _SH_RESIDENTIAL = "simheaven/facades/residential.fac"
@@ -3287,6 +3288,29 @@ CONTEXT_FACADE_VARIANTS = {
 }
 
 
+def _dominant_detection_landcover(veg_map, jx, jy, m_per_px):
+    """Return dominant non-building landcover in a 50 m center window."""
+    if veg_map is None or not getattr(veg_map, "size", 0):
+        return None
+    h, w = veg_map.shape[:2]
+    jx, jy = int(jx), int(jy)
+    if not (0 <= jx < w and 0 <= jy < h):
+        return None
+    r = max(1, int(50.0 / max(float(m_per_px), 0.1)))
+    y0, y1 = max(0, jy - r), min(h, jy + r + 1)
+    x0, x1 = max(0, jx - r), min(w, jx + r + 1)
+    arr = np.asarray(veg_map[y0:y1, x0:x1], dtype=np.int64).ravel()
+    arr = arr[(arr >= 0) & (arr < 9)]
+    if not arr.size:
+        return None
+    counts = np.bincount(arr, minlength=9)
+    counts[_SF_BUILDING] = 0
+    counts[0] = 0
+    if counts.sum() <= 0:
+        return None
+    return int(counts.argmax())
+
+
 def _facade_for_detection(facade_cls, veg_map, jx, jy, m_per_px,
                           lat=0.0, lon=0.0, include_simheaven_assets=True):
     """Pick a facade lib path for a YOLO detection using SegFormer landcover context.
@@ -3296,27 +3320,8 @@ def _facade_for_detection(facade_cls, veg_map, jx, jy, m_per_px,
     CONTEXT_FACADE_VARIANTS. Falls back to DEFAULT_FACADE_VARIANTS_BY_CLASS.
     Variant within the pool is chosen by a stable hash so identical detections
     always pick the same path."""
-    variants = None
-    if veg_map is not None and veg_map.size:
-        h, w = veg_map.shape[:2]
-        if 0 <= jx < w and 0 <= jy < h:
-            r = max(1, int(50.0 / max(float(m_per_px), 0.1)))
-            y0 = max(0, jy - r); y1 = min(h, jy + r + 1)
-            x0 = max(0, jx - r); x1 = min(w, jx + r + 1)
-            win = veg_map[y0:y1, x0:x1]
-            if win.size:
-                # SegFormer can emit negative ignore-indices (-100, -1) and
-                # out-of-range labels at padded edges; drop them before
-                # bincount, which requires non-negative inputs.
-                arr = np.asarray(win, dtype=np.int64).ravel()
-                arr = arr[(arr >= 0) & (arr < 9)]
-                if arr.size:
-                    counts = np.bincount(arr, minlength=9)
-                    counts[_SF_BUILDING] = 0
-                    counts[0] = 0  # ignore background
-                    if counts.sum() > 0:
-                        dominant = int(counts.argmax())
-                        variants = CONTEXT_FACADE_VARIANTS.get((facade_cls, dominant))
+    dominant = _dominant_detection_landcover(veg_map, jx, jy, m_per_px)
+    variants = CONTEXT_FACADE_VARIANTS.get((facade_cls, dominant))
     if variants and not include_simheaven_assets:
         variants = tuple(
             path for path in variants
@@ -4099,8 +4104,14 @@ def _yolo_facade_height_m(detection, rng, height_priors_by_class, placement_cls)
 
 
 def _capped_detection_height_m(detection, height_m):
-    """Clamp warehouse/industrial-scale detection heights to realistic boxes."""
+    """Apply the 16 m large-footprint cap in industrial landcover only."""
     height_m = float(height_m)
+    try:
+        landcover_class = int(detection.get('height_landcover_class'))
+    except (AttributeError, TypeError, ValueError):
+        landcover_class = None
+    if landcover_class not in _INDUSTRIAL_HEIGHT_LANDCOVER:
+        return height_m
     try:
         placement_cls = int(detection.get('placement_class'))
     except (AttributeError, TypeError, ValueError):
@@ -4134,6 +4145,20 @@ def _detection_footprint_metrics_m(detection):
         area_m2 = length_m * width_m
     max_side_m = max(max_side_m, length_m, width_m)
     return area_m2, max_side_m
+
+
+def _detection_height_prior_class(detection):
+    """Return a C1-C8 class for regional height lookup."""
+    try:
+        placement_cls = int(detection.get('placement_class'))
+    except (AttributeError, TypeError, ValueError):
+        placement_cls = None
+    if placement_cls in BLD_PLACEMENT_CLASSES:
+        return placement_cls
+    area_m2, max_side_m = _detection_footprint_metrics_m(detection)
+    if area_m2 > 0.0 and max_side_m > 0.0:
+        return _roof_fragment_class(area_m2, max_side_m, 1.0)
+    return BLD_CLASS_MEDIUM
 
 
 def _direct_yolo_raw_footprint_allowed(detection):
@@ -6700,14 +6725,41 @@ def _append_yolo_result_detections(
         del corners, xywhr, confs, classes, corners_tensor, xywhr_tensor, obb, result
 
 
-def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
-    """Overwrite detection heights with HeightNet predictions.
+def _apply_regional_height_fallbacks(detections, region):
+    """Replace global class defaults with regional median heights."""
+    for detection in detections or ():
+        if detection.get('height_source') != 'class_default':
+            continue
+        prior = HEIGHTPRIORS.height_prior(
+            region, _detection_height_prior_class(detection)
+        )
+        detection['height_m'] = float(prior.median_m)
+        detection['height_source'] = 'regional_class_default'
+        detection['height_prior_region'] = prior.region
 
-    Detections whose window/scalars cannot be built keep their decoded or
-    class-default height. Large warehouse/industrial-scale footprints get a
-    realistic ceiling so over-predictions do not extrude giant facades or skew
-    floor-variant ranking; smaller classes keep the raw HeightNet height.
-    """
+
+def _detection_center_px(detection):
+    """Return a detection center without requiring prepared placement state."""
+    try:
+        center = detection.get('center')
+        if center is not None and len(center) >= 2:
+            return int(round(float(center[0]))), int(round(float(center[1])))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        points = np.asarray(detection.get('points'), dtype=np.float64).reshape(-1, 2)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not points.size or not np.isfinite(points).all():
+        return None
+    center = points.mean(axis=0)
+    return int(round(float(center[0]))), int(round(float(center[1])))
+
+
+def _apply_heightnet_to_detections(
+    height_model, image, detections, m_per_px, *, region='generic', veg_map=None
+):
+    """Apply HeightNet with regional soft limits and contextual hard caps."""
     if height_model is None or not detections or image is None:
         return
     heights = HEIGHTMODEL.predict_detection_heights(
@@ -6718,9 +6770,29 @@ def _apply_heightnet_to_detections(height_model, image, detections, m_per_px):
         height = float(height)
         if not math.isfinite(height):
             continue
+        center = _detection_center_px(det)
+        if center is not None:
+            landcover_class = _dominant_detection_landcover(
+                veg_map, center[0], center[1], m_per_px
+            )
+            if landcover_class is not None:
+                det['height_landcover_class'] = landcover_class
+        prior = HEIGHTPRIORS.height_prior(
+            region, _detection_height_prior_class(det)
+        )
+        adjusted_height, adjustment = HEIGHTPRIORS.regularize_height_m(
+            max(height, lo), prior
+        )
+        capped_height = _capped_detection_height_m(det, adjusted_height)
+        if capped_height < adjusted_height - 1e-9:
+            adjustment = 'industrial_cap'
         det['height_raw_m'] = round(height, 3)
-        det['height_m'] = float(_capped_detection_height_m(det, max(height, lo)))
+        det['height_m'] = float(capped_height)
         det['height_source'] = 'heightnet'
+        det['height_prior_region'] = prior.region
+        det['height_prior_p95_m'] = float(prior.p95_m)
+        det['height_hard_ceiling_m'] = float(prior.hard_ceiling_m)
+        det['height_adjustment'] = adjustment
 
 
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
@@ -10410,6 +10482,9 @@ def run(
             roof_color_matching_active,
             asset_catalog_signature,
             height_priors_signature,
+            HEIGHTPRIORS.POLICY_VERSION,
+            HEIGHTPRIORS.P95_EXCESS_RETAIN,
+            LARGE_FOOTPRINT_HEIGHT_CAP_M,
             natural_asset_region,
             simheaven_package_region,
             effective_asset_region,
@@ -11368,6 +11443,10 @@ def run(
             yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
+            _apply_regional_height_fallbacks(
+                yolo_detections, natural_asset_region
+            )
+
             if yolo_detections and height_model is not None:
                 # Lazy HeightNet: heights are consumed only inside object
                 # candidate selection and the facade fallback, both of which
@@ -11423,7 +11502,12 @@ def run(
                             )
                     if _height_img is not None:
                         _apply_heightnet_to_detections(
-                            height_model, _height_img, _height_dets, m_per_px
+                            height_model,
+                            _height_img,
+                            _height_dets,
+                            m_per_px,
+                            region=natural_asset_region,
+                            veg_map=veg_map,
                         )
                         if (
                             roof_color_image is None and
@@ -12939,4 +13023,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
