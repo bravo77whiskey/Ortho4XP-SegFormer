@@ -709,7 +709,7 @@ def build_mesh(tile):
     time.sleep(0.3)
     fingers_crossed.poll()
     UI.unregister_subprocess(fingers_crossed)
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line()
         return 0
     if fingers_crossed.returncode:
@@ -750,7 +750,7 @@ def build_mesh(tile):
             time.sleep(0.3)
             fingers_crossed.poll()
             UI.unregister_subprocess(fingers_crossed)
-            if UI.red_flag:
+            if UI.stop_requested():
                 UI.exit_message_and_bottom_line()
                 return 0
             if fingers_crossed.returncode == 0:
@@ -767,13 +767,13 @@ def build_mesh(tile):
             )
             return 0
 
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line()
         return 0
 
     vertices = post_process_nodes_altitudes(tile)
 
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line()
         return 0
 

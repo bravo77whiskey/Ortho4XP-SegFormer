@@ -216,7 +216,9 @@ def build_masks(tile, for_imagery=False):
     UI.logprint(
         "Step 2.5 for tile lat=", tile.lat, ", lon=", tile.lon, ": normal exit."
     )
-    return
+    # 1 on success like every other build_* step, so callers (the batch
+    # journal among them) can tell a finished run from an aborted one.
+    return 1
 ################################################################################
     
 ################################################################################
@@ -468,7 +470,7 @@ def record_water_tris(tile):
             if i % step_stones == 0:
                 percent += 1
                 UI.progress_bar(1, int(percent * 5 / 10))
-                if UI.red_flag:
+                if UI.stop_requested():
                     UI.exit_message_and_bottom_line()
                     return 0
             (n1, n2, n3, tri_type) = [
@@ -599,7 +601,7 @@ def record_water_tris(tile):
                 if i % step_stones == 0:
                     percent += 1
                     UI.progress_bar(1, int(percent * 5 / 10))
-                    if UI.red_flag:
+                    if UI.stop_requested():
                         UI.exit_message_and_bottom_line()
                         return 0
                 (n1, n2, n3, tri_type) = [

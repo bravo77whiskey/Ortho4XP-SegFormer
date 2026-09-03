@@ -13,6 +13,9 @@ class parallel_worker(threading.Thread):
     def run(self):
         while True:
             args = self._queue.get()
+            # Park here rather than mid-task, so a pause never lands halfway
+            # through a mask or a DDS conversion.
+            UI.check_pause()
             if isinstance(args, str) and args == "quit":
                 try:
                     UI.progress_bar(self._progress["bar"], 100)

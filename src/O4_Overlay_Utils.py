@@ -107,7 +107,7 @@ def build_overlay(lat, lon):
         else:
             UI.vprint(1, "     " + line.decode("utf-8")[:-1])
     UI.unregister_subprocess(fingers_crossed)
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line()
         return 0
     if fingers_crossed.returncode:
@@ -213,7 +213,7 @@ def build_overlay(lat, lon):
         else:
             print("     " + line.decode("utf-8")[:-1])
     UI.unregister_subprocess(fingers_crossed)
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line()
         return 0
     dest_dir = os.path.join(

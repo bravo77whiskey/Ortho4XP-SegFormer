@@ -1577,7 +1577,7 @@ def download_jpeg_ortho(
             [xmin, ymax, xmax, ymin], "3857", (width, height), provider
         )
     # if stop flag we do not wish to imprint a white texture
-    if UI.red_flag:
+    if UI.stop_requested():
         return 0
     if not success:
         UI.lvprint(
@@ -1954,7 +1954,7 @@ def build_geotiffs(tile, texture_attributes_list):
             )
         done += 1
         UI.progress_bar(1, int(100 * done / todo))
-        if UI.red_flag:
+        if UI.stop_requested():
             UI.exit_message_and_bottom_line()
     UI.timings_and_bottom_line(timer)
     return

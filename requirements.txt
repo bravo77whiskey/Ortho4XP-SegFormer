@@ -3,6 +3,8 @@ pillow==12.0.0
 opencv-python==4.10.0.84
 pyproj==3.7.2
 requests==2.32.5
+# psutil suspends/resumes external worker process trees when a build is paused
+psutil>=5.9.0
 Rtree==1.4.1
 shapely==2.1.2
 scikit-fmm==2025.6.23

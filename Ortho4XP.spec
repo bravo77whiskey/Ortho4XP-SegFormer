@@ -95,6 +95,9 @@ hidden = [
     "PIL._tkinter_finder",
     # pyproj internals (hook handles CRS data automatically)
     "pyproj.datadir",
+    # psutil: imported lazily by O4_UI_Utils to suspend/resume the external
+    # worker trees (Triangle4XP, DSFTool, the SFR .venv python) on Pause.
+    "psutil",
     # Shapely geometry types
     "shapely.geometry",
     "shapely.ops",
@@ -107,6 +110,7 @@ hidden = [
     "O4_Mesh_Utils",
     "O4_Mask_Utils",
     "O4_Tile_Utils",
+    "O4_Build_State",
     "O4_GUI_Utils",
     "O4_Config_Utils",
     "O4_Cfg_Vars",

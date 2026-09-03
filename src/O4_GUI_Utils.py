@@ -48,6 +48,7 @@ import O4_PBF_Utils as PBF
 import O4_SFR_Pipeline as SFR
 import O4_SFR_Remote as SFR_REMOTE
 import O4_Scenery_Links as SLINK
+import O4_Build_State as BSTATE
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
@@ -259,20 +260,29 @@ class Ortho4XP_GUI(tk.Tk):
             command=self.open_earth_window,
             style="Flat.TButton",
         ).grid(row=0, column=11, rowspan=2, padx=5, pady=0)
+        self.pause_button = ttk.Button(
+            self.frame_tile,
+            takefocus=False,
+            text="Pause",
+            width=7,
+            command=self.toggle_pause,
+            style="Flat.TButton",
+        )
+        self.pause_button.grid(row=0, column=12, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.stop_icon,
             command=self.set_red_flag,
             style="Flat.TButton",
-        ).grid(row=0, column=12, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.exit_icon,
             command=self.exit_prg,
             style="Flat.TButton",
-        ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=14, rowspan=2, padx=5, pady=0)
 
         # Third row (Steps)
         for i in range(7):
@@ -401,6 +411,25 @@ class Ortho4XP_GUI(tk.Tk):
         # again which is redundant as that's already been done in O4_Config_Utils
         self.load_tile_cfg(int(self.lat.get()), int(self.lon.get()))
 
+        self.announce_unfinished_batch()
+
+    def announce_unfinished_batch(self):
+        """Say so on startup when a batch build was left half done.
+
+        The tile selection dies with the Tiles window, so without this the
+        only clue would be finding the Resume Build button by accident.
+        """
+        state = BSTATE.resumable()
+        if state is None:
+            return
+        pending = BSTATE.pending_tiles(state)
+        UI.vprint(
+            0,
+            "\nAn unfinished batch build is on record: %d tile(s) still to "
+            "go.\nOpen the Tiles Collection window and press 'Resume Build' "
+            "to carry on.\n" % len(pending),
+        )
+
     # GUI methods
     def write(self, line):
         self.console_queue.put(line)
@@ -429,7 +458,17 @@ class Ortho4XP_GUI(tk.Tk):
                 self.pgrbv[nbr].set(value)
         except queue.Empty:
             pass
+        self.refresh_pause_button()
         self.callback_pgrb = self.after(100, self.pgrb_update)
+
+    def refresh_pause_button(self):
+        """Label follows UI.paused, which Stop and window close also clear."""
+        try:
+            wanted = "Resume" if UI.is_paused() else "Pause"
+            if self.pause_button.cget("text") != wanted:
+                self.pause_button.config(text=wanted)
+        except Exception:
+            pass
 
     def tile_change(self, *args):
         """Load tile configuration on tile change."""
@@ -868,11 +907,23 @@ class Ortho4XP_GUI(tk.Tk):
             self.osm_data_window = Ortho4XP_OSM_Data_Manager(self)
             return 1
 
+    def toggle_pause(self):
+        """Freeze the running build where it stands, or let it carry on.
+
+        Pausing is allowed with nothing running: the next build then starts
+        paused, which the button's "Resume" label makes plain.
+        """
+        UI.toggle_pause()
+        self.refresh_pause_button()
+
     def set_red_flag(self):
         UI.red_flag = True
         # External workers (SFR .venv python, Triangle4XP, DSFTool) never see
         # red_flag — kill them (and their children) directly.
+        # kill_all_subprocesses() lifts any pause first, so a paused build
+        # unblocks and reaches its own red_flag test.
         UI.kill_all_subprocesses()
+        self.refresh_pause_button()
 
     def exit_prg(self) -> None:
         """Close the Ortho4XP application."""
@@ -2081,6 +2132,16 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "SegFormer Veg",
         "Override tile configs",
     ]
+    # Journal step keys -> the checkbutton that drives them.
+    step_ckbtn = {
+        "osm": "Assemble vector data",
+        "mesh": "Triangulate 3D mesh",
+        "mask": "Draw water masks",
+        "dsf": "Build imagery/DSF",
+        "ovl": "Extract overlays",
+        "sfr_bld": "SegFormer Bld",
+        "sfr_veg": "SegFormer Veg",
+    }
 
     canvas_min_x = 900
     canvas_min_y = 700
@@ -2175,6 +2236,12 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             row += 1
         ttk.Button(
             self.frame_left, text="  Batch Build   ", command=self.batch_build
+        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        row += 1
+        ttk.Button(
+            self.frame_left,
+            text=" Resume Build   ",
+            command=self.resume_build,
         ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row += 1
         ttk.Button(
@@ -2767,21 +2834,27 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         self.add_symlink(lat, lon)
         return
 
+    def mark_tile_todo(self, lat, lon):
+        """Draw the red 'to do' square over a tile, if it has none yet."""
+        if (lat, lon) in self.dico_tiles_todo:
+            return
+        [x0, y0] = GEO.wgs84_to_pix(lat + 1, lon, self.earthzl)
+        [x1, y1] = GEO.wgs84_to_pix(lat, lon + 1, self.earthzl)
+        if not OsX:
+            self.dico_tiles_todo[(lat, lon)] = self.canvas.create_rectangle(
+                x0, y0, x1, y1, fill="red", stipple="gray12"
+            )
+        else:
+            self.dico_tiles_todo[(lat, lon)] = self.canvas.create_rectangle(
+                x0 + 2, y0 + 2, x1 - 2, y1 - 2, outline="red", width=1
+            )
+
     def add_tile(self, event):
         x = self.canvas.canvasx(event.x)
         y = self.canvas.canvasy(event.y)
         (lat, lon) = [floor(t) for t in GEO.pix_to_wgs84(x, y, self.earthzl)]
         if (lat, lon) not in self.dico_tiles_todo:
-            [x0, y0] = GEO.wgs84_to_pix(lat + 1, lon, self.earthzl)
-            [x1, y1] = GEO.wgs84_to_pix(lat, lon + 1, self.earthzl)
-            if not OsX:
-                self.dico_tiles_todo[(lat, lon)] = self.canvas.create_rectangle(
-                    x0, y0, x1, y1, fill="red", stipple="gray12"
-                )
-            else:
-                self.dico_tiles_todo[(lat, lon)] = self.canvas.create_rectangle(
-                    x0 + 2, y0 + 2, x1 - 2, y1 - 2, outline="red", width=1
-                )
+            self.mark_tile_todo(lat, lon)
         else:
             self.canvas.delete(self.dico_tiles_todo[(lat, lon)])
             self.dico_tiles_todo.pop((lat, lon), None)
@@ -2801,6 +2874,57 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         if not list_lat_lon:
             UI.vprint(1, "Unable to batch build: No tiles selected.")
             return
+        steps = self.selected_steps()
+        override_cfg = bool(self.v_["Override tile configs"].get())
+        resume = self.confirm_resume(list_lat_lon, steps, override_cfg)
+        if resume is None:
+            return
+        self.launch_batch(list_lat_lon, steps, override_cfg, resume)
+        return
+
+    def selected_steps(self):
+        return {
+            step: bool(self.v_[label].get())
+            for step, label in self.step_ckbtn.items()
+        }
+
+    def confirm_resume(self, list_lat_lon, steps, override_cfg):
+        """Decide what to do about a journal left over from an earlier run.
+
+        Returns True to resume it, False to build from scratch, or None when
+        the user backed out - never silently discards unfinished progress.
+        """
+        state = BSTATE.resumable()
+        if state is None:
+            return False
+        if BSTATE.matches(
+            state, list_lat_lon, steps, self.custom_build_dir, override_cfg
+        ):
+            answer = messagebox.askyesnocancel(
+                "Resume batch build",
+                "This exact batch was interrupted before it finished.\n\n"
+                + BSTATE.describe(state)
+                + "\n\nResume where it stopped (Yes), or build every tile "
+                "again from the start (No)?",
+                parent=self,
+            )
+            if answer is None:
+                return None
+            if not answer:
+                BSTATE.discard()
+            return bool(answer)
+        if not messagebox.askyesno(
+            "Resume batch build",
+            "A different batch build was left unfinished:\n\n"
+            + BSTATE.describe(state)
+            + "\n\nStarting this batch discards that progress. Carry on?",
+            parent=self,
+        ):
+            return None
+        BSTATE.discard()
+        return False
+
+    def launch_batch(self, list_lat_lon, steps, override_cfg, resume):
         (lat, lon) = list_lat_lon[0]
         try:
             tile = CFG.Tile(lat, lon, self.custom_build_dir)
@@ -2810,18 +2934,62 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         args = [
             tile,
             list_lat_lon,
-            self.v_["Assemble vector data"].get(),
-            self.v_["Triangulate 3D mesh"].get(),
-            self.v_["Draw water masks"].get(),
-            self.v_["Build imagery/DSF"].get(),
-            self.v_["Extract overlays"].get(),
-            self.v_["SegFormer Bld"].get(),
-            self.v_["SegFormer Veg"].get(),
-            self.v_["Override tile configs"].get(),
+            steps["osm"],
+            steps["mesh"],
+            steps["mask"],
+            steps["dsf"],
+            steps["ovl"],
+            steps["sfr_bld"],
+            steps["sfr_veg"],
+            override_cfg,
+            resume,
         ]
         threading.Thread(
             target=TILE.build_tile_list, args=args, daemon=True
         ).start()
+        return
+
+    def resume_build(self):
+        """Reload an interrupted batch - tiles, steps and all - and run it.
+
+        The tile selection lives only in this window, so after a restart the
+        journal is the only record of what the batch was meant to cover.
+        """
+        state = BSTATE.resumable()
+        if state is None:
+            messagebox.showinfo(
+                "Resume batch build",
+                "There is no unfinished batch build to resume.",
+                parent=self,
+            )
+            return
+        journal_dir = state.get("custom_build_dir") or ""
+        if journal_dir != (self.custom_build_dir or ""):
+            messagebox.showwarning(
+                "Resume batch build",
+                "That batch was built into a different base folder:\n\n"
+                + (journal_dir or "(default Tiles folder)")
+                + "\n\nSet the same base folder in the main window first.",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Resume batch build",
+            BSTATE.describe(state) + "\n\nResume it now?",
+            parent=self,
+        ):
+            return
+        list_lat_lon = [(int(lat), int(lon)) for lat, lon in state["tiles"]]
+        journal_steps = state.get("steps", [])
+        steps = {step: step in journal_steps for step in BSTATE.STEPS}
+        for step, label in self.step_ckbtn.items():
+            self.v_[label].set(1 if steps[step] else 0)
+        override_cfg = bool(state.get("override_cfg"))
+        self.v_["Override tile configs"].set(1 if override_cfg else 0)
+        # Repaint the map so what is about to run is visible.
+        for lat, lon in BSTATE.pending_tiles(state):
+            self.mark_tile_todo(lat, lon)
+        self.launch_batch(list_lat_lon, steps, override_cfg, True)
         return
 
     def _zone_recovery_targets(self) -> list[tuple[int, int, object]]:

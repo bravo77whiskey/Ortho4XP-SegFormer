@@ -15,6 +15,7 @@ import O4_DSF_Utils as DSF
 import O4_Overlay_Utils as OVL
 import O4_SFR_Pipeline as SFR
 import O4_Scenery_Links as SLINK
+import O4_Build_State as BSTATE
 from O4_Parallel_Utils import parallel_launch, parallel_join
 
 max_download_slots = 1
@@ -52,6 +53,7 @@ def download_textures(
     def _download_task(*attrs):
         nonlocal interrupted
 
+        UI.check_pause()
         if UI.red_flag:
             interrupted = True
             return 0
@@ -316,15 +318,15 @@ def build_tile(tile):
 ################################################################################
 def build_all(tile):
     VMAP.build_poly_file(tile)
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line("")
         return 0
     MESH.build_mesh(tile)
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line("")
         return 0
     MASK.build_masks(tile)
-    if UI.red_flag:
+    if UI.stop_requested():
         UI.exit_message_and_bottom_line("")
         return 0
     build_tile(tile)
@@ -350,20 +352,71 @@ def build_all(tile):
     return 1
 
 ################################################################################
+def _clear_todo_marker(lat, lon):
+    """Drop the red 'to do' square once a tile needs no further work."""
+    try:
+        UI.gui.earth_window.canvas.delete(
+            UI.gui.earth_window.dico_tiles_todo[(lat, lon)]
+        )
+        UI.gui.earth_window.dico_tiles_todo.pop((lat, lon), None)
+    except:
+        pass
+
+################################################################################
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False
+    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume=False
 ):
     if UI.is_working:
         return 0
     UI.red_flag = 0
     timer = time.time()
+    # The journal lets a batch that was stopped (or that died with the app)
+    # pick up at the exact step it reached rather than rebuild from scratch.
+    steps = {
+        "osm": bool(do_osm),
+        "mesh": bool(do_mesh),
+        "mask": bool(do_mask),
+        "dsf": bool(do_dsf),
+        "ovl": bool(do_ovl),
+        "sfr_bld": bool(do_sfr_bld),
+        "sfr_veg": bool(do_sfr_veg),
+    }
+    BSTATE.begin(
+        list_lat_lon,
+        steps,
+        tile.custom_build_dir,
+        override_cfg,
+        resume=resume,
+    )
     UI.lvprint(
-        0, "Batch build launched for a number of", len(list_lat_lon), "tiles."
+        0,
+        "Batch build" + (" resumed" if resume else " launched"),
+        "for a number of",
+        len(list_lat_lon),
+        "tiles.",
     )
     k = 0
     for (lat, lon) in list_lat_lon:
         k += 1
+        UI.check_pause()
+        if UI.red_flag:
+            BSTATE.set_status("stopped")
+            UI.exit_message_and_bottom_line()
+            return 0
+        if any(steps.values()) and all(
+            BSTATE.is_done(lat, lon, step)
+            for step, wanted in steps.items()
+            if wanted
+        ):
+            UI.vprint(
+                1,
+                "Skipping tile",
+                FNAMES.short_latlon(lat, lon),
+                "- already built by the batch being resumed.",
+            )
+            _clear_todo_marker(lat, lon)
+            continue
         UI.vprint(
             1,
             "Dealing with tile ",
@@ -387,24 +440,37 @@ def build_tile_list(
             tile.read_from_config()
         if do_osm or do_mesh or do_dsf:
             tile.make_dirs()
-        if do_osm:
-            VMAP.build_poly_file(tile)
+        if do_osm and not BSTATE.is_done(lat, lon, "osm"):
+            UI.check_pause()
+            done = VMAP.build_poly_file(tile)
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
-        if do_mesh:
-            MESH.build_mesh(tile)
+            if done:
+                BSTATE.mark_done(lat, lon, "osm")
+        if do_mesh and not BSTATE.is_done(lat, lon, "mesh"):
+            UI.check_pause()
+            done = MESH.build_mesh(tile)
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
-        if do_mask:
-            MASK.build_masks(tile)
+            if done:
+                BSTATE.mark_done(lat, lon, "mesh")
+        if do_mask and not BSTATE.is_done(lat, lon, "mask"):
+            UI.check_pause()
+            done = MASK.build_masks(tile)
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
-        if do_dsf:
+            if done:
+                BSTATE.mark_done(lat, lon, "mask")
+        if do_dsf and not BSTATE.is_done(lat, lon, "dsf"):
+            UI.check_pause()
             tile_coords = FNAMES.short_latlon(lat, lon)
-            build_tile(tile)
+            done = build_tile(tile)
             if tile_coords in IMG.incomplete_imgs:
                 UI.lvprint(
                     1,
@@ -412,16 +478,24 @@ def build_tile_list(
                     f"{IMG.incomplete_imgs[tile_coords]}",
                 )
                 delete_incomplete_imgs(tile)
-                build_tile(tile)
+                done = build_tile(tile)
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
-        if do_ovl:
-            OVL.build_overlay(lat, lon)
+            if done:
+                BSTATE.mark_done(lat, lon, "dsf")
+        if do_ovl and not BSTATE.is_done(lat, lon, "ovl"):
+            UI.check_pause()
+            done = OVL.build_overlay(lat, lon)
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
-        if do_sfr_bld:
+            if done:
+                BSTATE.mark_done(lat, lon, "ovl")
+        if do_sfr_bld and not BSTATE.is_done(lat, lon, "sfr_bld"):
+            UI.check_pause()
             UI.lvprint(0, f"\nSegFormer Bld overlay for "
                        f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
             SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
@@ -445,15 +519,21 @@ def build_tile_list(
             SFR.sfr_patch_size      = tile.sfr_patch_size
             SFR.sfr_overlap         = tile.sfr_overlap
             SFR.sfr_batch_size      = tile.sfr_batch_size
+            done = True
             try:
                 SFR.process_bld_tile(tile.lat, tile.lon, tile.build_dir)
             except Exception as exc:
+                done = False
                 UI.lvprint(0, f"[SFR] SegFormer bld overlay failed for "
                            f"{FNAMES.short_latlon(lat, lon)}: {exc}")
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
-        if do_sfr_veg:
+            if done:
+                BSTATE.mark_done(lat, lon, "sfr_bld")
+        if do_sfr_veg and not BSTATE.is_done(lat, lon, "sfr_veg"):
+            UI.check_pause()
             UI.lvprint(0, f"\nSegFormer Veg overlay for "
                        f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
             SFR.sfr_veg_density       = tile.sfr_veg_density
@@ -476,25 +556,25 @@ def build_tile_list(
             SFR.sfr_patch_size        = tile.sfr_patch_size
             SFR.sfr_overlap           = tile.sfr_overlap
             SFR.sfr_batch_size        = tile.sfr_batch_size
+            done = True
             try:
                 SFR.process_veg_tile(tile.lat, tile.lon, tile.build_dir)
             except Exception as exc:
+                done = False
                 UI.lvprint(0, f"[SFR] SegFormer veg overlay failed for "
                            f"{FNAMES.short_latlon(lat, lon)}: {exc}")
             if UI.red_flag:
+                BSTATE.set_status("stopped")
                 UI.exit_message_and_bottom_line()
                 return 0
+            if done:
+                BSTATE.mark_done(lat, lon, "sfr_veg")
         if not do_dsf:
             # build_tile() links the tile itself; catch the runs which only
             # refreshed overlays over an already built tile.
             SLINK.auto_link_tile(tile)
-        try:
-            UI.gui.earth_window.canvas.delete(
-                UI.gui.earth_window.dico_tiles_todo[(lat, lon)]
-            )
-            UI.gui.earth_window.dico_tiles_todo.pop((lat, lon), None)
-        except:
-            pass
+        _clear_todo_marker(lat, lon)
+    BSTATE.complete()
     UI.lvprint(
         0, "Batch process completed in", UI.nicer_timer(time.time() - timer)
     )

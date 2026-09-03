@@ -1285,7 +1285,7 @@ def OSM_queries_to_OSM_layer(
         response = get_overpass_data(
             query, (lat, lon, lat + 1, lon + 1), server_code
         )
-        if UI.red_flag:
+        if UI.stop_requested():
             return 0
         if not response:
             UI.logprint(
@@ -1340,7 +1340,7 @@ def OSM_query_to_OSM_layer(
         osm_layer.update_dicosm(cached_file_name, input_tags, target_tags)
     else:
         response = get_overpass_data(query, bbox, server_code)
-        if UI.red_flag:
+        if UI.stop_requested():
             return 0
         if not response:
             UI.lvprint(
@@ -1453,7 +1453,7 @@ def get_overpass_data(query, bbox, server_code=None):
             )
         if tentative >= max_osm_tentatives:
             return 0
-        if UI.red_flag:
+        if UI.stop_requested():
             return 0
         time.sleep(wait)
         tentative += 1

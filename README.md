@@ -10,6 +10,7 @@ The specific changes in this forked version:
 #### General
 * Tile configurations are automatically loaded when the active tile is changed using the Tiles Collection and Management window. If a tile configuration doesn't exist, the global tile configuration settings are used. The tile configuration is not loaded if you manually type in coordinates to change the active tile.
 * Code changes to enable using [PyInstaller](https://pyinstaller.org/en/stable/) to bundle Ortho4XP and its dependencies into a single package.
+* A "Pause" button sits next to Stop in the main window. It freezes the build at the next step boundary - Python workers park, and the external workers (Triangle4XP, DSFTool, the SegFormer venv python) have their process trees suspended - and the button turns into "Resume". Stop and closing the window both lift a pause before aborting.
 
 #### Tiles Collection and Management
 * Batch building process modified in regards to configuration files. If a tile configuration exists, it will be used. If a tile configuration does not exist, the global configuration will be used.
@@ -17,6 +18,7 @@ The specific changes in this forked version:
 * Erased cached data feature works like batch building tiles now, meaning Shift-Click (red rectangle) to select tiles, choose deletion options, and click "Batch Delete". The batch delete has no effect on the active tile selection (yellow rectangle).
 * Display asterisk next to each tile zoom level number in the Tiles and configuration window if custom zoom levels have been specified.
 * Added ability to create a symlink to the yOrtho4XP_Overlays folder by pressing the "O" key in the Tiles Collection and Management window.
+* Batch builds are journalled step by step to `.batch_build_state.json`, so a batch that was stopped (or that died with the app) can carry on instead of starting over. "Batch Build" offers to resume when the same selection is still unfinished; "Resume Build" reloads the interrupted batch - tiles, steps and base folder - even after a restart. Only steps that actually succeeded are recorded, so a failed tile is retried.
 
 #### Config
 * Ortho4XP Config window is now separated into three tabs: Tile Config, Global Config, and Application Config. 

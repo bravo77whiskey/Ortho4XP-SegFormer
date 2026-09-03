@@ -789,7 +789,7 @@ def build_dsf(tile, download_queue):
         (n1, n2, n3) = tri_idx[3 * tri: 3 * tri + 3]
         if done % step == 0:
             UI.progress_bar(1, int(done / step * 0.9))
-            if UI.red_flag:
+            if UI.stop_requested():
                 UI.vprint(1, "DSF construction interrupted.")
                 return 0
         done += 1
@@ -1013,7 +1013,7 @@ def build_dsf(tile, download_queue):
         
         if done % step == 0:
             UI.progress_bar(1, int(done / step * 0.9))
-            if UI.red_flag:
+            if UI.stop_requested():
                 UI.vprint(1, "DSF construction interrupted.")
                 return 0
         done += 1
