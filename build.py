@@ -44,7 +44,7 @@ PRESERVE = {
     "SFR_cache",
     "Ortho4XP.cfg",
     ".last_gui_params.txt",
-    ".batch_build_state.json",   # unfinished batch build - survives a rebuild
+    "build_state",     # unfinished batch build journals - survive a rebuild
     ".venv",           # shared build+AI venv — preserved so torch/model cache survives rebuilds
 }
 

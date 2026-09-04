@@ -365,7 +365,23 @@ def _clear_todo_marker(lat, lon):
 ################################################################################
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume=False
+    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume_path=None
+):
+    try:
+        return _build_tile_list(
+            tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
+            do_sfr_bld, do_sfr_veg, override_cfg, resume_path,
+        )
+    finally:
+        # However this ended - finished, stopped, or an error nobody caught -
+        # the journal is no longer live work, so this instance (or another)
+        # can offer to resume it.
+        BSTATE.release()
+
+################################################################################
+def _build_tile_list(
+    tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
+    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume_path=None
 ):
     if UI.is_working:
         return 0
@@ -387,11 +403,11 @@ def build_tile_list(
         steps,
         tile.custom_build_dir,
         override_cfg,
-        resume=resume,
+        resume_path=resume_path,
     )
     UI.lvprint(
         0,
-        "Batch build" + (" resumed" if resume else " launched"),
+        "Batch build" + (" resumed" if resume_path else " launched"),
         "for a number of",
         len(list_lat_lon),
         "tiles.",

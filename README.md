@@ -18,7 +18,8 @@ The specific changes in this forked version:
 * Erased cached data feature works like batch building tiles now, meaning Shift-Click (red rectangle) to select tiles, choose deletion options, and click "Batch Delete". The batch delete has no effect on the active tile selection (yellow rectangle).
 * Display asterisk next to each tile zoom level number in the Tiles and configuration window if custom zoom levels have been specified.
 * Added ability to create a symlink to the yOrtho4XP_Overlays folder by pressing the "O" key in the Tiles Collection and Management window.
-* Batch builds are journalled step by step to `.batch_build_state.json`, so a batch that was stopped (or that died with the app) can carry on instead of starting over. "Batch Build" offers to resume when the same selection is still unfinished; "Resume Build" reloads the interrupted batch - tiles, steps and base folder - even after a restart. Only steps that actually succeeded are recorded, so a failed tile is retried.
+* Batch builds are journalled step by step under `build_state/`, so a batch that was stopped (or that died with the app) can carry on instead of starting over. "Batch Build" offers to resume when the same selection is still unfinished; "Resume Build" reloads an interrupted batch - tiles, steps and base folder - even after a restart, and lets you pick when several are waiting. Only steps that actually succeeded are recorded, so a failed tile is retried.
+* Several copies of Ortho4XP can be run side by side on different tiles. Each run owns its own journal, and a journal whose instance is still running is never offered for resume, so a second instance cannot start rebuilding the tiles the first one is part-way through. Selecting tiles another instance still owes asks for confirmation first.
 
 #### Config
 * Ortho4XP Config window is now separated into three tabs: Tile Config, Global Config, and Application Config. 

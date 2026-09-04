@@ -418,16 +418,17 @@ class Ortho4XP_GUI(tk.Tk):
 
         The tile selection dies with the Tiles window, so without this the
         only clue would be finding the Resume Build button by accident.
+        Batches another running copy of Ortho4XP owns are not ours to offer.
         """
-        state = BSTATE.resumable()
-        if state is None:
+        entries = BSTATE.resumable_all()
+        if not entries:
             return
-        pending = BSTATE.pending_tiles(state)
+        pending = sum(len(BSTATE.pending_tiles(state)) for _p, state in entries)
         UI.vprint(
             0,
-            "\nAn unfinished batch build is on record: %d tile(s) still to "
+            "\n%d unfinished batch build(s) on record, %d tile(s) still to "
             "go.\nOpen the Tiles Collection window and press 'Resume Build' "
-            "to carry on.\n" % len(pending),
+            "to carry on.\n" % (len(entries), pending),
         )
 
     # GUI methods
@@ -2108,6 +2109,131 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
         return
 
 ################################################################################
+class Ortho4XP_Resume_Picker(tk.Toplevel):
+    """Choose which interrupted batch build to carry on with.
+
+    Copies of Ortho4XP are routinely run side by side on different tiles, so
+    more than one journal can be waiting at once - one per instance after a
+    power cut. Blocks until the user picks, so `.result` is ready on return.
+    """
+
+    def __init__(self, parent, entries):
+        tk.Toplevel.__init__(self)
+        self.title("Resume batch build")
+        self.transient(parent)
+        self.configure(**THEME.frame_options())
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.entries = list(entries)
+        self.result = None
+
+        colors = THEME.palette()
+        pad = {"padx": 8, "pady": 4}
+
+        tk.Label(
+            self,
+            anchor=W,
+            justify=LEFT,
+            text="More than one batch build was left unfinished. Pick the one "
+                 "to carry on with:",
+            **THEME.label_options(),
+        ).grid(row=0, column=0, columnspan=2, sticky=E + W, **pad)
+
+        self.listbox = tk.Listbox(
+            self,
+            width=72,
+            height=min(10, max(3, len(self.entries))),
+            activestyle="dotbox",
+            exportselection=False,
+            bg=colors["entry_background"],
+            fg=colors["foreground"],
+            selectbackground=colors["select_background"],
+            selectforeground=colors["select_foreground"],
+        )
+        self.listbox.grid(row=1, column=0, sticky=N + S + E + W, **pad)
+        scrollbar = ttk.Scrollbar(self, command=self.listbox.yview)
+        scrollbar.grid(row=1, column=1, sticky=N + S + W)
+        self.listbox.config(yscrollcommand=scrollbar.set)
+        self.listbox.bind("<<ListboxSelect>>", self.on_select)
+        self.listbox.bind("<Double-Button-1>", lambda _e: self.use_selection())
+
+        self.detail_var = tk.StringVar(value="")
+        tk.Label(
+            self,
+            anchor=W,
+            justify=LEFT,
+            textvariable=self.detail_var,
+            **THEME.label_options(),
+        ).grid(row=2, column=0, columnspan=2, sticky=E + W, **pad)
+
+        button_row = tk.Frame(self, **THEME.frame_options())
+        button_row.grid(row=3, column=0, columnspan=2, sticky=E + W, **pad)
+        ttk.Button(button_row, text="Resume", command=self.use_selection).grid(
+            row=0, column=0, padx=4
+        )
+        ttk.Button(
+            button_row, text="Discard", command=self.discard_selection
+        ).grid(row=0, column=1, padx=4)
+        ttk.Button(button_row, text="Cancel", command=self.cancel).grid(
+            row=0, column=2, padx=4
+        )
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        self.refill(0)
+        self.grab_set()
+        parent.wait_window(self)
+
+    def refill(self, select):
+        self.listbox.delete(0, END)
+        for _path, state in self.entries:
+            self.listbox.insert(END, BSTATE.summarize(state))
+        if self.entries:
+            index = min(select, len(self.entries) - 1)
+            self.listbox.selection_set(index)
+        self.on_select()
+
+    def selected(self):
+        rows = self.listbox.curselection()
+        if not rows:
+            return None
+        return self.entries[rows[0]]
+
+    def on_select(self, event=None):
+        entry = self.selected()
+        self.detail_var.set(BSTATE.describe(entry[1]) if entry else "")
+
+    def use_selection(self):
+        entry = self.selected()
+        if entry is None:
+            return
+        self.result = entry
+        self.destroy()
+
+    def discard_selection(self):
+        entry = self.selected()
+        if entry is None:
+            return
+        if not messagebox.askyesno(
+            "Resume batch build",
+            "Throw this batch away? The tiles it had already built stay on "
+            "disk, but the record of how far it got is lost.\n\n"
+            + BSTATE.describe(entry[1]),
+            parent=self,
+        ):
+            return
+        row = self.listbox.curselection()[0]
+        BSTATE.discard(entry[0])
+        self.entries.pop(row)
+        if not self.entries:
+            self.destroy()
+            return
+        self.refill(row)
+
+    def cancel(self):
+        self.result = None
+        self.destroy()
+
+################################################################################
 class Ortho4XP_Earth_Preview(tk.Toplevel):
 
     earthzl = 6
@@ -2876,11 +3002,38 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             return
         steps = self.selected_steps()
         override_cfg = bool(self.v_["Override tile configs"].get())
-        resume = self.confirm_resume(list_lat_lon, steps, override_cfg)
-        if resume is None:
+        if not self.confirm_no_live_overlap(list_lat_lon):
             return
-        self.launch_batch(list_lat_lon, steps, override_cfg, resume)
+        resume_path = self.confirm_resume(list_lat_lon, steps, override_cfg)
+        if resume_path is None:
+            return
+        self.launch_batch(list_lat_lon, steps, override_cfg, resume_path)
         return
+
+    def confirm_no_live_overlap(self, list_lat_lon):
+        """Warn when another running instance still owes some of these tiles.
+
+        Parallel instances on separate tiles are the normal way to work; two
+        on the same tile would have both writing one build folder, so that
+        case is worth a question rather than a surprise.
+        """
+        wanted = {(int(lat), int(lon)) for (lat, lon) in list_lat_lon}
+        clash = sorted(BSTATE.busy_tiles() & wanted)
+        if not clash:
+            return True
+        listed = ", ".join(
+            FNAMES.short_latlon(lat, lon) for (lat, lon) in clash[:12]
+        )
+        if len(clash) > 12:
+            listed += ", ..."
+        return messagebox.askyesno(
+            "Batch build",
+            "Another running copy of Ortho4XP still has these tiles to "
+            "build:\n\n" + listed + "\n\nBuilding them here at the same "
+            "time means two processes writing one tile folder. Carry on "
+            "anyway?",
+            parent=self,
+        )
 
     def selected_steps(self):
         return {
@@ -2889,17 +3042,18 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         }
 
     def confirm_resume(self, list_lat_lon, steps, override_cfg):
-        """Decide what to do about a journal left over from an earlier run.
+        """Decide what to do about a journal left behind by an earlier run.
 
-        Returns True to resume it, False to build from scratch, or None when
-        the user backed out - never silently discards unfinished progress.
+        Returns the journal to resume, "" to build from scratch, or None when
+        the user backed out. Only a journal describing this very batch is
+        offered, and only when no live instance owns it - journals for other
+        batches are left where they are, since each run keeps its own.
         """
-        state = BSTATE.resumable()
-        if state is None:
-            return False
-        if BSTATE.matches(
-            state, list_lat_lon, steps, self.custom_build_dir, override_cfg
-        ):
+        for journal, state in BSTATE.resumable_all():
+            if not BSTATE.matches(
+                state, list_lat_lon, steps, self.custom_build_dir, override_cfg
+            ):
+                continue
             answer = messagebox.askyesnocancel(
                 "Resume batch build",
                 "This exact batch was interrupted before it finished.\n\n"
@@ -2911,20 +3065,21 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             if answer is None:
                 return None
             if not answer:
-                BSTATE.discard()
-            return bool(answer)
-        if not messagebox.askyesno(
-            "Resume batch build",
-            "A different batch build was left unfinished:\n\n"
-            + BSTATE.describe(state)
-            + "\n\nStarting this batch discards that progress. Carry on?",
-            parent=self,
-        ):
-            return None
-        BSTATE.discard()
-        return False
+                BSTATE.discard(journal)
+                return ""
+            claimed = BSTATE.claim(journal)
+            if claimed is None:
+                messagebox.showinfo(
+                    "Resume batch build",
+                    "Another instance picked that batch up first - nothing "
+                    "was started here.",
+                    parent=self,
+                )
+                return None
+            return claimed
+        return ""
 
-    def launch_batch(self, list_lat_lon, steps, override_cfg, resume):
+    def launch_batch(self, list_lat_lon, steps, override_cfg, resume_path):
         (lat, lon) = list_lat_lon[0]
         try:
             tile = CFG.Tile(lat, lon, self.custom_build_dir)
@@ -2942,7 +3097,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             steps["sfr_bld"],
             steps["sfr_veg"],
             override_cfg,
-            resume,
+            resume_path,
         ]
         threading.Thread(
             target=TILE.build_tile_list, args=args, daemon=True
@@ -2953,16 +3108,38 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         """Reload an interrupted batch - tiles, steps and all - and run it.
 
         The tile selection lives only in this window, so after a restart the
-        journal is the only record of what the batch was meant to cover.
+        journal is the only record of what a batch was meant to cover. Only
+        abandoned journals are on offer: one still owned by another running
+        instance would have the two of them building the same tiles.
         """
-        state = BSTATE.resumable()
-        if state is None:
+        entries = BSTATE.resumable_all()
+        if not entries:
+            running = len(BSTATE.live_batches())
             messagebox.showinfo(
                 "Resume batch build",
-                "There is no unfinished batch build to resume.",
+                "There is no unfinished batch build to resume."
+                + (
+                    "\n\n%d batch(es) are being built right now by another "
+                    "running copy of Ortho4XP." % running
+                    if running
+                    else ""
+                ),
                 parent=self,
             )
             return
+        if len(entries) == 1:
+            journal, state = entries[0]
+            if not messagebox.askyesno(
+                "Resume batch build",
+                BSTATE.describe(state) + "\n\nResume it now?",
+                parent=self,
+            ):
+                return
+        else:
+            picked = Ortho4XP_Resume_Picker(self, entries).result
+            if picked is None:
+                return
+            journal, state = picked
         journal_dir = state.get("custom_build_dir") or ""
         if journal_dir != (self.custom_build_dir or ""):
             messagebox.showwarning(
@@ -2973,11 +3150,14 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 parent=self,
             )
             return
-        if not messagebox.askyesno(
-            "Resume batch build",
-            BSTATE.describe(state) + "\n\nResume it now?",
-            parent=self,
-        ):
+        claimed = BSTATE.claim(journal)
+        if claimed is None:
+            messagebox.showinfo(
+                "Resume batch build",
+                "Another instance picked that batch up first - nothing was "
+                "started here.",
+                parent=self,
+            )
             return
         list_lat_lon = [(int(lat), int(lon)) for lat, lon in state["tiles"]]
         journal_steps = state.get("steps", [])
@@ -2989,7 +3169,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         # Repaint the map so what is about to run is visible.
         for lat, lon in BSTATE.pending_tiles(state):
             self.mark_tile_todo(lat, lon)
-        self.launch_batch(list_lat_lon, steps, override_cfg, True)
+        self.launch_batch(list_lat_lon, steps, override_cfg, claimed)
         return
 
     def _zone_recovery_targets(self) -> list[tuple[int, int, object]]:
