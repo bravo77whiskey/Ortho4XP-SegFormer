@@ -319,6 +319,36 @@ class ParallelInstanceTest(JournalTestCase):
         self._foreign_journal([(60, 2)], {"pid": os.getpid(), "created": 2.0})
         self.assertEqual(len(BSTATE.resumable_all()), 2)
 
+    def test_clearing_abandons_dead_batches_but_spares_live_ones(self):
+        # Another instance is still writing the live journal; deleting it
+        # would lose that run's progress record mid-build.
+        live = self._foreign_journal([(50, 1)], self._live_owner())
+        self._foreign_journal([(60, 2)], self._dead_owner())
+        self._foreign_journal([(70, 3)], {"pid": os.getpid(), "created": 2.0})
+
+        self.assertEqual(BSTATE.discard_abandoned(), 2)
+        self.assertEqual(BSTATE.resumable_all(), [])
+        self.assertEqual([p for p, _s in BSTATE.live_batches()], [live])
+        self.assertTrue(os.path.exists(live))
+
+    def test_clearing_spares_our_own_running_batch(self):
+        self._begin()
+        ours = BSTATE.journal_path()
+        self.assertEqual(BSTATE.discard_abandoned(), 0)
+        self.assertTrue(os.path.exists(ours))
+
+    def test_clearing_also_sweeps_journals_with_nothing_left(self):
+        path = self._foreign_journal([(50, 1)], self._dead_owner())
+        state = BSTATE._read(path)
+        state["progress"] = {"+50+001": list(self.steps)}
+        BSTATE._write(path, state)
+        self.assertEqual(BSTATE.resumable_all(), [])
+        self.assertEqual(BSTATE.discard_abandoned(), 1)
+        self.assertFalse(os.path.exists(path))
+
+    def test_clearing_with_nothing_on_record_is_a_no_op(self):
+        self.assertEqual(BSTATE.discard_abandoned(), 0)
+
     def test_an_unowned_journal_is_judged_by_its_heartbeat(self):
         # Journals carried over from the single-file layout have no owner, so
         # a stale mtime is the only sign their instance is gone.

@@ -288,6 +288,35 @@ def resumable_all():
     return entries
 
 
+def abandoned_all():
+    """Every journal no live instance owns, newest first.
+
+    A superset of resumable_all(): it also catches journals with nothing left
+    to build that never got tidied away, so clearing leaves no debris behind.
+    """
+    entries = []
+    for path, state in scan():
+        if _state_path and os.path.abspath(path) == os.path.abspath(_state_path):
+            continue
+        if owner_is_alive(state, path):
+            continue
+        entries.append((path, state))
+    return entries
+
+
+def discard_abandoned():
+    """Delete every journal no live instance owns; returns how many went.
+
+    Journals another running instance is writing are never touched. One that
+    gets claimed between the scan and the delete has already been renamed
+    away, so its old path simply is not there to remove.
+    """
+    entries = abandoned_all()
+    for path, _state in entries:
+        discard(path)
+    return len(entries)
+
+
 def resumable():
     """The most recent resumable journal as (path, state), or None."""
     entries = resumable_all()

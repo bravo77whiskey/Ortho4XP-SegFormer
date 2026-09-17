@@ -2114,7 +2114,8 @@ class Ortho4XP_Resume_Picker(tk.Toplevel):
 
     Copies of Ortho4XP are routinely run side by side on different tiles, so
     more than one journal can be waiting at once - one per instance after a
-    power cut. Blocks until the user picks, so `.result` is ready on return.
+    power cut. Also where unwanted batches are abandoned. Blocks until the
+    user is done, so `.result` is ready on return.
     """
 
     def __init__(self, parent, entries):
@@ -2133,8 +2134,8 @@ class Ortho4XP_Resume_Picker(tk.Toplevel):
             self,
             anchor=W,
             justify=LEFT,
-            text="More than one batch build was left unfinished. Pick the one "
-                 "to carry on with:",
+            text="Unfinished batch builds - pick one to carry on with, or "
+                 "discard the ones you no longer want:",
             **THEME.label_options(),
         ).grid(row=0, column=0, columnspan=2, sticky=E + W, **pad)
 
@@ -2173,8 +2174,11 @@ class Ortho4XP_Resume_Picker(tk.Toplevel):
         ttk.Button(
             button_row, text="Discard", command=self.discard_selection
         ).grid(row=0, column=1, padx=4)
+        ttk.Button(
+            button_row, text="Discard All", command=self.discard_all
+        ).grid(row=0, column=2, padx=4)
         ttk.Button(button_row, text="Cancel", command=self.cancel).grid(
-            row=0, column=2, padx=4
+            row=0, column=3, padx=4
         )
 
         self.columnconfigure(0, weight=1)
@@ -2228,6 +2232,22 @@ class Ortho4XP_Resume_Picker(tk.Toplevel):
             self.destroy()
             return
         self.refill(row)
+
+    def discard_all(self):
+        if not messagebox.askyesno(
+            "Resume batch build",
+            "Abandon all %d unfinished batch build(s) listed here? Tiles "
+            "already built stay on disk, but none of these batches can be "
+            "resumed afterwards." % len(self.entries),
+            icon="warning",
+            parent=self,
+        ):
+            return
+        for journal, _state in self.entries:
+            BSTATE.discard(journal)
+        self.entries = []
+        self.result = None
+        self.destroy()
 
     def cancel(self):
         self.result = None
@@ -2368,6 +2388,12 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.frame_left,
             text=" Resume Build   ",
             command=self.resume_build,
+        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        row += 1
+        ttk.Button(
+            self.frame_left,
+            text="Clear Unfinished",
+            command=self.clear_unfinished_builds,
         ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row += 1
         ttk.Button(
@@ -3104,6 +3130,41 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         ).start()
         return
 
+    def clear_unfinished_builds(self):
+        """Abandon every unfinished batch no running instance is working on.
+
+        Built tiles stay on disk; only the record of how far each batch got is
+        dropped, so Resume Build and the startup notice stop offering them.
+        """
+        entries = BSTATE.abandoned_all()
+        running = len(BSTATE.live_batches())
+        live_note = (
+            "\n\n%d batch(es) being built right now by another running copy "
+            "of Ortho4XP are left alone." % running
+            if running
+            else ""
+        )
+        if not entries:
+            messagebox.showinfo(
+                "Clear unfinished builds",
+                "There are no unfinished batch builds to clear." + live_note,
+                parent=self,
+            )
+            return
+        pending = sum(len(BSTATE.pending_tiles(state)) for _p, state in entries)
+        if not messagebox.askyesno(
+            "Clear unfinished builds",
+            "Abandon %d unfinished batch build(s), %d tile(s) still to go?\n\n"
+            "Tiles already built stay on disk, but these batches can no "
+            "longer be resumed." % (len(entries), pending) + live_note,
+            icon="warning",
+            parent=self,
+        ):
+            return
+        cleared = BSTATE.discard_abandoned()
+        UI.vprint(1, "Cleared", cleared, "unfinished batch build(s).")
+        return
+
     def resume_build(self):
         """Reload an interrupted batch - tiles, steps and all - and run it.
 
@@ -3127,19 +3188,11 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 parent=self,
             )
             return
-        if len(entries) == 1:
-            journal, state = entries[0]
-            if not messagebox.askyesno(
-                "Resume batch build",
-                BSTATE.describe(state) + "\n\nResume it now?",
-                parent=self,
-            ):
-                return
-        else:
-            picked = Ortho4XP_Resume_Picker(self, entries).result
-            if picked is None:
-                return
-            journal, state = picked
+        # The picker even for a single batch, so Discard is always at hand.
+        picked = Ortho4XP_Resume_Picker(self, entries).result
+        if picked is None:
+            return
+        journal, state = picked
         journal_dir = state.get("custom_build_dir") or ""
         if journal_dir != (self.custom_build_dir or ""):
             messagebox.showwarning(
