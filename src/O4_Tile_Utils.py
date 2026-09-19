@@ -363,6 +363,19 @@ def _clear_todo_marker(lat, lon):
         pass
 
 ################################################################################
+def _end_journal_on_stop():
+    """Settle the journal of a batch that red_flag cut short.
+
+    Stop means the user is done with the batch, so it is not offered for
+    resume. Anything else that raised red_flag - closing the window, mid-build
+    or while paused - leaves it resumable, as a crash does.
+    """
+    if UI.user_stopped:
+        BSTATE.complete()
+    else:
+        BSTATE.set_status("stopped")
+
+################################################################################
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
     do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume_path=None
@@ -386,6 +399,7 @@ def _build_tile_list(
     if UI.is_working:
         return 0
     UI.red_flag = 0
+    UI.user_stopped = False
     timer = time.time()
     # The journal lets a batch that was stopped (or that died with the app)
     # pick up at the exact step it reached rather than rebuild from scratch.
@@ -417,7 +431,7 @@ def _build_tile_list(
         k += 1
         UI.check_pause()
         if UI.red_flag:
-            BSTATE.set_status("stopped")
+            _end_journal_on_stop()
             UI.exit_message_and_bottom_line()
             return 0
         if any(steps.values()) and all(
@@ -460,7 +474,7 @@ def _build_tile_list(
             UI.check_pause()
             done = VMAP.build_poly_file(tile)
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
@@ -469,7 +483,7 @@ def _build_tile_list(
             UI.check_pause()
             done = MESH.build_mesh(tile)
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
@@ -478,7 +492,7 @@ def _build_tile_list(
             UI.check_pause()
             done = MASK.build_masks(tile)
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
@@ -496,7 +510,7 @@ def _build_tile_list(
                 delete_incomplete_imgs(tile)
                 done = build_tile(tile)
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
@@ -505,7 +519,7 @@ def _build_tile_list(
             UI.check_pause()
             done = OVL.build_overlay(lat, lon)
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
@@ -543,7 +557,7 @@ def _build_tile_list(
                 UI.lvprint(0, f"[SFR] SegFormer bld overlay failed for "
                            f"{FNAMES.short_latlon(lat, lon)}: {exc}")
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
@@ -580,7 +594,7 @@ def _build_tile_list(
                 UI.lvprint(0, f"[SFR] SegFormer veg overlay failed for "
                            f"{FNAMES.short_latlon(lat, lon)}: {exc}")
             if UI.red_flag:
-                BSTATE.set_status("stopped")
+                _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:

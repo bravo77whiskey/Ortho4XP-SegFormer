@@ -918,6 +918,7 @@ class Ortho4XP_GUI(tk.Tk):
         self.refresh_pause_button()
 
     def set_red_flag(self):
+        UI.user_stopped = True
         UI.red_flag = True
         # External workers (SFR .venv python, Triangle4XP, DSFTool) never see
         # red_flag — kill them (and their children) directly.

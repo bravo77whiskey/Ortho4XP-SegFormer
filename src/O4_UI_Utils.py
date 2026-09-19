@@ -8,6 +8,10 @@ import O4_File_Names as FNAMES
 
 verbosity = 1
 red_flag = False
+# Raised only by the Stop button. Closing the window also raises red_flag,
+# but a batch cut short that way stays resumable; one the user stopped is
+# over, and its journal goes with it.
+user_stopped = False
 paused = False
 is_working = False
 cleaning_level = 1

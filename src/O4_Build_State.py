@@ -1,7 +1,8 @@
 """Per-run journals for batch tile builds.
 
 A batch over a few dozen tiles runs for many hours, so it has to survive a
-Stop, a crash, or a reboot.  Every step that finishes is written to a small
+crash, a reboot, or the window being closed.  Pressing Stop is different: the
+user is done with that batch, and its journal is dropped.  Every step that finishes is written to a small
 JSON journal; a later run reads it back and skips the work that is already on
 disk instead of starting from the top.  The journal records *steps*, not
 tiles: a batch stopped after the mesh of the seventh tile resumes at that
@@ -456,7 +457,54 @@ def begin(list_lat_lon, steps, custom_build_dir="", override_cfg=False,
         _state_path = path
         _write_locked()
         _start_heartbeat_locked()
+        _take_over_abandoned_locked()
     return _state
+
+
+def _take_over_abandoned_locked():
+    """Strike this batch's work off every abandoned journal.
+
+    Interrupt a batch, then build some of its tiles in a new batch with a
+    different selection, and the old journal never matches anything again: it kept
+    announcing tiles that had since been built. From here on the newest batch
+    answers for each tile and step it covers - if it is stopped in turn, its
+    own journal says what is left. A journal with nothing left goes.
+
+    Each journal is claimed before it is edited, so one another instance is
+    resuming at the same moment is left alone. Only journals for the same base
+    folder are touched; the same tile elsewhere is a different build.
+    """
+    ours = set(_state.get("steps", []))
+    tiles = {(int(lat), int(lon)) for lat, lon in _state.get("tiles", [])}
+    folder = _state.get("custom_build_dir") or ""
+    for path, state in abandoned_all():
+        if (state.get("custom_build_dir") or "") != folder:
+            continue
+        overlap = ours.intersection(state.get("steps", []))
+        if not overlap or not tiles.intersection(
+            (int(lat), int(lon)) for lat, lon in state.get("tiles", [])
+        ):
+            continue
+        claimed = claim(path)
+        if claimed is None:
+            continue
+        state = _read(claimed)
+        if state is None:
+            continue
+        progress = state.setdefault("progress", {})
+        for lat, lon in state.get("tiles", []):
+            if (int(lat), int(lon)) not in tiles:
+                continue
+            done = progress.setdefault(_key(lat, lon), [])
+            done.extend(step for step in state["steps"]
+                        if step in overlap and step not in done)
+        if not pending_tiles(state):
+            _remove(claimed)
+            continue
+        if state.get("status") == "running":
+            state["status"] = "stopped"
+        state["owner"] = None
+        _write(claimed, state)
 
 
 def is_done(lat, lon, step):

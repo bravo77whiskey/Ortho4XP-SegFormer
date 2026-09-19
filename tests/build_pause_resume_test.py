@@ -172,6 +172,45 @@ class BuildJournalTest(JournalTestCase):
         self._begin(tiles=[(45, 5), (46, 6)], resume_path=path)
         self.assertFalse(BSTATE.is_done(45, 5, "osm"))
 
+    def _stopped(self, tiles, steps=None, folder=""):
+        BSTATE.begin(tiles, steps or self.steps, folder, False)
+        BSTATE.set_status("stopped")
+        BSTATE.close()
+
+    def test_a_new_batch_supersedes_stopped_ones_on_its_tiles(self):
+        # Reported 2026-09-18: stop a 1-tile and a 2-tile batch, finish one of
+        # the tiles in a third batch - both stopped journals kept being
+        # announced as unfinished.
+        self._stopped([(13, 79)])
+        self._stopped([(13, 77), (13, 79)])
+        self._begin(tiles=[(13, 77), (13, 79)])
+        self.assertEqual(len(self._journals()), 1)
+        BSTATE.complete()
+        self.assertEqual(self._journals(), [])
+        self.assertIsNone(BSTATE.resumable())
+
+    def test_a_stopped_batch_keeps_the_tiles_the_new_one_skips(self):
+        self._stopped([(13, 77), (13, 79)])
+        self._begin(tiles=[(13, 77)])
+        BSTATE.complete()
+        entries = BSTATE.resumable_all()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(BSTATE.pending_tiles(entries[0][1]), [(13, 79)])
+
+    def test_a_stopped_batch_keeps_the_steps_the_new_one_skips(self):
+        self._stopped([(45, 5)])
+        BSTATE.begin([(45, 5)], {"osm": True}, "", False)
+        BSTATE.complete()
+        path, state = BSTATE.resumable()
+        self.assertEqual(state["progress"], {"+45+005": ["osm"]})
+        self.assertEqual(BSTATE.pending_tiles(state), [(45, 5)])
+
+    def test_another_base_folder_is_a_different_build(self):
+        self._stopped([(45, 5)], folder="H:\\Tiles")
+        self._begin(tiles=[(45, 5)])
+        BSTATE.complete()
+        self.assertEqual(len(BSTATE.resumable_all()), 1)
+
     def test_matches_is_picky_about_the_whole_batch(self):
         state = self._begin()
         self.assertTrue(BSTATE.matches(state, self.tiles, self.steps, "", False))
@@ -357,6 +396,56 @@ class ParallelInstanceTest(JournalTestCase):
         old = time.time() - BSTATE.STALE_AFTER_S - 60
         os.utime(path, (old, old))
         self.assertEqual(len(BSTATE.resumable_all()), 1)
+
+
+class StopEndsTheBatchTest(JournalTestCase):
+    """Stop finishes a batch; closing the window or a crash does not."""
+
+    def setUp(self):
+        super().setUp()
+        import O4_Tile_Utils as TILE
+
+        self.TILE = TILE
+        self.addCleanup(self._reset_flags)
+
+    def _reset_flags(self):
+        UI.red_flag = False
+        UI.user_stopped = False
+
+    def test_stop_button_drops_the_journal(self):
+        self._begin()
+        BSTATE.mark_done(45, 5, "osm")
+        UI.user_stopped = True
+        UI.red_flag = True
+        self.TILE._end_journal_on_stop()
+        BSTATE.release()
+        self.assertEqual(self._journals(), [])
+        self.assertIsNone(BSTATE.resumable())
+
+    def test_closing_the_window_keeps_the_batch_resumable(self):
+        # exit_prg raises red_flag without user_stopped.
+        self._begin()
+        BSTATE.mark_done(45, 5, "osm")
+        UI.red_flag = True
+        self.TILE._end_journal_on_stop()
+        BSTATE.release()
+        self.assertIsNotNone(BSTATE.resumable())
+
+    def test_only_the_stop_button_marks_a_user_stop(self):
+        source = (SRC / "O4_GUI_Utils.py").read_text(encoding="utf-8")
+        stop = source.split("def set_red_flag(self):")[1].split("\n    def ")[0]
+        self.assertIn("UI.user_stopped = True", stop)
+        close = source.split("def exit_prg(self)")[1].split("\n    def ")[0]
+        self.assertNotIn("user_stopped", close)
+
+    def test_every_stop_exit_in_the_batch_loop_settles_the_journal(self):
+        source = (SRC / "O4_Tile_Utils.py").read_text(encoding="utf-8")
+        body = source.split("def _build_tile_list(")[1].split("\ndef ")[0]
+        self.assertNotIn('BSTATE.set_status("stopped")', body)
+        self.assertEqual(
+            body.count("if UI.red_flag:"), body.count("_end_journal_on_stop()")
+        )
+        self.assertIn("UI.user_stopped = False", body)
 
 
 class BuildTileListWiringTest(unittest.TestCase):
