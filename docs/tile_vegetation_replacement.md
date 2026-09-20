@@ -208,6 +208,16 @@ it. Recovery records are kept until restoration has been verified.
 **Veg Replace Status** lists the tiles with an installed replacement and any
 interrupted operation.
 
+### Restoring when a tile is erased
+
+The Tiles window's Batch Delete restores a tile's replacement before erasing it,
+so a package never keeps its trees removed with nothing of ours left to replace
+them. This happens automatically whenever **Tile (whole)** is selected, and can
+be done on its own with the **Veg replacement** box in the erase list. Tiles
+with nothing recorded against them are passed over in silence; a tile whose
+installed DSF is neither the original nor what this tool wrote is reported in a
+dialog and left alone, so the record survives for a manual recovery.
+
 ## Command line
 
 ```bash

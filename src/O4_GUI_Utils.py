@@ -2268,6 +2268,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "Jpeg imagery",
         "SFR bld cache",
         "SFR veg cache",
+        "Veg replacement",
         "Tile (whole)",
         "Tile (textures)",
     ]
@@ -2811,6 +2812,10 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             return
         list_lat_lon = sorted(self.dico_tiles_todo.keys())
         data_deleted = False
+        restore_veg = bool(self.v_["Veg replacement"].get()) or (
+            bool(self.v_["Tile (whole)"].get()) and not self.grouped
+        )
+        summary = {"restored": [], "conflicts": [], "skipped": 0}
         for lat, lon in list_lat_lon:
             if self.v_["OSM data"].get():
                 data_deleted = self.delete_osm_data(lat, lon)
@@ -2822,15 +2827,85 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 data_deleted = self.delete_sfr_bld_cache(lat, lon)
             if self.v_["SFR veg cache"].get():
                 data_deleted = self.delete_sfr_veg_cache(lat, lon)
+            # Erasing a tile has to undo the scenery edits that were made for
+            # it, or the packages below keep their trees removed with nothing
+            # of ours left to replace them.
+            if restore_veg:
+                self.restore_veg_replacement(lat, lon, summary)
             if self.v_["Tile (whole)"].get() and not self.grouped:
                 data_deleted = self.delete_tile_whole(lat, lon)
             if self.v_["Tile (textures)"].get() and not self.grouped:
                 data_deleted = self.delete_tile_textures(lat, lon)
+        if restore_veg:
+            self.report_veg_restore(summary)
+            data_deleted = data_deleted or bool(summary["restored"])
         if data_deleted:
             UI.vprint(1, "Selected cached data removed.")
         else:
             UI.vprint(1, "No cached data found.")
         return
+
+    def restore_veg_replacement(self, lat: int, lon: int, summary: dict) -> bool:
+        """Put back the scenery edited for one tile, collecting the outcome.
+
+        Tiles with nothing recorded against them are passed over in silence:
+        a batch delete usually spans many tiles and only a few carry a
+        replacement, and a "nothing to restore" line per tile would bury the
+        one that actually needs attention.
+        """
+        if not SFR.has_veg_tile_replacement(lat, lon):
+            summary["skipped"] += 1
+            return False
+        try:
+            result = SFR.restore_veg_tile_replacement(lat, lon)
+        except Exception as e:
+            summary["conflicts"].append(
+                (FNAMES.short_latlon(lat, lon), str(e))
+            )
+            _LOGGER.exception(e)
+            return False
+        if result.get("conflicts"):
+            for conflict in result["conflicts"]:
+                summary["conflicts"].append(
+                    (FNAMES.short_latlon(lat, lon), conflict["reason"])
+                )
+            return False
+        summary["restored"].append(FNAMES.short_latlon(lat, lon))
+        return True
+
+    @staticmethod
+    def report_veg_restore(summary: dict) -> None:
+        """Say what the restore did, and make an unresolved conflict loud.
+
+        A conflict means an installed DSF is neither the original nor what this
+        tool wrote, so something else changed it. Deleting the tile anyway
+        leaves that file edited with no record of why, which is worth a dialog
+        rather than a log line.
+        """
+        if summary["restored"]:
+            UI.vprint(
+                1,
+                "Vegetation replacement restored for "
+                + str(len(summary["restored"]))
+                + " tile(s): "
+                + ", ".join(summary["restored"]),
+            )
+        elif not summary["conflicts"]:
+            UI.vprint(2, "No installed vegetation replacement to restore.")
+        if summary["conflicts"]:
+            listed = "\n".join(
+                tile + ": " + reason for tile, reason in summary["conflicts"][:10]
+            )
+            if len(summary["conflicts"]) > 10:
+                listed += "\n..."
+            UI.lvprint(0, "Vegetation replacement NOT restored:\n" + listed)
+            messagebox.showwarning(
+                "Vegetation replacement not restored",
+                "The original scenery could not be put back for "
+                + str(len(summary["conflicts"]))
+                + " tile(s). Those packages are still carrying this tool's "
+                + "edits.\n\n" + listed,
+            )
 
     def delete_osm_data(self, lat: int, lon: int) -> None:
         """Delete cached OSM data."""

@@ -750,5 +750,109 @@ class RepointTextAssetTests(unittest.TestCase):
         self.assertEqual(replacements, [])
 
 
+class BatchDeleteRestoreTests(unittest.TestCase):
+    """Erasing a tile must hand its edited scenery back to its owner.
+
+    The Tiles window is Tk, so the wiring is checked against the source rather
+    than by driving a window; the behaviour it calls into is exercised below
+    against a real managed store.
+    """
+
+    def _gui_source(self):
+        return (SRC / "O4_GUI_Utils.py").read_text(encoding="utf-8")
+
+    def test_the_delete_list_offers_the_restore(self):
+        source = self._gui_source()
+        self.assertIn('"Veg replacement",', source)
+
+    def test_erasing_a_whole_tile_restores_without_being_asked(self):
+        source = self._gui_source()
+        self.assertIn(
+            'restore_veg = bool(self.v_["Veg replacement"].get()) or (\n'
+            '            bool(self.v_["Tile (whole)"].get()) and not self.grouped\n'
+            '        )',
+            source,
+        )
+
+    def test_the_restore_runs_before_the_tile_is_erased(self):
+        source = self._gui_source()
+        restore_at = source.index("self.restore_veg_replacement(lat, lon, summary)")
+        delete_at = source.index("data_deleted = self.delete_tile_whole(lat, lon)")
+        # The backup is keyed on the tile, not on the build folder, but running
+        # first keeps a failure recoverable: the tile is still there to retry.
+        self.assertLess(restore_at, delete_at)
+
+    def test_a_tile_with_nothing_recorded_is_skipped_silently(self):
+        source = self._gui_source()
+        self.assertIn("if not SFR.has_veg_tile_replacement(lat, lon):", source)
+        self.assertIn('summary["skipped"] += 1', source)
+
+    def test_an_unresolved_conflict_is_raised_to_a_dialog(self):
+        source = self._gui_source()
+        report = source[source.index("def report_veg_restore"):]
+        report = report[:report.index("\n    def ")]
+        self.assertIn("messagebox.showwarning", report)
+        self.assertIn("UI.lvprint(0,", report)
+
+
+class HasReplacementTests(unittest.TestCase):
+    """The cheap check the delete path uses to stay quiet."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = CLEANUP.ManagedStore(os.path.join(self.tmp.name, "managed"))
+
+    def test_absent_before_anything_is_installed(self):
+        self.assertIsNone(self.store.load_tile("+47+008"))
+
+    def test_present_once_a_manifest_exists_and_gone_after_restore(self):
+        self.store.save_tile("+47+008", {"tile": "+47+008", "sources": [],
+                                         "private_assets": []})
+        self.assertIsNotNone(self.store.load_tile("+47+008"))
+        CLEANUP.restore_tile(self.store, "+47+008", ignore_busy=True,
+                             log=lambda *_: None)
+        self.assertIsNone(self.store.load_tile("+47+008"))
+
+
+class DeleteThenRestoreTests(unittest.TestCase):
+    """The whole delete-time path, against installed scenery."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.fixture = SceneryFixture(self.tmp.name)
+        self.store = self.fixture.store()
+        self.original = self.fixture.source_dsf.read_bytes()
+        plan = CLEANUP.plan_tile(
+            CLEANUP.inventory_tile(str(self.fixture.custom_scenery), 47, 8),
+            self.store,
+        )
+        CLEANUP.apply_plan(plan, self.store, force_space=True, ignore_busy=True,
+                           log=lambda *_: None)
+        CLEANUP.set_overlay_exclusion(str(self.fixture.overlay_dsf), 47, 8, True,
+                                      self.store, log=lambda *_: None)
+
+    def test_restoring_at_delete_time_returns_the_package_to_shipped_state(self):
+        result = CLEANUP.restore_tile(
+            self.store, "+47+008", overlay_dsf=str(self.fixture.overlay_dsf),
+            ignore_busy=True, log=lambda *_: None)
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fixture.source_dsf.read_bytes(), self.original)
+        self.assertFalse(
+            (self.fixture.region_pack / CLEANUP.PRIVATE_DIR_NAME).exists())
+        self.assertIsNone(self.store.load_tile("+47+008"))
+
+    def test_a_changed_source_is_reported_and_left_alone(self):
+        installed = self.fixture.source_dsf.read_bytes()
+        self.fixture.source_dsf.write_bytes(installed[:-16] + b"\0" * 16)
+        result = CLEANUP.restore_tile(
+            self.store, "+47+008", overlay_dsf=str(self.fixture.overlay_dsf),
+            ignore_busy=True, log=lambda *_: None)
+        self.assertTrue(result["conflicts"])
+        # The record survives so the tile can still be recovered by hand.
+        self.assertIsNotNone(self.store.load_tile("+47+008"))
+
+
 if __name__ == "__main__":
     unittest.main()

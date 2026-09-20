@@ -602,6 +602,21 @@ def _finish_veg_tile_replacement(lat, lon, status_path, custom_scenery_dir,
         print(f"[SFR Veg] embedded-tree cleanup failed: {exc}", flush=True)
 
 
+def has_veg_tile_replacement(lat, lon):
+    """True when this tile still has scenery edits recorded against it.
+
+    Lets a caller skip a tile in silence instead of announcing "nothing to
+    restore" once per tile across a whole batch.
+    """
+    try:
+        import O4_SFR_Veg_Cleanup as CLEANUP
+
+        store = CLEANUP.ManagedStore(veg_replacement_root())
+        return store.load_tile(CLEANUP.tile_name(lat, lon)) is not None
+    except Exception:
+        return False
+
+
 def restore_veg_tile_replacement(lat, lon, keep_exclusion=False):
     """Undo one tile's installed vegetation replacement, both halves of it.
 
