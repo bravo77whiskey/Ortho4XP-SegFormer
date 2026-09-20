@@ -7,6 +7,7 @@ folder — no real scenery is read or written.
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -777,7 +778,7 @@ class BatchDeleteRestoreTests(unittest.TestCase):
     def test_the_restore_runs_before_the_tile_is_erased(self):
         source = self._gui_source()
         restore_at = source.index("self.restore_veg_replacement(lat, lon, summary)")
-        delete_at = source.index("data_deleted = self.delete_tile_whole(lat, lon)")
+        delete_at = source.index("self.delete_tile_whole(lat, lon)")
         # The backup is keyed on the tile, not on the build folder, but running
         # first keeps a failure recoverable: the tile is still there to retry.
         self.assertLess(restore_at, delete_at)
@@ -852,6 +853,44 @@ class DeleteThenRestoreTests(unittest.TestCase):
         self.assertTrue(result["conflicts"])
         # The record survives so the tile can still be recovered by hand.
         self.assertIsNotNone(self.store.load_tile("+47+008"))
+
+
+class BatchDeleteOutcomeTests(unittest.TestCase):
+    """Batch Delete reports what the whole run did, not what its last step did.
+
+    Each delete helper returns True or None, and they used to be assigned to
+    the same flag in turn, so whichever ran last decided the closing message on
+    its own. A run that erased OSM data and imagery still said "No cached data
+    found" if the final step happened to find nothing.
+    """
+
+    def _trash_body(self):
+        source = (SRC / "O4_GUI_Utils.py").read_text(encoding="utf-8")
+        start = source.index("    def trash(self) -> None:")
+        return source[start:source.index("\n    def ", start + 1)]
+
+    def test_no_step_overwrites_the_outcome_of_an_earlier_one(self):
+        body = self._trash_body()
+        self.assertNotIn("data_deleted = self.", body)
+        self.assertNotIn("data_deleted = data_deleted", body)
+
+    def test_every_delete_step_contributes_to_the_outcome(self):
+        body = self._trash_body()
+        calls = set(re.findall(r"self\.(delete_\w+)\(lat, lon\)", body))
+        self.assertTrue(calls)
+        for call in sorted(calls):
+            self.assertIn(
+                "data_deleted |= bool(self.%s(lat, lon))" % call,
+                body,
+                "%s does not accumulate into data_deleted" % call,
+            )
+
+    def test_a_restore_on_its_own_still_counts_as_work_done(self):
+        body = self._trash_body()
+        self.assertIn(
+            "data_deleted |= self.restore_veg_replacement(lat, lon, summary)",
+            body,
+        )
 
 
 if __name__ == "__main__":

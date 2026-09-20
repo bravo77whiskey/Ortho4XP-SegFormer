@@ -2816,29 +2816,33 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             bool(self.v_["Tile (whole)"].get()) and not self.grouped
         )
         summary = {"restored": [], "conflicts": [], "skipped": 0}
+        # Every step accumulates into data_deleted rather than assigning it:
+        # each of these returns True or None, so the last one to run used to
+        # decide the closing message on its own, and a run that cleared plenty
+        # still reported "No cached data found" whenever its final step had
+        # nothing left to do.
         for lat, lon in list_lat_lon:
             if self.v_["OSM data"].get():
-                data_deleted = self.delete_osm_data(lat, lon)
+                data_deleted |= bool(self.delete_osm_data(lat, lon))
             if self.v_["Mask data"].get():
-                data_deleted = self.delete_mask_data(lat, lon)
+                data_deleted |= bool(self.delete_mask_data(lat, lon))
             if self.v_["Jpeg imagery"].get():
-                data_deleted = self.delete_jpeg_imagery(lat, lon)
+                data_deleted |= bool(self.delete_jpeg_imagery(lat, lon))
             if self.v_["SFR bld cache"].get():
-                data_deleted = self.delete_sfr_bld_cache(lat, lon)
+                data_deleted |= bool(self.delete_sfr_bld_cache(lat, lon))
             if self.v_["SFR veg cache"].get():
-                data_deleted = self.delete_sfr_veg_cache(lat, lon)
+                data_deleted |= bool(self.delete_sfr_veg_cache(lat, lon))
             # Erasing a tile has to undo the scenery edits that were made for
             # it, or the packages below keep their trees removed with nothing
             # of ours left to replace them.
             if restore_veg:
-                self.restore_veg_replacement(lat, lon, summary)
+                data_deleted |= self.restore_veg_replacement(lat, lon, summary)
             if self.v_["Tile (whole)"].get() and not self.grouped:
-                data_deleted = self.delete_tile_whole(lat, lon)
+                data_deleted |= bool(self.delete_tile_whole(lat, lon))
             if self.v_["Tile (textures)"].get() and not self.grouped:
-                data_deleted = self.delete_tile_textures(lat, lon)
+                data_deleted |= bool(self.delete_tile_textures(lat, lon))
         if restore_veg:
             self.report_veg_restore(summary)
-            data_deleted = data_deleted or bool(summary["restored"])
         if data_deleted:
             UI.vprint(1, "Selected cached data removed.")
         else:
