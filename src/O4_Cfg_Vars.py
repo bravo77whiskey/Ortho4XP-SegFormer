@@ -418,6 +418,32 @@ cfg_tile_vars = {
         "short_name": "sfr_veg_simh_for_b",
         "hint": "Extra exclusion buffer in metres around simHeaven X-World forest polygons.",
     },
+    "sfr_veg_exclude_lower_forests": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_veg_excl_for",
+        "hint": "Replace lower-priority forests throughout this tile. The "
+                "generated vegetation DSF carries a sim/exclude_for property "
+                "covering the WHOLE one-degree tile, so every forest placed by "
+                "a lower-priority package (simHeaven, SwissUHD, ...) disappears "
+                "across the entire tile — including areas where the model "
+                "places no trees at all. Higher-priority packs such as airports "
+                "are unaffected. Off by default; turn it on only for tiles you "
+                "intend to re-vegetate completely.",
+    },
+    "sfr_veg_remove_embedded_trees": {
+        "type": bool,
+        "default": False,
+        "short_name": "sfr_veg_rm_trees",
+        "hint": "Also remove supported embedded trees from lower-priority "
+                "scenery in this tile. sim/exclude_for only suppresses forest "
+                "polygons; trees baked into autogen blocks, road vegetation or "
+                "standalone tree objects survive it. This edits the affected "
+                "source DSFs in place, keeping a verified backup of every "
+                "original, and needs sfr_veg_exclude_lower_forests enabled. "
+                "Unticking it later does NOT undo installed edits — use "
+                "the Restore Veg Tile action for that.",
+    },
     "sfr_veg_use_simheaven_asset_proximity": {
         "type": bool,
         "default": True,
@@ -730,6 +756,8 @@ list_sfr_veg_vars = [
     "sfr_veg_simheaven_building_buffer_m",
     "sfr_veg_avoid_simheaven_forests",
     "sfr_veg_simheaven_forest_buffer_m",
+    "sfr_veg_exclude_lower_forests",
+    "sfr_veg_remove_embedded_trees",
     "sfr_veg_use_simheaven_asset_proximity",
     "sfr_veg_res_m",
     "sfr_veg_disable_cache",

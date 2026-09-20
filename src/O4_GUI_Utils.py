@@ -748,6 +748,8 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_veg_simheaven_building_buffer_m = tile.sfr_veg_simheaven_building_buffer_m
         SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
         SFR.sfr_veg_simheaven_forest_buffer_m = tile.sfr_veg_simheaven_forest_buffer_m
+        SFR.sfr_veg_exclude_lower_forests = tile.sfr_veg_exclude_lower_forests
+        SFR.sfr_veg_remove_embedded_trees = tile.sfr_veg_remove_embedded_trees
         SFR.sfr_veg_use_simheaven_asset_proximity = tile.sfr_veg_use_simheaven_asset_proximity
         SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
         SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
@@ -2403,6 +2405,32 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             command=self.recover_zones,
         ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row += 1
+        # Installed scenery, not build settings: these act on files already on
+        # disk, which no configuration checkbox can undo.
+        ttk.Separator(self.frame_left, orient=HORIZONTAL).grid(
+            row=row, column=0, padx=5, pady=5, sticky=N + S + E + W
+        )
+        row += 1
+        tk.Label(
+            self.frame_left,
+            anchor=W,
+            text="Installed veg scenery",
+            **THEME.header_options(),
+            font="Helvetica 16 bold italic",
+        ).grid(row=row, column=0, sticky=W + E)
+        row += 1
+        ttk.Button(
+            self.frame_left,
+            text="Restore Veg Scenery",
+            command=self.restore_veg_scenery,
+        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        row += 1
+        ttk.Button(
+            self.frame_left,
+            text=" Veg Replace Status",
+            command=self.veg_replacement_status,
+        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        row += 1
         ttk.Separator(self.frame_left, orient=HORIZONTAL).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
         row +=1
         tk.Label(
@@ -3012,6 +3040,76 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self.canvas.delete(self.dico_tiles_todo[(lat, lon)])
             self.dico_tiles_todo.pop((lat, lon), None)
         return
+
+    def restore_veg_scenery(self):
+        """Put back the source scenery this tool edited, for the selected tiles.
+
+        Deliberately separate from the vegetation settings: unticking
+        "sfr_veg_exclude_lower_forests" changes what the *next* build does and
+        cannot undo edits already installed on disk. This is what undoes them.
+        """
+        list_lat_lon = sorted(self.dico_tiles_todo.keys())
+        if not list_lat_lon:
+            UI.vprint(1, "Unable to restore: No tiles selected.")
+            return
+        listed = ", ".join(
+            FNAMES.short_latlon(lat, lon) for (lat, lon) in list_lat_lon[:12]
+        )
+        if len(list_lat_lon) > 12:
+            listed += ", ..."
+        if not messagebox.askyesno(
+            "Restore installed vegetation scenery",
+            f"Restore the original scenery DSFs for {len(list_lat_lon)} tile(s)"
+            f" ({listed})?\n\n"
+            "This restores every source DSF this tool edited from its verified "
+            "backup and removes the tile-wide forest exclusion from the "
+            "generated overlay. Close X-Plane first.",
+        ):
+            return
+        threading.Thread(
+            target=self._restore_veg_scenery_worker,
+            args=[list_lat_lon],
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _restore_veg_scenery_worker(list_lat_lon):
+        for lat, lon in list_lat_lon:
+            try:
+                SFR.restore_veg_tile_replacement(int(lat), int(lon))
+            except Exception as exc:
+                UI.lvprint(
+                    0,
+                    f"[SFR Veg] restore failed for "
+                    f"{FNAMES.short_latlon(lat, lon)}: {exc}",
+                )
+        UI.lvprint(1, "[SFR Veg] Restore finished.")
+
+    def veg_replacement_status(self):
+        """Report which tiles carry an installed replacement, and any half-done one."""
+        try:
+            import O4_SFR_Veg_Cleanup as CLEANUP
+
+            store = CLEANUP.ManagedStore(SFR.veg_replacement_root())
+            tiles = store.tiles()
+            pending = store.pending()
+        except Exception as exc:
+            messagebox.showerror("Vegetation replacement", str(exc))
+            return
+        lines = [f"Managed state: {store.root}", ""]
+        lines.append(
+            "Tiles with an installed replacement: "
+            + (", ".join(tiles) if tiles else "none")
+        )
+        if pending:
+            lines.append("")
+            lines.append(
+                f"UNFINISHED: {pending.get('action')} on tile "
+                f"{pending.get('tile')} stopped after "
+                f"{len(pending.get('completed', []))} change(s). Re-run the "
+                "build to finish it, or restore that tile."
+            )
+        messagebox.showinfo("Vegetation replacement", "\n".join(lines))
 
     def batch_build(self):
         # Check if config window is open and if unsaved changes exist

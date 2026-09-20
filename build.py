@@ -45,6 +45,10 @@ PRESERVE = {
     "Ortho4XP.cfg",
     ".last_gui_params.txt",
     "build_state",     # unfinished batch build journals - survive a rebuild
+    # Vegetation replacement: the ONLY copy of every original DSF this tool
+    # edited, plus the journal that says which tiles are half-done. Losing it
+    # would make an installed replacement unrestorable.
+    "yOrtho4XP_Veg_Replacement",
     ".venv",           # shared build+AI venv — preserved so torch/model cache survives rebuilds
 }
 

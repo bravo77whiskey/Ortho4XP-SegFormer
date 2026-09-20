@@ -11,6 +11,7 @@ level — importing them at module load time would fail in the frozen exe before
 .venv has been set up.
 """
 
+import json
 import math
 import os
 import re
@@ -216,6 +217,8 @@ sfr_veg_avoid_simheaven_buildings = True
 sfr_veg_simheaven_building_buffer_m = 10.0
 sfr_veg_avoid_simheaven_forests = True
 sfr_veg_simheaven_forest_buffer_m = 0.0
+sfr_veg_exclude_lower_forests = False
+sfr_veg_remove_embedded_trees = False
 sfr_veg_use_simheaven_asset_proximity = True
 sfr_veg_avoid_gfv2    = False
 sfr_veg_gfv2_buffer_m = 0.0
@@ -488,6 +491,145 @@ def _auto_setup():
     return _deps_ready()
 
 
+def veg_replacement_root():
+    """Return the folder holding vegetation-replacement backups and journal."""
+    import O4_SFR_Veg_Cleanup as CLEANUP
+    return os.path.join(_data_dir, CLEANUP.MANAGED_DIR_NAME)
+
+
+def veg_overlay_dsf_path(lat, lon):
+    """Return the generated vegetation DSF for a tile."""
+    return _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
+
+
+def _read_veg_status(status_path):
+    """Return the overlay subprocess's status file, or None if it wrote none."""
+    if not status_path or not os.path.exists(status_path):
+        return None
+    try:
+        with open(status_path, 'r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"[SFR Veg] status file unreadable ({exc})", flush=True)
+        return None
+
+
+def _finish_veg_tile_replacement(lat, lon, status_path, custom_scenery_dir,
+                                 out_dsf, exclude_lower_forests,
+                                 remove_embedded_trees):
+    """Install or undo the tile replacement, once generation has really finished.
+
+    Generation *starting* is not enough to justify suppressing a whole tile's
+    forests. This only acts on what the overlay actually wrote: a compiled and
+    validated DSF carrying the exclusion, an empty result that has to be
+    reconciled, or a failure that must leave everything as it was.
+    """
+    import O4_SFR_Veg_Cleanup as CLEANUP
+
+    status = _read_veg_status(status_path)
+    tile = CLEANUP.tile_name(lat, lon)
+    store = CLEANUP.ManagedStore(veg_replacement_root())
+
+    if status is None:
+        if exclude_lower_forests:
+            print(
+                "[SFR Veg] no status from the overlay run; leaving installed "
+                "scenery untouched. Use the restore action if a previous "
+                "replacement should be undone.",
+                flush=True,
+            )
+        return
+
+    outcome = status.get('outcome')
+    if outcome not in ('ok', 'empty'):
+        print(
+            f"[SFR Veg] generation ended as {outcome!r}; no exclusion installed "
+            "and no embedded-tree cleanup started.",
+            flush=True,
+        )
+        return
+
+    if status.get('needs_reconcile'):
+        try:
+            result = CLEANUP.reconcile_tile(
+                store, tile, overlay_dsf=out_dsf, ignore_busy=True,
+                log=lambda message: print(message, flush=True),
+            )
+        except CLEANUP.ConflictError as exc:
+            print(f"[SFR Veg] could not reconcile tile {tile}: {exc}", flush=True)
+            return
+        if result.get('conflicts'):
+            for conflict in result['conflicts']:
+                print(f"[SFR Veg] {conflict['path']}: {conflict['reason']}",
+                      flush=True)
+        return
+
+    if not remove_embedded_trees:
+        return
+    if not status.get('embedded_tree_cleanup_allowed'):
+        print("[SFR Veg] embedded-tree cleanup skipped: the overlay did not "
+              "install a tile exclusion.", flush=True)
+        return
+
+    conflicts = CLEANUP.validate_scenery_order(custom_scenery_dir, lat, lon)
+    for conflict in conflicts:
+        print(f"[SFR Veg] scenery order [{conflict['severity']}] "
+              f"{conflict['message']}", flush=True)
+    if any(conflict['severity'] == 'error' for conflict in conflicts):
+        print("[SFR Veg] embedded-tree cleanup skipped until the scenery order "
+              "is fixed.", flush=True)
+        return
+
+    try:
+        inventory = CLEANUP.inventory_tile(
+            custom_scenery_dir, lat, lon, rules=store.rules()
+        )
+        plan = CLEANUP.plan_tile(inventory, store)
+        if not plan['sources']:
+            print("[SFR Veg] no supported embedded trees to remove in this tile.",
+                  flush=True)
+        else:
+            CLEANUP.apply_plan(
+                plan, store, ignore_busy=True,
+                log=lambda message: print(message, flush=True),
+            )
+        print(CLEANUP.format_report(plan, inventory, conflicts,
+                                    applied=bool(plan['sources']), store=store),
+              flush=True)
+    except CLEANUP.ConflictError as exc:
+        print(f"[SFR Veg] embedded-tree cleanup stopped: {exc}", flush=True)
+    except Exception as exc:
+        print(f"[SFR Veg] embedded-tree cleanup failed: {exc}", flush=True)
+
+
+def restore_veg_tile_replacement(lat, lon, keep_exclusion=False):
+    """Undo one tile's installed vegetation replacement, both halves of it.
+
+    Exposed for the GUI and the batch path. This is the *only* way installed
+    edits come back: changing a configuration checkbox affects future builds,
+    never scenery that is already on disk.
+    """
+    import O4_SFR_Veg_Cleanup as CLEANUP
+
+    tile = CLEANUP.tile_name(lat, lon)
+    store = CLEANUP.ManagedStore(veg_replacement_root())
+    overlay = None if keep_exclusion else veg_overlay_dsf_path(lat, lon)
+    result = CLEANUP.restore_tile(
+        store, tile, overlay_dsf=overlay, ignore_busy=True,
+        log=lambda message: print(message, flush=True),
+    )
+    if result.get('conflicts'):
+        for conflict in result['conflicts']:
+            print(f"[SFR Veg] {conflict['path']}: {conflict['reason']}",
+                  flush=True)
+    elif result.get('reason'):
+        print(f"[SFR Veg] tile {tile}: {result['reason']}", flush=True)
+    else:
+        print(f"[SFR Veg] tile {tile}: restored "
+              f"{len(result.get('restored', ()))} source DSF(s).", flush=True)
+    return result
+
+
 def process_veg_tile(lat, lon, build_dir):
     """Run the simHeaven-asset SegFormer vegetation overlay for one tile."""
     print(f"[SFR Veg] Starting for tile +{lat:02d}+{lon:03d} …", flush=True)
@@ -510,6 +652,34 @@ def process_veg_tile(lat, lon, build_dir):
     out_dsf          = _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
     custom_scenery_dir = _scenery_paths()
     remote_host      = _resolve_remote_host()
+    status_path      = os.path.join(cache_dir, 'veg_overlay_status.json')
+    # The overlay runs in the .venv subprocess, so this file is how its outcome
+    # comes back: a tile-wide exclusion and the cleanup that goes with it must
+    # never be installed just because the subprocess started.
+    try:
+        if os.path.exists(status_path):
+            os.remove(status_path)
+    except OSError:
+        pass
+
+    exclude_lower_forests = bool(sfr_veg_exclude_lower_forests)
+    remove_embedded_trees = bool(sfr_veg_remove_embedded_trees)
+    if remove_embedded_trees and not exclude_lower_forests:
+        print(
+            "[SFR Veg] embedded-tree removal needs forest replacement; "
+            "ignoring it for this tile",
+            flush=True,
+        )
+        remove_embedded_trees = False
+    print(
+        "[SFR Veg] Effective settings: "
+        f"exclude_lower_forests={exclude_lower_forests!r} "
+        f"remove_embedded_trees={remove_embedded_trees!r} "
+        f"avoid_simheaven_forests={sfr_veg_avoid_simheaven_forests!r}"
+        + (" (forced off for this run by tile replacement)"
+           if exclude_lower_forests and sfr_veg_avoid_simheaven_forests else ""),
+        flush=True,
+    )
 
     code = (
         f"import O4_SFR_Inference as SEG\n"
@@ -540,6 +710,8 @@ def process_veg_tile(lat, lon, build_dir):
         f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"
         f"    simheaven_forest_buffer_m = {sfr_veg_simheaven_forest_buffer_m!r},\n"
         f"    use_simheaven_asset_proximity = {sfr_veg_use_simheaven_asset_proximity!r},\n"
+        f"    exclude_lower_forests = {sfr_veg_exclude_lower_forests!r},\n"
+        f"    status_path      = {status_path!r},\n"
         f"    bld_excl_m       = {0.0 if sfr_veg_disable_cache else 10.0!r},\n"
         f"    dsftool_path     = {dsftool!r},\n"
         f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
@@ -562,6 +734,10 @@ def process_veg_tile(lat, lon, build_dir):
             )
         else:
             _cleanup_sfr_derived_cache(cache_dir, 'veg')
+    _finish_veg_tile_replacement(
+        lat, lon, status_path, custom_scenery_dir, out_dsf,
+        exclude_lower_forests, remove_embedded_trees,
+    )
     print(f"[SFR Veg] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 

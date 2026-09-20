@@ -44,6 +44,7 @@ added_datas = [
     (os.path.join(SPEC_DIR, "src", "scripts", "__init__.py"),            "sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_overlay.py"),    "sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_veg_overlay.py"),"sfr_scripts/src/scripts"),
+    (os.path.join(SPEC_DIR, "src", "scripts", "veg_tile_replacement.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "install_gfv2_simheaven_redirects.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_bld_overlay.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_sfr_overlay.py"),"sfr_scripts/src/scripts"),
@@ -68,6 +69,8 @@ added_datas = [
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Height_Priors.py"),      "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Stock_Yolo_Objects.py"), "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Utils.py"),          "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Edit.py"),           "sfr_scripts/src"),
+    (os.path.join(SPEC_DIR, "src", "O4_SFR_Veg_Cleanup.py"),        "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Vegetation_Overlay.py"), "sfr_scripts/src"),
 ]
 # pyproj CRS data is collected automatically by the pyinstaller pyproj hook
@@ -128,6 +131,8 @@ hidden = [
     "O4_SFR_Region_Boundaries",
     "O4_SFR_Remote",
     "O4_SFR_Texture_Selection",
+    "O4_SFR_DSF_Edit",
+    "O4_SFR_Veg_Cleanup",
     "O4_SFR_Inference",
     "O4_SFR_Building_Overlay",
     "O4_SFR_Roof_Color",

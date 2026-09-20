@@ -922,6 +922,96 @@ def _zones_from_property_pairs(pairs):
     return zones
 
 
+def effective_avoid_simheaven_forests(avoid_simheaven_forests,
+                                      exclude_lower_forests):
+    """Resolve the overlap/replacement conflict for one generation run.
+
+    Avoidance keeps generated trees out of the existing simHeaven forests;
+    replacement then excludes those same forests. Honouring both would leave a
+    bare hole exactly where the old forest was, so replacement wins. Only the
+    value used for this run changes; the user's saved setting is untouched and
+    resumes its normal behaviour as soon as replacement is off.
+    """
+    if exclude_lower_forests:
+        return False
+    return bool(avoid_simheaven_forests)
+
+
+def tile_exclusion_property_value(lat, lon):
+    """Return the ``west/south/east/north`` value covering one whole 1x1 tile.
+
+    Floor, not truncation, so the tile south/west of the equator or prime
+    meridian still gets the degree square it actually occupies: lat -34.2 is
+    tile -35..-34, and ``int()`` would have produced -34..-33.
+    """
+    lat_i = int(math.floor(float(lat)))
+    lon_i = int(math.floor(float(lon)))
+    return f"{lon_i}/{lat_i}/{lon_i + 1}/{lat_i + 1}"
+
+
+def validate_compiled_overlay(dsf_path, expected_exclusion_value=None):
+    """Check a freshly compiled overlay before it replaces the installed one.
+
+    Returns None when the file is usable, otherwise a short reason. DSFTool
+    reports success on some inputs it has not actually turned into a loadable
+    tile, and a tile-wide exclusion is worth proving rather than assuming: an
+    overlay that silently lost its `sim/exclude_for` would leave the old
+    forests and the new trees stacked on top of each other.
+    """
+    try:
+        size = os.path.getsize(dsf_path)
+    except OSError as exc:
+        return f"{dsf_path} is missing ({exc})"
+    if size < 64:
+        return f"{dsf_path} is only {size} bytes"
+    try:
+        pairs = _read_dsf_binary_properties(dsf_path)
+    except Exception as exc:
+        return f"header unreadable ({exc})"
+    if pairs is None:
+        return "not a plain uncompressed DSF"
+    properties = dict(pairs)
+    if properties.get("sim/overlay") != "1":
+        return "sim/overlay is not 1"
+    key = FOREST_EXCLUSION_PROPERTY_KEYS[0]
+    found = [value for name, value in pairs if name == key]
+    if expected_exclusion_value is None:
+        if found:
+            return f"unexpected {key} {found[0]}"
+        return None
+    if not found:
+        return f"{key} missing"
+    if len(found) != 1:
+        return f"{len(found)} {key} properties, expected 1"
+    if _parse_exclusion_rect(found[0]) != _parse_exclusion_rect(expected_exclusion_value):
+        return f"{key} is {found[0]}, expected {expected_exclusion_value}"
+    return None
+
+
+def write_generation_status(status_path, payload):
+    """Record how this generation run ended, for the caller across a subprocess.
+
+    The overlay runs inside the .venv subprocess, so an exit code is all the
+    pipeline would otherwise see. It needs more than that: whether the tile was
+    really processed, whether a tile-wide exclusion was installed, and whether
+    the compile succeeded, because embedded-tree cleanup must not start after a
+    partial or failed run.
+    """
+    if not status_path:
+        return
+    import json as _json
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(status_path)), exist_ok=True)
+        tmp = status_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            _json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, status_path)
+    except Exception as exc:  # a status file is never worth failing a build for
+        print(f"[SFR Veg] could not write status file {status_path}: {exc}")
+
+
 def _read_dsf_binary_properties(dsf_path):
     """Read the header key/value properties straight out of a binary DSF.
 
@@ -1486,12 +1576,51 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
         avoid_simheaven_forests=True, simheaven_forest_buffer_m=0.0,
         use_simheaven_asset_proximity=True,
+        exclude_lower_forests=False,
+        status_path=None,
         avoid_gfv2=False, gfv2_buffer_m=0.0,
         use_gfv2_asset_proximity=False):
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
                          _re.IGNORECASE)
+
+    # Tile replacement and forest-overlap avoidance are mutually exclusive.
+    # Avoidance keeps generated trees out of existing simHeaven forests;
+    # replacement then excludes those same forests, so honouring both would
+    # leave a bare hole exactly where the old forest used to be. Replacement
+    # wins for this run only — the user's saved setting is never rewritten.
+    exclude_lower_forests = bool(exclude_lower_forests)
+    requested_avoid_simheaven_forests = bool(avoid_simheaven_forests)
+    avoid_simheaven_forests = effective_avoid_simheaven_forests(
+        requested_avoid_simheaven_forests, exclude_lower_forests
+    )
+    if requested_avoid_simheaven_forests and not avoid_simheaven_forests:
+        print(
+            "[SFR Veg] tile forest replacement on: forest-overlap avoidance "
+            "forced off for this run (saved setting unchanged) so replaced "
+            "forests do not leave holes"
+        )
+    exclusion_value = tile_exclusion_property_value(lat, lon)
+    status = {
+        'tile': f"{'+' if int(math.floor(lat)) >= 0 else '-'}"
+                f"{abs(int(math.floor(lat))):02d}"
+                f"{'+' if int(math.floor(lon)) >= 0 else '-'}"
+                f"{abs(int(math.floor(lon))):03d}",
+        'lat': int(math.floor(lat)),
+        'lon': int(math.floor(lon)),
+        'out_dsf': os.path.abspath(out_dsf) if out_dsf else None,
+        'exclude_lower_forests': exclude_lower_forests,
+        'exclusion_property': FOREST_EXCLUSION_PROPERTY_KEYS[0],
+        'exclusion_value': exclusion_value if exclude_lower_forests else None,
+        'requested_avoid_simheaven_forests': requested_avoid_simheaven_forests,
+        'effective_avoid_simheaven_forests': bool(avoid_simheaven_forests),
+        'outcome': 'failed',
+        'polygons': 0,
+        'compiled': False,
+        'installed': False,
+        'embedded_tree_cleanup_allowed': False,
+    }
     _transient_cache_ctx = None
     sidecar_cache_dir = cache_dir
     if disable_cache:
@@ -1588,8 +1717,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     print(
         "simHeaven forest overlap avoid:"
         f" {'on' if avoid_simheaven_forests else 'off'}"
-        f" ({simheaven_forest_buffer_m}m); closest asset:"
+        f" (requested {'on' if requested_avoid_simheaven_forests else 'off'},"
+        f" {simheaven_forest_buffer_m}m); closest asset:"
         f" {'on' if use_simheaven_asset_proximity else 'off'}"
+    )
+    print(
+        "tile forest replacement:"
+        f" {'on' if exclude_lower_forests else 'off'}"
+        + (f" — {FOREST_EXCLUSION_PROPERTY_KEYS[0]} {exclusion_value}"
+           " over the whole tile" if exclude_lower_forests else "")
     )
     print(
         f"building overlap avoid: SFR cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
@@ -2357,15 +2493,36 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         print(f"Tree types: {summary}")
 
     if not polygons:
-        print("No vegetation polygons — skipping DSF write."); return 0
+        # A processed tile with nothing to plant must not keep a tile-wide
+        # exclusion alive: with no generated trees of our own, excluding the
+        # lower layers would leave the tile bare. Drop any managed overlay we
+        # wrote earlier and tell the caller to undo the rest of the workflow.
+        print("No vegetation polygons — skipping DSF write.")
+        status['outcome'] = 'empty'
+        status['needs_reconcile'] = True
+        if out_dsf and os.path.exists(out_dsf):
+            try:
+                os.remove(out_dsf)
+                print(f"Removed stale generated overlay {out_dsf}")
+                status['removed_stale_overlay'] = True
+            except OSError as exc:
+                print(f"Could not remove stale generated overlay {out_dsf}: {exc}")
+                status['outcome'] = 'failed'
+                status['error'] = f"stale overlay not removable: {exc}"
+        write_generation_status(status_path, status)
+        return 0
 
     # ── Write DSF ────────────────────────────────────────────────────────────
+    # Compile to a temporary file beside the target and swap it in only once it
+    # has been validated, so a DSFTool failure leaves the tile's previous
+    # overlay exactly as it was instead of destroying it.
     os.makedirs(os.path.dirname(os.path.abspath(out_dsf)), exist_ok=True)
     txt_path = out_dsf.replace('.dsf', '_veg.txt')
+    tmp_dsf = out_dsf + '.tmp'
 
     for_paths = sorted(set(p for p, _, _ in polygons))
     for_idx   = {p: i for i, p in enumerate(for_paths)}
-    lat_i = int(lat); lon_i = int(lon)
+    lat_i = int(math.floor(lat)); lon_i = int(math.floor(lon))
 
     _t = time.perf_counter()
     with open(txt_path, 'w') as f:
@@ -2374,7 +2531,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f.write(f"PROPERTY sim/west  {lon_i}\n")
         f.write(f"PROPERTY sim/east  {lon_i + 1}\n")
         f.write(f"PROPERTY sim/south {lat_i}\n")
-        f.write(f"PROPERTY sim/north {lat_i + 1}\n\n")
+        f.write(f"PROPERTY sim/north {lat_i + 1}\n")
+        if exclude_lower_forests:
+            # One rectangle over the whole degree square. X-Plane applies an
+            # exclusion to the DSFs below this overlay in scenery_packs.ini and
+            # never to the DSF carrying it, so our own trees survive it.
+            f.write(
+                f"PROPERTY {FOREST_EXCLUSION_PROPERTY_KEYS[0]} {exclusion_value}\n"
+            )
+        f.write("\n")
         for p in for_paths:
             f.write(f"POLYGON_DEF {p}\n")
         f.write("\n")
@@ -2387,14 +2552,46 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs)")
 
     _t = time.perf_counter()
-    ok = SEGFORMER.compile_dsf(txt_path, out_dsf)
+    try:
+        if os.path.exists(tmp_dsf):
+            os.remove(tmp_dsf)
+    except OSError:
+        pass
+    ok = SEGFORMER.compile_dsf(txt_path, tmp_dsf)
+    if ok:
+        problem = validate_compiled_overlay(
+            tmp_dsf, exclusion_value if exclude_lower_forests else None
+        )
+        if problem:
+            ok = False
+            print(f"Compiled DSF rejected: {problem}")
     timings['dsf_compile'] += time.perf_counter() - _t
     if ok:
+        os.replace(tmp_dsf, out_dsf)
         print(f"DSF compiled → {out_dsf}")
+        if exclude_lower_forests:
+            print(f"Tile forest replacement installed: "
+                  f"{FOREST_EXCLUSION_PROPERTY_KEYS[0]} {exclusion_value}")
+        status['outcome'] = 'ok'
+        status['compiled'] = True
+        status['installed'] = True
+        status['embedded_tree_cleanup_allowed'] = exclude_lower_forests
+        status['needs_reconcile'] = not exclude_lower_forests
         try: os.remove(txt_path)
         except: pass
     else:
         print(f"DSFTool failed — text file kept at {txt_path}")
+        print("Previous generated overlay left untouched.")
+        try:
+            if os.path.exists(tmp_dsf):
+                os.remove(tmp_dsf)
+        except OSError:
+            pass
+        status['outcome'] = 'compile_failed'
+        status['error'] = 'DSFTool could not produce a valid overlay'
+        status['text_path'] = txt_path
+    status['polygons'] = len(polygons)
+    write_generation_status(status_path, status)
 
     print(
         "[Veg timing] "
@@ -2462,6 +2659,14 @@ def parse_args():
     ap.add_argument('--no-simheaven-asset-proximity', action='store_true',
                     dest='no_simheaven_asset_proximity',
                     help='Use climate assets instead of the nearest X-World tree family.')
+    ap.add_argument('--exclude-lower-forests', action='store_true',
+                    dest='exclude_lower_forests',
+                    help='Replace lower-priority forests across the WHOLE one-degree '
+                         'tile by writing sim/exclude_for into the generated DSF, '
+                         'including where no trees are generated. Forces forest-overlap '
+                         'avoidance off for this run.')
+    ap.add_argument('--status-path', default=None, dest='status_path',
+                    help='Write a JSON summary of how this run ended to this path.')
     ap.add_argument('--no-avoid-gfv2', action='store_true', dest='no_avoid_gfv2',
                     help='Legacy no-op retained for command-line compatibility.')
     ap.add_argument('--gfv2-buffer-m', type=float, default=0.0, dest='gfv2_buffer_m',
@@ -2524,6 +2729,8 @@ def main():
         avoid_simheaven_forests = not args.no_avoid_simheaven_forests,
         simheaven_forest_buffer_m = args.simheaven_forest_buffer_m,
         use_simheaven_asset_proximity = not args.no_simheaven_asset_proximity,
+        exclude_lower_forests = args.exclude_lower_forests,
+        status_path      = args.status_path,
         avoid_gfv2       = False,
         gfv2_buffer_m    = 0.0,
         use_gfv2_asset_proximity = False,
