@@ -199,5 +199,55 @@ class OptionalLibraryRegionsTest(unittest.TestCase):
         self.assertNotIn("o4sfr", registered)
 
 
+class OptionalLibraryPropExclusionTest(unittest.TestCase):
+    """Props filed under a building folder must never stand in for a house."""
+
+    RUSCENERY_PROPS = (
+        "ruscenery/houses/bench.obj",
+        "ruscenery/houses/bus-column.obj",
+        "ruscenery/houses/cow.obj",
+        "ruscenery/houses/electro-column.obj",
+        "ruscenery/houses/electro-column2.obj",
+        "ruscenery/houses/lantern.obj",
+        "ruscenery/houses/lantern-double.obj",
+        "ruscenery/houses/phonepole.obj",
+        "ruscenery/houses/stall-d-01.obj",
+        "ruscenery/houses/stall-d-s.obj",
+        "ruscenery/houses/umbrella.obj",
+    )
+
+    def test_ruscenery_props_are_not_building_candidates(self):
+        for path in self.RUSCENERY_PROPS:
+            with self.subTest(path=path):
+                self.assertFalse(BLD._is_optional_library_building_candidate(path))
+
+    def test_ruscenery_buildings_stay_candidates(self):
+        for path in (
+            "ruscenery/houses/house-01.obj",
+            "ruscenery/houses/r-house-a.obj",
+            "ruscenery/houses/garage1.obj",
+            "ruscenery/houses/warehouse-d-02.obj",
+            "ruscenery/houses/hothouse-1.obj",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(BLD._is_optional_library_building_candidate(path))
+
+    def test_prop_words_match_whole_words_only(self):
+        # "cow" inside "moscow", "stall" inside "installation", "column"
+        # inside "columbus" must not reject real buildings.
+        for path in (
+            "ruscenery/houses/moscow_block.obj",
+            "ff_library/industrial/installation_hall.obj",
+            "objects/houses/US/OH/columbus_house.obj",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(BLD._is_optional_library_building_candidate(path))
+
+    def test_prop_folder_names_do_not_reject(self):
+        self.assertTrue(
+            BLD._is_optional_library_building_candidate("ruscenery/bench/houses/house-01.obj")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

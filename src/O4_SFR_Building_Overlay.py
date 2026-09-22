@@ -2866,6 +2866,29 @@ GENERIC_BUILDING_EXCLUDE_TOKENS = (
     "windmill",
 )
 
+# Street props and animals that some libraries file under a building folder
+# (RuScenery ships bench, phone/power poles, bus-stop columns, lanterns, market
+# stalls and a cow in ``ruscenery/houses/``). Matched as whole words of the
+# basename, split on non-letters, so "cow" cannot hit "moscow" and "stall"
+# cannot hit "installation".
+OPTIONAL_LIBRARY_PROP_NAME_WORDS = frozenset((
+    "bench",
+    "column",
+    "cow",
+    "lantern",
+    "phonepole",
+    "stall",
+    "umbrella",
+))
+
+
+def _has_prop_name_word(path):
+    """True when the object's basename names a street prop, not a building."""
+    name = (path or "").replace("\\", "/").lower().rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0]
+    return not OPTIONAL_LIBRARY_PROP_NAME_WORDS.isdisjoint(re.split(r"[^a-z]+", stem))
+
+
 OPTIONAL_LIBRARY_SPECIAL_LANDMARK_TOKENS = (
     "/wind_turbine",
     "wind_turbine",
@@ -5352,6 +5375,8 @@ def _is_optional_library_building_candidate(obj_path):
     if _is_excluded_building_filler_asset(p):
         return False
     if _path_has_any(p, GENERIC_BUILDING_EXCLUDE_TOKENS):
+        return False
+    if _has_prop_name_word(p):
         return False
     return _path_has_any(p, OPTIONAL_LIBRARY_INCLUDE_TOKENS)
 
