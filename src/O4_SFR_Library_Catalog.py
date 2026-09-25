@@ -1,15 +1,18 @@
 """Persistent catalog of installed X-Plane scenery libraries.
 
 Every building-overlay tile used to parse every ``library.txt`` (checking each
-export's file on disk) and re-measure every library OBJ, which cost minutes a
-tile although installed libraries rarely change. The catalog keeps the parsed
-exports, the ``library.txt`` prefix hits and the measured OBJ8 footprints in
-one file shared by all tiles; footprints are measured the first time a tile
-needs them.
+export's file on disk), re-measure every library OBJ and re-analyse its roof
+colour, which cost minutes a tile although installed libraries rarely change.
+The catalog keeps the parsed Custom Scenery and default-scenery exports, the
+``library.txt`` prefix hits, the measured OBJ8 footprints and other per-OBJ
+results (:meth:`LibraryCatalog.cached`) in one file shared by all tiles. It is
+independent of the per-tile cache setting. Per-OBJ results are computed the
+first time a tile needs them.
 
-Opening the catalog re-stats each package's ``library.txt`` (well under a
-second) and re-parses only packages whose file changed, appeared or vanished,
-or whose ``scenery_packs.ini`` activation changed. :func:`rescan` rebuilds it
+Opening the catalog re-stats each package's ``library.txt`` (about a second)
+and re-parses only packages whose file changed, appeared or vanished, dropping
+the per-OBJ results stored under them; ``scenery_packs.ini`` activation is read
+fresh every time. :func:`rescan` rebuilds it
 from scratch for changes those stamps cannot see, such as OBJ files replaced
 in place.
 """
@@ -99,13 +102,15 @@ def _parse_package(name, package_dir, library_txt):
 
 
 class LibraryCatalog:
-    """Parsed library exports and OBJ footprints for one Custom Scenery folder."""
+    """Parsed library exports and per-OBJ results for one Custom Scenery folder."""
 
     def __init__(self, custom_scenery_dir, catalog_path):
         self.custom_scenery_dir = custom_scenery_dir
         self.catalog_path = catalog_path
         self.packages = {}        # dir key -> package record
         self.obj_bounds = {}      # resolved OBJ path -> bounds tuple or None
+        self.derived = {}         # namespace -> {OBJ path: result}
+        self.default_order = []   # dir keys of default-scenery libraries, walk order
         self.active = []          # [(name, dir)] scenery_packs.ini order
         self.listing = []         # [(name, dir)] Custom Scenery folders, sorted
         self.scanned_at = None
@@ -120,6 +125,7 @@ class LibraryCatalog:
             "scanned_at": self.scanned_at,
             "packages": self.packages,
             "obj_bounds": self.obj_bounds,
+            "derived": self.derived,
         }
 
     def _restore(self, payload):
@@ -131,6 +137,7 @@ class LibraryCatalog:
             return False
         self.packages = payload.get("packages") or {}
         self.obj_bounds = payload.get("obj_bounds") or {}
+        self.derived = payload.get("derived") or {}
         self.scanned_at = payload.get("scanned_at")
         return True
 
@@ -193,16 +200,43 @@ class LibraryCatalog:
                 library_txt,
                 (name, stat.st_size, stat.st_mtime_ns),
             )
+        self.default_order = []
+        xplane_root = self._xplane_root()
+        if xplane_root:
+            for name, package_dir, library_txt in ASSETINV.iter_library_txt_files(
+                xplane_root=xplane_root, include_default=True
+            ):
+                key = _dir_key(package_dir)
+                if key in layout:
+                    continue
+                try:
+                    stat = os.stat(library_txt)
+                except OSError:
+                    continue
+                self.default_order.append(key)
+                layout[key] = (
+                    name,
+                    package_dir,
+                    library_txt,
+                    (name, stat.st_size, stat.st_mtime_ns),
+                )
         return layout
 
-    def _forget_bounds_under(self, package_dir):
+    def _xplane_root(self):
+        if os.path.basename(self.custom_scenery_dir).lower() != "custom scenery":
+            return None
+        return os.path.dirname(self.custom_scenery_dir)
+
+    def _forget_results_under(self, package_dir):
+        """Drop footprints and derived results for OBJs inside ``package_dir``."""
         prefix = _dir_key(package_dir).rstrip("\\/") + os.sep
-        stale = [
-            path for path in self.obj_bounds
-            if os.path.normcase(path).startswith(prefix)
-        ]
-        for path in stale:
-            del self.obj_bounds[path]
+        for results in (self.obj_bounds, *self.derived.values()):
+            stale = [
+                path for path in results
+                if os.path.normcase(path).startswith(prefix)
+            ]
+            for path in stale:
+                del results[path]
 
     def sync(self, *, full=False):
         """Bring the catalog in line with installed packages; return counts."""
@@ -211,9 +245,10 @@ class LibraryCatalog:
         if full:
             self.packages = {}
             self.obj_bounds = {}
+            self.derived = {}
         removed = [key for key in self.packages if key not in layout]
         for key in removed:
-            self._forget_bounds_under(self.packages.pop(key)["dir"])
+            self._forget_results_under(self.packages.pop(key)["dir"])
         todo = [
             (key, item) for key, item in layout.items()
             if self.packages.get(key, {}).get("stamp") != item[3]
@@ -221,7 +256,7 @@ class LibraryCatalog:
         if todo:
             for key, (_name, package_dir, _lib, _stamp) in todo:
                 if key in self.packages:
-                    self._forget_bounds_under(package_dir)
+                    self._forget_results_under(package_dir)
             with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
                 parsed = list(pool.map(
                     lambda job: _parse_package(job[1][0], job[1][1], job[1][2]),
@@ -297,6 +332,29 @@ class LibraryCatalog:
                 )
         return index
 
+    def default_exports(self, target_virtual_paths, suffixes=(".obj",)):
+        """Return default-scenery exports for these virtual paths.
+
+        Matches ``ASSETINV.scan_library_exports(include_default=True, ...)``.
+        """
+        suffixes = tuple(str(suffix).lower() for suffix in suffixes or ())
+        targets = {
+            ASSETINV.normalize_library_path(path)
+            for path in target_virtual_paths or ()
+            if path
+        }
+        exports = []
+        for key in self.default_order:
+            record = self.packages.get(key)
+            if record is None:
+                continue
+            exports.extend(
+                export for export in record["exports"]
+                if ASSETINV.normalize_library_path(export.virtual_path) in targets
+                and (not suffixes or _export_has_suffix(export, suffixes))
+            )
+        return exports
+
     def has_prefix(self, prefix):
         """Return whether any Custom Scenery folder's library.txt mentions ``prefix``.
 
@@ -324,11 +382,28 @@ class LibraryCatalog:
         self.dirty = True
         return bounds
 
+    def cached(self, namespace, obj_path, build):
+        """Return ``build()`` for one OBJ, computed once and kept with the catalog.
+
+        Results are dropped with the package the OBJ lives in and on rescan;
+        put a version in ``namespace`` to retire results when ``build`` changes.
+        """
+        results = self.derived.setdefault(namespace, {})
+        try:
+            return results[obj_path]
+        except KeyError:
+            pass
+        value = build()
+        results[obj_path] = value
+        self.dirty = True
+        return value
+
     def summary(self):
         exports = sum(len(record["exports"]) for record in self.packages.values())
+        derived = sum(len(results) for results in self.derived.values())
         return (
             f"{len(self.packages)} library packages, {exports} exports, "
-            f"{len(self.obj_bounds)} OBJ footprints"
+            f"{len(self.obj_bounds)} OBJ footprints, {derived} other OBJ results"
         )
 
 
@@ -374,7 +449,7 @@ def open_catalog(custom_scenery_dir, cache_dir):
 
 
 def rescan(custom_scenery_dir, cache_dir):
-    """Rebuild the catalog from scratch; OBJ footprints are re-measured on use."""
+    """Rebuild the catalog from scratch; per-OBJ results are recomputed on use."""
     custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
     if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
         raise FileNotFoundError(f"Custom Scenery folder not found: {custom_scenery_dir!r}")
@@ -388,7 +463,7 @@ def rescan(custom_scenery_dir, cache_dir):
     print(
         f"[SFR Lib] Library catalog rebuilt in {counts['seconds']:.1f}s "
         f"({catalog.summary()}); the next building build re-measures "
-        "OBJ footprints once.",
+        "OBJ footprints and roof colours once.",
         flush=True,
     )
     return catalog

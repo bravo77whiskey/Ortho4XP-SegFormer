@@ -1874,6 +1874,8 @@ def _library_catalog_for(custom_scenery_dir):
 def _library_obj_bounds(obj_path, cache_dir=None):
     """Return a library OBJ's footprint, from the catalog when one is open."""
     if _LIBRARY_CATALOG is not None:
+        if not obj_path:
+            return None
         return _LIBRARY_CATALOG.bounds_for(obj_path)
     return _read_obj8_bounds(obj_path, cache_dir)
 
@@ -1949,7 +1951,7 @@ def _custom_object_dims(object_path, package_dir, library_index, cache_dir):
     if dims is not None:
         return dims
     resolved_obj = _resolve_custom_object_path(p, package_dir, library_index)
-    bounds_m = _read_obj8_bounds(resolved_obj, cache_dir)
+    bounds_m = _library_obj_bounds(resolved_obj, cache_dir)
     if bounds_m is None:
         return None
     xmin, xmax, zmin, zmax = bounds_m
@@ -4662,6 +4664,9 @@ def _scan_default_object_exports(custom_scenery_dir, asset_pools):
     })
     if not virtual_paths:
         return []
+    catalog = _library_catalog_for(custom_scenery_dir)
+    if catalog is not None:
+        return catalog.default_exports(virtual_paths)
     resolved_custom = resolve_custom_scenery_dir(custom_scenery_dir)
     if not resolved_custom:
         return []
@@ -4693,10 +4698,31 @@ def _prepare_asset_roof_colors(
     default_object_exports = _scan_default_object_exports(
         custom_scenery_dir, asset_pools
     )
+    catalog = _library_catalog_for(custom_scenery_dir)
+    analyze = None
+    real_path = os.path.realpath
+    if catalog is not None:
+        # Roof colours belong to the installed libraries, not the tile: keep
+        # them in the shared catalog whatever the tile cache setting.
+        namespace = f"roof_color:{ROOFCOLOR.ROOF_COLOR_ANALYZER_VERSION}"
+
+        def analyze(obj_path):
+            return catalog.cached(
+                namespace,
+                obj_path,
+                lambda: ROOFCOLOR.analyze_obj_roof_color(obj_path),
+            )
+
+        def real_path(obj_path):
+            return catalog.cached(
+                "realpath", obj_path, lambda: os.path.realpath(obj_path)
+            )
     return ROOFCOLOR.enrich_asset_roof_colors(
         asset_pools,
         list(runtime_library_exports or ()) + list(default_object_exports or ()),
         cache_dir=cache_dir,
+        analyze=analyze,
+        real_path=real_path,
     )
 
 

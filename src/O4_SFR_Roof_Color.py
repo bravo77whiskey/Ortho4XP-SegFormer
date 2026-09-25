@@ -406,13 +406,16 @@ def analyze_obj_roof_color(obj_path, cache_dir=None):
         "obj_path": os.path.abspath(obj_path),
         "texture_path": os.path.abspath(texture_path),
         "sample_count": len(surface_samples),
+        # Kept so placement-cache signatures need not re-stat both files.
+        "obj_signature": analysis_key[1],
+        "texture_signature": analysis_key[2],
     })
     PCACHE.save(cache_path, descriptor)
     _ANALYSIS_MEMORY_CACHE[analysis_key] = descriptor
     return descriptor
 
 
-def _effective_physical_exports(exports):
+def _effective_physical_exports(exports, real_path=os.path.realpath):
     """Return active physical variants, ignoring backups when primaries exist."""
     exports = list(exports or ())
     primaries = [
@@ -428,7 +431,7 @@ def _effective_physical_exports(exports):
         if not path:
             missing = True
             continue
-        key = os.path.normcase(os.path.realpath(path))
+        key = os.path.normcase(real_path(path))
         if key in seen:
             continue
         seen.add(key)
@@ -436,12 +439,19 @@ def _effective_physical_exports(exports):
     return resolved, missing
 
 
-def enrich_asset_roof_colors(asset_pools, library_exports, cache_dir=None):
+def enrich_asset_roof_colors(asset_pools, library_exports, cache_dir=None,
+                             analyze=None, real_path=os.path.realpath):
     """Attach strict physical-variant roof descriptors to object assets.
 
+    ``analyze(obj_path)`` replaces :func:`analyze_obj_roof_color` with
+    ``cache_dir`` and ``real_path`` replaces :func:`os.path.realpath`, e.g. to
+    read both from the shared library catalog.
     Returns counters describing how many virtual aliases are safe matches,
     inconsistent across variants, or unavailable.
     """
+    if analyze is None:
+        def analyze(path):
+            return analyze_obj_roof_color(path, cache_dir=cache_dir)
     grouped = ASSETINV.unique_virtual_exports(library_exports or (), suffix=".obj")
     counters = {
         "safe": 0,
@@ -454,13 +464,13 @@ def enrich_asset_roof_colors(asset_pools, library_exports, cache_dir=None):
                 continue
             key = ASSETINV.normalize_library_path(asset.get("path", ""))
             exports = grouped.get(key, ())
-            paths, missing_export = _effective_physical_exports(exports)
+            paths, missing_export = _effective_physical_exports(exports, real_path)
             if not paths and os.path.isfile(str(asset.get("path") or "")):
                 paths = [asset["path"]]
             descriptors = []
             failed = bool(missing_export)
             for path in paths:
-                descriptor = analyze_obj_roof_color(path, cache_dir=cache_dir)
+                descriptor = analyze(path)
                 if descriptor is None:
                     failed = True
                     continue
@@ -524,8 +534,8 @@ def roof_metadata_signature(asset):
         variants.append((
             item.get("family"),
             tuple(round(float(value), 3) for value in item.get("lab", ())),
-            _file_signature(item.get("obj_path")),
-            _file_signature(item.get("texture_path")),
+            item.get("obj_signature") or _file_signature(item.get("obj_path")),
+            item.get("texture_signature") or _file_signature(item.get("texture_path")),
         ))
     return (
         bool(asset.get("roof_color_complete")),

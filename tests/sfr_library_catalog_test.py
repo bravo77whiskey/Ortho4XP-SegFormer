@@ -220,6 +220,78 @@ class LibraryCatalogTest(unittest.TestCase):
         self.assertIsNone(LIBCAT.open_catalog(str(self.custom), None))
         self.assertIsNone(LIBCAT.open_catalog(None, str(self.cache)))
 
+    def test_default_scenery_exports_match_disk_scan(self):
+        default_lib = self.custom.parent / "Resources" / "default scenery" / "1000 autogen"
+        _write_obj(default_lib / "objects" / "garage.obj")
+        _write_library(
+            default_lib,
+            "A\n800\nLIBRARY\n"
+            "EXPORT lib/g10/autogen/garage.obj objects/garage.obj\n"
+            "EXPORT lib/g10/autogen/other.obj objects/garage.obj\n",
+        )
+        pools = {1: [
+            {"kind": "object", "path": "lib/g10/autogen/garage.obj"},
+            {"kind": "object", "path": "simheaven/houses/house_10x10x2.obj"},
+        ]}
+        disk = BLD._scan_default_object_exports(self.custom, pools)
+        BLD._LIBRARY_CATALOG = self._open()
+        cached = BLD._scan_default_object_exports(self.custom, pools)
+        self.assertEqual(cached, disk)
+        self.assertEqual(
+            [export.virtual_path for export in cached],
+            ["lib/g10/autogen/garage.obj"],
+        )
+        # Default libraries never count as Custom Scenery packages.
+        self.assertNotIn(
+            "lib/g10/autogen/garage.obj", BLD._active_custom_library_index(self.custom)
+        )
+
+    def test_cached_results_persist_and_drop_with_their_package(self):
+        catalog = self._open()
+        house = str(self.simheaven / "objects" / "house.obj")
+        shed = str(self.sfd / "objects" / "shed.obj")
+        calls = []
+
+        def build(path):
+            calls.append(path)
+            return f"result:{os.path.basename(path)}"
+
+        for path in (house, shed, house):
+            catalog.cached("probe:v1", path, lambda path=path: build(path))
+        self.assertEqual(calls, [house, shed])
+        catalog.save()
+
+        library_txt = self.sfd / "library.txt"
+        library_txt.write_text(library_txt.read_text(encoding="utf-8") + "\n",
+                               encoding="utf-8")
+        _bump_mtime(library_txt)
+        reopened = self._open()
+        self.assertEqual(reopened.derived["probe:v1"], {house: "result:house.obj"})
+
+        LIBCAT.rescan(str(self.custom), str(self.cache))
+        self.assertEqual(self._open().derived, {})
+
+    def test_roof_colours_come_from_catalog_whatever_the_tile_cache(self):
+        from unittest import mock
+
+        pools = {1: [{"kind": "object", "path": "simheaven/houses/house_10x10x2.obj"}]}
+        exports = BLD._scan_runtime_library_exports(self.custom, include_simheaven=True)
+        BLD._LIBRARY_CATALOG = self._open()
+        descriptor = {"family": "red", "lab": (50.0, 40.0, 30.0)}
+        with mock.patch.object(
+            BLD.ROOFCOLOR, "analyze_obj_roof_color", return_value=descriptor
+        ) as analyze:
+            BLD._prepare_asset_roof_colors(True, self.custom, pools, exports, None)
+            BLD._LIBRARY_CATALOG.save()
+            BLD._LIBRARY_CATALOG = self._open()
+            counts = BLD._prepare_asset_roof_colors(
+                True, self.custom, pools, exports, None
+            )
+        # Analysed once, then served from the reopened catalog.
+        self.assertEqual(analyze.call_count, 1)
+        self.assertEqual(counts["safe"], 1)
+        self.assertEqual(pools[1][0]["roof_color_variants"], (descriptor,))
+
     def test_library_obj_bounds_uses_catalog_when_open(self):
         obj = str(self.simheaven / "objects" / "house.obj")
         self.assertEqual(BLD._library_obj_bounds(obj), (-2.0, 2.0, -2.0, 2.0))
