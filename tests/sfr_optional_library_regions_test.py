@@ -196,7 +196,8 @@ class OptionalLibraryRegionsTest(unittest.TestCase):
         registered = set(BLD.CURATED_EXTRA_BUILDING_LIBRARIES)
         missing = expected - registered
         self.assertFalse(missing, msg=f"missing registrations: {sorted(missing)}")
-        self.assertNotIn("o4sfr", registered)
+        # Our own ProcGen library (restored 2026-09-25 for procgen_v4).
+        self.assertIn("o4sfr", registered)
 
 
 class OptionalLibraryPropExclusionTest(unittest.TestCase):

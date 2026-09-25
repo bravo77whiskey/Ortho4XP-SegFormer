@@ -2777,6 +2777,12 @@ CURATED_EXTRA_BUILDING_LIBRARIES = {
         # Niche Cold-War / vintage thematic — primarily European bases.
         "regions": ("europe",),
     },
+    "o4sfr": {
+        "label": "O4SFR_Library",
+        "package_patterns": ("o4sfr_library", "o4sfr"),
+        "virtual_prefixes": ("o4sfr/",),
+        # Our shipped library — per-asset region encoded in path token /<region>/.
+    },
 }
 
 OPTIONAL_LIBRARY_INCLUDE_TOKENS = (
@@ -5143,8 +5149,8 @@ def _optional_asset_region_match(asset_regions, asset_region):
     """Return True when a classified optional asset is valid for a tile region.
 
     The token ``"generic"`` on an asset acts as a wildcard so global libraries
-    (OB_Library, MisterX residual residential subset) can serve tiles in any
-    natural-earth region.
+    (OB_Library, MisterX residual residential subset, the o4sfr generic bucket)
+    can serve tiles in any natural-earth region.
     """
     if not asset_regions:
         return False
@@ -5153,6 +5159,26 @@ def _optional_asset_region_match(asset_regions, asset_region):
     region = (asset_region or "generic").lower()
     allowed = OPTIONAL_ASSET_REGION_ALIASES.get(region, {region})
     return bool(set(asset_regions).intersection(allowed))
+
+
+_O4SFR_PATH_REGION_TOKENS = {
+    "/north_america/": ("north_america",),
+    "/north-america/": ("north_america",),
+    "/america/": ("north_america", "south_america"),
+    "/americas/": ("north_america", "south_america"),
+    "/south_america/": ("south_america",),
+    "/south-america/": ("south_america",),
+    "/latam/": ("south_america",),
+    "/europe/": ("europe",),
+    "/scandinavia/": ("scandinavia",),
+    "/mediterranean/": ("mediterranean",),
+    "/asia/": ("asia",),
+    "/se_asia/": ("se_asia",),
+    "/southeast_asia/": ("se_asia",),
+    "/africa/": ("africa",),
+    "/australia_oceania/": ("australia_oceania",),
+    "/oceania/": ("australia_oceania",),
+}
 
 
 def _load_region_overrides():
@@ -5201,7 +5227,7 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
     Resolution order, first match wins:
 
     1. ``O4_SFR_Region_Overrides.json`` (visual-triage decisions).
-    2. Per-library hand-coded path rules (world-models, cdb-library).
+    2. Per-library hand-coded path rules (world-models, cdb-library, o4sfr).
     3. The library's static ``regions`` registration in
        ``CURATED_EXTRA_BUILDING_LIBRARIES``.
     """
@@ -5254,6 +5280,13 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
             "/hihifo_" in p
         ):
             return ("australia_oceania",)
+
+    # Our shipped library carries the region in a path token: o4sfr/<region>/...
+    if lib_id == "o4sfr" or p.startswith("o4sfr/"):
+        for token, regions in _O4SFR_PATH_REGION_TOKENS.items():
+            if token in p:
+                return regions
+        return ("generic",)
 
     # Fall back to the library's static `regions` registration.  Libraries that
     # leave this empty stay "unclassified" and won't enter the placement pool

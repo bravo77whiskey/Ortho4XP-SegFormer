@@ -40,10 +40,22 @@ def test_asset_mode_filters_object_and_facade_pools():
     ] == ["object", "facade"]
 
 
-def test_o4sfr_is_not_a_runtime_curated_library():
-    assert "o4sfr" not in overlay.CURATED_EXTRA_BUILDING_LIBRARIES
-    assert "o4sfr" not in overlay._enabled_extra_library_ids("auto")
-    assert overlay._enabled_extra_library_ids("o4sfr") == ()
+def test_o4sfr_is_a_runtime_curated_library():
+    # Restored 2026-09-25 for the v4 ProcGen library (procgen_v4/).
+    assert "o4sfr" in overlay.CURATED_EXTRA_BUILDING_LIBRARIES
+    assert "o4sfr" in overlay._enabled_extra_library_ids("auto")
+    assert overlay._enabled_extra_library_ids("o4sfr") == ("o4sfr",)
+    assert overlay._enabled_extra_library_ids("off") == ()
+
+
+def test_o4sfr_regions_come_from_the_path_token():
+    regions = overlay._optional_library_asset_regions
+    assert regions("o4sfr/africa/apartments/apt_18.9x11.7x2.obj",
+                   "o4sfr") == ("africa",)
+    assert regions("o4sfr/mediterranean/residential/house_9.5x7.8x2.obj",
+                   "o4sfr") == ("mediterranean",)
+    assert regions("o4sfr/generic/industrial/ind_48.9x27.6x3.obj",
+                   "o4sfr") == ("generic",)
 
 
 def test_yolo_facade_fallback_prefers_detection_height():
