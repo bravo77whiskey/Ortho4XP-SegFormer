@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+from collections import OrderedDict
 from pathlib import Path
 
 import cv2
@@ -39,6 +40,13 @@ _BARYCENTRIC_SAMPLES = (
     (0.10, 0.45, 0.45),
 )
 _ANALYSIS_MEMORY_CACHE = {}
+# Decoded textures, most recently used last.  Atlas libraries share a few
+# large pages across tens of thousands of OBJs (the v4 ProcGen library: 54
+# 4096^2 pages for 104k OBJs), so decoding per OBJ made a first-contact
+# pool scan take hours.  A tile's pool touches only its region's handful of
+# pages, so a small LRU holds them all (~50 MB per 4096^2 RGB page).
+_TEXTURE_CACHE = OrderedDict()
+_TEXTURE_CACHE_MAX = 10
 
 
 def _lab_family(lab):
@@ -327,11 +335,26 @@ def _roof_surface_samples(vertices, indices, draw_ranges):
     ]
 
 
-def _sample_texture(texture_path, surface_samples):
+def _load_texture(texture_path):
+    key = _file_signature(texture_path)
+    if key is not None and key in _TEXTURE_CACHE:
+        _TEXTURE_CACHE.move_to_end(key)
+        return _TEXTURE_CACHE[key]
     try:
         with Image.open(texture_path) as source:
             texture = np.asarray(source.convert("RGB"), dtype=np.uint8)
     except Exception:
+        return None
+    if key is not None:
+        _TEXTURE_CACHE[key] = texture
+        while len(_TEXTURE_CACHE) > _TEXTURE_CACHE_MAX:
+            _TEXTURE_CACHE.popitem(last=False)
+    return texture
+
+
+def _sample_texture(texture_path, surface_samples):
+    texture = _load_texture(texture_path)
+    if texture is None:
         return None
     if texture.ndim != 3 or texture.shape[0] <= 0 or texture.shape[1] <= 0:
         return None

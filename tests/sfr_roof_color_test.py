@@ -160,6 +160,35 @@ def test_obj_analyzer_keeps_top_roof_and_supports_wrapped_uvs():
         assert descriptor["sample_count"] > 0
 
 
+def test_obj_analyzer_decodes_a_shared_texture_once():
+    # Atlas libraries share one page across thousands of OBJs; decoding it
+    # per OBJ turned a first-contact pool scan into hours.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _write_split_texture(root / "roof.png")
+        objs = []
+        for i in range(5):
+            obj = root / f"house_{i}.obj"
+            _write_obj(obj, wrapped=bool(i % 2))
+            objs.append(obj)
+        ROOF._TEXTURE_CACHE.clear()
+        real_open = ROOF.Image.open
+        with mock.patch.object(ROOF.Image, "open",
+                               side_effect=real_open) as opened:
+            descriptors = [ROOF.analyze_obj_roof_color(str(o)) for o in objs]
+        assert all(d is not None and d["family"] == "warm"
+                   for d in descriptors)
+        assert opened.call_count == 1
+
+        # Editing the texture invalidates the cached decode.
+        _write_split_texture(root / "roof.png", roof_rgb=(40, 60, 200),
+                             other_rgb=(40, 60, 200))
+        os.utime(root / "roof.png", ns=(1, 1))
+        ROOF._ANALYSIS_MEMORY_CACHE.clear()
+        descriptor = ROOF.analyze_obj_roof_color(str(objs[0]))
+        assert descriptor["family"] != "warm"
+
+
 def test_obj_analyzer_uses_dds_sibling_when_declared_png_is_missing():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
