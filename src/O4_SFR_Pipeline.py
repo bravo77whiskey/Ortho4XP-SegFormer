@@ -32,6 +32,14 @@ def _sfr_cache_dir(lat, lon):
                             f'{int(lat):+03d}{int(lon):+04d}')
 
 
+def _sfr_library_cache_dir():
+    try:
+        import O4_File_Names as FNAMES
+        return FNAMES.sfr_library_cache_dir()
+    except Exception:
+        return os.path.join(_exe_dir, 'SFR_cache', '_libraries')
+
+
 # Persistent sidecar caches written under the per-tile SFR_cache dir by
 # PCACHE.load_or_build() / ensure_cached_dsf_text() (parsed OSM, mesh-water
 # index, disassembled DSF text, OBJ8 bounds). Unlike the per-DDS inference
@@ -828,6 +836,7 @@ def process_bld_tile(lat, lon, build_dir):
         f"    avoid_custom_scenery     = {sfr_bld_avoid_custom_scenery!r},\n"
         f"    roof_color_matching      = {sfr_bld_roof_color_matching!r},\n"
         f"    cache_dir                = {cache_dir!r},\n"
+        f"    library_cache_dir        = {_sfr_library_cache_dir()!r},\n"
         f"    grid_n                   = {sfr_bld_grid_n!r},\n"
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
         f"    dsftool_path             = {dsftool!r},\n"
@@ -860,6 +869,38 @@ def process_bld_tile(lat, lon, build_dir):
         else:
             _cleanup_sfr_derived_cache(cache_dir, 'bld')
     print(f"[SFR Bld] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
+
+
+def rescan_building_libraries():
+    """Rebuild the shared scenery-library catalog the building overlay reads.
+
+    Tile builds re-read only packages whose library.txt changed; run this after
+    replacing library OBJs in place, or whenever library results look stale.
+    """
+    print("[SFR Lib] Rescanning scenery libraries …", flush=True)
+    custom_scenery_dir = _scenery_paths()
+    if not custom_scenery_dir:
+        print("[SFR Lib] No Custom Scenery folder configured.", flush=True)
+        return False
+    if not _auto_setup():
+        raise RuntimeError(
+            "SegFormer setup failed — torch could not be installed into .venv. "
+            "Click 'Setup SegFormer' and check the log for errors."
+        )
+    code = (
+        "import O4_SFR_Building_Overlay as bld_overlay\n"
+        "bld_overlay.rescan_library_catalog(\n"
+        f"    {custom_scenery_dir!r},\n"
+        f"    {_sfr_library_cache_dir()!r},\n"
+        ")\n"
+    )
+    ret = _run_venv(code)
+    if ret != 0:
+        if _red_flag_set():
+            print("[SFR Lib] Interrupted by user.", flush=True)
+            return False
+        raise RuntimeError(f"Library rescan subprocess failed (exit {ret})")
+    return True
 
 
 # ── Model setup / dependency installation ────────────────────────────────────

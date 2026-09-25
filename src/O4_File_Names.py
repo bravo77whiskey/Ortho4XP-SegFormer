@@ -105,6 +105,11 @@ def sfr_cache_dir(lat, lon):
     return os.path.join(SFR_cache_dir, long_latlon(lat, lon))
 
 
+def sfr_library_cache_dir():
+    """Shared (not per-tile) cache of installed scenery library scans."""
+    return os.path.join(SFR_cache_dir, "_libraries")
+
+
 def mask_dir(lat, lon):
     return os.path.join(Mask_dir, long_latlon(lat, lon))
 

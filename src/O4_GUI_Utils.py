@@ -242,24 +242,31 @@ class Ortho4XP_GUI(tk.Tk):
         ttk.Button(
             self.frame_tile,
             takefocus=False,
+            text="Libraries",
+            command=self.rescan_sfr_libraries,
+            style="Flat.TButton",
+        ).grid(row=0, column=9, rowspan=2, padx=5, pady=0)
+        ttk.Button(
+            self.frame_tile,
+            takefocus=False,
             image=self.config_icon,
             command=self.open_config_window,
             style="Flat.TButton",
-        ).grid(row=0, column=9, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=10, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.loupe_icon,
             command=self.open_custom_zl_window,
             style="Flat.TButton",
-        ).grid(row=0, column=10, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=11, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.earth_icon,
             command=self.open_earth_window,
             style="Flat.TButton",
-        ).grid(row=0, column=11, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=12, rowspan=2, padx=5, pady=0)
         self.pause_button = ttk.Button(
             self.frame_tile,
             takefocus=False,
@@ -268,21 +275,21 @@ class Ortho4XP_GUI(tk.Tk):
             command=self.toggle_pause,
             style="Flat.TButton",
         )
-        self.pause_button.grid(row=0, column=12, rowspan=2, padx=5, pady=0)
+        self.pause_button.grid(row=0, column=13, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.stop_icon,
             command=self.set_red_flag,
             style="Flat.TButton",
-        ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=14, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.exit_icon,
             command=self.exit_prg,
             style="Flat.TButton",
-        ).grid(row=0, column=14, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=15, rowspan=2, padx=5, pady=0)
 
         # Third row (Steps)
         for i in range(7):
@@ -806,6 +813,17 @@ class Ortho4XP_GUI(tk.Tk):
             target=SFR.process_bld_tile,
             args=[tile.lat, tile.lon, tile.build_dir],
             daemon=True,
+        )
+        self.working_thread.start()
+
+    def rescan_sfr_libraries(self):
+        """Rebuild the scenery-library catalog SegFormer Bld reuses across tiles."""
+        running = getattr(self, "working_thread", None)
+        if running is not None and running.is_alive():
+            UI.vprint(0, "Wait for the running job to finish before rescanning libraries.")
+            return
+        self.working_thread = threading.Thread(
+            target=SFR.rescan_building_libraries, daemon=True
         )
         self.working_thread.start()
 

@@ -41,6 +41,7 @@ import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
+import O4_SFR_Library_Catalog as LIBCAT
 import O4_SFR_Roof_Color as ROOFCOLOR
 import O4_SFR_Height_Model as HEIGHTMODEL
 import O4_SFR_Height_Priors as HEIGHTPRIORS
@@ -1845,44 +1846,48 @@ def _read_obj8_bounds(obj_path, cache_dir=None):
     """Return OBJ8 X/Z footprint bounds as ``(xmin, xmax, zmin, zmax)``."""
     if not obj_path or not os.path.isfile(obj_path):
         return None
-
-    def _parse():
-        min_x = min_z = float('inf')
-        max_x = max_z = float('-inf')
-        n_vertices = 0
-        with open(obj_path, 'r', encoding='utf-8', errors='ignore') as handle:
-            for raw_line in handle:
-                line = raw_line.lstrip()
-                if not line.startswith('VT'):
-                    continue
-                parts = line.split()
-                if len(parts) < 4 or parts[0] != 'VT':
-                    continue
-                try:
-                    x = float(parts[1])
-                    z = float(parts[3])
-                except ValueError:
-                    continue
-                min_x = min(min_x, x)
-                max_x = max(max_x, x)
-                min_z = min(min_z, z)
-                max_z = max(max_z, z)
-                n_vertices += 1
-        if n_vertices <= 0 or max_x <= min_x or max_z <= min_z:
-            return None
-        return (float(min_x), float(max_x), float(min_z), float(max_z))
-
     return PCACHE.load_or_build(
         obj_path,
         cache_dir,
         "obj8_bounds",
-        _parse,
+        lambda: LIBCAT.measure_obj8_bounds(obj_path),
         version="obj8-xz-bounds-v1",
     )
 
 
+# Shared library catalog opened by run(); the scan helpers below fall back to
+# reading library.txt files from disk while it is None (tests, audit scripts).
+_LIBRARY_CATALOG = None
+
+
+def _library_catalog_for(custom_scenery_dir):
+    """Return the open library catalog when it covers ``custom_scenery_dir``."""
+    catalog = _LIBRARY_CATALOG
+    if catalog is None or not custom_scenery_dir:
+        return None
+    resolved = resolve_custom_scenery_dir(custom_scenery_dir)
+    if os.path.normcase(resolved) != os.path.normcase(catalog.custom_scenery_dir):
+        return None
+    return catalog
+
+
+def _library_obj_bounds(obj_path, cache_dir=None):
+    """Return a library OBJ's footprint, from the catalog when one is open."""
+    if _LIBRARY_CATALOG is not None:
+        return _LIBRARY_CATALOG.bounds_for(obj_path)
+    return _read_obj8_bounds(obj_path, cache_dir)
+
+
+def rescan_library_catalog(custom_scenery_dir, library_cache_dir):
+    """Rebuild the shared library catalog, e.g. after installing libraries."""
+    return LIBCAT.rescan(custom_scenery_dir, library_cache_dir)
+
+
 def _active_custom_library_index(custom_scenery_dir):
     """Build a best-effort active library virtual-path to physical OBJ map."""
+    catalog = _library_catalog_for(custom_scenery_dir)
+    if catalog is not None:
+        return catalog.active_object_index()
     index = {}
     for _, package_dir in active_scenery_pack_dirs(custom_scenery_dir):
         library_txt = os.path.join(package_dir, 'library.txt')
@@ -4626,6 +4631,11 @@ def _scan_runtime_library_exports(custom_scenery_dir, *, include_sfd=False,
     )
     if not patterns:
         return []
+    catalog = _library_catalog_for(custom_scenery_dir)
+    if catalog is not None:
+        exports = catalog.runtime_exports(patterns, suffixes)
+        if exports is not None:
+            return exports
     return ASSETINV.scan_library_exports(
         custom_scenery_dir=custom_scenery_dir,
         package_name_patterns=patterns,
@@ -4820,7 +4830,7 @@ def _bounds_union(bounds_iter):
 def _measured_bounds_for_exports(exports, cache_dir=None):
     """Return unioned OBJ8 bounds for all physical variants of one virtual path."""
     return _bounds_union(
-        _read_obj8_bounds(export.resolved_path, cache_dir)
+        _library_obj_bounds(export.resolved_path, cache_dir)
         for export in exports
         if getattr(export, "resolved_path", None)
     )
@@ -4866,7 +4876,7 @@ def _alias_oversized_footprint_fraction(declared_bounds, exports, cache_dir=None
         rp = getattr(export, "resolved_path", None)
         if not rp:
             continue
-        bounds = _read_obj8_bounds(rp, cache_dir)
+        bounds = _library_obj_bounds(rp, cache_dir)
         if bounds is None:
             continue
         n += 1
@@ -5652,6 +5662,11 @@ def _merge_asset_pools(*pool_maps):
 
 def _find_library_export(custom_scenery_dir, library_prefix):
     """Return True if any installed scenery package exports the requested prefix."""
+    catalog = _library_catalog_for(custom_scenery_dir)
+    if catalog is not None:
+        found = catalog.has_prefix(library_prefix)
+        if found is not None:
+            return found
     custom_scenery_dir = resolve_custom_scenery_dir(custom_scenery_dir)
     if not custom_scenery_dir or not os.path.isdir(custom_scenery_dir):
         return False
@@ -9603,6 +9618,7 @@ def run(
     yolo_min_coverage=YOLO_OBJECT_MIN_COVERAGE,
     height_checkpoint=None,
     roof_color_matching=False,
+    library_cache_dir=None,
     **legacy_kwargs,
 ):
     # Zone-area filtering was retired in favour of the up-front min-footprint
@@ -10162,6 +10178,11 @@ def run(
                   _simheaven_objects_signature(sh_bld_objects))
     print(f"simHeaven buildings: {len(sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
 
+    # Installed libraries rarely change between tiles: read their exports and
+    # OBJ footprints from the shared catalog instead of re-scanning the disk.
+    global _LIBRARY_CATALOG
+    _LIBRARY_CATALOG = LIBCAT.open_catalog(custom_scenery_dir, library_cache_dir)
+
     _t = time.perf_counter()
     if avoid_custom_scenery and dsftool_path and os.path.exists(dsftool_path):
         custom_bld_polys, custom_bld_objects, custom_bld_skipped, custom_bld_layers = (
@@ -10365,6 +10386,8 @@ def run(
         runtime_library_exports,
         sidecar_cache_dir,
     )
+    if _LIBRARY_CATALOG is not None:
+        _LIBRARY_CATALOG.save_if_dirty()
     asset_sources_label = _describe_asset_sources(
         default_assets_available,
         sfd_assets_available,
@@ -13063,6 +13086,7 @@ def main():
         make_viz   = not args.no_viz,
         debug_image_only = args.debug_image_only,
         cache_dir  = cache_dir,
+        library_cache_dir = os.path.join(o4xp_root, 'SFR_cache', '_libraries'),
         verbose_log = args.verbose_log,
         grid_n          = args.grid_n,
         osm_roads_path  = args.osm_roads,
