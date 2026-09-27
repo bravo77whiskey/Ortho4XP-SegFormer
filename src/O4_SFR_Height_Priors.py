@@ -14,8 +14,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 P95_EXCESS_RETAIN = 0.5
+
+# Neighbourhood context (policy 2).  A building rarely stands far above the
+# median of the buildings around it unless its footprint is large: in 10,700
+# 3DBAG buildings (12 Dutch districts, 70th-percentile roof height, 150 m
+# neighbourhoods of at least 6 others) the height above the neighbourhood
+# median had P99 = 9.3 m under 100 m2, P99 = 10.2 m at 100-250 m2 and
+# P95 = 8.9 m at 250-600 m2, while larger footprints reached 40-60 m.  So a
+# small footprint may exceed its neighbourhood median by at most the excess
+# below; large footprints are not context-capped.
+CONTEXT_RADIUS_M = 150.0
+CONTEXT_MIN_NEIGHBOURS = 6
+CONTEXT_EXCESS_M = ((250.0, 10.0), (600.0, 15.0))   # (area below, max excess)
+
+# Asset gate: a placed asset (eave height, floors x 3.2 m) may exceed the
+# detection's regularized height by one storey or 25 %, whichever is more,
+# and never the regional/class hard ceiling.
+ASSET_GATE_ABS_M = 3.5
+ASSET_GATE_REL = 0.25
 
 
 @dataclass(frozen=True)
@@ -90,3 +108,78 @@ def regularize_height_m(height_m: float, prior: HeightPrior) -> tuple[float, str
         height_m = prior.hard_ceiling_m
         adjustment = "hard_ceiling"
     return height_m, adjustment
+
+
+def context_excess_limit_m(area_m2: float) -> float | None:
+    """Return the allowed height above the neighbourhood median, or None."""
+
+    try:
+        area_m2 = float(area_m2)
+    except (TypeError, ValueError):
+        return None
+    if not area_m2 > 0.0:
+        return None
+    for area_below, excess_m in CONTEXT_EXCESS_M:
+        if area_m2 < area_below:
+            return float(excess_m)
+    return None
+
+
+def neighbourhood_context_caps(points_m, heights_m, areas_m2):
+    """Return per-building context caps (None where no cap applies).
+
+    ``points_m`` are building centres in metres, ``heights_m`` their
+    regularized heights.  The reference is the median height of the other
+    buildings within CONTEXT_RADIUS_M; it needs CONTEXT_MIN_NEIGHBOURS.
+    """
+
+    import numpy as np
+
+    pts = np.asarray(points_m, dtype=np.float64).reshape(-1, 2)
+    hs = np.asarray(heights_m, dtype=np.float64).reshape(-1)
+    n = len(hs)
+    caps = [None] * n
+    if n <= CONTEXT_MIN_NEIGHBOURS:
+        return caps
+    limits = [context_excess_limit_m(a) for a in areas_m2]
+    if all(limit is None for limit in limits):
+        return caps
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:  # pragma: no cover - scipy ships with the app
+        cKDTree = None
+    tree = cKDTree(pts) if cKDTree is not None else None
+    r2 = CONTEXT_RADIUS_M * CONTEXT_RADIUS_M
+    for i in range(n):
+        limit = limits[i]
+        if limit is None or not np.isfinite(hs[i]):
+            continue
+        if tree is not None:
+            nb = [j for j in tree.query_ball_point(pts[i], CONTEXT_RADIUS_M) if j != i]
+        else:
+            d2 = ((pts - pts[i]) ** 2).sum(axis=1)
+            nb = [j for j in np.flatnonzero(d2 <= r2).tolist() if j != i]
+        vals = hs[nb]
+        vals = vals[np.isfinite(vals)]
+        if vals.size < CONTEXT_MIN_NEIGHBOURS:
+            continue
+        caps[i] = float(np.median(vals)) + limit
+    return caps
+
+
+def asset_height_limit_m(height_m, prior: HeightPrior | None = None):
+    """Return the tallest asset (eave height) allowed for a detection."""
+
+    limit = None
+    try:
+        height_m = float(height_m)
+    except (TypeError, ValueError):
+        height_m = float("nan")
+    if height_m == height_m and height_m > 0.0:
+        limit = max(height_m + ASSET_GATE_ABS_M, height_m * (1.0 + ASSET_GATE_REL))
+    elif prior is not None:
+        limit = max(prior.p95_m, prior.median_m + ASSET_GATE_ABS_M)
+    if prior is not None:
+        ceiling = float(prior.hard_ceiling_m)
+        limit = ceiling if limit is None else min(limit, ceiling)
+    return limit

@@ -45,6 +45,7 @@ import O4_SFR_Library_Catalog as LIBCAT
 import O4_SFR_Roof_Color as ROOFCOLOR
 import O4_SFR_Height_Model as HEIGHTMODEL
 import O4_SFR_Height_Priors as HEIGHTPRIORS
+import O4_SFR_Footprint_Polygons as FOOTPRINTS
 import O4_SFR_Texture_Selection as TEXSEL
 from O4_SFR_Texture_Selection import compute_covered_fractions
 from O4_SFR_DSF_Utils import (
@@ -2698,8 +2699,23 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 70      # v70: regional height regularization
-BLD_PLACEMENT_FAST_CACHE_VERSION = 72  # v72: regional height regularization
+BLD_PLACEMENT_CACHE_VERSION = 72      # v72: large-footprint polygons
+BLD_PLACEMENT_FAST_CACHE_VERSION = 74  # v74: large-footprint polygons
+# Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
+# wing the detector missed) are extruded as a polygon facade traced from the
+# landcover building class (O4_SFR_Footprint_Polygons), and the smaller
+# detections on that roof are not placed as separate buildings.  Measured on
+# 37 large detections over Eindhoven against the complete BAG cadastre
+# (relief displacement compensated): footprint IoU 0.50 -> 0.56, better on
+# 20, worse on 2.  O4_SFR_BLD_FOOTPRINT_POLYGONS=0 disables.
+LARGE_FOOTPRINT_MIN_M2 = 1000.0
+# Use the polygon only when it changes the footprint materially; a near-OBB
+# polygon keeps the object/OBB-facade path (a fitted 3-D asset looks better).
+LARGE_FOOTPRINT_SHRINK = 0.85
+LARGE_FOOTPRINT_GROW = 1.08
+# A smaller detection is part of a placed large roof when this share of its
+# OBB lies inside the roof polygon.
+LARGE_FOOTPRINT_NESTED_FRAC = 0.5
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -4195,6 +4211,105 @@ def _detection_height_prior_class(detection):
     if area_m2 > 0.0 and max_side_m > 0.0:
         return _roof_fragment_class(area_m2, max_side_m, 1.0)
     return BLD_CLASS_MEDIUM
+
+
+def _detection_height_gate_m(detection):
+    """Return the tallest asset eave height allowed for a detection, or None."""
+    try:
+        gate = detection.get('height_gate_max_m')
+    except AttributeError:
+        return None
+    if gate is None:
+        return None
+    try:
+        gate = float(gate)
+    except (TypeError, ValueError):
+        return None
+    return gate if math.isfinite(gate) and gate > 0.0 else None
+
+
+def _assign_height_gates(detections, region):
+    """Set ``height_gate_max_m`` from each detection's height and its prior.
+
+    Runs after the regional fallbacks and HeightNet, so every detection is
+    gated: by its regularized height when it has one, else by the regional
+    class P95.  Disable with O4_SFR_BLD_HEIGHT_GATE=0.
+    """
+    if not _env_flag("O4_SFR_BLD_HEIGHT_GATE", True):
+        return
+    for det in detections or ():
+        prior = HEIGHTPRIORS.height_prior(
+            det.get('height_prior_region') or region,
+            _detection_height_prior_class(det),
+        )
+        gate = HEIGHTPRIORS.asset_height_limit_m(det.get('height_m'), prior)
+        if gate is not None:
+            det['height_gate_max_m'] = float(gate)
+
+
+def _apply_height_context_caps(detections, m_per_px):
+    """Cap small footprints relative to their neighbourhood's median height.
+
+    HEIGHTPRIORS.CONTEXT_EXCESS_M has the evidence.  Operates on the
+    detections that received a model height on this texture; returns how
+    many were lowered.  Disable with O4_SFR_BLD_HEIGHT_CONTEXT=0.
+    """
+    if not _env_flag("O4_SFR_BLD_HEIGHT_CONTEXT", True):
+        return 0
+    rows = []
+    for det in detections or ():
+        if det.get('height_source') != 'heightnet':
+            continue
+        center = _detection_center_px(det)
+        if center is None:
+            continue
+        area_m2, _side = _detection_footprint_metrics_m(det)
+        rows.append((det, center, area_m2))
+    if not rows:
+        return 0
+    points = [(c[0] * float(m_per_px), c[1] * float(m_per_px)) for _d, c, _a in rows]
+    heights = [float(d['height_m']) for d, _c, _a in rows]
+    caps = HEIGHTPRIORS.neighbourhood_context_caps(
+        points, heights, [a for _d, _c, a in rows]
+    )
+    n_capped = 0
+    for (det, _c, _a), cap in zip(rows, caps):
+        if cap is None:
+            continue
+        det['height_context_cap_m'] = round(float(cap), 3)
+        if float(det['height_m']) > cap:
+            det['height_m'] = max(float(HEIGHTMODEL.HEIGHT_MODEL_MIN_M), float(cap))
+            det['height_adjustment'] = 'context_cap'
+            n_capped += 1
+    return n_capped
+
+
+def _large_footprint_rings(detection, building_mask, m_per_px):
+    """Return polygon rings (texture px) for a large irregular roof, or None.
+
+    None means: keep the normal object / OBB-facade path (small detection,
+    no building evidence, or a polygon that is nearly the OBB).
+    """
+    if building_mask is None:
+        return None
+    area_m2, _side = _detection_footprint_metrics_m(detection)
+    if area_m2 < float(LARGE_FOOTPRINT_MIN_M2):
+        return None
+    pts = np.asarray(detection.get('points', ()), dtype=np.float64)
+    if pts.shape != (4, 2):
+        return None
+    res = FOOTPRINTS.extract_footprint(building_mask, pts, m_per_px)
+    if res is None:
+        return None
+    ratio = res['area_m2'] / max(res['obb_area_m2'], 1e-6)
+    if LARGE_FOOTPRINT_SHRINK <= ratio <= LARGE_FOOTPRINT_GROW:
+        return None
+    rings = []
+    for ring in res['rings']:
+        ring = np.asarray(ring, dtype=np.float64)
+        if len(ring) >= 3:
+            rings.append(ring)
+    return rings or None
 
 
 def _direct_yolo_raw_footprint_allowed(detection):
@@ -6892,6 +7007,7 @@ def _apply_heightnet_to_detections(
         det['height_prior_p95_m'] = float(prior.p95_m)
         det['height_hard_ceiling_m'] = float(prior.hard_ceiling_m)
         det['height_adjustment'] = adjustment
+    _apply_height_context_caps(detections, m_per_px)
 
 
 def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
@@ -8353,6 +8469,7 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
     req_w = np.empty(n, dtype=np.float64)
     aspect = np.empty(n, dtype=np.float64)
     height = np.empty(n, dtype=np.float64)
+    height_known = []
     for i, (_rank, _cls, cand) in enumerate(entries):
         cov_area[i] = float(cand['coverage_area_m2'])
         rl = float(cand['required_length_m'])
@@ -8363,6 +8480,7 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
         # max(required_length / max(required_width, 1e-6), 1e-6).
         aspect[i] = max(rl / max(rw, 1e-6), 1e-6)
         asset_height = cand['asset'].get('height_m')
+        height_known.append(asset_height is not None)
         if asset_height is None:
             asset_height = DEFAULT_FACADE_HEIGHT_M.get(int(_cls), 8.0)
         height[i] = float(asset_height)
@@ -8376,6 +8494,9 @@ def _merged_yolo_candidates_by_zone(fit_table, zone_class):
         # doubles; skips a numpy scalar extraction per candidate).
         'aspect_list': aspect.tolist(),
         'height_list': height.tolist(),
+        # The height gate applies only to assets whose height is known (a
+        # floors token or a height in the path), never to a class guess.
+        'height_known_list': height_known,
         # Ascending copy for the binary-search coverage cutoff (cov_area is
         # sorted descending, so the >=-threshold set is always a prefix).
         'cov_asc': np.ascontiguousarray(cov_area[::-1]),
@@ -8591,6 +8712,10 @@ def _select_yolo_object_candidate_once(
             if not residential_context and _asset_requires_residential_context(asset):
                 context_skipped += 1
                 continue
+            legacy_gate_m = _detection_height_gate_m(detection)
+            if legacy_gate_m is not None and asset.get('height_m') is not None:
+                if float(asset['height_m']) > legacy_gate_m + 1e-6:
+                    continue
             footprint_area_m2 = float(candidate['footprint_area_m2'])
             if footprint_area_m2 / detection_area_m2 < float(min_coverage):
                 continue
@@ -8649,6 +8774,7 @@ def _select_yolo_object_candidate_once(
         'coverage_reject': 0,
         'outline_reject': 0,
         'occupancy_reject': 0,
+        'height_reject': 0,
         'seen': 0,
     }
 
@@ -8688,7 +8814,13 @@ def _select_yolo_object_candidate_once(
     static_rank = view['static_rank']
     aspect_list = merged_bundle['aspect_list']
     height_list = merged_bundle['height_list']
+    height_known_list = merged_bundle.get('height_known_list')
     det_aspect_c = max(det_aspect, 1e-6)
+    # Height gate: an asset taller than the detection's regularized height
+    # plus a storey (never above the regional/class hard ceiling) would stand
+    # out of its street; skip it so a shorter fit or the facade fallback,
+    # which extrudes the detection's own height, takes the footprint.
+    height_gate_m = _detection_height_gate_m(detection)
     # Height fit: same-footprint assets differing only in floors share
     # coverage AND aspect, so ranking height error between aspect_error and
     # static_rank picks the floor variant nearest the detection's (HeightNet)
@@ -8735,6 +8867,14 @@ def _select_yolo_object_candidate_once(
                 continue
             if not residential_context and requires_res[idx]:
                 counters['context_skipped'] += 1
+                continue
+            if (
+                height_gate_m is not None and
+                height_known_list is not None and
+                height_known_list[idx] and
+                height_list[idx] > height_gate_m + 1e-6
+            ):
+                counters['height_reject'] += 1
                 continue
             group.append((
                 abs(math.log(aspect_list[idx] / det_aspect_c)),
@@ -8817,6 +8957,7 @@ def _select_yolo_object_candidate_once(
         # ~cov_ok is exactly the suffix beyond the coverage prefix.
         counters['coverage_reject'] = int(np.count_nonzero(size_ok[prefix_n:]))
     for status in (
+        'height_reject',
         'context_skipped',
         'occupancy_reject',
         'outline_reject',
@@ -9890,6 +10031,7 @@ def run(
         'trained_yolo_inference': 0.0,
         'yolo_suppress': 0.0,
         'heightnet': 0.0,
+        'footprint_polygons': 0.0,
         'stock_yolo_inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
@@ -11631,6 +11773,11 @@ def run(
                 _record_elapsed(timings, file_timings, 'heightnet', _t)
 
             if yolo_detections:
+                _assign_height_gates(yolo_detections, natural_asset_region)
+                file_counts['height_context_capped'] = sum(
+                    1 for _d in yolo_detections
+                    if _d.get('height_adjustment') == 'context_cap'
+                )
                 _t_yolo_place = time.perf_counter()
                 # O4_SFR_BLD_PLACE_PROFILE: per-phase wall-time + candidate-scan
                 # accounting for the placement loop. perf_counter is only called
@@ -11664,7 +11811,118 @@ def run(
                 _blkdbg = (
                     [] if _env_flag("O4_SFR_BLD_BLOCK_DEBUG", False) else None
                 )
+                # Large irregular roofs first (largest first): a polygon
+                # facade traced from the landcover building class, then the
+                # smaller detections on that roof are skipped below.
+                large_roof_mask = None
+                if (
+                    veg_map is not None and
+                    _asset_kind_enabled('facade', building_asset_mode) and
+                    _env_flag("O4_SFR_BLD_FOOTPRINT_POLYGONS", True)
+                ):
+                    _t_lf = time.perf_counter()
+                    _bld_class_mask = veg_map == SEGFORMER.CLASS_BUILDING
+                    for detection in sorted(
+                        (
+                            d for d in yolo_detections
+                            if float(d.get('area_m2', 0.0)) >= LARGE_FOOTPRINT_MIN_M2
+                        ),
+                        key=lambda d: (
+                            -float(d.get('area_m2', 0.0)),
+                            -float(d.get('confidence', 0.0)),
+                        ),
+                    ):
+                        prepared_yolo = _prepare_direct_yolo_detection(
+                            detection, img_w, img_h
+                        )
+                        if not prepared_yolo['valid']:
+                            continue
+                        jx = int(prepared_yolo['jx'])
+                        jy = int(prepared_yolo['jy'])
+                        if not (0 <= jx < img_w and 0 <= jy < img_h):
+                            continue
+                        if placement_occ_mask[jy, jx]:
+                            continue
+                        if large_roof_mask is not None and large_roof_mask[jy, jx]:
+                            continue
+                        o_lon, o_lat = px_to_latlon(
+                            jx, jy, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+                        )
+                        if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
+                            continue
+                        if not _direct_yolo_facade_footprint_allowed(detection):
+                            continue
+                        rings = _large_footprint_rings(
+                            detection, _bld_class_mask, m_per_px
+                        )
+                        if not rings:
+                            continue
+                        ring_polys = []
+                        for ring in rings:
+                            ring_i = np.rint(ring).astype(np.int32)
+                            ring_i[:, 0] = np.clip(ring_i[:, 0], 0, img_w - 1)
+                            ring_i[:, 1] = np.clip(ring_i[:, 1], 0, img_h - 1)
+                            if not _poly_fits_with_integral(
+                                static_occ_mask, ring_i, fit_scratch,
+                                static_occ_integral,
+                            ):
+                                continue
+                            if (
+                                route_excl_mask is not None and
+                                _poly_mask_overlap_frac(
+                                    route_excl_mask, ring_i, fit_scratch
+                                ) > DIRECT_FACADE_ROAD_OVERLAP_FRAC
+                            ):
+                                continue
+                            if not _poly_fits(building_spacing_mask, ring_i, fit_scratch):
+                                continue
+                            ring_polys.append((ring, ring_i))
+                        if not ring_polys:
+                            continue
+                        try_cls = int(detection['placement_class'])
+                        facade_cls = _yolo_facade_class(try_cls) or (
+                            try_cls if try_cls in BLD_PLACEMENT_CLASSES
+                            else BLD_CLASS_MEDIUM
+                        )
+                        facade_path = _facade_for_detection(
+                            facade_cls, veg_map, jx, jy, m_per_px,
+                            lat=float(o_lat), lon=float(o_lon),
+                            include_simheaven_assets=simheaven_assets_available,
+                        )
+                        facade_h = _yolo_facade_height_m(
+                            detection, height_rng, height_priors_by_class, facade_cls
+                        )
+                        if large_roof_mask is None:
+                            large_roof_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                        for ring, ring_i in ring_polys:
+                            placed_facades.append((
+                                _pixel_ring_to_latlon(
+                                    ring, img_w, img_h, lat_n, lat_s, lon_w, lon_e
+                                ),
+                                facade_path,
+                                facade_h,
+                            ))
+                            placed_viz_polys.append((ring_i.copy(), facade_cls))
+                            _mark_poly(building_spacing_mask, ring_i)
+                            _mark_poly(large_roof_mask, ring_i)
+                            if _obj_avoid:
+                                cv2.fillPoly(recent_spacing_mask, [ring_i], 1)
+                                recent_spacing_marks += 1
+                        detection['_large_footprint_placed'] = True
+                        pts_this.append((jx, jy, float(detection['heading']), facade_cls))
+                        file_counts['yolo_footprint_polygon_placed'] = (
+                            file_counts.get('yolo_footprint_polygon_placed', 0) + 1
+                        )
+                        file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
+                    _bld_class_mask = None
+                    if large_roof_mask is not None:
+                        building_spacing_integral = cv2.integral(
+                            building_spacing_mask, sdepth=cv2.CV_32S
+                        )
+                    _record_elapsed(timings, file_timings, 'footprint_polygons', _t_lf)
                 for detection in yolo_detections:
+                    if detection.get('_large_footprint_placed'):
+                        continue
                     if _pf:
                         _t_pf = time.perf_counter()
                         prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
@@ -11721,6 +11979,20 @@ def run(
                         file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
                         if _blkdbg is not None:
                             _blkdbg.append(('static_footprint', jx, jy, yolo_poly))
+                        continue
+                    if (
+                        large_roof_mask is not None and
+                        large_roof_mask[jy, jx] and
+                        _poly_mask_overlap_frac(
+                            large_roof_mask, yolo_poly, fit_scratch, bbox=yolo_bbox
+                        ) >= LARGE_FOOTPRINT_NESTED_FRAC
+                    ):
+                        # part of a large roof already placed as one polygon
+                        file_counts['yolo_inside_large_footprint'] = (
+                            file_counts.get('yolo_inside_large_footprint', 0) + 1
+                        )
+                        if _blkdbg is not None:
+                            _blkdbg.append(('large_footprint', jx, jy, yolo_poly))
                         continue
 
                     heading = float(detection['heading'])
@@ -11864,6 +12136,7 @@ def run(
                                 'outline_reject': 'yolo_object_outline_reject',
                                 'context_skipped': 'yolo_object_context_skipped',
                                 'occupancy_reject': 'yolo_object_occupancy_reject',
+                                'height_reject': 'yolo_object_height_reject',
                                 'no_dimensions': 'yolo_object_no_dimensions',
                                 'miss': 'yolo_object_lookup_miss',
                             }.get(object_status, 'yolo_object_lookup_miss')
