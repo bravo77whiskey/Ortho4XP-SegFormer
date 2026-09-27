@@ -2699,8 +2699,8 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 72      # v72: large-footprint polygons
-BLD_PLACEMENT_FAST_CACHE_VERSION = 74  # v74: large-footprint polygons
+BLD_PLACEMENT_CACHE_VERSION = 73      # v73: segment-first switch
+BLD_PLACEMENT_FAST_CACHE_VERSION = 75  # v75: segment-first switch
 # Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
 # wing the detector missed) are extruded as a polygon facade traced from the
 # landcover building class (O4_SFR_Footprint_Polygons), and the smaller
@@ -2716,6 +2716,33 @@ LARGE_FOOTPRINT_GROW = 1.08
 # A smaller detection is part of a placed large roof when this share of its
 # OBB lies inside the roof polygon.
 LARGE_FOOTPRINT_NESTED_FRAC = 0.5
+# Segment-first placement (O4_SFR_BLD_SEG_FIRST = off | guarded | all).
+# Building-class components are traced before the detector runs its course:
+# a rectangular outline becomes a detection matched to an object like a YOLO
+# box, any other outline a polygon facade, and YOLO boxes mostly inside a
+# claimed outline are dropped.  'guarded' only claims components of at least
+# SEG_FIRST_GUARD_MIN_M2 holding at most SEG_FIRST_GUARD_MAX_SMALL
+# house-sized YOLO boxes: at ZL16 a terrace block segments as one blob, and
+# its per-house boxes are the better placement.  'all' claims every
+# component of SEG_FIRST_MIN_M2 or more.
+SEG_FIRST_MIN_M2 = 30.0
+SEG_FIRST_GUARD_MIN_M2 = 600.0
+SEG_FIRST_GUARD_MAX_SMALL = 2
+SEG_FIRST_SMALL_DET_M2 = 250.0
+# ...and whose roof reads as one: internal edge density at most this (the
+# production YOLO is too sparse in dense Asian blocks for the small-box test
+# alone; see FOOTPRINTS.roof_edge_density).
+SEG_FIRST_GUARD_MAX_EDGE = 0.27
+# A YOLO box this close to a segmented rectangle is kept instead of the
+# rectangle: the detector's box hugs the roof, the mask adds facade lean.
+SEG_FIRST_YOLO_MATCH_IOU = 0.6
+# Outlines rougher than FOOTPRINTS.MAX_IRREGULARITY are never placed from
+# segmentation (they stay with YOLO), in every mode and for the large-roof
+# refinement of YOLO boxes alike.
+# O4_SFR_BLD_SEG_FIRST_GROUND -- reject outlines that look like open ground
+#   (FOOTPRINTS.looks_like_ground: soil-coloured and flat, or flat and no
+#   contrast with the surroundings); 0 disables.
+SEG_FIRST_CLAIM_FRAC = 0.5
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -4284,6 +4311,160 @@ def _apply_height_context_caps(detections, m_per_px):
     return n_capped
 
 
+def _seg_first_mode():
+    mode = os.environ.get("O4_SFR_BLD_SEG_FIRST", "guarded").strip().lower()
+    return mode if mode in ("off", "guarded", "all") else "guarded"
+
+
+
+def _poly_iou_px(a, b):
+    """IoU of two pixel polygons (Nx2 float arrays)."""
+    pts = np.vstack([a, b])
+    x0, y0 = np.floor(pts.min(axis=0)).astype(int) - 1
+    x1, y1 = np.ceil(pts.max(axis=0)).astype(int) + 2
+    ma = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    mb = np.zeros_like(ma)
+    cv2.fillPoly(ma, [np.rint(np.asarray(a) - (x0, y0)).astype(np.int32)], 1)
+    cv2.fillPoly(mb, [np.rint(np.asarray(b) - (x0, y0)).astype(np.int32)], 1)
+    union = np.count_nonzero(ma | mb)
+    return np.count_nonzero(ma & mb) / union if union else 0.0
+
+
+def _seg_first_detections(detections, veg_map, image, m_per_px, img_w, img_h,
+                          mode, file_counts=None, road_mask=None):
+    """Return the detection list with segment-first footprints merged in.
+
+    Adds pseudo-detections (``seg_first`` = 'rect' | 'polygon'; polygons
+    carry ``seg_rings`` in texture px) and drops YOLO boxes lying mostly
+    inside a claimed outline.  ``image`` (RGB) enables shared-wall splits.
+    """
+    detections = list(detections or ())
+    if mode == "off" or veg_map is None:
+        return detections
+    m_per_px = float(m_per_px)
+    min_m2 = SEG_FIRST_GUARD_MIN_M2 if mode == "guarded" else SEG_FIRST_MIN_M2
+    comps = FOOTPRINTS.segment_components(
+        veg_map == SEGFORMER.CLASS_BUILDING, m_per_px, min_m2,
+        cut_mask=road_mask,
+    )
+    if not comps:
+        return detections
+    det_polys = []
+    det_centres = []
+    for det in detections:
+        pts = np.asarray(det.get('points', ()), dtype=np.float64).reshape(-1, 2)
+        det_polys.append(pts)
+        det_centres.append(pts.mean(axis=0) if len(pts) else np.array([-1.0, -1.0]))
+    det_centres = np.asarray(det_centres).reshape(-1, 2)
+    det_areas = np.array([float(d.get('area_m2', 0.0)) for d in detections])
+    claimed = np.zeros((img_h, img_w), dtype=np.uint8)
+    keep_yolo = set()
+    new_dets = []
+    ground_test = _env_flag("O4_SFR_BLD_SEG_FIRST_GROUND", True)
+    building_all = veg_map == SEGFORMER.CLASS_BUILDING
+    ring_px = int(math.ceil(FOOTPRINTS.GROUND_RING_M / m_per_px)) + 2
+    counts = {'components': 0, 'guarded_out': 0, 'guarded_edges': 0,
+              'irregular': 0, 'ground_soil': 0, 'ground_no_contrast': 0,
+              'pieces': 0, 'rect': 0,
+              'rect_yolo_kept': 0, 'polygon': 0, 'splits': 0}
+    for (x, y, w, h), cmask in comps:
+        counts['components'] += 1
+        if mode == "guarded" and len(detections):
+            cx = det_centres[:, 0].astype(int) - x
+            cy = det_centres[:, 1].astype(int) - y
+            inside = (cx >= 0) & (cx < w) & (cy >= 0) & (cy < h)
+            idx = np.flatnonzero(inside)
+            idx = idx[cmask[cy[idx], cx[idx]]]
+            if np.count_nonzero(det_areas[idx] < SEG_FIRST_SMALL_DET_M2) > SEG_FIRST_GUARD_MAX_SMALL:
+                counts['guarded_out'] += 1
+                continue
+        rgb = image[y:y + h, x:x + w] if image is not None else None
+        if mode == "guarded":
+            edge = FOOTPRINTS.roof_edge_density(rgb, cmask)
+            if edge is not None and edge > SEG_FIRST_GUARD_MAX_EDGE:
+                counts['guarded_edges'] += 1
+                continue
+        pieces = FOOTPRINTS.split_shared_walls(rgb, cmask, m_per_px)
+        counts['splits'] += len(pieces) - 1
+        for piece in pieces:
+            res = FOOTPRINTS.trace_piece(piece, m_per_px)
+            if res is None:
+                continue
+            if (
+                res['rect'] is None and
+                res['irregularity'] > FOOTPRINTS.MAX_IRREGULARITY
+            ):
+                # too rough to be one regular structure: leave it to YOLO
+                counts['irregular'] += 1
+                continue
+            if ground_test and image is not None:
+                wx0, wy0 = max(0, x - ring_px), max(0, y - ring_px)
+                wx1 = min(img_w, x + w + ring_px)
+                wy1 = min(img_h, y + h + ring_px)
+                win_piece = np.zeros((wy1 - wy0, wx1 - wx0), dtype=bool)
+                win_piece[y - wy0:y - wy0 + h, x - wx0:x - wx0 + w] = piece
+                is_ground, why = FOOTPRINTS.looks_like_ground(
+                    image[wy0:wy1, wx0:wx1], win_piece,
+                    building_all[wy0:wy1, wx0:wx1], m_per_px,
+                )
+                if is_ground:
+                    counts['ground_' + why] += 1
+                    continue
+            counts['pieces'] += 1
+            off = np.array([x, y], dtype=np.float64)
+            rings = [np.asarray(r, dtype=np.float64) + off for r in res['rings']]
+            for ring in rings:
+                cv2.fillPoly(claimed, [np.rint(ring).astype(np.int32)], 1)
+            if res['rect'] is not None:
+                rect = np.asarray(res['rect'], dtype=np.float64) + off
+                matched = None
+                near = np.flatnonzero(
+                    np.hypot(*(det_centres - rect.mean(axis=0)).T) <
+                    np.ptp(rect, axis=0).max()
+                )
+                for k in near.tolist():
+                    if len(det_polys[k]) == 4 and _poly_iou_px(det_polys[k], rect) >= SEG_FIRST_YOLO_MATCH_IOU:
+                        matched = k
+                        break
+                if matched is not None:
+                    keep_yolo.add(matched)
+                    counts['rect_yolo_kept'] += 1
+                    continue
+                det = _yolo_obb_detection_from_points(
+                    rect, 1.0, -100, img_w, img_h, m_per_px)
+                if det is None:
+                    continue
+                det['seg_first'] = 'rect'
+                counts['rect'] += 1
+            else:
+                frame = np.asarray(res['frame'], dtype=np.float64) + off
+                det = _yolo_obb_detection_from_points(
+                    frame, 1.0, -100, img_w, img_h, m_per_px)
+                if det is None:
+                    continue
+                det['seg_first'] = 'polygon'
+                det['seg_rings'] = rings
+                det['seg_area_m2'] = float(res['area_m2'])
+                counts['polygon'] += 1
+            new_dets.append(det)
+    scratch = np.zeros_like(claimed)
+    kept = []
+    dropped = 0
+    for k, det in enumerate(detections):
+        pts = det_polys[k]
+        if k not in keep_yolo and len(pts) >= 3:
+            ring = np.rint(pts).astype(np.int32)
+            if _poly_mask_overlap_frac(claimed, ring, scratch) >= SEG_FIRST_CLAIM_FRAC:
+                dropped += 1
+                continue
+        kept.append(det)
+    if file_counts is not None:
+        for key, value in counts.items():
+            file_counts['seg_first_' + key] = value
+        file_counts['seg_first_yolo_dropped'] = dropped
+    return kept + new_dets
+
+
 def _large_footprint_rings(detection, building_mask, m_per_px):
     """Return polygon rings (texture px) for a large irregular roof, or None.
 
@@ -4303,6 +4484,8 @@ def _large_footprint_rings(detection, building_mask, m_per_px):
         return None
     ratio = res['area_m2'] / max(res['obb_area_m2'], 1e-6)
     if LARGE_FOOTPRINT_SHRINK <= ratio <= LARGE_FOOTPRINT_GROW:
+        return None
+    if res['irregularity'] > FOOTPRINTS.MAX_IRREGULARITY:
         return None
     rings = []
     for ring in res['rings']:
@@ -10032,6 +10215,7 @@ def run(
         'yolo_suppress': 0.0,
         'heightnet': 0.0,
         'footprint_polygons': 0.0,
+        'seg_first': 0.0,
         'stock_yolo_inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
@@ -10734,6 +10918,19 @@ def run(
             HEIGHTPRIORS.POLICY_VERSION,
             HEIGHTPRIORS.P95_EXCESS_RETAIN,
             LARGE_FOOTPRINT_HEIGHT_CAP_M,
+            (
+                _env_flag("O4_SFR_BLD_HEIGHT_GATE", True),
+                _env_flag("O4_SFR_BLD_HEIGHT_CONTEXT", True),
+                _env_flag("O4_SFR_BLD_FOOTPRINT_POLYGONS", True),
+                _seg_first_mode(),
+                SEG_FIRST_MIN_M2, SEG_FIRST_GUARD_MIN_M2,
+                SEG_FIRST_GUARD_MAX_SMALL, SEG_FIRST_GUARD_MAX_EDGE,
+                FOOTPRINTS.SPLIT_MIN_DE, FOOTPRINTS.SPLIT_MIN_LINE,
+                FOOTPRINTS.SPLIT_MIN_GAP_L, FOOTPRINTS.RECT_MIN_FILL,
+                FOOTPRINTS.MAX_IRREGULARITY,
+                _env_flag("O4_SFR_BLD_SEG_FIRST_GROUND", True),
+                FOOTPRINTS.GROUND_MAX_DE, FOOTPRINTS.GROUND_MAX_EDGE,
+            ),
             natural_asset_region,
             simheaven_package_region,
             effective_asset_region,
@@ -11692,6 +11889,25 @@ def run(
             yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
+            _seg_mode = _seg_first_mode()
+            if _seg_mode != "off" and veg_map is not None:
+                _t = time.perf_counter()
+                _seg_img = img
+                if _seg_img is None:
+                    _seg_img = _load_source_image(
+                        fname, _source_mode, _orthophoto_dir
+                    )
+                yolo_detections = _seg_first_detections(
+                    yolo_detections, veg_map, _seg_img, m_per_px,
+                    img_w, img_h, _seg_mode, file_counts,
+                    road_mask=(
+                        road_mask if rail_mask is None
+                        else (road_mask | rail_mask)
+                    ),
+                )
+                _seg_img = None
+                _record_elapsed(timings, file_timings, 'seg_first', _t)
+
             _apply_regional_height_fallbacks(
                 yolo_detections, natural_asset_region
             )
@@ -11815,17 +12031,24 @@ def run(
                 # facade traced from the landcover building class, then the
                 # smaller detections on that roof are skipped below.
                 large_roof_mask = None
+                _poly_refine = _env_flag("O4_SFR_BLD_FOOTPRINT_POLYGONS", True)
                 if (
                     veg_map is not None and
                     _asset_kind_enabled('facade', building_asset_mode) and
-                    _env_flag("O4_SFR_BLD_FOOTPRINT_POLYGONS", True)
+                    (_poly_refine or any(
+                        d.get('seg_rings') is not None for d in yolo_detections
+                    ))
                 ):
                     _t_lf = time.perf_counter()
                     _bld_class_mask = veg_map == SEGFORMER.CLASS_BUILDING
                     for detection in sorted(
                         (
                             d for d in yolo_detections
-                            if float(d.get('area_m2', 0.0)) >= LARGE_FOOTPRINT_MIN_M2
+                            if d.get('seg_rings') is not None or (
+                                _poly_refine and
+                                d.get('seg_first') is None and
+                                float(d.get('area_m2', 0.0)) >= LARGE_FOOTPRINT_MIN_M2
+                            )
                         ),
                         key=lambda d: (
                             -float(d.get('area_m2', 0.0)),
@@ -11841,9 +12064,16 @@ def run(
                         jy = int(prepared_yolo['jy'])
                         if not (0 <= jx < img_w and 0 <= jy < img_h):
                             continue
-                        if placement_occ_mask[jy, jx]:
+                        _seg_poly = detection.get('seg_rings') is not None
+                        # a segmented outline's frame centre may sit in its
+                        # own courtyard or a neighbour piece: only its rings
+                        # are tested below
+                        if not _seg_poly and placement_occ_mask[jy, jx]:
                             continue
-                        if large_roof_mask is not None and large_roof_mask[jy, jx]:
+                        if (
+                            not _seg_poly and large_roof_mask is not None and
+                            large_roof_mask[jy, jx]
+                        ):
                             continue
                         o_lon, o_lat = px_to_latlon(
                             jx, jy, img_w, img_h, lat_n, lat_s, lon_w, lon_e
@@ -11852,9 +12082,12 @@ def run(
                             continue
                         if not _direct_yolo_facade_footprint_allowed(detection):
                             continue
-                        rings = _large_footprint_rings(
-                            detection, _bld_class_mask, m_per_px
-                        )
+                        if _seg_poly:
+                            rings = detection['seg_rings']
+                        else:
+                            rings = _large_footprint_rings(
+                                detection, _bld_class_mask, m_per_px
+                            )
                         if not rings:
                             continue
                         ring_polys = []
@@ -11874,7 +12107,13 @@ def run(
                                 ) > DIRECT_FACADE_ROAD_OVERLAP_FRAC
                             ):
                                 continue
-                            if not _poly_fits(building_spacing_mask, ring_i, fit_scratch):
+                            if _seg_poly:
+                                # split pieces share their cut edge
+                                if _poly_mask_overlap_frac(
+                                    building_spacing_mask, ring_i, fit_scratch
+                                ) > 0.1:
+                                    continue
+                            elif not _poly_fits(building_spacing_mask, ring_i, fit_scratch):
                                 continue
                             ring_polys.append((ring, ring_i))
                         if not ring_polys:
@@ -11910,9 +12149,11 @@ def run(
                                 recent_spacing_marks += 1
                         detection['_large_footprint_placed'] = True
                         pts_this.append((jx, jy, float(detection['heading']), facade_cls))
-                        file_counts['yolo_footprint_polygon_placed'] = (
-                            file_counts.get('yolo_footprint_polygon_placed', 0) + 1
+                        _fp_key = (
+                            'seg_first_polygon_placed' if _seg_poly
+                            else 'yolo_footprint_polygon_placed'
                         )
+                        file_counts[_fp_key] = file_counts.get(_fp_key, 0) + 1
                         file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
                     _bld_class_mask = None
                     if large_roof_mask is not None:

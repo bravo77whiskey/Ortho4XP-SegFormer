@@ -48,6 +48,22 @@ WING_MIN_M = 8.0
 MAX_GROWTH = 1.2
 # A ring must lie this much inside the OBB; detached pieces are neighbours.
 MIN_RING_IN_OBB = 0.5
+# Irregularity of a traced outline, the sum of:
+#   * the share of its perimeter in edges shorter than SHORT_EDGE_M (a
+#     jagged or stair-stepped outline is mostly short steps; a clean L or U
+#     is long walls -- perimeter alone cannot tell, since any orthogonally
+#     convex staircase has its bounding rectangle's perimeter);
+#   * |perimeter / rotated-rectangle perimeter - 1| (notches, rounding);
+#   * 1 - fit IoU of the outline against its mask;
+#   * 1.0 when the outline is not rectilinear (blobs, curves, angled walls)
+#     or has more than MAX_REGULAR_VERTICES corners (a staircase tracing of
+#     a curve; regular structures at ZL16 stay within about a dozen).
+# On Kaohsiung ZL16 samples clean halls, L and stepped shapes scored at or
+# below ~0.25 and rough multi-building outlines above.  Callers treat
+# anything above MAX_IRREGULARITY as not one regular structure.
+SHORT_EDGE_M = 6.0
+MAX_REGULAR_VERTICES = 12
+MAX_IRREGULARITY = 0.25
 RECTILINEAR_MIN_IOU = 0.80
 WORK_M_PER_PX = 0.5       # rotated working grid resolution (upsampled)
 
@@ -382,7 +398,21 @@ def _extract(building_mask, obb_pts, m_per_px, grow):
         tex = arr @ inv_fwd[:, :2].T + inv_fwd[:, 2]
         rings.append(tex)
         area_px += abs(cv2.contourArea(tex.astype(np.float32)))
+    all_pts = np.vstack(rings).astype(np.float32)
+    (_c, (rw, rh), _a) = cv2.minAreaRect(all_pts)
+    perimeter = sum(cv2.arcLength(r.astype(np.float32), True) for r in rings)
+    short = 0.0
+    for r in rings:
+        edges = np.linalg.norm(np.roll(r, -1, axis=0) - r, axis=1)
+        short += float(edges[edges * m_per_px < SHORT_EDGE_M].sum())
+    irregularity = (short / max(perimeter, 1e-6) +
+                    abs(perimeter / max(2.0 * (rw + rh), 1e-6) - 1.0) +
+                    (1.0 - float(fit)) +
+                    (0.0 if kind == "rectilinear" and
+                     sum(len(r) for r in rings) <= MAX_REGULAR_VERTICES
+                     else 1.0))
     return {
+        "irregularity": float(irregularity),
         "rings": rings,
         "kind": kind,
         "fill": float(fill),
@@ -390,3 +420,261 @@ def _extract(building_mask, obb_pts, m_per_px, grow):
         "obb_area_m2": float(obb_area_m2),
         "fit_iou": float(fit),
     }
+
+
+# ---------------------------------------------------------------- segment-first
+#
+# Segment-first placement (overlay switch O4_SFR_BLD_SEG_FIRST) starts from
+# the building-class components themselves instead of detector boxes.  At
+# ZL16 the landcover model cannot see party walls, so one component can hold
+# several buildings.  The programmatic cue left in the ortho is a straight
+# line across the roof where the roof colour changes (different roofing, a
+# parapet, a height step casting a shadow): split_shared_walls() cuts a
+# component there.  Without such a line, wall-sharing buildings stay one.
+
+SEG_OPEN_M = 2.0          # bridges narrower than this are cut first
+SPLIT_MIN_PIECE_M = 8.0   # each side of a cut is at least this long
+SPLIT_STRIP_M = 4.0       # roof sampled this far on each side of a cut
+SPLIT_MIN_CHROMA = 10.0   # mean a*b* difference across the cut (roofing)
+# ...or a dark line along the cut (gap, parapet shadow, height step) at
+# least this much darker (L*) than both sides.  A brightness change alone
+# is a pitched roof's ridge, not a wall.
+SPLIT_MIN_GAP_L = 12.0
+SPLIT_MIN_SHARE = 0.2     # each piece holds at least this share of the area
+SPLIT_MIN_DE = SPLIT_MIN_CHROMA   # kept for cache keys
+SPLIT_MIN_LINE = 1.4      # gradient on the cut / median gradient in the roof
+SPLIT_MIN_SPAN = 0.8      # the cut crosses the component over this share
+SPLIT_MAX_DEPTH = 3
+# traced area / its rotated rectangle at or above this -> "rectangle": at
+# ZL16 a plain hall often traces with a notch or a chamfered corner, and a
+# 4-vertex-only test sent two thirds of such halls to facades
+RECT_MIN_FILL = 0.85
+
+
+def _component_frame(mask):
+    """minAreaRect of a mask's pixels -> (corners, rect)."""
+    ys, xs = np.nonzero(mask)
+    pts = np.stack([xs, ys], 1).astype(np.float32)
+    rect = cv2.minAreaRect(pts)
+    return cv2.boxPoints(rect), rect
+
+
+def _rotate_to_frame(arr, rect, interp):
+    """Rotate ``arr`` so the rect is axis-aligned.
+
+    Returns the rotated array and the forward affine (texture px -> frame).
+    """
+    (cx, cy), (w, h), ang = rect
+    pad = 4
+    out_w = int(math.ceil(w)) + 2 * pad
+    out_h = int(math.ceil(h)) + 2 * pad
+    m = cv2.getRotationMatrix2D((cx, cy), ang, 1.0)
+    m[0, 2] += out_w / 2.0 - cx
+    m[1, 2] += out_h / 2.0 - cy
+    rot = cv2.warpAffine(arr, m, (out_w, out_h), flags=interp, borderValue=0)
+    return rot, m
+
+
+def _best_cut(lab, mask, grad, m_per_px, axis):
+    """Best straight cut along ``axis`` (0 = vertical line): (axis, pos, dE)."""
+    strip = max(2, int(round(SPLIT_STRIP_M / m_per_px)))
+    min_piece = max(strip, int(round(SPLIT_MIN_PIECE_M / m_per_px)))
+    roof_grad = grad[mask]
+    if roof_grad.size < 16:
+        return None
+    med = float(np.median(roof_grad)) + 1e-3
+    m = mask if axis == 0 else mask.T
+    L = lab if axis == 0 else lab.transpose(1, 0, 2)
+    g = grad if axis == 0 else grad.T
+    cols = np.flatnonzero(m.any(axis=0))
+    if cols.size == 0:
+        return None
+    lo, hi = int(cols[0]), int(cols[-1]) + 1
+    col_area = np.cumsum(m.sum(axis=0))
+    total = float(col_area[-1])
+    best = None
+    for c in range(lo + min_piece, hi - min_piece + 1):
+        a = m[:, c - strip:c]
+        b = m[:, c:c + strip]
+        if a.sum() < 4 or b.sum() < 4:
+            continue
+        left = col_area[c - 1] / total
+        if left < SPLIT_MIN_SHARE or left > 1.0 - SPLIT_MIN_SHARE:
+            continue
+        line = m[:, c - 1] & m[:, c]
+        span = line.sum() / max(1, max(m[:, c - 1].sum(), m[:, c].sum()))
+        if span < SPLIT_MIN_SPAN:
+            continue
+        la = L[:, c - strip:c][a].mean(axis=0)
+        lb = L[:, c:c + strip][b].mean(axis=0)
+        chroma = float(np.linalg.norm(la[1:] - lb[1:]))
+        line_l = float(np.minimum(L[:, c - 1, 0][line], L[:, c, 0][line]).mean())
+        gap = min(la[0], lb[0]) - line_l
+        if chroma < SPLIT_MIN_CHROMA and gap < SPLIT_MIN_GAP_L:
+            continue
+        de = max(chroma, gap)
+        gl = float(np.maximum(g[:, c - 1][line], g[:, c][line]).mean()) / med
+        if gl < SPLIT_MIN_LINE:
+            continue
+        if best is None or de > best[2]:
+            best = (axis, c, de)
+    return best
+
+
+def split_shared_walls(rgb, mask, m_per_px, depth=0):
+    """Split one component at straight roof-colour lines.
+
+    ``rgb`` and ``mask`` (bool) share a shape.  Returns a list of bool masks;
+    the input alone when nothing splits.
+    """
+    if depth >= SPLIT_MAX_DEPTH or rgb is None:
+        return [mask]
+    if np.count_nonzero(mask) * m_per_px * m_per_px < 2 * SPLIT_MIN_PIECE_M ** 2:
+        return [mask]
+    _corners, rect = _component_frame(mask)
+    mrot, fwd = _rotate_to_frame(mask.astype(np.uint8), rect, cv2.INTER_NEAREST)
+    mrot = mrot != 0
+    rgbrot, _ = _rotate_to_frame(np.ascontiguousarray(rgb), rect, cv2.INTER_LINEAR)
+    lab = cv2.cvtColor(rgbrot, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab[..., 0] *= 100.0 / 255.0
+    lab[..., 1:] -= 128.0
+    gray = cv2.cvtColor(rgbrot, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+    gy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+    # a vertical cut needs x-gradient evidence along it, a horizontal one y
+    cut = None
+    for grad, axis in ((gx, 0), (gy, 1)):
+        c = _best_cut(lab, mrot, grad, m_per_px, axis)
+        if c is not None and (cut is None or c[2] > cut[2]):
+            cut = c
+    if cut is None:
+        return [mask]
+    axis, pos, _de = cut
+    side = np.zeros(mrot.shape, dtype=np.uint8)
+    if axis == 0:
+        side[:, pos:] = 1
+    else:
+        side[pos:, :] = 1
+    inv = cv2.invertAffineTransform(fwd)
+    h, w = mask.shape
+    back = cv2.warpAffine(side, inv, (w, h), flags=cv2.INTER_NEAREST,
+                          borderValue=0) != 0
+    out = []
+    for part in (mask & ~back, mask & back):
+        if np.count_nonzero(part):
+            out.extend(split_shared_walls(rgb, part, m_per_px, depth + 1))
+    return out
+
+
+def trace_piece(mask, m_per_px):
+    """Trace one building mask (bool) -> dict or None.
+
+    Adds ``rect`` (the rotated rectangle's 4 corners when the outline is
+    one ring filling >= RECT_MIN_FILL of that rectangle, else None) and
+    ``frame`` (the mask's rotated bounding rectangle) to extract's result.
+    """
+    if np.count_nonzero(mask) < 4:
+        return None
+    corners, _rect = _component_frame(mask)
+    res = _extract(mask.astype(np.uint8), corners, m_per_px, grow=False)
+    if res is None:
+        return None
+    rect = None
+    if len(res["rings"]) == 1:
+        ring = np.asarray(res["rings"][0], dtype=np.float32)
+        box = cv2.minAreaRect(ring)
+        (_c, (rw, rh), _a) = box
+        if abs(cv2.contourArea(ring)) >= RECT_MIN_FILL * max(rw * rh, 1e-6):
+            rect = cv2.boxPoints(box).astype(np.float64)
+    res["rect"] = rect
+    res["frame"] = corners
+    return res
+
+
+def segment_components(building_mask, m_per_px, min_m2, cut_mask=None):
+    """Opened building-class components as ((x, y, w, h), bool mask crop).
+
+    ``cut_mask`` (e.g. rasterized OSM roads) is removed first, so a street
+    always separates two components.
+    """
+    bm = (np.asarray(building_mask) != 0).astype(np.uint8)
+    if cut_mask is not None:
+        bm[np.asarray(cut_mask) != 0] = 0
+    k = max(1, int(round(SEG_OPEN_M / m_per_px)))
+    op = cv2.morphologyEx(bm, cv2.MORPH_OPEN,
+                          cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(op, connectivity=4)
+    min_px = min_m2 / (m_per_px * m_per_px)
+    out = []
+    for c in range(1, n):
+        x, y, w, h, a = stats[c]
+        if a < min_px:
+            continue
+        out.append(((int(x), int(y), int(w), int(h)), lab[y:y + h, x:x + w] == c))
+    return out
+
+
+def roof_edge_density(rgb, mask):
+    """Share of Canny edge pixels inside a component (eroded by 1 px).
+
+    One roof reads as a few long lines; a block of several buildings as
+    many.  On Kaohsiung ZL16 samples single halls and sheds sat at or
+    below ~0.26 and multi-building complexes above.  None without pixels.
+    """
+    if rgb is None:
+        return None
+    inner = cv2.erode(mask.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    if np.count_nonzero(inner) < 20:
+        return None
+    gray = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 60, 140) > 0
+    return float(edges[inner].mean())
+
+
+# Ground look-alikes.  The landcover model sometimes labels running tracks,
+# clay pitches, dirt lots and dark fields "building" (bare land is almost
+# never predicted on Taiwan ZL16 samples, so the class map cannot veto
+# them).  Two cues, both requiring a flat surface (roofs, even brown
+# corrugated ones, carry edges): a soil colour, or no colour contrast with
+# the non-building ground around the outline.
+GROUND_RING_M = 6.0
+GROUND_MAX_EDGE = 0.15    # soil test: flat
+GROUND_SOIL_A = (3.0, 20.0)
+GROUND_SOIL_B = (10.0, 35.0)
+GROUND_SOIL_L = (30.0, 72.0)
+GROUND_MAX_DE = 6.0       # contrast test: indistinguishable from the ring
+GROUND_DE_MAX_EDGE = 0.2
+
+
+def looks_like_ground(rgb, piece, building, m_per_px):
+    """True when a claimed outline is more likely open ground than a roof.
+
+    ``rgb`` (HxWx3), ``piece`` and ``building`` (HxW bool) share a window
+    that extends at least GROUND_RING_M around the piece.  Returns
+    (bool, reason) with reason 'soil', 'no_contrast' or None.
+    """
+    if rgb is None:
+        return False, None
+    piece_u8 = piece.astype(np.uint8)
+    inner = cv2.erode(piece_u8, np.ones((3, 3), np.uint8)) > 0
+    r = max(2, int(round(GROUND_RING_M / m_per_px)))
+    ring = (cv2.dilate(piece_u8, np.ones((2 * r + 1, 2 * r + 1), np.uint8)) > 0)
+    ring &= ~piece & ~building
+    if np.count_nonzero(inner) < 10 or np.count_nonzero(ring) < 10:
+        return False, None
+    rgb = np.ascontiguousarray(rgb)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab[..., 0] *= 100.0 / 255.0
+    lab[..., 1:] -= 128.0
+    edges = cv2.Canny(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), 60, 140) > 0
+    edge = float(edges[inner].mean())
+    mean = lab[piece].mean(axis=0)
+    if (edge < GROUND_MAX_EDGE and
+            GROUND_SOIL_L[0] <= mean[0] <= GROUND_SOIL_L[1] and
+            GROUND_SOIL_A[0] <= mean[1] <= GROUND_SOIL_A[1] and
+            GROUND_SOIL_B[0] <= mean[2] <= GROUND_SOIL_B[1]):
+        return True, "soil"
+    de = float(np.linalg.norm(mean - lab[ring].mean(axis=0)))
+    if de < GROUND_MAX_DE and edge < GROUND_DE_MAX_EDGE:
+        return True, "no_contrast"
+    return False, None
