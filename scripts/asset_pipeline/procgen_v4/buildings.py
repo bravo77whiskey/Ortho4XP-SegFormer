@@ -10,8 +10,11 @@ Contract kept from the old library (so the overlay needs no change):
 Band content:
   1  full: per-floor facades, eaves with fascia + soffits, barge boards,
      ridge caps, chimneys, dormers, porches/verandas, canopies, arcades;
-  2  shell: per-floor facades + bare roof planes (no trims, no add-ons);
-  3  box: one plain quad per wall + the roof silhouette;
+  2  band 1 minus what is a pixel or two at the switch (soffits, barge
+     boards, ridge caps, porch/arcade posts); chimneys, dormers, porch
+     roofs, canopies, recessed fronts, eave boards, coping, unit colours
+     and the roof tile scale/offset all stay, so the switch does not pop;
+  3  window-textured walls (see far_group) + the roof silhouette;
   4  a single roof-coloured quad.
 Band 1 ends at FULL_FRACTION x the old band-1 distance; see budget.py for
 why that keeps the frame-cost integral at or below the old library's.
@@ -30,7 +33,7 @@ import strips as strip_recipes
 
 FLOOR_H = 3.2
 TRIM_DROP = 0.22          # fascia board depth below the roof edge
-FULL_FRACTION = 0.6       # band 1 = 0 .. 0.6 x old d0
+FULL_FRACTION = 0.8       # band 1 = 0 .. 0.8 x old d0
 BASE_BANDS = (1100, 2800, 4700, 8500)
 _SCALE_REF, _SCALE_MIN, _SCALE_MAX = 30.0, 0.32, 1.65
 
@@ -179,9 +182,10 @@ def clip_poly_t(pts, axis_o, axis_d, t0, t1):
 
 
 # How far a roof texture may stretch in v before the face is split into
-# another row.  Band 1 keeps the tile scale exact; distant bands trade
-# stretch for triangles (a 3 km-away roof never shows its tile courses).
-ROOF_STRETCH = {1: 1.0, 2: 1.8, 3: 1e9, 4: 1e9}
+# another row.  Bands 1 and 2 keep the tile scale exact, so the courses do
+# not visibly jump at the nearest switch; bands 3-4 trade stretch for
+# triangles (a 2 km-away roof never shows its tile courses).
+ROOF_STRETCH = {1: 1.0, 2: 1.0, 3: 1e9, 4: 1e9}
 _LEVEL = [1]
 
 
@@ -224,10 +228,26 @@ def _cross(a, b):
             a[0] * b[1] - a[1] * b[0])
 
 
+def far_group(floors):
+    """Upper floors drawn per quad in band 3.  One- and two-storey walls
+    stay per floor; taller walls draw the ground floor plus ONE quad with
+    the window strip stretched over the upper floors.  Past ~1 km a floor
+    is a few pixels, so what reads is the facade's mean tone (windows
+    included), which the old plain band-3 slab got wrong, not the count of
+    window rows; two quads per wall keep the cost near the old slab's."""
+    return 1 if floors <= 2 else floors - 1
+
+
 def facade_wall(mesh, fac, a, b, z_base, floors, *, level_detail=True,
                 door_side=False, start=None, u_start=None, strip_ground=None,
-                strip_upper=None):
-    """Per-floor wall quads along edge a->b (exterior on the right)."""
+                strip_upper=None, group=1, top_extra=0.0):
+    """Per-floor wall quads along edge a->b (exterior on the right).
+
+    ``group`` > 1 draws upper floors ``group`` at a time, the window strip
+    stretched over the group (band 3); ``top_extra`` lifts the last quad
+    to cover a parapet.  Bays and per-floor shifts are the same draws as
+    the per-floor walls, so bands 1-3 show the same windows in the same
+    places."""
     ax, ay = a
     bx, by = b
     length = math.hypot(bx - ax, by - ay)
@@ -251,18 +271,29 @@ def facade_wall(mesh, fac, a, b, z_base, floors, *, level_detail=True,
     frng = random.Random(stable_seed((round(ax, 2), round(ay, 2), round(bx, 2),
                                round(by, 2), fac.key, fac.ctx.rng_seed,
                                "floors")))
+    shifts = []
     for f in range(floors):
-        z0 = z_base + f * FLOOR_H
-        z1 = z0 + FLOOR_H
         st = (strip_ground or fac.ground) if f == 0 else \
             (strip_upper or fac.upper)
         uf = u0
         if st is fac.upper and motifs > 1:
             uf = u0 + frng.randrange(motifs) * fac.motif * p / \
                 fac.upper.world_w
+        shifts.append((st, uf))
+    f = 0
+    while f < floors:
+        st, uf = shifts[f]
+        n = 1 if f == 0 else min(max(1, group), floors - f)
+        z0 = z_base + f * FLOOR_H
+        z1 = z0 + n * FLOOR_H
+        span = n * FLOOR_H
+        if f + n >= floors:
+            z1 += top_extra
+            span += top_extra
         pts = [(ax, ay, z0), (bx, by, z0), (bx, by, z1), (ax, ay, z1)]
         mesh.planar(pts, st, (0, 0, 1), u0=uf, u_scale=u_scale,
-                    origin=pts[0])
+                    origin=pts[0], v_scale=FLOOR_H / span)
+        f += n
 
 
 def plain_wall(mesh, strip, a, b, z0, z1, u0=0.0):
@@ -286,11 +317,13 @@ def rect_ring(x0, y0, x1, y1):
     return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 
 
-def ring_walls(mesh, fac, ring, z_base, floors, *, front_edge=0):
+def ring_walls(mesh, fac, ring, z_base, floors, *, front_edge=0, group=1,
+               top_extra=0.0):
     for i in range(len(ring)):
         a, b = ring[i], ring[(i + 1) % len(ring)]
         facade_wall(mesh, fac, a, b, z_base, floors,
-                    door_side=(i == front_edge))
+                    door_side=(i == front_edge), group=group,
+                    top_extra=top_extra)
 
 
 def ring_plain(mesh, strip, ring, z0, z1, rng):
@@ -319,7 +352,8 @@ def box_part(mesh, strip, x0, x1, y0, y1, z0, z1, top_strip=None,
                     v_scale=min(1.0, ts.world_h / max(y1 - y0, 1e-3)))
 
 
-def flat_top(mesh, ctx, roof_strip, x0, y0, x1, y1, z, *, coping=0.3):
+def flat_top(mesh, ctx, roof_strip, x0, y0, x1, y1, z, *, coping=0.3,
+             u0=None):
     """Coplanar coping ring + roof field (no sunken membrane: the old
     library's sunken roofs rendered see-through in the sim)."""
     c = min(coping, 0.2 * min(x1 - x0, y1 - y0))
@@ -340,7 +374,7 @@ def flat_top(mesh, ctx, roof_strip, x0, y0, x1, y1, z, *, coping=0.3):
                         v_scale=0.3 / c)
     roof_face(mesh, [(ix0, iy0, z), (ix1, iy0, z), (ix1, iy1, z),
                      (ix0, iy1, z)], (0, 1, 0), roof_strip,
-              ctx.rng.random())
+              ctx.rng.random() if u0 is None else u0)
 
 
 # ------------------------------------------------------ pitched roofs
@@ -450,6 +484,21 @@ class Gable:
                      (x1, yc, zc)]):
             mesh.planar(pts, rid, (0, 0, 1), origin=pts[0], v_off=0.5,
                         v_scale=2.0)
+
+    def fascia(self, mesh, ctx):
+        """Band 2 trim: only the eave boards (the gutter line reads from
+        far away; soffits, barge boards and ridge caps do not)."""
+        x0, x1, y0, y1 = self.x0, self.x1, self.y0, self.y1
+        ze, d = self.ze, TRIM_DROP
+        fas = ctx.trim["fascia"]
+        edges = [((x0, y0), (x1, y0)), ((x1, y1), (x0, y1))]
+        if isinstance(self, Hip):
+            edges += [((x1, y0), (x1, y1)), ((x0, y1), (x0, y0))]
+        for a, b in edges:
+            pts = [(a[0], a[1], ze - d), (b[0], b[1], ze - d),
+                   (b[0], b[1], ze), (a[0], a[1], ze)]
+            mesh.planar(pts, fas, (0, 0, 1), origin=pts[0],
+                        v_scale=0.4 / (d + 0.02))
 
     def quad(self, mesh, strip):
         z = (self.ze + self.ridge) / 2.0
@@ -607,9 +656,11 @@ def dormer(mesh, ctx, roof, fac, rng, x_center, width):
 
 
 def porch(mesh, ctx, x0, x1, y_edge, y_wall, z_top, fac, rng, *,
-          pitch=12.0, posts=True):
+          pitch=12.0, posts=True, detail=True):
     """Shed-roofed porch/veranda between the wall line and the footprint
-    edge (y_edge < y_wall).  Posts are three-sided (the back never shows)."""
+    edge (y_edge < y_wall).  Posts are three-sided (the back never shows).
+    ``detail=False`` (band 2) keeps the roof, its front board and the deck
+    and drops the posts, side boards and soffit."""
     tan = math.tan(math.radians(pitch))
     depth = y_wall - y_edge
     zw = z_top
@@ -623,6 +674,15 @@ def porch(mesh, ctx, x0, x1, y_edge, y_wall, z_top, fac, rng, *,
     pts = [(x0, y_edge, ze - d), (x1, y_edge, ze - d), (x1, y_edge, ze),
            (x0, y_edge, ze)]
     mesh.planar(pts, fas, (0, 0, 1), origin=pts[0], v_scale=0.4 / 0.22)
+    deck_h = 0.35
+    if not detail:
+        mesh.planar([(x0, y_edge + 0.05, deck_h), (x1, y_edge + 0.05, deck_h),
+                     (x1, y_wall, deck_h), (x0, y_wall, deck_h)],
+                    ctx.trim["dark"], (0, 1, 0), v_scale=0.4 / depth)
+        mesh.planar([(x0, y_edge + 0.05, 0.0), (x1, y_edge + 0.05, 0.0),
+                     (x1, y_edge + 0.05, deck_h), (x0, y_edge + 0.05, deck_h)],
+                    ctx.trim["dark"], (0, 0, 1), v_scale=1.0)
+        return
     for xe, flip in ((x0, True), (x1, False)):
         pts = [(xe, y_wall, zw - d), (xe, y_edge, ze - d), (xe, y_edge, ze),
                (xe, y_wall, zw)]
@@ -635,7 +695,6 @@ def porch(mesh, ctx, x0, x1, y_edge, y_wall, z_top, fac, rng, *,
         pts = pts[::-1]
     mesh.planar(pts, sof, (1, 0, 0), origin=pts[0], v_scale=0.4 / depth)
     # deck
-    deck_h = 0.35
     light = ctx.trim["light"]
     mesh.planar([(x0, y_edge + 0.05, deck_h), (x1, y_edge + 0.05, deck_h),
                  (x1, y_wall, deck_h), (x0, y_wall, deck_h)], ctx.trim["dark"],
@@ -710,49 +769,51 @@ def build_pitched_house(L, W, F, ctx, hip):
     has_chimney = rng.random() < m.get("chimney_p", 0)
     u_roof = rng.random()
     bands = []
+    ring = roof.wall_ring()
+    porch_span = None
+    if add_porch:
+        px0, px1 = (ring[0][0], ring[1][0])
+        if add_porch == "porch":
+            pw = min(px1 - px0, max(3.5, 0.55 * (px1 - px0)))
+            pc = rng.uniform(px0 + pw / 2, px1 - pw / 2)
+            px0, px1 = pc - pw / 2, pc + pw / 2
+        else:
+            px0, px1 = x0 + 0.05, x1 - 0.05
+        porch_span = (px0, px1)
     for level in (1, 2, 3, 4):
         set_level(level)
         mesh = Mesh()
-        ring = roof.wall_ring()
         if level <= 2:
+            # Band 2 is band 1 minus the parts that are a pixel or two at
+            # the switch (soffits, barge boards, ridge caps, porch posts),
+            # so the nearest LOD change keeps the chimney, dormers, porch
+            # and eave line in place.
+            full = level == 1
             ring_walls(mesh, fac, ring, 0.0, F, front_edge=0)
-            if level == 1 or not hip:
+            if full or not hip:
                 roof.gables(mesh, fac.plain, random.Random(7))
-            if level == 1:
-                roof.roof(mesh, roof_strip, u_roof)
+            roof.roof(mesh, roof_strip, u_roof)
+            if full:
                 roof.trims(mesh, ctx)
-                if has_chimney:
-                    chimney(mesh, ctx, roof, fac, random.Random(11))
-                if dormers:
-                    wr = roof.wall_ring()
-                    span = wr[1][0] - wr[0][0]
-                    nd = 1 if span < 10 else 2
-                    for i in range(nd):
-                        xc = wr[0][0] + span * (i + 1) / (nd + 1)
-                        dormer(mesh, ctx, roof, fac, random.Random(13 + i),
-                               xc, 1.6)
-                if add_porch:
-                    px0, px1 = (ring[0][0], ring[1][0])
-                    if add_porch == "porch":
-                        pw = min(px1 - px0, max(3.5, 0.55 * (px1 - px0)))
-                        pc = rng.uniform(px0 + pw / 2, px1 - pw / 2)
-                        px0, px1 = pc - pw / 2, pc + pw / 2
-                    else:
-                        px0, px1 = x0 + 0.05, x1 - 0.05
-                    porch(mesh, ctx, px0, px1, y0, ring[0][1],
-                          min(he, FLOOR_H) - 0.15, fac, random.Random(17))
             else:
-                # shell: bare roof planes out to the footprint
-                roof.roof(mesh, roof_strip, u_roof)
-                if add_porch:
-                    rs = roof_strip
-                    ze = min(he, FLOOR_H) - 0.15 - porch_d * 0.21
-                    roof_face(mesh, [(x0, y0, ze), (x1, y0, ze),
-                                     (x1, ring[0][1], ze + porch_d * 0.21),
-                                     (x0, ring[0][1], ze + porch_d * 0.21)],
-                              (0, 1, 0.21), rs, 0.3)
+                roof.fascia(mesh, ctx)
+            if has_chimney:
+                chimney(mesh, ctx, roof, fac, random.Random(11))
+            if dormers:
+                wr = roof.wall_ring()
+                span = wr[1][0] - wr[0][0]
+                nd = 1 if span < 10 else 2
+                for i in range(nd):
+                    xc = wr[0][0] + span * (i + 1) / (nd + 1)
+                    dormer(mesh, ctx, roof, fac, random.Random(13 + i),
+                           xc, 1.6)
+            if porch_span:
+                porch(mesh, ctx, porch_span[0], porch_span[1], y0,
+                      ring[0][1], min(he, FLOOR_H) - 0.15, fac,
+                      random.Random(17), detail=full)
         elif level == 3:
-            ring_plain(mesh, fac.plain, ring, 0.0, he, random.Random(3))
+            ring_walls(mesh, fac, ring, 0.0, F, front_edge=0,
+                       group=far_group(F))
             roof.gables(mesh, fac.plain, random.Random(7))
             roof.roof(mesh, roof_strip, u_roof)
         else:
@@ -778,6 +839,7 @@ def build_lshape(L, W, F, ctx):
     wing = Gable(-W / 2, W / 2 - a + 1.0, L / 2 - b, L / 2, he, pitch, o,
                  o * 0.8)
     bands = []
+    has_chimney = rng.random() < m.get("chimney_p", 0)
     for level in (1, 2, 3, 4):
         set_level(level)
         mesh = Mesh()
@@ -795,11 +857,15 @@ def build_lshape(L, W, F, ctx):
             if level == 1:
                 main.trims(mesh, ctx)
                 wing.trims(wmesh, ctx)
-                if rng.random() < m.get("chimney_p", 0):
-                    chimney(mesh, ctx, main, fac, random.Random(11))
+            else:
+                main.fascia(mesh, ctx)
+                wing.fascia(wmesh, ctx)
+            if has_chimney:
+                chimney(mesh, ctx, main, fac, random.Random(11))
         elif level == 3:
-            ring_plain(mesh, fac.plain, ring, 0.0, he, random.Random(3))
-            ring_plain(wmesh, fac.plain, wring, 0.0, he, random.Random(4))
+            g = far_group(F)
+            ring_walls(mesh, fac, ring, 0.0, F, front_edge=0, group=g)
+            ring_walls(wmesh, fac, wring, 0.0, F, front_edge=2, group=g)
             main.roof(mesh, roof_strip, 0.1)
             wing.roof(wmesh, roof_strip, 0.6)
         else:
@@ -833,36 +899,45 @@ def build_rowhouse(L, W, F, ctx):
     n_units = max(2, int(round((wx1 - wx0) / rng.uniform(5.0, 6.5))))
     uw = (wx1 - wx0) / n_units
     bands = []
+    chimneys = rng.random() < max(0.3, m.get("chimney_p", 0))
+
+    def unit_walls(mesh, group=1):
+        # alternating unit colourways in every band that shows walls, so
+        # the terrace never changes colour at a switch
+        for i in range(n_units):
+            fac = facs[i % 2]
+            a = wx0 + i * uw
+            b = a + uw
+            facade_wall(mesh, fac, (a, wy0), (b, wy0), 0.0, F,
+                        door_side=True, group=group)
+            facade_wall(mesh, fac, (b, wy1), (a, wy1), 0.0, F, group=group)
+        facade_wall(mesh, facs[0], (wx1, wy0), (wx1, wy1), 0.0, F,
+                    group=group)
+        facade_wall(mesh, facs[1], (wx0, wy1), (wx0, wy0), 0.0, F,
+                    group=group)
+
     for level in (1, 2, 3, 4):
         set_level(level)
         mesh = Mesh()
-        if level == 2:
-            ring_walls(mesh, facs[0], ring, 0.0, F, front_edge=0)
-            roof.gables(mesh, facs[0].plain, random.Random(7))
-            roof.roof(mesh, roof_strip, 0.2)
-        elif level == 1:
-            for i in range(n_units):
-                fac = facs[i % 2]
-                a = wx0 + i * uw
-                b = a + uw
-                facade_wall(mesh, fac, (a, wy0), (b, wy0), 0.0, F,
-                            door_side=True)
-                facade_wall(mesh, fac, (b, wy1), (a, wy1), 0.0, F)
-            facade_wall(mesh, facs[0], (wx1, wy0), (wx1, wy1), 0.0, F)
-            facade_wall(mesh, facs[1], (wx0, wy1), (wx0, wy0), 0.0, F)
+        if level <= 2:
+            unit_walls(mesh)
             roof.gables(mesh, facs[0].plain, random.Random(7))
             roof.roof(mesh, roof_strip, 0.2)
             if level == 1:
                 roof.trims(mesh, ctx)
-                if rng.random() < max(0.3, m.get("chimney_p", 0)):
-                    for i in range(1, n_units):
-                        x = wx0 + i * uw - 0.3
-                        box_part(mesh, facs[0].plain, x, x + 0.6,
-                                 roof.yc - 0.35, roof.yc + 0.35,
-                                 roof.ridge - 0.4, roof.ridge + 0.75,
-                                 top_strip=ctx.trim["coping"])
+            else:
+                roof.fascia(mesh, ctx)
+            if chimneys:
+                # band 2 drops the stacks' narrow end faces (along the ridge)
+                sides = (True, True, True, True) if level == 1 else                     (True, False, True, False)
+                for i in range(1, n_units):
+                    x = wx0 + i * uw - 0.3
+                    box_part(mesh, facs[0].plain, x, x + 0.6,
+                             roof.yc - 0.35, roof.yc + 0.35,
+                             roof.ridge - 0.4, roof.ridge + 0.75,
+                             top_strip=ctx.trim["coping"], sides=sides)
         elif level == 3:
-            ring_plain(mesh, facs[0].plain, ring, 0.0, he, random.Random(3))
+            unit_walls(mesh, group=far_group(F))
             roof.gables(mesh, facs[0].plain, random.Random(7))
             roof.roof(mesh, roof_strip, 0.2)
         else:
@@ -881,58 +956,60 @@ def build_flat(L, W, F, ctx, *, keys, front_inset=0.0, canopy_z=None,
     he = F * FLOOR_H
     top = he + parapet
     x0, x1, y0, y1 = -L / 2, L / 2, -W / 2, W / 2
+    # one roof offset for every band: a per-band draw slid the baked
+    # rooftop equipment sideways at each switch
+    u_roof = rng.random()
+    arcaded = arcade and F >= 2
+    # the front wall line and the roof field are the same in bands 1-3
+    yb = y0 + front_inset if (front_inset and not arcaded) else y0
     bands = []
     for level in (1, 2, 3, 4):
         set_level(level)
         mesh = Mesh()
-        if level == 1 and arcade and F >= 2:
-            # five-foot way: ground floor pulled back, upper floors flush
-            yi = y0 + front_inset
-            facade_wall(mesh, fac, (x0, yi), (x1, yi), 0.0, 1,
-                        door_side=True)
-            for a, b in (((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)),
-                         ((x0, y1), (x0, y0))):
-                facade_wall(mesh, fac, a, b, 0.0, F)
-            facade_wall(mesh, fac, (x0, y0), (x1, y0), FLOOR_H, F - 1,
-                        strip_ground=fac.upper)
-            sof = ctx.trim["soffit"]
-            pts = [(x1, yi, FLOOR_H), (x0, yi, FLOOR_H), (x0, y0, FLOOR_H),
-                   (x1, y0, FLOOR_H)]
-            if poly_normal(pts)[2] > 0:
-                pts = pts[::-1]
-            mesh.planar(pts, sof, (1, 0, 0), v_scale=0.4 / front_inset)
-            n = max(2, int(round(L / 4.5)) + 1)
-            s = 0.4
-            for i in range(n):
-                px = x0 + (L - s) * i / (n - 1)
-                box_part(mesh, fac.plain, px, px + s, y0, y0 + s, 0.0,
-                         FLOOR_H, sides=(True, True, False, True), top=False)
-            # the end walls of the arcade
-            for xe, a, b in ((x1, (x1, y0), (x1, yi)),
-                             (x0, (x0, yi), (x0, y0))):
-                pass
-        elif level <= 2:
-            yi = y0 + (front_inset if level == 1 else 0.0)
-            ring = rect_ring(x0, yi, x1, y1)
-            ring_walls(mesh, fac, ring, 0.0, F, front_edge=0)
-            if level == 1 and front_inset > 0 and canopy_z is not None:
-                canopy(mesh, ctx, x0, x1, y0, yi, canopy_z)
         if level <= 2:
-            ring = rect_ring(x0, y0, x1, y1)
-            if level == 1 and front_inset and not arcade:
-                ring = rect_ring(x0, y0 + front_inset, x1, y1)
-            ring_plain(mesh, fac.plain, ring, he, top, random.Random(5))
-            if level == 1 and front_inset and not arcade:
-                # roof field only over the building; canopy covers the rest
-                flat_top(mesh, ctx, roof_strip, x0, y0 + front_inset, x1, y1,
-                         top)
+            # band 2 = band 1 minus the arcade posts (a pixel or two wide
+            # at the switch); the recessed ground floor, canopy and coping
+            # stay, so shop fronts no longer jump forward
+            full = level == 1
+            if arcaded:
+                # five-foot way: ground floor pulled back, upper floors flush
+                yi = y0 + front_inset
+                facade_wall(mesh, fac, (x0, yi), (x1, yi), 0.0, 1,
+                            door_side=True)
+                for a, b in (((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)),
+                             ((x0, y1), (x0, y0))):
+                    facade_wall(mesh, fac, a, b, 0.0, F)
+                facade_wall(mesh, fac, (x0, y0), (x1, y0), FLOOR_H, F - 1,
+                            strip_ground=fac.upper)
+                sof = ctx.trim["soffit"]
+                pts = [(x1, yi, FLOOR_H), (x0, yi, FLOOR_H),
+                       (x0, y0, FLOOR_H), (x1, y0, FLOOR_H)]
+                if poly_normal(pts)[2] > 0:
+                    pts = pts[::-1]
+                mesh.planar(pts, sof, (1, 0, 0), v_scale=0.4 / front_inset)
+                if full:
+                    n = max(2, int(round(L / 4.5)) + 1)
+                    s = 0.4
+                    for i in range(n):
+                        px = x0 + (L - s) * i / (n - 1)
+                        box_part(mesh, fac.plain, px, px + s, y0, y0 + s,
+                                 0.0, FLOOR_H,
+                                 sides=(True, True, False, True), top=False)
             else:
-                flat_top(mesh, ctx, roof_strip, x0, y0, x1, y1, top,
-                         coping=0.3 if level == 1 else 0.0)
+                ring = rect_ring(x0, yb, x1, y1)
+                ring_walls(mesh, fac, ring, 0.0, F, front_edge=0)
+                if front_inset > 0 and canopy_z is not None:
+                    canopy(mesh, ctx, x0, x1, y0, yb, canopy_z)
+            ring = rect_ring(x0, yb, x1, y1)
+            ring_plain(mesh, fac.plain, ring, he, top, random.Random(5))
+            # roof field only over the building; a canopy covers the rest
+            flat_top(mesh, ctx, roof_strip, x0, yb, x1, y1, top, u0=u_roof)
         elif level == 3:
-            ring = rect_ring(x0, y0, x1, y1)
-            ring_plain(mesh, fac.plain, ring, 0.0, top, random.Random(3))
-            flat_top(mesh, ctx, roof_strip, x0, y0, x1, y1, top, coping=0)
+            ring = rect_ring(x0, yb, x1, y1)
+            ring_walls(mesh, fac, ring, 0.0, F, front_edge=0,
+                       group=far_group(F), top_extra=parapet)
+            flat_top(mesh, ctx, roof_strip, x0, yb, x1, y1, top, coping=0,
+                     u0=u_roof)
         else:
             far_quad(mesh, roof_strip, x0, y0, x1, y1, top)
         bands.append(mesh)
@@ -964,8 +1041,11 @@ def build_apartment(L, W, F, ctx, *, prefer_pitched):
             roof.roof(mesh, roof_strip, 0.3)
             if level == 1:
                 roof.trims(mesh, ctx)
+            else:
+                roof.fascia(mesh, ctx)
         elif level == 3:
-            ring_plain(mesh, fac.plain, ring, 0.0, he, random.Random(3))
+            ring_walls(mesh, fac, ring, 0.0, F, front_edge=0,
+                       group=far_group(F))
             roof.roof(mesh, roof_strip, 0.3)
         else:
             roof.quad(mesh, roof_strip)
@@ -992,8 +1072,11 @@ def build_warehouse(L, W, F, ctx):
             roof.roof(mesh, roof_strip, 0.1)
             if level == 1:
                 roof.trims(mesh, ctx)
+            else:
+                roof.fascia(mesh, ctx)
         elif level == 3:
-            ring_plain(mesh, fac.plain, ring, 0.0, he, random.Random(3))
+            ring_walls(mesh, fac, ring, 0.0, F, front_edge=0,
+                       group=far_group(F))
             roof.gables(mesh, fac.plain, random.Random(7))
             roof.roof(mesh, roof_strip, 0.1)
         else:

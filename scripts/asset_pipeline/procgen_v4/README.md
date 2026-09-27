@@ -93,19 +93,27 @@ row: same archetype, footprint, floors, region and seed.
   the texture), and flat roofs have a coplanar coping ring. All three were
   rejected before.
 * Frame load is modelled as `Σ tris_band × (far² − near²)`, because instance
-  count grows with ring area. Across 3,000 sampled assets it is **1.04× the
-  old library on average (median 1.01)**. Band 1, the full model with eaves,
-  fascia, soffits, chimneys, dormers, porches, verandas and arcades, ends at
-  0.6× the old full-detail range. Beyond that, band 2 keeps per-floor window
-  rows, so the detail change at the switch is small.
-* Known excess: distant pitched buildings keep their roof silhouette in
-  band 3 (+4 triangles) instead of turning into flat-topped boxes. The
-  L-shape (about 1% of OBJs) is two volumes in band 2, which puts it at
-  about 1.8×.
+  count grows with ring area.
+* Smooth LOD (2026-09-27): no band switch may move, recolour or drop
+  anything a viewer can see at that distance. Band 1 (full model) ends at
+  0.8× the old full-detail range. Band 2 keeps band 1's walls, roof tile
+  scale and offset, chimneys, dormers, porch roofs, shop canopies and
+  recessed fronts, coping, eave boards and per-unit terrace colours, and
+  drops only features a pixel or two wide at the switch (soffits, barge
+  boards, ridge caps, porch and arcade posts). Band 3 keeps the window
+  texture: one quad per floor up to two floors, otherwise the ground floor
+  plus one stretched quad for the upper floors, so the facade's mean tone
+  no longer brightens into a plain slab. Band 4 is still one roof quad.
+  Rendered at each switch distance (2560 px, 60° view), the first switch
+  now changes 0.0–0.6% of pixels in a building crop, down from 3–7%.
+* Cost: the modelled load is **1.36× the old library (median 1.28)**.
+  Terraces carry most of it (up to 4.4×, about 6% of OBJs). Instance
+  counts, texture pages and batching are unchanged.
 
 ## Not done yet
 
-* No in-sim frame-time measurement. The contract is a model, not a benchmark.
+* No in-sim frame-time measurement. The contract is a model, not a
+  benchmark; the smooth-LOD round made that check more important.
 * No night lighting (`TEXTURE_LIT`).
 * No normal-map mip tuning: the old "shimmer" suspect was `GLOBAL_specular`
   with high gloss. v4 keeps `GLOBAL_specular 1.0` but walls carry
