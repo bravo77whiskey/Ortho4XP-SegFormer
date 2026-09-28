@@ -46,6 +46,7 @@ import O4_SFR_Roof_Color as ROOFCOLOR
 import O4_SFR_Height_Model as HEIGHTMODEL
 import O4_SFR_Height_Priors as HEIGHTPRIORS
 import O4_SFR_Footprint_Polygons as FOOTPRINTS
+import O4_SFR_Agri_Structures as AGRI
 import O4_SFR_Texture_Selection as TEXSEL
 from O4_SFR_Texture_Selection import compute_covered_fractions
 from O4_SFR_DSF_Utils import (
@@ -188,6 +189,9 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("heightnet_dets", "heightnet_dets"),
                 ("yolo_supp", "yolo_suppressed_overlap"),
                 ("yolo_placed", "yolo_placed"),
+                ("agri_ground", "agri_ground"),
+                ("agri_greenhouse", "agri_greenhouse"),
+                ("greenhouse_pieces", "greenhouse_pieces_placed"),
                 ("yolo_obj", "yolo_object_placed"),
                 ("yolo_fac", "yolo_facade_placed"),
                 ("roof_color_match", "roof_color_matched"),
@@ -2699,8 +2703,8 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 73      # v73: segment-first switch
-BLD_PLACEMENT_FAST_CACHE_VERSION = 75  # v75: segment-first switch
+BLD_PLACEMENT_CACHE_VERSION = 74      # v74: farmland/greenhouse sorting
+BLD_PLACEMENT_FAST_CACHE_VERSION = 76  # v76: farmland/greenhouse sorting
 # Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
 # wing the detector missed) are extruded as a polygon facade traced from the
 # landcover building class (O4_SFR_Footprint_Polygons), and the smaller
@@ -2743,6 +2747,11 @@ SEG_FIRST_YOLO_MATCH_IOU = 0.6
 #   (FOOTPRINTS.looks_like_ground: soil-coloured and flat, or flat and no
 #   contrast with the surroundings); 0 disables.
 SEG_FIRST_CLAIM_FRAC = 0.5
+# Farmland sorting (O4_SFR_Agri_Structures, O4_SFR_BLD_AGRI): greenhouse
+# detections become greenhouse assets; this facade is the fallback when the
+# O4SFR greenhouse library is not installed.  Facade wall height.
+GREENHOUSE_FACADE_PATHS = ("facades/agricultural/greenhouse_1.fac",)
+GREENHOUSE_HEIGHT_M = 4.0
 BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_SFR_BLD_MAX_CANDIDATES.
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
@@ -4309,6 +4318,21 @@ def _apply_height_context_caps(detections, m_per_px):
             det['height_adjustment'] = 'context_cap'
             n_capped += 1
     return n_capped
+
+
+def _agri_mode():
+    """O4_SFR_BLD_AGRI: greenhouse (default) | drop | off.
+
+    ``greenhouse`` drops farmland ground detections and places greenhouse
+    assets on greenhouse detections; ``drop`` drops both; ``off`` keeps the
+    old behaviour (everything is a building).
+    """
+    raw = os.environ.get("O4_SFR_BLD_AGRI", "greenhouse").strip().lower()
+    if raw in {"0", "off", "false", "no", "none"}:
+        return "off"
+    if raw == "drop":
+        return "drop"
+    return "greenhouse"
 
 
 def _seg_first_mode():
@@ -9888,6 +9912,87 @@ def _mark_dynamic_center_blockers(center_block_masks, cx, cy, heading, mark_boun
         cv2.fillPoly(center_mask, [np.int32(block_poly)], 1)
 
 
+def _place_greenhouses(
+    detections, *, m_per_px, img_w, img_h, lat, lon, bounds,
+    static_occ_mask, route_excl_mask, building_spacing_mask, fit_scratch,
+    tunnel_paths, facade_path, placed_objects, placed_facades, file_counts,
+):
+    """Place greenhouse detections as tunnel-array objects or a facade.
+
+    Tunnel arrays (O4_SFR_Agri_Structures.greenhouse_pieces) are used when
+    the O4SFR greenhouse library exports every piece a detection needs;
+    otherwise the greenhouse facade wraps the detection OBB at
+    GREENHOUSE_HEIGHT_M; with neither installed nothing is placed.  Pieces
+    avoid static scenery and roads like building footprints do, and are
+    marked into ``building_spacing_mask`` so no building lands on them.
+    """
+    lat_n, lat_s, lon_w, lon_e = bounds
+
+    def _clear(poly_i):
+        if not _poly_fits(static_occ_mask, poly_i, fit_scratch):
+            return False
+        if route_excl_mask is not None and _poly_mask_overlap_frac(
+            route_excl_mask, poly_i, fit_scratch
+        ) > DIRECT_FACADE_ROAD_OVERLAP_FRAC:
+            return False
+        # neighbouring greenhouses touch: tolerate a shared edge
+        return _poly_mask_overlap_frac(
+            building_spacing_mask, poly_i, fit_scratch
+        ) <= 0.1
+
+    def _in_tile(px, py):
+        o_lon, o_lat = px_to_latlon(px, py, img_w, img_h, lat_n, lat_s, lon_w, lon_e)
+        return (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1), o_lon, o_lat
+
+    n_pieces = 0
+    for det in sorted(
+        detections, key=lambda d: -float(d.get('area_m2', 0.0))
+    ):
+        pieces = (
+            AGRI.greenhouse_pieces(det, m_per_px, northern=lat >= 0)
+            if tunnel_paths else []
+        )
+        if pieces and all(p['path'] in tunnel_paths for p in pieces):
+            # pieces of one detection share edges: test them all before
+            # marking any, or each would block its neighbour
+            fitted = []
+            for piece in pieces:
+                poly_i = np.rint(piece['poly']).astype(np.int32)
+                if not _clear(poly_i):
+                    continue
+                ok, o_lon, o_lat = _in_tile(*piece['center'])
+                if ok:
+                    fitted.append((piece, poly_i, o_lon, o_lat))
+            for piece, poly_i, o_lon, o_lat in fitted:
+                placed_objects.append(
+                    (o_lon, o_lat, round(float(piece['bearing']), 1), piece['path'])
+                )
+                _mark_poly(building_spacing_mask, poly_i)
+            n_pieces += len(fitted)
+            continue
+        if facade_path is None:
+            continue
+        ring = np.asarray(det['points'], dtype=np.float64)
+        poly_i = np.rint(ring).astype(np.int32)
+        if not _clear(poly_i):
+            continue
+        ok, _o_lon, _o_lat = _in_tile(*np.asarray(ring).mean(axis=0))
+        if not ok:
+            continue
+        placed_facades.append((
+            _pixel_ring_to_latlon(ring, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
+            facade_path,
+            GREENHOUSE_HEIGHT_M,
+        ))
+        _mark_poly(building_spacing_mask, poly_i)
+        n_pieces += 1
+    if n_pieces:
+        file_counts['greenhouse_pieces_placed'] = (
+            file_counts.get('greenhouse_pieces_placed', 0) + n_pieces
+        )
+    return n_pieces
+
+
 def _pixel_ring_to_latlon(points_px, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
     """Convert a closed or open polygon ring from image pixels to lon/lat pairs."""
     ring = []
@@ -10216,6 +10321,7 @@ def run(
         'heightnet': 0.0,
         'footprint_polygons': 0.0,
         'seg_first': 0.0,
+        'greenhouses': 0.0,
         'stock_yolo_inference': 0.0,
         'zone_cleanup': 0.0,
         'lookup': 0.0,
@@ -10612,6 +10718,35 @@ def run(
         stock_yolo_library_exports,
         suffixes=(".obj", ".fac"),
     )
+    # Greenhouse assets: the O4SFR greenhouse library's tunnel arrays when
+    # installed, else one greenhouse facade over the detection, else nothing.
+    greenhouse_tunnel_paths = frozenset(
+        p for p in stock_yolo_exported_paths
+        if p.startswith(AGRI.GREENHOUSE_LIBRARY_PREFIX)
+    )
+    greenhouse_facade_path = next(
+        (p for p in GREENHOUSE_FACADE_PATHS if p in stock_yolo_exported_paths),
+        None,
+    )
+    greenhouse_asset_signature = (
+        len(greenhouse_tunnel_paths),
+        hashlib.sha1(
+            "|".join(sorted(greenhouse_tunnel_paths)).encode("utf-8")
+        ).hexdigest()[:12],
+        greenhouse_facade_path,
+        GREENHOUSE_HEIGHT_M,
+    )
+    if _agri_mode() == "greenhouse":
+        print(
+            "Greenhouses: "
+            + (
+                f"{len(greenhouse_tunnel_paths)} O4SFR tunnel-array objects"
+                if greenhouse_tunnel_paths else
+                f"facade {greenhouse_facade_path}" if greenhouse_facade_path
+                else "no greenhouse assets installed; greenhouse detections are dropped"
+            ),
+            flush=True,
+        )
     stock_yolo_asset_map, dropped_stock_paths, dropped_stock_classes = (
         _filter_stock_yolo_asset_map(
             STOCKYOLO.STOCK_YOLO_ASSET_MAP,
@@ -10923,6 +11058,7 @@ def run(
                 _env_flag("O4_SFR_BLD_HEIGHT_CONTEXT", True),
                 _env_flag("O4_SFR_BLD_FOOTPRINT_POLYGONS", True),
                 _seg_first_mode(),
+                _agri_mode(), greenhouse_asset_signature,
                 SEG_FIRST_MIN_M2, SEG_FIRST_GUARD_MIN_M2,
                 SEG_FIRST_GUARD_MAX_SMALL, SEG_FIRST_GUARD_MAX_EDGE,
                 FOOTPRINTS.SPLIT_MIN_DE, FOOTPRINTS.SPLIT_MIN_LINE,
@@ -11888,6 +12024,77 @@ def run(
             valid_labels = np.flatnonzero(np.arange(n_cc) != 0)
             yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
+
+            # Farmland sorting (O4_SFR_Agri_Structures): drop open-ground
+            # detections, take greenhouses out of the building flow and place
+            # them as greenhouse assets before any building claims the area.
+            if (
+                yolo_detections and veg_map is not None and not mesh_water_full
+                and _agri_mode() != "off"
+            ):
+                _t_gh = time.perf_counter()
+                _agri_img = {'img': img, 'tried': img is not None}
+
+                def _agri_image():
+                    if not _agri_img['tried']:
+                        _agri_img['tried'] = True
+                        _agri_img['img'] = _load_source_image(
+                            fname, _source_mode, _orthophoto_dir
+                        )
+                    return _agri_img['img']
+
+                def _agri_heights(dets):
+                    _himg = _agri_image()
+                    if height_model is None or _himg is None:
+                        return [float('nan')] * len(dets)
+                    return HEIGHTMODEL.predict_detection_heights(
+                        height_model, _himg, dets, m_per_px
+                    )
+
+                _n_agri_in = len(yolo_detections)
+                yolo_detections, greenhouse_detections = AGRI.split_detections(
+                    yolo_detections, veg_map, _agri_image, m_per_px,
+                    counts=file_counts, height_fn=_agri_heights,
+                )
+                file_counts['agri_greenhouse'] = len(greenhouse_detections)
+                file_counts['agri_ground'] = (
+                    _n_agri_in - len(yolo_detections) - len(greenhouse_detections)
+                )
+                if len(yolo_detections) != _n_agri_in:
+                    file_counts['yolo_detections'] = len(yolo_detections)
+                    yolo_guidance = (
+                        _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
+                        if yolo_detections else None
+                    )
+                if greenhouse_detections:
+                    # A greenhouse block the landcover model reads as roof
+                    # must not be traced again as a building (segment-first,
+                    # large-roof polygons): its OBB becomes farmland.
+                    veg_map = veg_map.copy()
+                    for _gh in greenhouse_detections:
+                        cv2.fillPoly(
+                            veg_map,
+                            [np.round(np.asarray(_gh['points'])).astype(np.int32)],
+                            int(AGRI.CLASS_AGRICULTURE),
+                        )
+                    if _agri_mode() == "greenhouse":
+                        _place_greenhouses(
+                            greenhouse_detections,
+                            m_per_px=m_per_px, img_w=img_w, img_h=img_h,
+                            lat=lat, lon=lon,
+                            bounds=(lat_n, lat_s, lon_w, lon_e),
+                            static_occ_mask=static_occ_mask,
+                            route_excl_mask=route_excl_mask,
+                            building_spacing_mask=building_spacing_mask,
+                            fit_scratch=fit_scratch,
+                            tunnel_paths=greenhouse_tunnel_paths,
+                            facade_path=greenhouse_facade_path,
+                            placed_objects=placed_stock_objects,
+                            placed_facades=placed_facades,
+                            file_counts=file_counts,
+                        )
+                _agri_img = None
+                _record_elapsed(timings, file_timings, 'greenhouses', _t_gh)
 
             _seg_mode = _seg_first_mode()
             if _seg_mode != "off" and veg_map is not None:
