@@ -131,7 +131,13 @@ def add_obj(spec):
         for li in poly.loop_indices:
             vi = mesh.loops[li].vertex_index
             uv.data[li].uv = (verts[vi][6], verts[vi][7])
-    mesh.polygons.foreach_set("use_smooth", [False] * len(mesh.polygons))
+    if spec.get("smooth"):
+        # shade with the exported vertex normals, as X-Plane does
+        mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+        mesh.normals_split_custom_set_from_vertices(
+            [(v[3], -v[5], v[4]) for v in verts])
+    else:
+        mesh.polygons.foreach_set("use_smooth", [False] * len(mesh.polygons))
     mesh.materials.append(material(tex, nml))
     obj = bpy.data.objects.new(name, mesh)
     obj.location = (spec["loc"][0], spec["loc"][1], 0.0)
