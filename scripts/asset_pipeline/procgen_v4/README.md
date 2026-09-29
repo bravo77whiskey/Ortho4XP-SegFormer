@@ -110,6 +110,13 @@ row: same archetype, footprint, floors, region and seed.
   Terraces carry most of it (up to 4.4×, about 6% of OBJs). Instance
   counts, texture pages and batching are unchanged.
 
+## Image-generated pages
+
+`image-gen/` replaces the baked facade and roof pages with image-generated
+ones (codex CLI's image tool). It keeps the same page layout, UVs and bay
+tables, so the OBJs above are unchanged. See `image-gen/README.md`. These
+are the pages installed since 2026-09-29.
+
 ## Not done yet
 
 * No in-sim frame-time measurement. The contract is a model, not a
