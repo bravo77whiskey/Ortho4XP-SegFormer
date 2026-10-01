@@ -25,7 +25,7 @@ Example:
         "H:/XP12/Custom Scenery/yOrtho4XP_Bld_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
-import sys, os, json, argparse, warnings, time, math, re, urllib.request, urllib.parse, hashlib, fnmatch
+import sys, os, json, argparse, warnings, time, math, re, hashlib, fnmatch
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
@@ -38,6 +38,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
+import O4_SFR_Overpass as OVERPASS
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
@@ -1558,7 +1559,7 @@ def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     return filtered
 
 
-def _download_and_cache_osm(lat, lon, cache_path, timeout=45):
+def _download_and_cache_osm(lat, lon, cache_path):
     """Download OSM building, transport, and residential-area data.
 
     Fetches one combined Overpass query for the 1 degree tile and caches it as
@@ -1566,74 +1567,20 @@ def _download_and_cache_osm(lat, lon, cache_path, timeout=45):
     building footprint exclusions, railway exclusions, and residential-area
     guidance for small-house placement.
     """
-    if os.path.exists(cache_path):
-        return True
-
-    import bz2 as _bz2
-    bbox = f"{int(lat)},{int(lon)},{int(lat)+1},{int(lon)+1}"
-    query = (
-        f'[out:xml][timeout:{timeout}];'
-        f'('
-        f'  way["building"]({bbox});'
-        f'  way["railway"~"^(rail|light_rail|subway|tram|narrow_gauge|monorail)$"]({bbox});'
-        f'  way["aeroway"~"^(aerodrome|apron|taxiway|runway|terminal|hangar)$"]({bbox});'
-        f'  way["landuse"~"^(railway|aeroway)$"]({bbox});'
-        f'  way["landuse"="residential"]({bbox});'
-        f');'
-        f'(._;>;);out body;'
-    )
-    servers = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.private.coffee/api/interpreter",
-        "https://overpass.osm.jp/api/interpreter",
-    ]
-    for server in servers:
-        try:
-            url = server + '?data=' + urllib.parse.quote(query)
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
-                data = resp.read()
-            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
-            with _bz2.open(cache_path, 'wb') as f:
-                f.write(data)
-            print(f"  [OSM excl] Downloaded {len(data)//1024} KB → {os.path.basename(cache_path)}")
-            return True
-        except Exception as e:
-            print(f"  [OSM excl] {server} failed: {e}")
-    return False
+    query = OVERPASS.tile_query(lat, lon, (
+        'way["building"]',
+        'way["railway"~"^(rail|light_rail|subway|tram|narrow_gauge|monorail)$"]',
+        'way["aeroway"~"^(aerodrome|apron|taxiway|runway|terminal|hangar)$"]',
+        'way["landuse"~"^(railway|aeroway)$"]',
+        'way["landuse"="residential"]',
+    ))
+    return OVERPASS.download_to_cache(query, cache_path, "OSM excl")
 
 
-def _download_and_cache_osm_roads(lat, lon, cache_path, timeout=60):
+def _download_and_cache_osm_roads(lat, lon, cache_path):
     """Download all OSM highway ways for zone splitting and road context."""
-    if os.path.exists(cache_path):
-        return True
-
-    import bz2 as _bz2
-    bbox = f"{int(lat)},{int(lon)},{int(lat)+1},{int(lon)+1}"
-    query = (
-        f'[out:xml][timeout:{timeout}];'
-        f'('
-        f'  way["highway"]({bbox});'
-        f');'
-        f'(._;>;);out body;'
-    )
-    servers = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.private.coffee/api/interpreter",
-        "https://overpass.osm.jp/api/interpreter",
-    ]
-    for server in servers:
-        try:
-            url = server + '?data=' + urllib.parse.quote(query)
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
-                data = resp.read()
-            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
-            with _bz2.open(cache_path, 'wb') as f:
-                f.write(data)
-            print(f"  [OSM roads] Downloaded {len(data)//1024} KB -> {os.path.basename(cache_path)}")
-            return True
-        except Exception as e:
-            print(f"  [OSM roads] {server} failed: {e}")
-    return False
+    query = OVERPASS.tile_query(lat, lon, ('way["highway"]',))
+    return OVERPASS.download_to_cache(query, cache_path, "OSM roads")
 
 
 def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):

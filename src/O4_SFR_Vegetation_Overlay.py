@@ -32,7 +32,7 @@ Example:
         --cache-dir "cache_zl16_36_101"
 """
 
-import sys, os, argparse, warnings, time, math, urllib.request, urllib.parse
+import sys, os, argparse, warnings, time, math
 warnings.filterwarnings('ignore')
 
 import hashlib
@@ -45,6 +45,7 @@ import O4_Forest_Assets as FOREST_ASSETS
 import O4_SFR_Climate_Regions as CLIMATE_REGIONS
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
+import O4_SFR_Overpass as OVERPASS
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Texture_Selection as TEXSEL
 from O4_SFR_Building_Overlay import (
@@ -214,41 +215,15 @@ def _parse_excl_context_cache(cache_path, cache_dir=None):
     )
 
 
-def _download_and_cache_veg_context_osm(lat, lon, cache_path, timeout=45):
+def _download_and_cache_veg_context_osm(lat, lon, cache_path):
     """Download OSM semantics used to classify tree cover into real-world types."""
-    if os.path.exists(cache_path):
-        return True
-
-    bbox = f"{int(lat)},{int(lon)},{int(lat)+1},{int(lon)+1}"
-    query = (
-        f'[out:xml][timeout:{timeout}];'
-        f'('
-        f'  way["natural"~"^(wood|tree_row|water|wetland|scrub)$"]({bbox});'
-        f'  way["waterway"="riverbank"]({bbox});'
-        f'  way["landuse"~"^(forest|orchard|farmland|farmyard|residential|allotments|village_green|recreation_ground)$"]({bbox});'
-        f'  way["leisure"~"^(park|garden|golf_course|pitch)$"]({bbox});'
-        f');'
-        f'(._;>;);out body;'
-    )
-    servers = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.private.coffee/api/interpreter",
-        "https://overpass.osm.jp/api/interpreter",
-    ]
-    for server in servers:
-        try:
-            url = server + '?data=' + urllib.parse.quote(query)
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
-                data = resp.read()
-            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
-            import bz2 as _bz2
-            with _bz2.open(cache_path, 'wb') as f:
-                f.write(data)
-            print(f"  [OSM veg] Downloaded {len(data)//1024} KB → {os.path.basename(cache_path)}")
-            return True
-        except Exception as exc:
-            print(f"  [OSM veg] {server} failed: {exc}")
-    return False
+    query = OVERPASS.tile_query(lat, lon, (
+        'way["natural"~"^(wood|tree_row|water|wetland|scrub)$"]',
+        'way["waterway"="riverbank"]',
+        'way["landuse"~"^(forest|orchard|farmland|farmyard|residential|allotments|village_green|recreation_ground)$"]',
+        'way["leisure"~"^(park|garden|golf_course|pitch)$"]',
+    ))
+    return OVERPASS.download_to_cache(query, cache_path, "OSM veg")
 
 
 def _parse_veg_context_osm(cache_path, cache_dir=None):
