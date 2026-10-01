@@ -666,6 +666,20 @@ def _or_optional_masks(lhs, rhs):
     return cv2.bitwise_or(lhs, rhs)
 
 
+def _bld_cache_objects(bld_data):
+    """Placed objects ``(lon, lat, heading, path)`` from a ``*_bld.pkl``.
+
+    The building pass nests them under ``'placements'``; older caches kept
+    ``'objects'`` at the top level.
+    """
+    if not isinstance(bld_data, dict):
+        return ()
+    placements = bld_data.get('placements')
+    if isinstance(placements, dict) and placements.get('objects'):
+        return placements['objects']
+    return bld_data.get('objects') or ()
+
+
 def _pack_cache_mask(mask):
     """Bit-pack a 2-D 0/1 uint8 mask for the mask cache; anything else as is.
 
@@ -2244,7 +2258,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 try:
                     with open(_bld_pkl, 'rb') as _f:
                         _bld_data = _pickle.load(_f)
-                    _bld_objs = _bld_data.get('objects', [])
+                    _bld_objs = _bld_cache_objects(_bld_data)
                     _bld_r = max(1, int(bld_excl_m / mpp))
                     bld_excl_mask = np.zeros((img_h, img_w), dtype=np.uint8)
                     for _o_lon, _o_lat, _heading, _obj_path in _bld_objs:

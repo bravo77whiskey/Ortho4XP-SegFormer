@@ -439,6 +439,15 @@ class ForestAssetPolicyTests(unittest.TestCase):
         packed = SFR_VEG._pack_cache_mask(road)
         self.assertEqual(packed["__bits__"].nbytes, (road.size + 7) // 8)
 
+    def test_building_exclusion_reads_nested_placements(self):
+        obj = (120.4, 22.8, 271.2, "lib/garden/pools/pool_Small_7x10.obj")
+        nested = {"params": (), "source": "direct_yolo",
+                  "placements": {"objects": [obj], "facades": []}}
+        self.assertEqual(list(SFR_VEG._bld_cache_objects(nested)), [obj])
+        self.assertEqual(list(SFR_VEG._bld_cache_objects({"objects": [obj]})), [obj])
+        self.assertEqual(list(SFR_VEG._bld_cache_objects({"placements": {}})), [])
+        self.assertEqual(list(SFR_VEG._bld_cache_objects(None)), [])
+
     def test_vegetation_aux_cache_key_tracks_exclusion_zones(self):
         base_args = (
             "34336_26384_BI16.dds",
