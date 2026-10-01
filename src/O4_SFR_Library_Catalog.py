@@ -182,7 +182,16 @@ class LibraryCatalog:
             entries = sorted(os.scandir(cs_dir), key=lambda item: item.name.lower())
         except OSError:
             entries = []
-        self.listing = [(entry.name, entry.path) for entry in entries if entry.is_dir()]
+        self.listing = []
+        for entry in entries:
+            # One corrupt folder (WinError 1392) must not sink every build.
+            try:
+                is_dir = entry.is_dir()
+            except OSError as exc:
+                print(f"[SFR Lib] Skipping unreadable scenery folder {entry.path}: {exc}", flush=True)
+                continue
+            if is_dir:
+                self.listing.append((entry.name, entry.path))
         layout = {}
         # Active names first: exports carry the scenery_packs.ini name.
         for name, package_dir in self.active + self.listing:

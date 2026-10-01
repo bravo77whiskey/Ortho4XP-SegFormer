@@ -402,6 +402,17 @@ class OSM_layer:
         return 1
 
 ################################################################################
+
+
+def _entry_is_dir(entry):
+    """``DirEntry.is_dir()`` that treats an unreadable (corrupt) entry as absent."""
+    try:
+        return entry.is_dir()
+    except OSError as exc:
+        print(f"Skipping unreadable folder {entry.path}: {exc}", flush=True)
+        return False
+
+
 def _create_synthetic_way(osm_layer, lon_lat_points, tags=None, first=True):
     nodeids = []
     for lonp, latp in lon_lat_points:
@@ -610,7 +621,7 @@ def _candidate_apt_dat_files():
         custom_scenery = os.path.join(root, "Custom Scenery")
         if os.path.isdir(custom_scenery):
             for entry in sorted(os.scandir(custom_scenery), key=lambda item: item.name.lower()):
-                if not entry.is_dir():
+                if not _entry_is_dir(entry):
                     continue
                 custom_apt = os.path.join(entry.path, "Earth nav data", "apt.dat")
                 if os.path.isfile(custom_apt):

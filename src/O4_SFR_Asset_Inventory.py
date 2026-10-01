@@ -26,6 +26,15 @@ class LibraryExport:
     region: str | None = None
 
 
+def _entry_is_dir(entry):
+    """``DirEntry.is_dir()`` that treats an unreadable (corrupt) entry as absent."""
+    try:
+        return entry.is_dir()
+    except OSError as exc:
+        print(f"Skipping unreadable folder {entry.path}: {exc}", flush=True)
+        return False
+
+
 def normalize_library_path(path):
     """Return a normalized, case-insensitive library path key."""
     return (path or "").replace("\\", "/").strip().lower().lstrip("/")
@@ -44,7 +53,7 @@ def _package_dirs(custom_scenery_dir, package_name_patterns=None):
                 os.scandir(custom_scenery_dir),
                 key=lambda item: item.name.lower(),
             )
-            if entry.is_dir()
+            if _entry_is_dir(entry)
         ]
 
     patterns = [

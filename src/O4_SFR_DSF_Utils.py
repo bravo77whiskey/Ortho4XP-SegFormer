@@ -6,6 +6,15 @@ import re
 import subprocess
 
 
+def _entry_is_dir(entry):
+    """``DirEntry.is_dir()`` that treats an unreadable (corrupt) entry as absent."""
+    try:
+        return entry.is_dir()
+    except OSError as exc:
+        print(f"Skipping unreadable folder {entry.path}: {exc}", flush=True)
+        return False
+
+
 def resolve_custom_scenery_dir(custom_scenery_dir):
     """Accept either X-Plane root or Custom Scenery and return Custom Scenery."""
     if not custom_scenery_dir:
@@ -144,7 +153,7 @@ def _scan_custom_scenery(custom_scenery_dir, tile_dsf_relpath, folder_filter):
                 os.scandir(custom_scenery_dir),
                 key=lambda item: item.name.lower(),
             )
-            if entry.is_dir()
+            if _entry_is_dir(entry)
         ]
     for folder_name, package_dir in entries:
         if not folder_filter(folder_name.lower()):
