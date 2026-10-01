@@ -408,7 +408,36 @@ class ForestAssetPolicyTests(unittest.TestCase):
         key_b = SFR_VEG._dds_mask_cache_key(*base_args, ("mesh-b", 10, 20))
 
         self.assertNotEqual(key_a, key_b)
-        self.assertEqual(key_a["version"], 3)
+        self.assertEqual(key_a["version"], 4)
+
+    def test_vegetation_mask_cache_bit_packs_and_round_trips(self):
+        import os
+        import tempfile
+
+        rng = np.random.default_rng(3)
+        road = (rng.random((37, 53)) > 0.7).astype(np.uint8)
+        resid = (rng.random((37, 53)) > 0.9).astype(np.uint8)
+        odd = np.full((4, 5), 7, dtype=np.uint8)  # not 0/1: stored as is
+        key = {"version": 4, "fname": "x.dds"}
+        payload = {
+            "road_excl": road,
+            "bld_excl_mask": None,
+            "forest_excl_mask": odd,
+            "context_masks": {"residential": resid, "forest": None},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "x_vegaux.pkl")
+            SFR_VEG._save_dds_mask_cache(path, key, payload)
+            loaded = SFR_VEG._load_dds_mask_cache(path, key)
+            self.assertIsNone(SFR_VEG._load_dds_mask_cache(path, {"version": 3}))
+        np.testing.assert_array_equal(loaded["road_excl"], road)
+        self.assertEqual(loaded["road_excl"].dtype, np.uint8)
+        self.assertIsNone(loaded["bld_excl_mask"])
+        np.testing.assert_array_equal(loaded["forest_excl_mask"], odd)
+        np.testing.assert_array_equal(loaded["context_masks"]["residential"], resid)
+        self.assertIsNone(loaded["context_masks"]["forest"])
+        packed = SFR_VEG._pack_cache_mask(road)
+        self.assertEqual(packed["__bits__"].nbytes, (road.size + 7) // 8)
 
     def test_vegetation_aux_cache_key_tracks_exclusion_zones(self):
         base_args = (

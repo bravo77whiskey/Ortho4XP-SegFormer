@@ -634,7 +634,8 @@ def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
                         simheaven_building_buffer_m, mesh_water_sig=None,
                         excl_zone_sig=None):
     return {
-        'version': 3,
+        # 4: 0/1 masks stored bit-packed (see _pack_cache_mask)
+        'version': 4,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -665,6 +666,28 @@ def _or_optional_masks(lhs, rhs):
     return cv2.bitwise_or(lhs, rhs)
 
 
+def _pack_cache_mask(mask):
+    """Bit-pack a 2-D 0/1 uint8 mask for the mask cache; anything else as is.
+
+    The cached masks are full-texture rasters (16 MB each at 4096 px), a
+    tile's worth was ~10 GB of writes per run; packed they are 1/8 of that
+    and round-trip exactly.
+    """
+    if (
+        isinstance(mask, np.ndarray) and mask.dtype == np.uint8 and
+        mask.ndim == 2 and not np.any(mask > 1)
+    ):
+        return {'__bits__': np.packbits(mask, axis=None), 'shape': mask.shape}
+    return mask
+
+
+def _unpack_cache_mask(value):
+    if isinstance(value, dict) and '__bits__' in value:
+        h, w = value['shape']
+        return np.unpackbits(value['__bits__'], count=h * w).reshape(h, w)
+    return value
+
+
 def _load_dds_mask_cache(cache_path, key):
     import pickle as _pickle
     if not os.path.exists(cache_path):
@@ -673,6 +696,13 @@ def _load_dds_mask_cache(cache_path, key):
         with open(cache_path, 'rb') as f:
             data = _pickle.load(f)
         if data.get('key') == key:
+            for name, value in list(data.items()):
+                if name == 'context_masks' and isinstance(value, dict):
+                    data[name] = {
+                        k: _unpack_cache_mask(v) for k, v in value.items()
+                    }
+                elif name != 'key':
+                    data[name] = _unpack_cache_mask(value)
             return data
     except Exception:
         return None
@@ -681,9 +711,15 @@ def _load_dds_mask_cache(cache_path, key):
 
 def _save_dds_mask_cache(cache_path, key, payload):
     import pickle as _pickle
+    packed = {}
+    for name, value in payload.items():
+        if name == 'context_masks' and isinstance(value, dict):
+            packed[name] = {k: _pack_cache_mask(v) for k, v in value.items()}
+        else:
+            packed[name] = _pack_cache_mask(value)
     try:
         with open(cache_path, 'wb') as f:
-            _pickle.dump({'key': key, **payload}, f, protocol=_pickle.HIGHEST_PROTOCOL)
+            _pickle.dump({'key': key, **packed}, f, protocol=_pickle.HIGHEST_PROTOCOL)
     except Exception:
         pass
 
