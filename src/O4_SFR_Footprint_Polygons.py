@@ -83,22 +83,24 @@ def _obb_frame(pts):
 def _peaks(profile, min_sep, min_strength):
     """Indices of local maxima >= min_strength, greedy by strength."""
     order = np.argsort(-profile, kind="stable")
+    order = order[profile[order] >= min_strength]
+    blocked = np.zeros(len(profile), dtype=bool)
     taken = []
     for i in order.tolist():
-        if profile[i] < min_strength:
-            break
-        if all(abs(i - j) >= min_sep for j in taken):
+        if not blocked[i]:
             taken.append(i)
+            blocked[max(0, i - min_sep + 1):i + min_sep] = True
     return sorted(taken)
 
 
 def _grid_breaks(mask, axis, min_sep, min_strength):
     """Wall positions along ``axis`` (0 = columns/x, 1 = rows/y)."""
-    m = mask.astype(np.int16)
+    m = np.asarray(mask, dtype=bool)
+    # |diff| of a 0/1 mask is "neighbours differ"
     if axis == 0:
-        diff = np.abs(np.diff(m, axis=1)).sum(axis=0)  # length W-1
+        diff = (m[:, 1:] != m[:, :-1]).sum(axis=0)  # length W-1
     else:
-        diff = np.abs(np.diff(m, axis=0)).sum(axis=1)
+        diff = (m[1:, :] != m[:-1, :]).sum(axis=1)
     # a boundary between pixel i and i+1 sits at coordinate i+1
     prof = np.convolve(diff.astype(np.float64), [0.25, 0.5, 0.25], mode="same")
     brk = [p + 1 for p in _peaks(prof, min_sep, min_strength)]
@@ -114,18 +116,13 @@ def _grid_breaks(mask, axis, min_sep, min_strength):
 
 def _cells(mask, xs, ys):
     """Boolean cell grid: majority of mask pixels in each (y, x) cell."""
-    grid = np.zeros((len(ys) - 1, len(xs) - 1), dtype=bool)
-    integ = cv2.integral(mask.astype(np.uint8))
-    for j in range(len(ys) - 1):
-        y0, y1 = ys[j], ys[j + 1]
-        for i in range(len(xs) - 1):
-            x0, x1 = xs[i], xs[i + 1]
-            area = (y1 - y0) * (x1 - x0)
-            if area <= 0:
-                continue
-            s = integ[y1, x1] - integ[y0, x1] - integ[y1, x0] + integ[y0, x0]
-            grid[j, i] = s * 2 >= area
-    return grid
+    integ = cv2.integral(mask.astype(np.uint8)).astype(np.int64)
+    xs = np.asarray(xs, dtype=np.int64)
+    ys = np.asarray(ys, dtype=np.int64)
+    corners = integ[np.ix_(ys, xs)]
+    s = corners[1:, 1:] - corners[:-1, 1:] - corners[1:, :-1] + corners[:-1, :-1]
+    area = np.diff(ys)[:, None] * np.diff(xs)[None, :]
+    return (area > 0) & (s * 2 >= area)
 
 
 def _trace_cells(grid, xs, ys):
@@ -139,11 +136,15 @@ def _trace_cells(grid, xs, ys):
     # points are rounded to the nearest cell corner, which folds the cut
     # back onto the corner
     q = 4
-    img = np.zeros((q * h + 1, q * w + 1), dtype=np.uint8)
-    for j in range(h):
-        for i in range(w):
-            if grid[j, i]:
-                img[q * j:q * j + q + 1, q * i:q * i + q + 1] = 255
+    # cell (j, i) covers rows q*j..q*j+q and columns q*i..q*i+q inclusive:
+    # a q-fold upsampling, widened by one pixel down and right
+    up = np.zeros((q * h + 1, q * w + 1), dtype=bool)
+    up[:-1, :-1] = np.repeat(np.repeat(np.asarray(grid, dtype=bool), q, 0), q, 1)
+    blk = up.copy()
+    blk[1:, :] |= up[:-1, :]
+    blk[:, 1:] |= up[:, :-1]
+    blk[1:, 1:] |= up[:-1, :-1]
+    img = blk.astype(np.uint8) * 255
     contours, hierarchy = cv2.findContours(
         img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     out = []
@@ -251,9 +252,13 @@ def extract_footprint(building_mask, obb_pts, m_per_px):
     Tries the grown footprint first and falls back to carving inside the
     OBB when growth exceeds MAX_GROWTH.  See :func:`_extract`.
     """
-    res = _extract(building_mask, obb_pts, m_per_px, grow=True)
+    base = _extract_base(building_mask, obb_pts, m_per_px)
+    if base is None:
+        return None
+    res = _extract_finish(base, grow=True)
     if res is not None and res["area_m2"] > MAX_GROWTH * res["obb_area_m2"]:
-        res = _extract(building_mask, obb_pts, m_per_px, grow=False)
+        # the carve-only retry shares everything up to the growth step
+        res = _extract_finish(base, grow=False)
     return res
 
 
@@ -266,6 +271,12 @@ def _extract(building_mask, obb_pts, m_per_px, grow):
     ``kind`` ('rectilinear' | 'simplified'), ``fill`` (building share of the
     OBB), ``area_m2``, ``obb_area_m2``, ``fit_iou`` (rings vs cleaned mask).
     """
+    base = _extract_base(building_mask, obb_pts, m_per_px)
+    return None if base is None else _extract_finish(base, grow)
+
+
+def _extract_base(building_mask, obb_pts, m_per_px):
+    """Steps of :func:`_extract` that do not depend on ``grow``, or None."""
     m_per_px = float(m_per_px)
     if m_per_px <= 0.0:
         return None
@@ -289,8 +300,23 @@ def _extract(building_mask, obb_pts, m_per_px, grow):
     fwd = np.array([[ca * scale, sa * scale, 0.0],
                     [-sa * scale, ca * scale, 0.0]])
     fwd[:, 2] = np.array([out_w / 2.0, out_h / 2.0]) - fwd[:, :2] @ centre
-    src = (np.asarray(building_mask) != 0).astype(np.uint8) * 255
-    work = cv2.warpAffine(src, fwd, (out_w, out_h), flags=cv2.INTER_LINEAR,
+    # warp only the source pixels under the work window (+2 px for the
+    # bilinear taps): the mask is usually a whole texture, and converting
+    # and warping all of it per detection dominated placement time
+    bm = np.asarray(building_mask)
+    win = np.array([[0.0, 0.0], [out_w, 0.0], [0.0, out_h], [out_w, out_h]])
+    inv0 = cv2.invertAffineTransform(fwd)
+    win = win @ inv0[:, :2].T + inv0[:, 2]
+    sx0 = max(0, int(math.floor(win[:, 0].min())) - 2)
+    sy0 = max(0, int(math.floor(win[:, 1].min())) - 2)
+    sx1 = min(bm.shape[1], int(math.ceil(win[:, 0].max())) + 3)
+    sy1 = min(bm.shape[0], int(math.ceil(win[:, 1].max())) + 3)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return None
+    fwd_crop = fwd.copy()
+    fwd_crop[:, 2] += fwd[:, :2] @ np.array([sx0, sy0], dtype=np.float64)
+    src = (bm[sy0:sy1, sx0:sx1] != 0).astype(np.uint8) * 255
+    work = cv2.warpAffine(src, fwd_crop, (out_w, out_h), flags=cv2.INTER_LINEAR,
                           borderValue=0) >= 128
     # OBB in the work frame is axis-aligned and centred
     ox0 = int(round(out_w / 2.0 - length * scale / 2.0))
@@ -315,16 +341,32 @@ def _extract(building_mask, obb_pts, m_per_px, grow):
     obb_m = np.zeros_like(clean)
     obb_m[oy0:oy1, ox0:ox1] = 1
     keep = np.zeros(clean.shape, dtype=bool)
+    obb_b = obb_m != 0
+    core_b = core != 0
     for c in range(1, n):
-        comp = lab == c
-        area = int(stats[c, cv2.CC_STAT_AREA])
-        inside = int(np.count_nonzero(comp & (obb_m != 0)))
-        if np.any(comp & (core != 0)) and inside >= 0.3 * area:
-            keep |= comp
+        x, y, w, h, area = (int(v) for v in stats[c])
+        win_c = (slice(y, y + h), slice(x, x + w))
+        comp = lab[win_c] == c
+        inside = int(np.count_nonzero(comp & obb_b[win_c]))
+        if np.any(comp & core_b[win_c]) and inside >= 0.3 * area:
+            keep[win_c] |= comp
         elif inside >= 0.6 * area:
-            keep |= comp
+            keep[win_c] |= comp
     if not keep.any():
         return None
+    return {"keep": keep, "obb_m": obb_m, "work_m": work_m, "fwd": fwd,
+            "m_per_px": m_per_px, "fill": fill, "obb_area_m2": obb_area_m2}
+
+
+def _extract_finish(base, grow):
+    """Growth, cell grid, tracing and scoring of :func:`_extract`."""
+    keep = base["keep"].copy()
+    obb_m = base["obb_m"]
+    work_m = base["work_m"]
+    fwd = base["fwd"]
+    m_per_px = base["m_per_px"]
+    fill = base["fill"]
+    obb_area_m2 = base["obb_area_m2"]
     outside = keep & (obb_m == 0)
     if not grow:
         keep &= obb_m != 0
@@ -338,12 +380,16 @@ def _extract(building_mask, obb_pts, m_per_px, grow):
     inv = (~keep).astype(np.uint8)
     hn, hlab, hstats, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
     min_hole_px = MIN_HOLE_M2 / (work_m * work_m)
-    for c in range(1, hn):
-        x, y, w, h, a = hstats[c]
-        if x == 0 or y == 0 or x + w >= inv.shape[1] or y + h >= inv.shape[0]:
-            continue
-        if a < min_hole_px:
-            keep[hlab == c] = True
+    hs = hstats.astype(np.int64)
+    small_hole = (
+        (hs[:, 0] != 0) & (hs[:, 1] != 0) &
+        (hs[:, 0] + hs[:, 2] < inv.shape[1]) &
+        (hs[:, 1] + hs[:, 3] < inv.shape[0]) &
+        (hs[:, 4] < min_hole_px)
+    )
+    small_hole[0] = False
+    if small_hole.any():
+        keep |= small_hole[hlab]
     keep_u8 = keep.astype(np.uint8)
 
     min_sep = max(2, int(round(MIN_STEP_M / work_m)))
@@ -490,21 +536,60 @@ def _best_cut(lab, mask, grad, m_per_px, axis):
     if cols.size == 0:
         return None
     lo, hi = int(cols[0]), int(cols[-1]) + 1
-    col_area = np.cumsum(m.sum(axis=0))
+    col_sum = m.sum(axis=0)
+    col_area = np.cumsum(col_sum)
     total = float(col_area[-1])
+    # the area, share and span gates are integer counts: evaluate them for
+    # every column at once and run the colour tests only where they pass
+    n_cols = m.shape[1]
+    c_all = np.arange(lo + min_piece, hi - min_piece + 1)
+    if c_all.size == 0:
+        return None
+    cs = np.concatenate(([0], col_area))
+    a_sum = cs[c_all] - cs[c_all - strip]
+    b_sum = cs[np.minimum(c_all + strip, n_cols)] - cs[c_all]
+    left_all = col_area[c_all - 1] / total
+    both = np.zeros(n_cols + 1, dtype=np.int64)
+    both[1:n_cols] = (m[:, :-1] & m[:, 1:]).sum(axis=0)
+    span_all = both[c_all] / np.maximum(
+        1, np.maximum(col_sum[c_all - 1], col_sum[np.minimum(c_all, n_cols - 1)]))
+    gate = ((a_sum >= 4) & (b_sum >= 4) &
+            (left_all >= SPLIT_MIN_SHARE) & (left_all <= 1.0 - SPLIT_MIN_SHARE) &
+            (span_all >= SPLIT_MIN_SPAN))
+    # the cut-line gradient test, estimated in float64 for all columns; the
+    # 1% margin dwarfs float32 rounding, so only columns the exact test below
+    # would reject are skipped
+    line_all = m[:, :-1] & m[:, 1:]
+    g_line = np.where(line_all, np.maximum(g[:, :-1], g[:, 1:]), 0.0)
+    g_sum = np.zeros(n_cols + 1, dtype=np.float64)
+    g_sum[1:n_cols] = g_line.sum(axis=0, dtype=np.float64)
+    gl_est = g_sum[c_all] / np.maximum(both[c_all], 1) / med
+    gate &= gl_est >= SPLIT_MIN_LINE * 0.99
+    # same for the roofing-colour / dark-line test: strip means from column
+    # prefix sums.  float32 means of n values in [-128, 128] stray by at
+    # most ~n * 1e-5, so the margin keeps every column the test could pass.
+    if gate.any():
+        lab_sum = np.zeros((n_cols + 1, 3), dtype=np.float64)
+        lab_sum[1:] = np.cumsum(
+            np.where(m[..., None], L, 0.0).sum(axis=0, dtype=np.float64), axis=0)
+        sa = lab_sum[c_all] - lab_sum[c_all - strip]
+        sb = lab_sum[np.minimum(c_all + strip, n_cols)] - lab_sum[c_all]
+        la_est = sa / np.maximum(a_sum, 1)[:, None]
+        lb_est = sb / np.maximum(b_sum, 1)[:, None]
+        chroma_est = np.hypot(la_est[:, 1] - lb_est[:, 1], la_est[:, 2] - lb_est[:, 2])
+        l_line = np.where(line_all, np.minimum(L[:, :-1, 0], L[:, 1:, 0]), 0.0)
+        l_sum = np.zeros(n_cols + 1, dtype=np.float64)
+        l_sum[1:n_cols] = l_line.sum(axis=0, dtype=np.float64)
+        gap_est = (np.minimum(la_est[:, 0], lb_est[:, 0]) -
+                   l_sum[c_all] / np.maximum(both[c_all], 1))
+        margin = 0.5 + 3e-5 * np.maximum(a_sum, b_sum)
+        gate &= ((chroma_est >= SPLIT_MIN_CHROMA - margin) |
+                 (gap_est >= SPLIT_MIN_GAP_L - margin))
     best = None
-    for c in range(lo + min_piece, hi - min_piece + 1):
+    for c in c_all[gate].tolist():
         a = m[:, c - strip:c]
         b = m[:, c:c + strip]
-        if a.sum() < 4 or b.sum() < 4:
-            continue
-        left = col_area[c - 1] / total
-        if left < SPLIT_MIN_SHARE or left > 1.0 - SPLIT_MIN_SHARE:
-            continue
         line = m[:, c - 1] & m[:, c]
-        span = line.sum() / max(1, max(m[:, c - 1].sum(), m[:, c].sum()))
-        if span < SPLIT_MIN_SPAN:
-            continue
         la = L[:, c - strip:c][a].mean(axis=0)
         lb = L[:, c:c + strip][b].mean(axis=0)
         chroma = float(np.linalg.norm(la[1:] - lb[1:]))

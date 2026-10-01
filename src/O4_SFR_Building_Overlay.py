@@ -163,7 +163,11 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("mask", "mask_apply"),
         ("cc", "connected_components"),
         ("candidates", "candidate_grid"),
+        ("greenhouses", "greenhouses"),
+        ("seg_first", "seg_first"),
         ("place", "fit_loop"),
+        # large-roof polygon tracing, part of place
+        ("place_polygons", "footprint_polygons"),
         # O4_SFR_BLD_PLACE_PROFILE sub-phase breakdown (silent when 0).
         ("place_prep", "place_prep"),
         ("place_fits", "place_fits"),
@@ -4380,6 +4384,7 @@ def _seg_first_detections(detections, veg_map, image, m_per_px, img_w, img_h,
         det_polys.append(pts)
         det_centres.append(pts.mean(axis=0) if len(pts) else np.array([-1.0, -1.0]))
     det_centres = np.asarray(det_centres).reshape(-1, 2)
+    det_centres_i = det_centres.astype(int)
     det_areas = np.array([float(d.get('area_m2', 0.0)) for d in detections])
     claimed = np.zeros((img_h, img_w), dtype=np.uint8)
     keep_yolo = set()
@@ -4394,8 +4399,8 @@ def _seg_first_detections(detections, veg_map, image, m_per_px, img_w, img_h,
     for (x, y, w, h), cmask in comps:
         counts['components'] += 1
         if mode == "guarded" and len(detections):
-            cx = det_centres[:, 0].astype(int) - x
-            cy = det_centres[:, 1].astype(int) - y
+            cx = det_centres_i[:, 0] - x
+            cy = det_centres_i[:, 1] - y
             inside = (cx >= 0) & (cx < w) & (cy >= 0) & (cy < h)
             idx = np.flatnonzero(inside)
             idx = idx[cmask[cy[idx], cx[idx]]]
@@ -4472,12 +4477,25 @@ def _seg_first_detections(detections, veg_map, image, m_per_px, img_w, img_h,
                 counts['polygon'] += 1
             new_dets.append(det)
     scratch = np.zeros_like(claimed)
+    # a box whose bbox holds no claimed pixel overlaps nothing: skip the
+    # raster test for those (most boxes) using one integral image
+    claimed_integ = cv2.integral(claimed, sdepth=cv2.CV_32S)
     kept = []
     dropped = 0
     for k, det in enumerate(detections):
         pts = det_polys[k]
         if k not in keep_yolo and len(pts) >= 3:
             ring = np.rint(pts).astype(np.int32)
+            bx1 = max(0, int(ring[:, 0].min()))
+            bx2 = min(img_w, int(ring[:, 0].max()) + 1)
+            by1 = max(0, int(ring[:, 1].min()))
+            by2 = min(img_h, int(ring[:, 1].max()) + 1)
+            if bx1 >= bx2 or by1 >= by2 or (
+                claimed_integ[by2, bx2] - claimed_integ[by1, bx2] -
+                claimed_integ[by2, bx1] + claimed_integ[by1, bx1]
+            ) == 0:
+                kept.append(det)
+                continue
             if _poly_mask_overlap_frac(claimed, ring, scratch) >= SEG_FIRST_CLAIM_FRAC:
                 dropped += 1
                 continue
@@ -4517,6 +4535,36 @@ def _large_footprint_rings(detection, building_mask, m_per_px):
         if len(ring) >= 3:
             rings.append(ring)
     return rings or None
+
+
+def _start_large_footprint_jobs(detections, building_mask, m_per_px):
+    """Trace large-roof polygons on a worker thread, ahead of the pre-pass.
+
+    ``_large_footprint_rings`` is pure CPU work on the static class map, so
+    it can run while HeightNet keeps the main thread waiting on the GPU.
+    Jobs are queued in the pre-pass order (largest first); the pre-pass
+    takes each result from its future and traces inline anything not
+    queued.  Returns (futures by id(detection), executor).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs = sorted(
+        (
+            d for d in detections
+            if d.get('seg_rings') is None and d.get('seg_first') is None and
+            float(d.get('area_m2', 0.0)) >= LARGE_FOOTPRINT_MIN_M2
+        ),
+        key=lambda d: (
+            -float(d.get('area_m2', 0.0)),
+            -float(d.get('confidence', 0.0)),
+        ),
+    )
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sfr-bld-rings')
+    futures = {
+        id(d): executor.submit(_large_footprint_rings, d, building_mask, m_per_px)
+        for d in jobs
+    }
+    return futures, executor
 
 
 def _direct_yolo_raw_footprint_allowed(detection):
@@ -5479,7 +5527,8 @@ def _scanned_sfd_catalog_entries(asset_region, library_exports=None,
     return tuple(sorted(entries, key=lambda item: item[0].lower()))
 
 
-def _is_optional_library_export_enabled(export, enabled_library_ids):
+def _optional_library_match_id(export, enabled_library_ids):
+    """First enabled curated library id whose patterns match ``export``."""
     package = (getattr(export, "package_name", "") or "").lower()
     virtual_path = (getattr(export, "virtual_path", "") or "").replace("\\", "/").lower()
     for lib_id in enabled_library_ids or ():
@@ -5489,18 +5538,19 @@ def _is_optional_library_export_enabled(export, enabled_library_ids):
         if not any(pattern in package for pattern in meta["package_patterns"]):
             continue
         if any(virtual_path.startswith(prefix.lower()) for prefix in meta["virtual_prefixes"]):
-            return True
+            return lib_id
         if lib_id == "world-models" and package == "world-models":
-            return True
-    return False
+            return lib_id
+    return None
+
+
+def _is_optional_library_export_enabled(export, enabled_library_ids):
+    return _optional_library_match_id(export, enabled_library_ids) is not None
 
 
 def _optional_library_id_for_export(export, enabled_library_ids):
     """Return the curated optional-library id for one library export."""
-    for lib_id in enabled_library_ids or ():
-        if _is_optional_library_export_enabled(export, (lib_id,)):
-            return lib_id
-    return None
+    return _optional_library_match_id(export, enabled_library_ids)
 
 
 def _optional_asset_region_match(asset_regions, asset_region):
@@ -12119,6 +12169,19 @@ def run(
                 yolo_detections, natural_asset_region
             )
 
+            # Large-roof polygons need neither heights nor anything placed
+            # below: trace them on a worker while HeightNet runs.
+            _ring_jobs = None
+            if (
+                yolo_detections and veg_map is not None and
+                _asset_kind_enabled('facade', building_asset_mode) and
+                _env_flag("O4_SFR_BLD_FOOTPRINT_POLYGONS", True)
+            ):
+                _ring_jobs = _start_large_footprint_jobs(
+                    yolo_detections, veg_map == SEGFORMER.CLASS_BUILDING,
+                    m_per_px,
+                )
+
             if yolo_detections and height_model is not None:
                 # Lazy HeightNet: heights are consumed only inside object
                 # candidate selection and the facade fallback, both of which
@@ -12289,8 +12352,13 @@ def run(
                             continue
                         if not _direct_yolo_facade_footprint_allowed(detection):
                             continue
+                        _ring_job = (
+                            _ring_jobs[0].get(id(detection)) if _ring_jobs else None
+                        )
                         if _seg_poly:
                             rings = detection['seg_rings']
+                        elif _ring_job is not None:
+                            rings = _ring_job.result()
                         else:
                             rings = _large_footprint_rings(
                                 detection, _bld_class_mask, m_per_px
@@ -12367,6 +12435,10 @@ def run(
                         building_spacing_integral = cv2.integral(
                             building_spacing_mask, sdepth=cv2.CV_32S
                         )
+                    if _ring_jobs is not None:
+                        # drop traces for detections the gates skipped
+                        _ring_jobs[1].shutdown(wait=True, cancel_futures=True)
+                        _ring_jobs = None
                     _record_elapsed(timings, file_timings, 'footprint_polygons', _t_lf)
                 for detection in yolo_detections:
                     if detection.get('_large_footprint_placed'):

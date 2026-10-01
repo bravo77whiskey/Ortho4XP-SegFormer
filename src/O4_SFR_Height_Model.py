@@ -309,14 +309,12 @@ def predict_detection_heights(model, image, detections, m_per_px,
     ``detections``. Predictions are raw model output (expm1); callers apply
     the HEIGHT_MODEL_MIN_M floor and any placement-class-specific caps.
     """
-    import cv2
     import torch
 
     n = len(detections)
     out = np.full((n,), np.nan, dtype=np.float64)
     if n == 0 or model is None or image is None:
         return out
-    img_h, img_w = image.shape[:2]
     m_per_px = float(m_per_px)
     if not math.isfinite(m_per_px) or m_per_px <= 0.0:
         return out
@@ -325,43 +323,34 @@ def predict_detection_heights(model, image, detections, m_per_px,
     scalar_layout = getattr(model, "_sfr_scalar_layout", LEGACY_SCALAR_LAYOUT)
     half_px = (window_m / 2.0) / m_per_px
 
+    device = getattr(model, "_sfr_device", "cpu")
+    if str(device).startswith("cuda"):
+        return _predict_heights_cuda(
+            model, image, detections, m_per_px, batch_size, out,
+            half_px, crop_px, scalar_layout, device,
+        )
+
     valid_idx = []
     crops = []
     scalars = []
     for i, det in enumerate(detections):
-        parsed = _detection_scalars(det, m_per_px)
-        if parsed is None:
+        cut = _detection_crop(image, det, m_per_px, half_px, crop_px,
+                              scalar_layout)
+        if cut is None:
             continue
-        cx, cy, area_m2, long_m = parsed
-        x0 = int(round(cx - half_px))
-        x1 = int(round(cx + half_px))
-        y0 = int(round(cy - half_px))
-        y1 = int(round(cy + half_px))
-        if x1 - x0 < 2 or y1 - y0 < 2:
-            continue
-        sx0, sy0 = max(0, x0), max(0, y0)
-        sx1, sy1 = min(img_w, x1), min(img_h, y1)
-        if sx1 <= sx0 or sy1 <= sy0:
-            continue
-        window = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
-        window[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = image[sy0:sy1, sx0:sx1]
-        crops.append(cv2.resize(window, (crop_px, crop_px),
-                                interpolation=cv2.INTER_LINEAR))
-        scalars.append(_encode_scalars(
-            area_m2, long_m, m_per_px, scalar_layout
-        ))
+        crops.append(cut[0])
+        scalars.append(cut[1])
         valid_idx.append(i)
 
     if not valid_idx:
         return out
-    device = getattr(model, "_sfr_device", "cpu")
     crops_np = np.stack(crops)
     scalars_np = np.asarray(scalars, dtype=np.float32)
     preds = np.empty((len(valid_idx),), dtype=np.float64)
     batch_size = int(batch_size)
     if batch_size <= 0:
         raise ValueError("HeightNet batch_size must be positive")
-    use_fp16 = _fp16_enabled() and str(device).startswith("cuda")
+    use_fp16 = False  # CPU path; CUDA goes through _predict_heights_cuda
     with torch.inference_mode():
         for start in range(0, len(valid_idx), batch_size):
             stop = start + batch_size
@@ -377,4 +366,84 @@ def predict_detection_heights(model, image, detections, m_per_px,
             # otherwise overflow to inf (12 -> ~163 km, far past any clamp).
             preds[start:stop] = np.expm1(np.clip(pred, -2.0, 8.0))
     out[np.asarray(valid_idx, dtype=np.int64)] = preds
+    return out
+
+
+def _detection_crop(image, det, m_per_px, half_px, crop_px, scalar_layout):
+    """(crop uint8 HxWx3, encoded scalars) for one detection, or None."""
+    import cv2
+
+    parsed = _detection_scalars(det, m_per_px)
+    if parsed is None:
+        return None
+    img_h, img_w = image.shape[:2]
+    cx, cy, area_m2, long_m = parsed
+    x0 = int(round(cx - half_px))
+    x1 = int(round(cx + half_px))
+    y0 = int(round(cy - half_px))
+    y1 = int(round(cy + half_px))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    sx0, sy0 = max(0, x0), max(0, y0)
+    sx1, sy1 = min(img_w, x1), min(img_h, y1)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return None
+    window = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
+    window[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = image[sy0:sy1, sx0:sx1]
+    crop = cv2.resize(window, (crop_px, crop_px), interpolation=cv2.INTER_LINEAR)
+    return crop, _encode_scalars(area_m2, long_m, m_per_px, scalar_layout)
+
+
+def _predict_heights_cuda(model, image, detections, m_per_px, batch_size, out,
+                          half_px, crop_px, scalar_layout, device):
+    """GPU path of :func:`predict_detection_heights`, same batches and maths.
+
+    Crops for the next batch are cut while the GPU runs the current one, and
+    pixels travel as uint8 (a quarter of the bytes) and are scaled on the
+    GPU.  The input keeps the NHWC strides the CPU path hands the model, and
+    the divisor is a device tensor (a CPU scalar would turn the division
+    into a reciprocal multiply), so predictions are bit-identical.
+    """
+    import torch
+
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("HeightNet batch_size must be positive")
+    use_fp16 = _fp16_enabled()
+    n = len(detections)
+    valid_idx = []
+    preds = []
+    pending = None
+    next_i = 0
+    with torch.inference_mode():
+        divisor = torch.tensor(255.0, dtype=torch.float32, device=device)
+        while True:
+            idx, crops, scalars = [], [], []
+            while next_i < n and len(idx) < batch_size:
+                cut = _detection_crop(image, detections[next_i], m_per_px,
+                                      half_px, crop_px, scalar_layout)
+                if cut is not None:
+                    idx.append(next_i)
+                    crops.append(cut[0])
+                    scalars.append(cut[1])
+                next_i += 1
+            if pending is not None:
+                # the previous batch ran while the crops above were cut
+                preds.append(pending.float().cpu().numpy())
+                pending = None
+            if not idx:
+                break
+            imgs = torch.from_numpy(np.stack(crops)).to(device)
+            imgs = imgs.permute(0, 3, 1, 2).float().div_(divisor)
+            scal = torch.from_numpy(
+                np.asarray(scalars, dtype=np.float32)).to(device)
+            with torch.autocast("cuda", dtype=torch.float16, enabled=use_fp16):
+                pending = model(imgs, scal)
+            valid_idx.extend(idx)
+    if not valid_idx:
+        return out
+    pred = np.concatenate(preds)
+    # Clip the log-space output before expm1: wrong-regime inputs can
+    # otherwise overflow to inf (12 -> ~163 km, far past any clamp).
+    out[np.asarray(valid_idx, dtype=np.int64)] = np.expm1(np.clip(pred, -2.0, 8.0))
     return out

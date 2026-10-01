@@ -191,6 +191,39 @@ def _no_window():
     return {}
 
 
+def _disable_power_throttling(proc):
+    """Opt a worker out of Windows power throttling (EcoQoS). Best effort.
+
+    Windows 11 may run windowless background processes on efficiency cores
+    at low clocks.  A throttled bench process took 49 s instead of 22 s on
+    one dense texture; opting out costs nothing when Windows would not have
+    throttled the worker anyway.
+    """
+    if not sys.platform.startswith('win'):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PowerThrottlingState(ctypes.Structure):
+            _fields_ = [('Version', wintypes.ULONG),
+                        ('ControlMask', wintypes.ULONG),
+                        ('StateMask', wintypes.ULONG)]
+
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.SetProcessInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetProcessInformation.restype = wintypes.BOOL
+        # PROCESS_POWER_THROTTLING_EXECUTION_SPEED | ..._IGNORE_TIMER_RESOLUTION
+        # controlled, both states off; class 4 = ProcessPowerThrottling
+        state = _PowerThrottlingState(1, 0x1 | 0x4, 0)
+        return bool(kernel32.SetProcessInformation(
+            wintypes.HANDLE(int(proc._handle)), 4,
+            ctypes.byref(state), ctypes.sizeof(state)))
+    except Exception:
+        return False
+
+
 # scripts.generate_veg_overlay / scripts.generate_bld_overlay are run as .venv subprocesses,
 # never imported into the frozen exe process.
 
@@ -367,6 +400,7 @@ def _run_venv(code):
         env=env,
         **_no_window(),
     )
+    _disable_power_throttling(proc)
     UI = _ui()
     if UI:
         UI.register_subprocess(proc)
