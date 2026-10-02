@@ -186,17 +186,22 @@ def run_job(job, samples):
         geo, _info = strips.roof_strip(job["roof"], W, H, job["seed"])
     elif kind == "band":
         geo = strips.trim_band(job["band"], W, H, job["seed"])
+        _info = None
     else:
         raise ValueError(kind)
     mats = job["mats"]
     seed_w = (job["seed"] % 997) / 97.0
+    # photo textures repeat within one bay so floors that slide by whole
+    # motifs stay continuous
+    period_u = (_info or {}).get("bay_m", W) if kind == "facade" else W
     for name, part in geo.parts.items():
         if not part["f"]:
             continue
         spec = mats.get(name)
         if spec is None:
             raise KeyError(f"job {job['name']}: no material '{name}'")
-        material = build_material(name, spec, W, seed_w)
+        material = build_material(name, spec, W, seed_w, period_u=period_u,
+                                  strip_h=H)
         _mesh(scene, name, part, material)
     tmp = job["out"] + ".exr"
     scene.render.filepath = tmp

@@ -528,6 +528,7 @@ def facade_strip(scheme, level, W, H, seed, margin_bays=1):
     ww = win["w"]
     openings = []
     jobs = []
+    table_openings = []     # (kind, (x0, x1, z0, z1), entry) of the strip itself
     per_bay_rng = [random.Random(seed * 7919 + k) for k in range(len(entries))]
     shop_sign = 0.0
     for rep in range(-margin_bays, 1 + margin_bays):
@@ -538,6 +539,7 @@ def facade_strip(scheme, level, W, H, seed, margin_bays=1):
                 continue
             brng = random.Random(seed * 7919 + k)  # identical across reps
             cx = xo + span * p / 2.0
+            n_open = len(openings)
             if kind == "win" or (kind == "small"):
                 w_ = ww if kind == "win" else ww * 0.55
                 h_ = wh if kind == "win" else wh * 0.55
@@ -575,6 +577,8 @@ def facade_strip(scheme, level, W, H, seed, margin_bays=1):
                 if k % scheme.get("shop_run", 2) == 0:
                     shop_sign = brng.random()
                 jobs.append(("shop", o, brng, shop_sign))
+            if rep == 0 and len(openings) > n_open:
+                table_openings.append((kind, openings[-1], k))
     x_lo, x_hi = -margin_bays * p - 0.5, W + margin_bays * p + 0.5
     wall_with_openings(geo, "wall", x_lo, x_hi, 0.0, H, openings)
     _interior_volume(geo, W, H, margin_bays * p + 0.5)
@@ -616,7 +620,7 @@ def facade_strip(scheme, level, W, H, seed, margin_bays=1):
     if level == "upper" and scheme.get("string_course"):
         sc = scheme["string_course"]
         geo.box("surround", x_lo, x_hi, -0.03, 0.0, 0.0, sc)
-    return geo, {"bays": n, "bay_m": p}
+    return geo, {"bays": n, "bay_m": p, "openings": table_openings}
 
 
 def plain_strip(scheme, W, H, seed, vents=True):
@@ -667,7 +671,11 @@ def roof_strip(roof, W, H, seed):
     # an underlay so gaps read dark rather than as holes
     geo.rect_front("underlay", -margin - 1, W + margin + 1, -0.5, H + 0.5,
                    y=0.05)
-    if kind in ("clay_interlock", "concrete_tile"):
+    if (roof.get("mat") or {}).get("photo"):
+        # a photoscanned covering carries its own tiles: one flat sheet
+        geo.rect_front("tile", -margin - 1, W + margin + 1, -0.5, H + 0.5,
+                       y=0.0, rnd=0.5)
+    elif kind in ("clay_interlock", "concrete_tile"):
         n, tw = _periodic_cols(W, roof.get("tile_w", 0.30))
         course = roof.get("course", 0.34)
         rows = int(math.ceil((H + 0.6) / course)) + 1

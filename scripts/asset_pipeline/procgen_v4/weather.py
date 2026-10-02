@@ -378,7 +378,7 @@ def _walls(out, d, cls_i, occ, wear, k, level, px_per_m, rng, wall_kind):
         lum = out.mean(-1, keepdims=True)
         chalk = lum * 0.8 + 0.2 * np.array([0.8, 0.78, 0.74], np.float32)
         out = _mix(out, chalk, f * 0.4, solid)
-    if wall_kind in PAINTED and wear["repaint"] > 0:
+    if wall_kind in PAINTED and wear["repaint"] > 0 and k > 0:
         field = repaint_blocks((h, w), px_per_m, rng, wear["repaint"])
         out = out * np.where(wall[..., None] > 0, field[..., None], 1.0)
 

@@ -130,13 +130,77 @@ def _scale_color(t, color, factor):
     return node.outputs[0]
 
 
-def build_material(name, spec, period, seed=0.0):
+def _snap_repeat(size, span):
+    """A repeat close to ``size`` that fits a whole number of times in
+    ``span``, so the photo wraps with the strip (and with the bay period,
+    which keeps floors that slide by whole motifs continuous)."""
+    return span / max(1, round(span / size))
+
+
+def _image(t, path, colorspace, vec):
+    node = t.n("ShaderNodeTexImage", interpolation="Cubic",
+               extension="REPEAT")
+    img = bpy.data.images.load(path, check_existing=True)
+    img.colorspace_settings.name = colorspace
+    node.image = img
+    t.link(vec, node.inputs["Vector"])
+    return node.outputs["Color"]
+
+
+def _photo_surface(t, photo, px, pz, period_u, strip_h):
+    """(colour, height) from a CC0 photoscanned texture: colour map x gain
+    x AO^k, displacement as bump height.  Strip x maps to the photo's u,
+    strip z to its v (rot90 swaps them, e.g. soldier-course lintels)."""
+    sx, sy = photo["size"]
+    if photo.get("rot90"):
+        sx, sy = sy, sx
+    rx = _snap_repeat(sx, period_u)
+    ry = _snap_repeat(sy, strip_h)
+    u = t.math("DIVIDE", px, rx)
+    v = t.math("DIVIDE", pz, ry)
+    if photo.get("rot90"):
+        u, v = v, t.math("MULTIPLY", u, -1.0)
+    comb = t.n("ShaderNodeCombineXYZ")
+    t.link(u, comb.inputs[0])
+    t.link(v, comb.inputs[1])
+    uv = comb.outputs[0]
+    color = _image(t, photo["diff"], "sRGB", uv)
+    if photo.get("desat"):
+        bw = t.n("ShaderNodeRGBToBW")
+        t.link(color, bw.inputs[0])
+        color = t.mix(color, bw.outputs[0], float(photo["desat"]))
+    gain = photo.get("gain", (1.0, 1.0, 1.0))
+    mul = t.n("ShaderNodeVectorMath", operation="MULTIPLY")
+    t.link(color, mul.inputs[0])
+    mul.inputs[1].default_value = tuple(gain)
+    color = mul.outputs[0]
+    ao_k = photo.get("ao_k", 0.0)
+    if ao_k and photo.get("ao"):
+        ao = _image(t, photo["ao"], "Non-Color", uv)
+        bw = t.n("ShaderNodeRGBToBW")
+        t.link(ao, bw.inputs[0])
+        color = _scale_color(t, color, t.math("POWER", bw.outputs[0], ao_k))
+    height = None
+    if photo.get("disp"):
+        disp = _image(t, photo["disp"], "Non-Color", uv)
+        bw = t.n("ShaderNodeRGBToBW")
+        t.link(disp, bw.inputs[0])
+        height = bw.outputs[0]
+    return color, height
+
+
+def build_material(name, spec, period, seed=0.0, period_u=None,
+                   strip_h=None):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     t = _T(material)
     vec, px, pz, py = _periodic_coords(t, period)
     rnd = _attr(t, "rnd")
     rnd2 = _attr(t, "rnd2")
+    if spec.get("photo"):
+        return _finish(t, material, spec, rnd, rnd2, py, *_photo_surface(
+            t, spec["photo"], px, pz, period_u or period, strip_h or 1.0),
+            photo=True, vec=vec, seed=seed)
 
     # ---- base colour from the palette
     palette = spec["base"]
@@ -242,10 +306,24 @@ def build_material(name, spec, period, seed=0.0):
         color = _scale_color(t, color, _variation(t, wave.outputs["Fac"],
                                                   pat.get("amount", 0.12)))
 
+    return _finish(t, material, spec, rnd, rnd2, py, color, height,
+                   vec=vec, seed=seed)
+
+
+def _finish(t, material, spec, rnd, rnd2, py, color, height, *, photo=False,
+            vec=None, seed=0.0):
     # ---- bump: pattern height plus a fine surface noise
     bump_amt = spec.get("bump", 0.0)
     normal = None
-    if bump_amt or height is not None:
+    if photo:
+        if height is not None:
+            bump = t.n("ShaderNodeBump")
+            bump.inputs["Strength"].default_value = 1.0
+            bump.inputs["Distance"].default_value = spec["photo"].get(
+                "bump", 0.01)
+            t.link(height, bump.inputs["Height"])
+            normal = bump.outputs["Normal"]
+    elif bump_amt or height is not None:
         hsum = height
         tex = _noise(t, vec, spec.get("bump_scale", 30.0), 5.0, 0.6,
                      w=5.0 + seed)

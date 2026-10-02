@@ -175,12 +175,16 @@ def main(argv=None):
     ap.add_argument("--blender", default=DEFAULT_BLENDER)
     ap.add_argument("--samples", type=int, default=64)
     ap.add_argument("--jobs", type=int, default=2)
+    ap.add_argument("--wear-scale", type=float, default=None,
+                    help="override every page's wear (0 = clean)")
     args = ap.parse_args(argv)
     cache = os.path.abspath(args.cache or os.path.join(args.out, "_bake_cache"))
     os.makedirs(cache, exist_ok=True)
     pages = page_specs(args.regions)
     if args.pages:
         pages = [p for p in pages if p[0] in set(args.pages)]
+    if args.wear_scale is not None:
+        pages = [p[:4] + (args.wear_scale,) for p in pages]
     # bake: industrial pages share one bake
     all_jobs = {}
     for page, kind, kit, region, scale in pages:
