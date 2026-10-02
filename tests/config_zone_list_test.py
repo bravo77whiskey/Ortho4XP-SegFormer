@@ -66,12 +66,14 @@ class ConfigZoneListTests(unittest.TestCase):
 
     def test_read_from_config_allows_equals_inside_values(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = Path(tmpdir) / "name=visual.pt"
+            checkpoint.write_bytes(b"")
             cfg_path = Path(tmpdir) / "Ortho4XP_+36+117.cfg"
             cfg_path.write_text(
                 "\n".join(
                     [
                         "sfr_bld_o4sfr_library_assets=facades",
-                        "sfr_bld_yolo_checkpoint=C:/models/name=visual.pt",
+                        f"sfr_bld_yolo_checkpoint={checkpoint}",
                         "zone_list=[[[36.25, 117.25, 36.25, 117.5], 18, 'Arc=Custom']]",
                     ]
                 ),
@@ -82,8 +84,49 @@ class ConfigZoneListTests(unittest.TestCase):
             self.assertEqual(tile.read_from_config(config_file=str(cfg_path)), 1)
 
             self.assertEqual(tile.sfr_bld_asset_mode, "facades")
-            self.assertEqual(tile.sfr_bld_yolo_checkpoint, "C:/models/name=visual.pt")
+            self.assertEqual(tile.sfr_bld_yolo_checkpoint, str(checkpoint))
             self.assertEqual(tile.zone_list[0][2], "Arc=Custom")
+
+    def test_missing_tile_model_paths_fall_back_to_global(self):
+        original_global_cfg = CFG.global_cfg_file
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                yolo = Path(tmpdir) / "global_yolo.pt"
+                height = Path(tmpdir) / "global_height.pt"
+                tile_yolo = Path(tmpdir) / "tile_yolo.pt"
+                for path in (yolo, height, tile_yolo):
+                    path.write_bytes(b"")
+                global_cfg = Path(tmpdir) / "Ortho4XP.cfg"
+                global_cfg.write_text(
+                    f"sfr_bld_yolo_checkpoint={yolo}\n"
+                    f"sfr_bld_height_checkpoint={height}\n"
+                    "sfr_bld_yolo_conf=0.18\n",
+                    encoding="utf-8",
+                )
+                CFG.global_cfg_file = str(global_cfg)
+
+                tile = CFG.Tile(36, 117, "")
+                tile.build_dir = tmpdir
+                cfg_path = Path(tmpdir) / "Ortho4XP_+36+117.cfg"
+                cfg_path.write_text(
+                    "sfr_bld_yolo_checkpoint=Z:/gone/yolo.pt\n"
+                    "sfr_bld_height_checkpoint=\n"
+                    "sfr_bld_yolo_conf=0.3\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(tile.read_from_config(), 1)
+                self.assertEqual(tile.sfr_bld_yolo_checkpoint, str(yolo))
+                self.assertEqual(tile.sfr_bld_height_checkpoint, str(height))
+                self.assertEqual(tile.sfr_bld_yolo_conf, 0.3)
+
+                # An existing tile model path still wins over the global one.
+                cfg_path.write_text(
+                    f"sfr_bld_yolo_checkpoint={tile_yolo}\n", encoding="utf-8"
+                )
+                self.assertEqual(tile.read_from_config(), 1)
+                self.assertEqual(tile.sfr_bld_yolo_checkpoint, str(tile_yolo))
+        finally:
+            CFG.global_cfg_file = original_global_cfg
 
 
 if __name__ == "__main__":

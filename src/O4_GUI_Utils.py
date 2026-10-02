@@ -522,6 +522,8 @@ class Ortho4XP_GUI(tk.Tk):
                     (var, value) = line.split("=")
                     value = CFG.config_compatibility(value)
                     var, value = CFG.normalize_config_entry(var, value)
+                    if CFG.is_missing_model_path(var, value):
+                        continue
                     target = (
                         cfg_vars[var]["module"] + "." + var
                         if "module" in cfg_vars[var]

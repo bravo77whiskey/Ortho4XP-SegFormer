@@ -130,6 +130,18 @@ def normalize_config_entry(var: str, value: str) -> tuple[str, str]:
         pass
     return pixel_radius_aliases[var], value
 
+
+def is_missing_model_path(var: str, value: str) -> bool:
+    """True for a model path (file picker var) that names no existing file.
+
+    Tile configs skip such entries so the global config's model is used
+    instead, e.g. when a tile cfg was written on another machine.
+    """
+    if not cfg_vars[var].get("file_picker") or os.path.isfile(value):
+        return False
+    UI.vprint(1, f"Tile config {var}={value!r} does not exist, using the global one.")
+    return True
+
 ################################################################################
 # Initialization to default values
 # Some variables are set using simply their name
@@ -224,8 +236,13 @@ class Tile:
                 )
                 raise Exception
 
-    def _apply_config_file(self, config_file):
-        """Parse a single config file and apply values to self. Silently skips unknown vars."""
+    def _apply_config_file(self, config_file, keep_missing_model_paths=False):
+        """Parse a single config file and apply values to self. Silently skips unknown vars.
+
+        With keep_missing_model_paths, a model path (file picker var) that
+        names no existing file is ignored, so the value already loaded from
+        the global config stays in effect.
+        """
         with open(config_file, "r") as f:
             for line in f.readlines():
                 line = line.strip()
@@ -235,6 +252,8 @@ class Tile:
                     (var, value) = line.split("=", 1)
                     value = config_compatibility(value)
                     var, value = normalize_config_entry(var, value)
+                    if keep_missing_model_paths and is_missing_model_path(var, value):
+                        continue
                     if cfg_vars[var]["type"] in (bool, list):
                         cmd = "self." + var + "=" + value
                     else:
@@ -302,7 +321,7 @@ class Tile:
             elif not tile_exists:
                 return 1   # global was the only source; already applied
         try:
-            self._apply_config_file(config_file)
+            self._apply_config_file(config_file, keep_missing_model_paths=True)
             return 1
         except Exception:
             UI.lvprint(
@@ -1147,6 +1166,8 @@ class Ortho4XP_Config(tk.Toplevel):
                 (var, value) = line.split("=", 1)
                 value = config_compatibility(value)
                 var, value = normalize_config_entry(var, value)
+                if is_missing_model_path(var, value):
+                    continue
                 self.v_[var].set(value)
             except Exception as e:
                 # compatibility with zone_list config files from version <= 1.20
@@ -1211,6 +1232,8 @@ class Ortho4XP_Config(tk.Toplevel):
                 (var, value) = line.split("=", 1)
                 value = config_compatibility(value)
                 var, value = normalize_config_entry(var, value)
+                if is_missing_model_path(var, value):
+                    continue
                 self.v_[var].set(value)
             except Exception as e:
                 # compatibility with zone_list config files from version <= 1.20
