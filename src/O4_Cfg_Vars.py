@@ -452,6 +452,28 @@ cfg_tile_vars = {
                 "simHeaven forest polygon, with the tile's most common tree "
                 "family as fallback.",
     },
+    "sfr_veg_use_leaf_type_maps": {
+        "type": bool,
+        "default": True,
+        "short_name": "sfr_veg_leaf_maps",
+        "hint": "Choose broadleaf, conifer, or mixed assets from leaf-type maps "
+                "(Copernicus HRL 10 m in Europe, GLC_FCS30D 30 m and CGLS "
+                "100 m worldwide, explicit OSM leaf_type) and split forests "
+                "along their boundaries. Map data downloads once per tile "
+                "(once per 5x5 degrees for GLC_FCS30D, 10-700 MB) into "
+                "SFR_cache/_leaf_type. Falls back to the simHeaven closest "
+                "asset where no map covers the tile.",
+    },
+    "sfr_veg_use_xp_forests": {
+        "type": bool,
+        "default": True,
+        "short_name": "sfr_veg_xp_for",
+        "hint": "Plant X-Plane 12's own climate forests (lib/g8 broad/coni/"
+                "mixed per temperature and moisture band, orchard sets in "
+                "orchards) instead of the three simHeaven forest aliases. The "
+                "band follows the default global scenery's nearest forest, "
+                "with Koppen climate as fallback.",
+    },
     "sfr_veg_avoid_gfv2": {
         "type": bool,
         "default": False,
@@ -759,6 +781,8 @@ list_sfr_veg_vars = [
     "sfr_veg_exclude_lower_forests",
     "sfr_veg_remove_embedded_trees",
     "sfr_veg_use_simheaven_asset_proximity",
+    "sfr_veg_use_leaf_type_maps",
+    "sfr_veg_use_xp_forests",
     "sfr_veg_res_m",
     "sfr_veg_disable_cache",
     "sfr_patch_size",

@@ -49,6 +49,34 @@ MESH_DEFS_BY_PATH = {
 
 SIMHEAVEN_TREE_ASSET_PATHS = frozenset(MESH_DEFS_BY_PATH)
 
+# X-Plane 12's own forests (Resources/default scenery/1200 forests), the same
+# physical .for files simHeaven's three aliases point at, but addressed by
+# X-Plane's climate bands: temperature x moisture, each with seasonal variants.
+# Only the dense sets are used — generated polygons already carry their own
+# DSF density, and the sparse `_sp` sets would thin them a second time.
+G8_TEMPS = ("vcld", "cld", "tmp", "wrm", "hot", "vhot")
+G8_MOISTS = ("dry", "sdry", "wet", "rain")
+G8_FAMILIES = ("broad", "coni", "mixed")
+FAMILY_BY_SIMHEAVEN_PATH = {
+    "simheaven/forests/broad.for": "broad",
+    "simheaven/forests/coni.for": "coni",
+    "simheaven/forests/mixed.for": "mixed",
+}
+G8_FOREST_PATHS = frozenset(
+    f"lib/g8/{family}_{temp}_{moist}.for"
+    for family in G8_FAMILIES for temp in G8_TEMPS for moist in G8_MOISTS
+)
+# Orchard sets exist for the four warmest bands only; warm semi-dry has an
+# olive grove set instead.
+G8_ORCHARD_PATHS = frozenset(
+    {f"lib/g8/orch_{temp}_{moist}.for"
+     for temp in ("tmp", "wrm", "hot", "vhot") for moist in G8_MOISTS}
+    - {"lib/g8/orch_wrm_sdry.for"}
+) | {"lib/g8/olive_wrm_sdry.for"}
+_G8_FAMILY_RE = re.compile(
+    r"^lib/g8/(broad|coni|mixed)_(vcld|cld|tmp|wrm|hot|vhot)_(dry|sdry|wet|rain)\.for$"
+)
+
 GFV2_PATH_RE = re.compile(
     r"^forests/(?P<region>[^/]+)/(?P<family>[^/]+)/"
     r"(?P=region)_(?P=family)_(?P<dlevel>\d+)_y(?P<variant>\d+)\.for$",
@@ -146,6 +174,35 @@ def simheaven_type_hint_candidates(
     return default_short_tree_candidates_for_region(fallback_region)
 
 
+def tree_family(path: str | None) -> str | None:
+    """Return broad / coni / mixed for a simHeaven or X-Plane g8 forest path."""
+    normalized = (path or "").replace("\\", "/").strip().lower().lstrip("/")
+    family = FAMILY_BY_SIMHEAVEN_PATH.get(normalized)
+    if family:
+        return family
+    match = _G8_FAMILY_RE.match(normalized)
+    return match.group(1) if match else None
+
+
+def g8_forest_path(family: str, temp: str, moist: str, orchard: bool = False) -> str:
+    """X-Plane 12 forest for a tree family in a climate band.
+
+    ``orchard`` picks the band's orchard set when X-Plane has one.
+    """
+    if temp not in G8_TEMPS or moist not in G8_MOISTS:
+        raise ValueError(f"unknown climate band {temp}_{moist}")
+    if orchard:
+        candidate = (
+            "lib/g8/olive_wrm_sdry.for" if (temp, moist) == ("wrm", "sdry")
+            else f"lib/g8/orch_{temp}_{moist}.for"
+        )
+        if candidate in G8_ORCHARD_PATHS:
+            return candidate
+    if family not in G8_FAMILIES:
+        raise ValueError(f"unknown tree family {family!r}")
+    return f"lib/g8/{family}_{temp}_{moist}.for"
+
+
 def all_approved_generated_forest_paths() -> tuple[str, ...]:
     """Return every forest path that new overlays may emit."""
     return tuple(
@@ -155,6 +212,8 @@ def all_approved_generated_forest_paths() -> tuple[str, ...]:
                 for paths in DEFAULT_SHORT_TREE_BY_REGION.values()
                 for path in paths
             }
+            | G8_FOREST_PATHS
+            | G8_ORCHARD_PATHS
         )
     )
 

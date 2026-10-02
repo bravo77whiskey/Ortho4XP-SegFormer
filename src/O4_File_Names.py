@@ -110,6 +110,11 @@ def sfr_library_cache_dir():
     return os.path.join(SFR_cache_dir, "_libraries")
 
 
+def sfr_leaf_type_cache_dir():
+    """Shared (not per-tile) cache of downloaded leaf-type maps."""
+    return os.path.join(SFR_cache_dir, "_leaf_type")
+
+
 def mask_dir(lat, lon):
     return os.path.join(Mask_dir, long_latlon(lat, lon))
 

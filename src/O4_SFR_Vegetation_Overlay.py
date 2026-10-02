@@ -11,7 +11,8 @@ Pipeline
 4. Morphological close → open (kernel sizes in metres)
 5. Vectorise (OpenCV contours) → Douglas-Peucker → lat/lon polygons
 6. Per polygon: shape ratio → area-fill | treeline
-7. Pixel fill fraction + nearest X-World family → simHeaven .for path + density
+7. Leaf-type map zones (O4_SFR_Leaf_Type) split each tree mask into broad /
+   conifer / mixed; pixel fill fraction → simHeaven .for path + density
 8. Write DSF text, compile with DSFTool
 
 Usage:
@@ -43,6 +44,7 @@ from PIL import Image
 
 import O4_Forest_Assets as FOREST_ASSETS
 import O4_SFR_Climate_Regions as CLIMATE_REGIONS
+import O4_SFR_Leaf_Type as LEAF_TYPE
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
 import O4_SFR_Inference as SEGFORMER
@@ -1424,8 +1426,13 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       region, rng, density_override,
                       context_masks=None, type_counts=None,
                       simheaven_type_path=None,
-                      simheaven_type_resolver=None):
-    """Extract polygons from one DDS class mask. Returns list of (path, density, ring)."""
+                      simheaven_type_resolver=None,
+                      forest_path_mapper=None):
+    """Extract polygons from one DDS class mask. Returns list of (path, density, ring).
+
+    ``forest_path_mapper.map_path(path, lon, lat, veg_type)`` may swap the
+    chosen tree family for a climate-specific X-Plane forest at the polygon.
+    """
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
     for cnt in cnts:
@@ -1485,6 +1492,10 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         )
         if not fpath:
             continue
+        if forest_path_mapper is not None and veg_cls == SEGFORMER.CLASS_TREE:
+            c_lon = sum(p[0] for p in ring) / len(ring)
+            c_lat = sum(p[1] for p in ring) / len(ring)
+            fpath = forest_path_mapper.map_path(fpath, c_lon, c_lat, veg_type)
         polys.append((fpath, dsf_den, ring))
     return polys
 
@@ -1503,7 +1514,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         exclude_lower_forests=False,
         status_path=None,
         avoid_gfv2=False, gfv2_buffer_m=0.0,
-        use_gfv2_asset_proximity=False):
+        use_gfv2_asset_proximity=False,
+        use_leaf_type_maps=True, leaf_type_cache_dir=None,
+        use_xp_forests=True):
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
@@ -1637,7 +1650,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
           f"simplify={simplify_m}m  density={dens_str}  excl_buffer={excl_buffer_m}m")
     if avoid_gfv2 or use_gfv2_asset_proximity or gfv2_buffer_m:
         print("Legacy Global Forests settings ignored; the pipeline is simHeaven-only")
-    print("vegetation asset selection: simHeaven X-World forests")
+    print(
+        "vegetation asset selection: "
+        + ("leaf-type maps, simHeaven X-World fallback" if use_leaf_type_maps
+           else "simHeaven X-World forests")
+        + ("; planted as X-Plane 12 climate forests (lib/g8)" if use_xp_forests
+           else "; planted as simHeaven forest aliases")
+    )
     print(
         "simHeaven forest overlap avoid:"
         f" {'on' if avoid_simheaven_forests else 'off'}"
@@ -1681,6 +1700,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'bld_excl': 0.0,
         'forest_layer_excl': 0.0,
         'excl_zones': 0.0,
+        'leaf_type': 0.0,
         'contours': 0.0,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
@@ -1796,6 +1816,49 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         )
         for layer in forest_layers
     )
+
+    # ── Leaf-type maps: broadleaf / conifer / mixed zones ───────────────────
+    # Downloaded once per tile (GLC once per 5x5 degree block) into a shared
+    # cache; without any coverage the simHeaven closest-asset choice stays.
+    leaf_types = None
+    if use_leaf_type_maps:
+        _t = time.perf_counter()
+        print("Leaf-type maps:")
+        try:
+            leaf_types = LEAF_TYPE.TileLeafTypes(
+                lat,
+                lon,
+                leaf_type_cache_dir or LEAF_TYPE.default_cache_dir(cache_dir),
+                forest_records=forest_records,
+                log=print,
+            )
+        except Exception as exc:
+            print(f"  [LeafType] failed: {exc}")
+            leaf_types = None
+        if leaf_types is not None and not leaf_types.available:
+            print("  [LeafType] no map coverage — using simHeaven closest asset")
+            leaf_types = None
+        timings['leaf_type'] += time.perf_counter() - _t
+
+    # ── X-Plane 12 climate forests ──────────────────────────────────────────
+    # The family (broad / coni / mixed) chosen above becomes X-Plane's own
+    # forest for the climate band its global scenery uses at the polygon.
+    xp_forest_mapper = None
+    if use_xp_forests:
+        _t = time.perf_counter()
+        try:
+            xp_forest_mapper = LEAF_TYPE.XPForestMapper(
+                lat,
+                lon,
+                leaf_type_cache_dir or LEAF_TYPE.default_cache_dir(cache_dir),
+                custom_scenery_dir,
+                dsftool_path,
+                log=print,
+            )
+        except Exception as exc:
+            print(f"  [XPForests] failed, keeping simHeaven aliases: {exc}")
+            xp_forest_mapper = None
+        timings['leaf_type'] += time.perf_counter() - _t
 
     # ── Forest-asset context ────────────────────────────────────────────────
     veg_context = _veg_context_from_simheaven(forest_records)
@@ -2300,11 +2363,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             )
 
         _poly_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_vegpoly.pkl'))
-        _asset_mode = (
-            'simheaven_closest_v1'
-            if simheaven_type_resolver is not None
-            else 'simheaven_climate_v1'
-        )
+        if leaf_types is not None:
+            _asset_mode = 'leaf_type_maps_v1'
+        elif simheaven_type_resolver is not None:
+            _asset_mode = 'simheaven_closest_v1'
+        else:
+            _asset_mode = 'simheaven_climate_v1'
+        if xp_forest_mapper is not None:
+            _asset_mode += '+' + xp_forest_mapper.signature
         _poly_cache_key = _dds_polygon_cache_key(
             fname,
             lat_n,
@@ -2324,8 +2390,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             region,
             koppen_code,
             _asset_mode,
-            simheaven_type_source_path,
-            forest_type_sig=simheaven_type_sig,
+            None if leaf_types is not None else simheaven_type_source_path,
+            forest_type_sig=(
+                leaf_types.signature if leaf_types is not None
+                else simheaven_type_sig
+            ),
             covered_fracs=_covered_fracs,
         )
         _poly_cached = None
@@ -2358,7 +2427,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       region=region,
                       density_override=density_override,
                       context_masks=local_context_masks,
-                      type_counts=None)
+                      type_counts=None,
+                      forest_path_mapper=xp_forest_mapper)
         if simheaven_type_source_path:
             kwargs['simheaven_type_path'] = simheaven_type_source_path
         if simheaven_type_resolver is not None:
@@ -2372,9 +2442,25 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         dds_type_counts = {}
         kwargs['type_counts'] = dds_type_counts
 
-        _t = time.perf_counter()
-        p = _process_dds_mask(tree_mask, SEGFORMER.CLASS_TREE, **kwargs)
-        timings['contours'] += time.perf_counter() - _t
+        if leaf_types is not None:
+            _t = time.perf_counter()
+            zone = leaf_types.zone_for_texture(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
+            timings['leaf_type'] += time.perf_counter() - _t
+            _t = time.perf_counter()
+            p = []
+            for code, for_path in LEAF_TYPE.CODE_PATHS:
+                part = np.where(zone == code, tree_mask, 0).astype(np.uint8)
+                if part.any():
+                    p.extend(_process_dds_mask(
+                        part, SEGFORMER.CLASS_TREE,
+                        **dict(kwargs, simheaven_type_path=for_path,
+                               simheaven_type_resolver=None),
+                    ))
+            timings['contours'] += time.perf_counter() - _t
+        else:
+            _t = time.perf_counter()
+            p = _process_dds_mask(tree_mask, SEGFORMER.CLASS_TREE, **kwargs)
+            timings['contours'] += time.perf_counter() - _t
         n_tree += len(p); polygons.extend(p)
         for veg_type, count in dds_type_counts.items():
             tree_type_counts[veg_type] = tree_type_counts.get(veg_type, 0) + int(count)
@@ -2507,6 +2593,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"bld_excl={timings['bld_excl']:.1f}s  "
         f"forest_excl={timings['forest_layer_excl']:.1f}s  "
         f"excl_zones={timings['excl_zones']:.1f}s  "
+        f"leaf_type={timings['leaf_type']:.1f}s  "
         f"contours={timings['contours']:.1f}s  "
         f"dsf_text={timings['dsf_text']:.1f}s  "
         f"dsf_compile={timings['dsf_compile']:.1f}s"
@@ -2572,6 +2659,14 @@ def parse_args():
     ap.add_argument('--gfv2-asset-proximity', action='store_true',
                     dest='gfv2_asset_proximity',
                     help='Legacy no-op retained for command-line compatibility.')
+    ap.add_argument('--no-leaf-type-maps', action='store_true', dest='no_leaf_type_maps',
+                    help='Choose broadleaf/conifer/mixed from the nearest simHeaven forest '
+                         'instead of the HRL / GLC_FCS30D / CGLS leaf-type maps.')
+    ap.add_argument('--leaf-type-cache-dir', default=None, dest='leaf_type_cache_dir',
+                    help='Shared leaf-type map cache (default: SFR_cache/_leaf_type).')
+    ap.add_argument('--no-xp-forests', action='store_true', dest='no_xp_forests',
+                    help='Emit the simHeaven forest aliases instead of X-Plane 12 '
+                         'climate forests (lib/g8).')
     ap.add_argument('--no-viz',     action='store_true')
     return ap.parse_args()
 
@@ -2631,6 +2726,9 @@ def main():
         avoid_gfv2       = False,
         gfv2_buffer_m    = 0.0,
         use_gfv2_asset_proximity = False,
+        use_leaf_type_maps = not args.no_leaf_type_maps,
+        leaf_type_cache_dir = args.leaf_type_cache_dir,
+        use_xp_forests = not args.no_xp_forests,
     )
     print(f"\nDone: {n} vegetation polygons in {(time.time()-t0)/60:.1f}min")
     return n

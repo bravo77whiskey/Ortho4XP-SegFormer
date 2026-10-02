@@ -40,6 +40,14 @@ def _sfr_library_cache_dir():
         return os.path.join(_exe_dir, 'SFR_cache', '_libraries')
 
 
+def _sfr_leaf_type_cache_dir():
+    try:
+        import O4_File_Names as FNAMES
+        return FNAMES.sfr_leaf_type_cache_dir()
+    except Exception:
+        return os.path.join(_exe_dir, 'SFR_cache', '_leaf_type')
+
+
 # Persistent sidecar caches written under the per-tile SFR_cache dir by
 # PCACHE.load_or_build() / ensure_cached_dsf_text() (parsed OSM, mesh-water
 # index, disassembled DSF text, OBJ8 bounds). Unlike the per-DDS inference
@@ -261,6 +269,8 @@ sfr_veg_simheaven_forest_buffer_m = 0.0
 sfr_veg_exclude_lower_forests = False
 sfr_veg_remove_embedded_trees = False
 sfr_veg_use_simheaven_asset_proximity = True
+sfr_veg_use_leaf_type_maps = True
+sfr_veg_use_xp_forests = True
 sfr_veg_avoid_gfv2    = False
 sfr_veg_gfv2_buffer_m = 0.0
 sfr_veg_use_gfv2_asset_proximity = False
@@ -767,6 +777,9 @@ def process_veg_tile(lat, lon, build_dir):
         f"    avoid_simheaven_forests = {sfr_veg_avoid_simheaven_forests!r},\n"
         f"    simheaven_forest_buffer_m = {sfr_veg_simheaven_forest_buffer_m!r},\n"
         f"    use_simheaven_asset_proximity = {sfr_veg_use_simheaven_asset_proximity!r},\n"
+        f"    use_leaf_type_maps = {sfr_veg_use_leaf_type_maps!r},\n"
+        f"    leaf_type_cache_dir = {_sfr_leaf_type_cache_dir()!r},\n"
+        f"    use_xp_forests = {sfr_veg_use_xp_forests!r},\n"
         f"    exclude_lower_forests = {sfr_veg_exclude_lower_forests!r},\n"
         f"    status_path      = {status_path!r},\n"
         f"    bld_excl_m       = {0.0 if sfr_veg_disable_cache else 10.0!r},\n"

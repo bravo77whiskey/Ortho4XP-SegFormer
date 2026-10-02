@@ -760,6 +760,8 @@ class Ortho4XP_GUI(tk.Tk):
         SFR.sfr_veg_exclude_lower_forests = tile.sfr_veg_exclude_lower_forests
         SFR.sfr_veg_remove_embedded_trees = tile.sfr_veg_remove_embedded_trees
         SFR.sfr_veg_use_simheaven_asset_proximity = tile.sfr_veg_use_simheaven_asset_proximity
+        SFR.sfr_veg_use_leaf_type_maps = tile.sfr_veg_use_leaf_type_maps
+        SFR.sfr_veg_use_xp_forests = tile.sfr_veg_use_xp_forests
         SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
         SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
         SFR.sfr_veg_use_gfv2_asset_proximity = tile.sfr_veg_use_gfv2_asset_proximity

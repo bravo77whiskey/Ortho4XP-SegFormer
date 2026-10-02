@@ -50,17 +50,23 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertIn("Permission denied", out.getvalue())
         self.assertIn("skipping", out.getvalue())
 
-    def test_allowlist_contains_only_simheaven_assets(self):
+    def test_allowlist_is_simheaven_aliases_plus_dense_xp_g8_forests(self):
         approved = set(FOREST_ASSETS.APPROVED_GENERATED_FOREST_PATHS)
         self.assertEqual(FOREST_ASSETS.HEIGHT_CUTOFF_METERS, 24.0)
-        self.assertEqual(
-            approved,
-            {
-                "simheaven/forests/broad.for",
-                "simheaven/forests/coni.for",
-                "simheaven/forests/mixed.for",
-            },
-        )
+        simheaven = {
+            "simheaven/forests/broad.for",
+            "simheaven/forests/coni.for",
+            "simheaven/forests/mixed.for",
+        }
+        self.assertTrue(simheaven <= approved)
+        g8 = approved - simheaven
+        self.assertEqual(len(FOREST_ASSETS.G8_FOREST_PATHS), 72)
+        self.assertEqual(g8, set(FOREST_ASSETS.G8_FOREST_PATHS) | set(FOREST_ASSETS.G8_ORCHARD_PATHS))
+        for path in g8:
+            self.assertTrue(path.startswith("lib/g8/"), msg=path)
+            # sparse sets would thin the per-polygon DSF density a second time
+            self.assertNotIn("_sp_", path, msg=path)
+            self.assertFalse(path.startswith("lib/g8/rainforest"), msg=path)
 
     def test_allowlist_excludes_known_tall_default_assets(self):
         approved = set(FOREST_ASSETS.APPROVED_GENERATED_FOREST_PATHS)
