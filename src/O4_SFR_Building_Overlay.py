@@ -9952,6 +9952,22 @@ def _write_polygon_winding(handle, lonlat_ring):
     handle.write("END_WINDING\n")
 
 
+def _ccw_lonlat_ring(lonlat_ring):
+    """Return ``lonlat_ring`` wound counter-clockwise seen from above.
+
+    The DSF spec requires facades to be wound counter-clockwise; a clockwise
+    one is built inside out (walls face inward and vanish from outside).
+    Rings come from several sources with different point orders (YOLO OBBs,
+    traced outlines, ``cv2.boxPoints`` rectangles), so the order is fixed
+    here, where every facade is written.
+    """
+    ring = list(lonlat_ring)
+    twice_area = 0.0
+    for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1]):
+        twice_area += x0 * y1 - x1 * y0
+    return ring[::-1] if twice_area < 0.0 else ring
+
+
 def _merge_exclusion_rects(rects, eps=1e-6):
     """Merge overlapping/touching exclusion rectangles.
 
@@ -13639,7 +13655,7 @@ def run(
         for lonlat_ring, facade_path, height_m in placed_facades:
             idx = poly_idx[facade_path]
             f.write(f"BEGIN_POLYGON {idx} {int(round(height_m))} 2\n")
-            _write_polygon_winding(f, lonlat_ring)
+            _write_polygon_winding(f, _ccw_lonlat_ring(lonlat_ring))
             f.write("END_POLYGON\n")
         for lonlat_ring, pol_path in placed_draped:
             idx = poly_idx[pol_path]

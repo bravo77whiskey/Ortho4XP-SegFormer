@@ -113,6 +113,21 @@ class SegFirstDetectionTests(unittest.TestCase):
         self.assertEqual([d.get("seg_first") for d in out], ["rect"])
         self.assertGreater(out[0]["area_m2"], 9000)
 
+    def test_facade_rings_are_written_counter_clockwise(self):
+        # segment-first rectangles come in cv2.boxPoints order, the reverse
+        # of a YOLO OBB; both must reach the DSF counter-clockwise
+        veg = _veg()
+        veg[40:100, 40:120] = BUILDING
+        rect = BLD._seg_first_detections([], veg, None, MPP, 256, 256, "guarded")[0]
+        yolo = _det(np.array([[180, 80], [180, 40], [60, 40], [60, 80]], float))
+        for det in (rect, yolo):
+            ring = BLD._ccw_lonlat_ring(BLD._pixel_ring_to_latlon(
+                det["points"], 256, 256, 46.1, 46.0, 8.0, 8.1))
+            area2 = sum(x0 * y1 - x1 * y0
+                        for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1]))
+            self.assertGreater(area2, 0.0)
+            self.assertEqual(ring[0], ring[-1])
+
     def test_guard_leaves_terrace_blocks_to_yolo(self):
         veg = _veg()
         veg[40:100, 40:120] = BUILDING
