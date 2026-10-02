@@ -874,7 +874,6 @@ def process_bld_tile(lat, lon, build_dir):
         f"    grid_n                   = {sfr_bld_grid_n!r},\n"
         f"    custom_scenery_dir       = {custom_scenery_dir!r},\n"
         f"    dsftool_path             = {dsftool!r},\n"
-        f"    skip_osm_excl_download   = False,\n"
         f"    yolo_enabled             = {sfr_bld_yolo_enabled!r},\n"
         f"    yolo_checkpoint          = {sfr_bld_yolo_checkpoint!r},\n"
         f"    yolo_conf                = {sfr_bld_yolo_conf!r},\n"

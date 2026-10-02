@@ -45,7 +45,6 @@ import O4_Forest_Assets as FOREST_ASSETS
 import O4_SFR_Climate_Regions as CLIMATE_REGIONS
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
-import O4_SFR_Overpass as OVERPASS
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Texture_Selection as TEXSEL
 from O4_SFR_Building_Overlay import (
@@ -57,7 +56,6 @@ from O4_SFR_Building_Overlay import (
     _rasterize_mesh_water_mask,
     _rasterize_simheaven_objects,
     _simheaven_objects_for_bounds,
-    _transient_cache_peer_path,
     covered_rects_to_px,
     mask_covered_regions,
 )
@@ -180,56 +178,12 @@ def _load_osm_roads(osm_bz2_path, cache_dir=None):
     )
 
 
-def _parse_excl_context_cache(cache_path, cache_dir=None):
-    """Parse exclusion cache into railway ways and residential polygons."""
-    import bz2, xml.etree.ElementTree as ET
-    if not os.path.exists(cache_path):
-        return [], []
-    def _parse():
-        with bz2.open(cache_path, 'rb') as f:
-            root = ET.parse(f).getroot()
-        nodes = {}
-        for node in root.iter('node'):
-            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-        rails = []
-        residential_polys = []
-        for way in root.iter('way'):
-            pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-            if len(pts) < 2:
-                continue
-            is_closed = len(pts) >= 4 and pts[0] == pts[-1]
-            tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
-            rw = tags.get('railway')
-            if rw and not is_closed:
-                rails.append({'pts': pts, 'type': rw})
-            elif is_closed and tags.get('landuse') == 'residential':
-                residential_polys.append([(lon, lat) for lat, lon in pts])
-        return rails, residential_polys
+def _veg_context_from_simheaven(forest_records):
+    """Forest-asset context from the installed simHeaven 7-forests polygons.
 
-    return PCACHE.load_or_build(
-        cache_path,
-        cache_dir,
-        "osm_parse",
-        _parse,
-        version="veg-excl-context-v1",
-    )
-
-
-def _download_and_cache_veg_context_osm(lat, lon, cache_path):
-    """Download OSM semantics used to classify tree cover into real-world types."""
-    query = OVERPASS.tile_query(lat, lon, (
-        'way["natural"~"^(wood|tree_row|water|wetland|scrub)$"]',
-        'way["waterway"="riverbank"]',
-        'way["landuse"~"^(forest|orchard|farmland|farmyard|residential|allotments|village_green|recreation_ground)$"]',
-        'way["leisure"~"^(park|garden|golf_course|pitch)$"]',
-    ))
-    return OVERPASS.download_to_cache(query, cache_path, "OSM veg")
-
-
-def _parse_veg_context_osm(cache_path, cache_dir=None):
-    """Parse vegetation semantic polygons and tree-row hints from OSM XML cache."""
-    import bz2, xml.etree.ElementTree as ET
-
+    SegFormer alone decides where trees go; this context only steers which
+    forest assets a tree patch gets (see ``_classify_tree_cover``).
+    """
     context = {
         'forest_polys': [],
         'woodland_hint_polys': [],
@@ -240,74 +194,20 @@ def _parse_veg_context_osm(cache_path, cache_dir=None):
         'water_polys': [],
         'tree_rows': [],
     }
-    if not os.path.exists(cache_path):
-        return context
-
-    def _parse():
-        parsed_context = {
-            'forest_polys': [],
-            'woodland_hint_polys': [],
-            'orchard_polys': [],
-            'managed_polys': [],
-            'residential_polys': [],
-            'farmland_polys': [],
-            'water_polys': [],
-            'tree_rows': [],
-        }
-
-        with bz2.open(cache_path, 'rb') as f:
-            root = ET.parse(f).getroot()
-
-        nodes = {}
-        for node in root.iter('node'):
-            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-
-        for way in root.iter('way'):
-            pts_latlon = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-            if len(pts_latlon) < 2:
-                continue
-
-            is_closed = len(pts_latlon) >= 4 and pts_latlon[0] == pts_latlon[-1]
-            tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
-            landuse = tags.get('landuse')
-            natural = tags.get('natural')
-            leisure = tags.get('leisure')
-            waterway = tags.get('waterway')
-
-            if natural == 'tree_row' and len(pts_latlon) >= 2:
-                parsed_context['tree_rows'].append({'pts': pts_latlon, 'type': 'tree_row'})
-                continue
-
-            if not is_closed:
-                continue
-
-            pts_lonlat = [(lon, lat) for lat, lon in pts_latlon]
-            if natural == 'wood' or landuse == 'forest':
-                parsed_context['forest_polys'].append(pts_lonlat)
-            elif natural == 'scrub':
-                parsed_context['woodland_hint_polys'].append(pts_lonlat)
-            elif landuse == 'orchard':
-                parsed_context['orchard_polys'].append(pts_lonlat)
-            elif landuse in {'residential'}:
-                parsed_context['residential_polys'].append(pts_lonlat)
-            elif landuse in {'farmland', 'farmyard', 'allotments'}:
-                parsed_context['farmland_polys'].append(pts_lonlat)
-            elif leisure in {'park', 'garden', 'golf_course', 'pitch'} or landuse in {
-                'village_green', 'recreation_ground'
-            }:
-                parsed_context['managed_polys'].append(pts_lonlat)
-            elif natural in {'water', 'wetland'} or waterway == 'riverbank':
-                parsed_context['water_polys'].append(pts_lonlat)
-
-        return parsed_context
-
-    return PCACHE.load_or_build(
-        cache_path,
-        cache_dir,
-        "osm_parse",
-        _parse,
-        version="veg-context-v1",
-    )
+    for record in forest_records or ():
+        path = (record.get('path') or '').replace('\\', '/').lower()
+        if 'orchard' in path:
+            key = 'orchard_polys'
+        elif 'wetland' in path:
+            key = 'water_polys'
+        elif 'shrub' in path or 'scrub' in path:
+            key = 'woodland_hint_polys'
+        elif 'hedge' in path or 'random_tree' in path:
+            continue
+        else:
+            key = 'forest_polys'
+        context[key].append(record['pts'])
+    return context
 
 
 def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
@@ -1596,7 +1496,6 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         excl_buffer_m=EXCL_BUFFER_M,
         bld_excl_m=10.0,
         osm_roads_path=None, use_simheaven=True, dsftool_path=None,
-        download_veg_context=True,
         custom_scenery_dir=None,
         avoid_simheaven_buildings=True, simheaven_building_buffer_m=10.0,
         avoid_simheaven_forests=True, simheaven_forest_buffer_m=0.0,
@@ -1804,59 +1703,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
 
-    transient_peer_dir = sidecar_cache_dir if disable_cache else None
     osm_roads = _load_osm_roads(osm_roads_path, cache_dir=sidecar_cache_dir)
     print(f"OSM roads: {len(osm_roads)} ways  ({osm_roads_path})")
     osm_roads = _prepare_roads(osm_roads)
 
-    # Railways + residential hints from the exclusion cache written by building overlay.
-    excl_cache_candidates = [
-        osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2'),
-        osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail.osm.bz2'),
-    ]
-    excl_cache = next((p for p in excl_cache_candidates if os.path.exists(p)), excl_cache_candidates[0])
-    excl_rails, excl_residential = _parse_excl_context_cache(
-        excl_cache, cache_dir=sidecar_cache_dir
-    )
-    print(f"OSM railways: {len(excl_rails)} ways")
-    excl_rails = _prepare_roads(excl_rails)
-
-    veg_context_osm_path = _transient_cache_peer_path(
-        osm_roads_path,
-        '_veg_context.osm.bz2',
-        transient_peer_dir,
-    ) or osm_roads_path.replace('_big_roads.osm.bz2', '_veg_context.osm.bz2')
-    if download_veg_context and not os.path.exists(veg_context_osm_path):
-        _download_and_cache_veg_context_osm(lat, lon, veg_context_osm_path)
-    veg_context = _parse_veg_context_osm(veg_context_osm_path, cache_dir=sidecar_cache_dir)
-    if excl_residential and not veg_context['residential_polys']:
-        veg_context['residential_polys'] = excl_residential
-    print(
-        "OSM veg context: "
-        f"forest={len(veg_context['forest_polys'])} "
-        f"woodland={len(veg_context['woodland_hint_polys'])} "
-        f"orchard={len(veg_context['orchard_polys'])} "
-        f"managed={len(veg_context['managed_polys'])} "
-        f"residential={len(veg_context['residential_polys'])} "
-        f"tree_rows={len(veg_context['tree_rows'])}"
-    )
-    veg_context_prepared = {
-        key: _prepare_polygons(value)
-        for key, value in veg_context.items()
-        if key.endswith('_polys')
-    }
-    context_poly_sigs = {
-        key: _polys_signature(value)
-        for key, value in veg_context_prepared.items()
-    }
-    veg_context_indexes = {
-        key: BBOX.build_bounds_index(value)
-        for key, value in veg_context_prepared.items()
-    }
     osm_residential_roads = _prepare_roads(_residential_roads(osm_roads))
     osm_residential_index = BBOX.build_bounds_index(osm_residential_roads)
-    veg_context_tree_rows = _prepare_roads(veg_context.get('tree_rows', []))
-    tree_row_index = BBOX.build_bounds_index(veg_context_tree_rows)
 
     # simHeaven full street network
     if dsftool_path is None:
@@ -1871,20 +1723,18 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         print(f"  [simHeaven] DSFTool not found at {dsftool_path} — skipping")
 
     sh_network = _prepare_roads(sh_network)
-    all_road_ways = osm_roads + excl_rails + sh_network
+    all_road_ways = osm_roads + sh_network
     all_road_index = BBOX.build_bounds_index(all_road_ways)
     all_road_sig = _roads_signature(all_road_ways)
     osm_residential_sig = _roads_signature(osm_residential_roads)
-    tree_row_sig = _roads_signature(veg_context_tree_rows)
 
     forest_layers = []
+    forest_records = []
     simheaven_type_source_path = None
     simheaven_type_resolver = None
     simheaven_type_sig = None
-    need_simheaven_forests = (
-        avoid_simheaven_forests or use_simheaven_asset_proximity
-    )
-    if need_simheaven_forests and dsftool_path and os.path.exists(dsftool_path):
+    # Always read: the 7-forests polygons also feed the forest-asset context.
+    if dsftool_path and os.path.exists(dsftool_path):
         forest_matches = find_simheaven_forest_dsfs(
             custom_scenery_dir,
             lat,
@@ -1933,7 +1783,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 )
         else:
             print("simHeaven forests: no enabled 7-forests DSF for this tile")
-    elif need_simheaven_forests:
+    else:
         print(
             "simHeaven forests: skipped "
             f"(DSFTool unavailable at {dsftool_path})"
@@ -1946,6 +1796,32 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         )
         for layer in forest_layers
     )
+
+    # ── Forest-asset context ────────────────────────────────────────────────
+    veg_context = _veg_context_from_simheaven(forest_records)
+    print(
+        "Forest-asset context (simHeaven 7-forests): "
+        f"forest={len(veg_context['forest_polys'])} "
+        f"woodland={len(veg_context['woodland_hint_polys'])} "
+        f"orchard={len(veg_context['orchard_polys'])} "
+        f"wetland={len(veg_context['water_polys'])}"
+    )
+    veg_context_prepared = {
+        key: _prepare_polygons(value)
+        for key, value in veg_context.items()
+        if key.endswith('_polys')
+    }
+    context_poly_sigs = {
+        key: _polys_signature(value)
+        for key, value in veg_context_prepared.items()
+    }
+    veg_context_indexes = {
+        key: BBOX.build_bounds_index(value)
+        for key, value in veg_context_prepared.items()
+    }
+    veg_context_tree_rows = _prepare_roads(veg_context.get('tree_rows', []))
+    tree_row_index = BBOX.build_bounds_index(veg_context_tree_rows)
+    tree_row_sig = _roads_signature(veg_context_tree_rows)
 
     # ── Custom-scenery forest exclusion zones ───────────────────────────────
     # An airport's `sim/exclude_for` zone is honoured with no buffer and no
@@ -2662,9 +2538,6 @@ def parse_args():
                          'excluding from tree mask (default: %(default)sm)')
     ap.add_argument('--osm-roads', default=None, dest='osm_roads',
                     help='Path to *_big_roads.osm.bz2 (auto-discovered from tex_dir if omitted)')
-    ap.add_argument('--no-download-veg-context', action='store_true',
-                    dest='no_download_veg_context',
-                    help='Do not download OSM vegetation context when the cache is missing.')
     ap.add_argument('--custom-scenery-dir', default=None,
                     help='Configured X-Plane Custom Scenery directory used to locate simHeaven.')
     ap.add_argument('--no-simheaven', action='store_true', dest='no_simheaven',
@@ -2747,7 +2620,6 @@ def main():
         excl_buffer_m    = args.excl_buffer_m,
         osm_roads_path   = args.osm_roads,
         use_simheaven    = not args.no_simheaven,
-        download_veg_context = not args.no_download_veg_context,
         custom_scenery_dir = args.custom_scenery_dir,
         avoid_simheaven_buildings = not args.no_avoid_simheaven_buildings,
         simheaven_building_buffer_m = args.simheaven_building_buffer_m,

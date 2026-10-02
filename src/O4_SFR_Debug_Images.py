@@ -602,7 +602,6 @@ def generate_production_building_debug_images(
     min_footprint_m2: float = 12.0,
     grid_n: int = BLD.HEADING_GRID_N,
     custom_scenery_dir: str | os.PathLike[str] | None = None,
-    skip_osm_excl_download: bool = False,
     viz_size: int = 1600,
     yolo_checkpoint: str | os.PathLike[str] | None = None,
     yolo_conf: float | None = None,
@@ -645,7 +644,6 @@ def generate_production_building_debug_images(
                 disable_cache=True,
                 grid_n=grid_n,
                 custom_scenery_dir=str(custom_scenery_dir) if custom_scenery_dir else None,
-                skip_osm_excl_download=skip_osm_excl_download,
                 debug_image_only=True,
                 dds_filter=names,
                 ignore_placement_cache=True,
@@ -719,7 +717,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--min-footprint-m2", type=float, default=12.0)
     parser.add_argument("--grid-n", type=int, default=BLD.HEADING_GRID_N)
     parser.add_argument("--custom-scenery-dir", default=None)
-    parser.add_argument("--skip-osm-excl-download", action="store_true")
     parser.add_argument("--yolo-checkpoint", default=None)
     parser.add_argument("--yolo-conf", type=float, default=None)
     parser.add_argument("--yolo-iou", type=float, default=None)
@@ -781,7 +778,6 @@ def main(argv: list[str] | None = None) -> int:
             min_footprint_m2=args.min_footprint_m2,
             grid_n=args.grid_n,
             custom_scenery_dir=args.custom_scenery_dir,
-            skip_osm_excl_download=args.skip_osm_excl_download,
             viz_size=args.production_viz_size,
             yolo_checkpoint=args.yolo_checkpoint,
             yolo_conf=args.yolo_conf,

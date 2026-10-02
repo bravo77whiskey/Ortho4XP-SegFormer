@@ -38,7 +38,6 @@ Image.MAX_IMAGE_PIXELS = None
 
 import O4_SFR_Bounds_Index as BBOX
 import O4_SFR_Persistent_Cache as PCACHE
-import O4_SFR_Overpass as OVERPASS
 import O4_SFR_Inference as SEGFORMER
 import O4_SFR_Stock_Yolo_Objects as STOCKYOLO
 import O4_SFR_Asset_Inventory as ASSETINV
@@ -522,16 +521,6 @@ def _osm_tile_peer_path(osm_roads_path, suffix):
         if base.endswith(old_suffix):
             return os.path.join(folder, base[:-len(old_suffix)] + suffix)
     return None
-
-
-def _transient_cache_peer_path(osm_roads_path, suffix, transient_cache_dir=None):
-    """Return an OSM peer path, using transient storage for new no-cache peers."""
-    peer_path = _osm_tile_peer_path(osm_roads_path, suffix)
-    if not peer_path:
-        return None
-    if not transient_cache_dir or os.path.exists(peer_path):
-        return peer_path
-    return os.path.join(transient_cache_dir, os.path.basename(peer_path))
 
 
 def _rasterize_roads(roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
@@ -1559,28 +1548,31 @@ def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
     return filtered
 
 
-def _download_and_cache_osm(lat, lon, cache_path):
-    """Download OSM building, transport, and residential-area data.
+# X-Plane road.net virtual-road subtypes (default ``lib/g10/roads.net``, which
+# simHeaven's network DSFs use) mapped to the OSM classes ROAD_EXCLUSION_WIDTH_M
+# knows. simHeaven builds the network from OSM, so these are the same ways the
+# Overpass download used to fetch. Anything else (powerlines, simHeaven's own
+# networks) stays 'network' and never blocks placement.
+_XP_ROAD_SUBTYPE_RANGES = (
+    (10, 28, 'primary'),            # primary, primary_oneway
+    (30, 48, 'secondary'),          # secondary, secondary_oneway
+    (50, 68, 'residential'),        # local, local_oneway
+    (70, 71, 'service'),            # single_lane_road(_oneway)
+    (100, 101, 'motorway'),         # hwy_6
+    (110, 111, 'trunk'),            # hwy_4
+    (120, 131, 'motorway_link'),    # hwy_ramp, hwy_weave_lane
+    (151, 154, 'rail'),             # rail_primary/secondary/tertiary/inset
+)
 
-    Fetches one combined Overpass query for the 1 degree tile and caches it as
-    bz2-compressed OSM XML. The cached file feeds three downstream uses:
-    building footprint exclusions, railway exclusions, and residential-area
-    guidance for small-house placement.
-    """
-    query = OVERPASS.tile_query(lat, lon, (
-        'way["building"]',
-        'way["railway"~"^(rail|light_rail|subway|tram|narrow_gauge|monorail)$"]',
-        'way["aeroway"~"^(aerodrome|apron|taxiway|runway|terminal|hangar)$"]',
-        'way["landuse"~"^(railway|aeroway)$"]',
-        'way["landuse"="residential"]',
-    ))
-    return OVERPASS.download_to_cache(query, cache_path, "OSM excl")
 
-
-def _download_and_cache_osm_roads(lat, lon, cache_path):
-    """Download all OSM highway ways for zone splitting and road context."""
-    query = OVERPASS.tile_query(lat, lon, ('way["highway"]',))
-    return OVERPASS.download_to_cache(query, cache_path, "OSM roads")
+def _simheaven_segment_type(network_def, subtype):
+    """Return the OSM-style class for one simHeaven network segment."""
+    if not network_def.replace('\\', '/').lower().endswith('lib/g10/roads.net'):
+        return 'network'
+    for low, high, road_type in _XP_ROAD_SUBTYPE_RANGES:
+        if low <= subtype <= high:
+            return road_type
+    return 'network'
 
 
 def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path, cache_dir):
@@ -1597,14 +1589,21 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
             )
             def _parse():
                 parsed_ways = []
+                network_defs = []
                 current_points = None
+                current_type = 'network'
                 with open(cached_text_path, "r", encoding="utf-8", errors="ignore") as text_file:
                     for raw_line in text_file:
                         line = raw_line.strip()
-                        if line.startswith("BEGIN_SEGMENT "):
+                        if line.startswith("NETWORK_DEF "):
+                            network_defs.append(line.split(" ", 1)[1])
+                        elif line.startswith("BEGIN_SEGMENT "):
                             parts = line.split()
                             try:
                                 current_points = [(float(parts[5]), float(parts[4]))]
+                                current_type = _simheaven_segment_type(
+                                    network_defs[int(parts[1])], int(parts[2])
+                                )
                             except (IndexError, ValueError):
                                 current_points = None
                         elif line.startswith("SHAPE_POINT ") and current_points is not None:
@@ -1620,7 +1619,7 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
                             except (IndexError, ValueError):
                                 pass
                             if len(current_points) >= 2:
-                                parsed_ways.append({"pts": current_points, "type": "network"})
+                                parsed_ways.append({"pts": current_points, "type": current_type})
                             current_points = None
                 return parsed_ways
 
@@ -1630,7 +1629,7 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
                     cache_dir,
                     "dsf_parse",
                     _parse,
-                    version="simheaven-network-v1",
+                    version="simheaven-network-v2",
                 )
             )
             print(f"  [simHeaven net] {folder_name}: +{len(road_ways) - segment_count_before} segments")
@@ -2234,62 +2233,6 @@ def _rasterize_simheaven_objects(objects, lat_n, lat_s, lon_w, lon_e,
     return mask
 
 
-def _parse_excl_osm(cache_path, cache_dir=None):
-    """Parse downloaded OSM into exclusions and residential guidance.
-
-    Returns:
-      exclusion_polys: closed ways that should block building placement
-      rail_ways:       open railway ways rasterized like roads
-      residential_polys:
-                       closed ``landuse=residential`` polygons used to keep
-                       small residential objects inside residential areas
-    """
-    import bz2, xml.etree.ElementTree as ET
-    exclusion_polys = []
-    rail_ways = []
-    residential_polys = []
-    if not os.path.exists(cache_path):
-        return exclusion_polys, rail_ways, residential_polys
-    def _parse():
-        parsed_exclusion_polys = []
-        parsed_rail_ways = []
-        parsed_residential_polys = []
-        with bz2.open(cache_path, 'rb') as f:
-            root = ET.parse(f).getroot()
-        nodes = {}
-        for node in root.iter('node'):
-            nodes[node.get('id')] = (float(node.get('lat')), float(node.get('lon')))
-        for way in root.iter('way'):
-            pts = [nodes[nd.get('ref')] for nd in way.iter('nd') if nd.get('ref') in nodes]
-            if len(pts) < 2:
-                continue
-            is_closed = len(pts) >= 4 and pts[0] == pts[-1]
-            tags = {tag.get('k'): tag.get('v') for tag in way.iter('tag')}
-            railway_type = tags.get('railway')
-            landuse_type = tags.get('landuse')
-
-            if railway_type and not is_closed:
-                parsed_rail_ways.append({'pts': pts, 'type': railway_type})
-            elif is_closed and landuse_type == 'residential':
-                parsed_residential_polys.append(pts)
-            elif is_closed and (
-                'building' in tags or
-                'aeroway' in tags or
-                landuse_type in {'railway', 'aeroway'}
-            ):
-                parsed_exclusion_polys.append(pts)
-        return parsed_exclusion_polys, parsed_rail_ways, parsed_residential_polys
-
-    return PCACHE.load_or_build(
-        cache_path,
-        cache_dir,
-        "osm_parse",
-        _parse,
-        version="building-exclusions-v1",
-    )
-
-
-# ── Per-zone heading detection (Hough fallback) ────────────────────────────
 def _zone_heading(img, bx, by, bw, bh, pad=80):
     """Detect dominant road/block heading for a single zone.
 
@@ -10053,7 +9996,6 @@ def run(
     grid_n=HEADING_GRID_N,
     osm_roads_path=None,
     dsftool_path=None,
-    skip_osm_excl_download=False,
     custom_scenery_dir=None,
     avoid_custom_scenery=True,
     debug_image_only=False,
@@ -10242,40 +10184,25 @@ def run(
             f'{lat_g_str}{lon_g_str}',
             f'{lat_s_str}{lon_s_str}',
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
-    transient_peer_dir = sidecar_cache_dir if disable_cache else None
     osm_big_roads = _load_osm_roads(osm_roads_path, cache_dir=sidecar_cache_dir)
     osm_small_roads_path = _osm_tile_peer_path(osm_roads_path, "_small_roads.osm.bz2")
-    osm_all_roads_path = _transient_cache_peer_path(
-        osm_roads_path,
-        "_all_roads.osm.bz2",
-        transient_peer_dir,
-    )
     osm_small_roads = (
         _load_osm_roads(osm_small_roads_path, cache_dir=sidecar_cache_dir)
         if osm_small_roads_path else []
     )
-    osm_all_roads = []
-    if osm_all_roads_path:
-        if not os.path.exists(osm_all_roads_path) and not skip_osm_excl_download:
-            _download_and_cache_osm_roads(lat, lon, osm_all_roads_path)
-        osm_all_roads = _load_osm_roads(osm_all_roads_path, cache_dir=sidecar_cache_dir)
-
-    if osm_all_roads:
-        osm_roads = osm_all_roads
-        print(f"OSM all roads: {len(osm_roads)} ways from {osm_all_roads_path}")
-    else:
-        osm_roads = (osm_big_roads or []) + (osm_small_roads or [])
-        print(
-            f"OSM roads: {len(osm_roads)} ways "
-            f"(big={len(osm_big_roads)} small={len(osm_small_roads)})"
-        )
+    # Ortho4XP's own OSM extracts; the full street grid and the railways come
+    # from the installed simHeaven network below. Nothing is downloaded here.
+    osm_roads = (osm_big_roads or []) + (osm_small_roads or [])
+    print(
+        f"OSM roads: {len(osm_roads)} ways "
+        f"(big={len(osm_big_roads)} small={len(osm_small_roads)})"
+    )
 
     # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
-    # OSM building polygons are parsed for diagnostics only. They describe where
-    # buildings should exist, not what is already visible in the simulator.
     excl_polys = []           # hard exclusions: water / airports
     existing_bld_polys = []   # occupancy-only blockers: simHeaven facade footprints
-    excl_rails = []           # road-style dicts for railways
+    excl_rails = []           # road-style dicts for railways (simHeaven network)
+    residential_polys = []    # no residential landuse source
 
     for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
         p = _osm_tile_peer_path(osm_roads_path, suffix) or osm_roads_path.replace(
@@ -10283,29 +10210,6 @@ def run(
         )
         excl_polys.extend(_load_osm_closed_ways(p, cache_dir=sidecar_cache_dir))
     print(f"Exclusion polygons (water+airports): {len(excl_polys)}")
-
-    excl_cache = _transient_cache_peer_path(
-        osm_roads_path,
-        '_excl_bld_rail_res.osm.bz2',
-        transient_peer_dir,
-    ) or osm_roads_path.replace('_big_roads.osm.bz2', '_excl_bld_rail_res.osm.bz2')
-    if skip_osm_excl_download:
-        ok = os.path.exists(excl_cache)
-    else:
-        ok = _download_and_cache_osm(lat, lon, excl_cache)
-    residential_polys = []
-    if ok:
-        bld_polys, rail_ways, residential_polys = _parse_excl_osm(
-            excl_cache, cache_dir=sidecar_cache_dir
-        )
-        excl_rails.extend(rail_ways)
-        print(
-            f"OSM buildings: {len(bld_polys)} polys (not used as blockers)  "
-            f"railways: {len(rail_ways)} ways  "
-            f"residential areas: {len(residential_polys)} polys"
-        )
-    else:
-        print("OSM building/rail/residential data: unavailable (OSM cache/download failed)")
 
     timings = {
         'simheaven_parse': 0.0,
@@ -10608,7 +10512,11 @@ def run(
     if dsftool_path and os.path.exists(dsftool_path):
         sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
         timings['simheaven_parse'] += time.perf_counter() - _t
-        print(f"simHeaven network: {len(sh_network)} road segments")
+        excl_rails.extend(way for way in sh_network if way['type'] == 'rail')
+        print(
+            f"simHeaven network: {len(sh_network)} road segments "
+            f"({len(excl_rails)} railway)"
+        )
     else:
         sh_network = []
         timings['simheaven_parse'] += time.perf_counter() - _t

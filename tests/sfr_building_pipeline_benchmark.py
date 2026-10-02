@@ -133,7 +133,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Clear the benchmark cache and run with cache disabled.",
     )
-    parser.add_argument("--skip-osm-download", action="store_true")
     parser.add_argument(
         "--allow-current-python",
         action="store_true",
@@ -263,7 +262,6 @@ def main() -> int:
             grid_n=args.grid_n,
             osm_roads_path=args.osm_roads,
             dsftool_path=str(dsftool) if dsftool else None,
-            skip_osm_excl_download=args.skip_osm_download,
             custom_scenery_dir=str(custom_scenery_dir) if custom_scenery_dir else None,
             avoid_custom_scenery=not args.no_custom_scenery_avoidance,
             yolo_conf=args.yolo_conf,
