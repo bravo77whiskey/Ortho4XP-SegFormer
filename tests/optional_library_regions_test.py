@@ -1,0 +1,254 @@
+"""Region routing tests for the curated optional building libraries.
+
+Covers the Track-A library additions (FFLibrary, BS2001, RuScenery, ZDP,
+AR_Library, OB_Library, MisterX, Vectors to Final).
+"""
+
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import O4_Building_Overlay as BLD
+
+
+class OptionalLibraryRegionsTest(unittest.TestCase):
+    def _accepted(self, obj_path, lib_id, tile_region):
+        return BLD._optional_library_rejection_reason(obj_path, lib_id, tile_region) is None
+
+    # --- Track A: per-library fixed regions ---------------------------------
+
+    def test_ff_library_is_europe_only(self):
+        path = "ff_library/houses/residential/townhouse_03.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "ff-library"),
+            ("europe",),
+        )
+        self.assertTrue(self._accepted(path, "ff-library", "europe"))
+        self.assertTrue(self._accepted(path, "ff-library", "mediterranean"))
+        self.assertFalse(self._accepted(path, "ff-library", "north_america"))
+        self.assertFalse(self._accepted(path, "ff-library", "asia"))
+
+    def test_ruscenery_is_europe_only(self):
+        path = "ruscenery/buildings/residential/khrushchyovka.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "ruscenery"),
+            ("europe",),
+        )
+        self.assertTrue(self._accepted(path, "ruscenery", "europe"))
+        self.assertFalse(self._accepted(path, "ruscenery", "africa"))
+
+    def test_bs2001_is_europe_only(self):
+        path = "bs2001/buildings/houses/house_eu_01.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "bs2001"),
+            ("europe",),
+        )
+        self.assertTrue(self._accepted(path, "bs2001", "scandinavia"))
+        self.assertFalse(self._accepted(path, "bs2001", "south_america"))
+
+    def test_ar_library_is_south_america_only(self):
+        path = "ar_library/buildings/residential/casa_01.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "ar-library"),
+            ("south_america",),
+        )
+        self.assertTrue(self._accepted(path, "ar-library", "south_america"))
+        self.assertFalse(self._accepted(path, "ar-library", "europe"))
+        self.assertFalse(self._accepted(path, "ar-library", "north_america"))
+
+    def test_vectors_to_final_is_europe_only(self):
+        path = "vectors_to_final/buildings/residential/barracks.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "vectors-to-final"),
+            ("europe",),
+        )
+        self.assertTrue(self._accepted(path, "vectors-to-final", "europe"))
+        self.assertFalse(self._accepted(path, "vectors-to-final", "asia"))
+
+    def test_zdp_library_serves_americas_and_europe(self):
+        path = "zdp_library/buildings/houses/house_01.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "zdp-library"),
+            ("north_america", "europe"),
+        )
+        self.assertTrue(self._accepted(path, "zdp-library", "north_america"))
+        self.assertTrue(self._accepted(path, "zdp-library", "europe"))
+        self.assertFalse(self._accepted(path, "zdp-library", "asia"))
+        self.assertFalse(self._accepted(path, "zdp-library", "africa"))
+
+    # --- Generic libraries act as a wildcard --------------------------------
+
+    def test_ob_library_is_generic_wildcard(self):
+        path = "ob_library/buildings/houses/house_a.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "ob-library"),
+            ("generic",),
+        )
+        for region in (
+            "europe",
+            "north_america",
+            "south_america",
+            "asia",
+            "se_asia",
+            "africa",
+            "australia_oceania",
+            "mediterranean",
+            "scandinavia",
+        ):
+            self.assertTrue(
+                self._accepted(path, "ob-library", region),
+                msg=f"OB_Library should serve {region}",
+            )
+
+    def test_misterx_is_generic_wildcard(self):
+        path = "misterx_library/buildings/residential/house.obj"
+        self.assertEqual(
+            BLD._optional_library_asset_regions(path, "misterx"),
+            ("generic",),
+        )
+        self.assertTrue(self._accepted(path, "misterx", "asia"))
+        self.assertTrue(self._accepted(path, "misterx", "africa"))
+
+    # --- Registry sanity ----------------------------------------------------
+
+    def test_curated_libraries_entries_have_required_keys(self):
+        for lib_id, entry in BLD.CURATED_EXTRA_BUILDING_LIBRARIES.items():
+            with self.subTest(lib_id=lib_id):
+                self.assertIn("label", entry)
+                self.assertIn("package_patterns", entry)
+                self.assertIn("virtual_prefixes", entry)
+                regions = entry.get("regions")
+                if regions is not None:
+                    self.assertIsInstance(regions, tuple)
+                    for region in regions:
+                        self.assertTrue(
+                            region == "generic"
+                            or region in BLD.OPTIONAL_ASSET_REGION_ALIASES,
+                            msg=f"{lib_id} declared unknown region {region!r}",
+                        )
+
+    def test_region_priority_regional_beats_generic(self):
+        # europe-tagged asset for a europe tile → priority 0
+        self.assertEqual(
+            BLD._region_priority_for_asset_regions(("europe",), "europe"),
+            0,
+        )
+        # generic asset matches but at lower priority (1)
+        self.assertEqual(
+            BLD._region_priority_for_asset_regions(("generic",), "europe"),
+            1,
+        )
+        # europe-tagged asset on a north_america tile → falls to 1
+        self.assertEqual(
+            BLD._region_priority_for_asset_regions(("europe",), "north_america"),
+            1,
+        )
+        # empty regions tuple defaults to 1 (no signal)
+        self.assertEqual(
+            BLD._region_priority_for_asset_regions((), "europe"),
+            1,
+        )
+
+    def test_asset_retry_sort_key_orders_regional_first(self):
+        regional = {
+            "kind": "object",
+            "path": "lib/regional.obj",
+            "source": "Track A",
+            "footprint_area_m2": 200.0,
+            "footprint_max_side_m": 20.0,
+            "region_priority": 0,
+        }
+        generic = {
+            "kind": "object",
+            "path": "lib/generic.obj",
+            "source": "Track A",
+            "footprint_area_m2": 80.0,   # smaller footprint
+            "footprint_max_side_m": 10.0,
+            "region_priority": 1,
+        }
+        # Despite generic having a smaller footprint, regional must come first.
+        sorted_assets = sorted(
+            [generic, regional], key=BLD._asset_retry_sort_key
+        )
+        self.assertEqual(sorted_assets[0]["path"], "lib/regional.obj")
+        self.assertEqual(sorted_assets[1]["path"], "lib/generic.obj")
+
+    def test_opensceneryx_override_routes_wooden_houses_to_europe(self):
+        # Sanity check that the compiled override file is loaded and applied
+        # for the canonical opensceneryx Haussmannian-style wooden houses.
+        regions = BLD._optional_library_asset_regions(
+            "opensceneryx/objects/buildings/residential/houses/wooden/7.obj",
+            "opensceneryx",
+        )
+        self.assertIn("europe", regions)
+
+    def test_track_a_libraries_registered(self):
+        expected = {
+            "ff-library", "ruscenery", "bs2001", "ar-library",
+            "ob-library", "zdp-library", "misterx", "vectors-to-final",
+        }
+        registered = set(BLD.CURATED_EXTRA_BUILDING_LIBRARIES)
+        missing = expected - registered
+        self.assertFalse(missing, msg=f"missing registrations: {sorted(missing)}")
+        # Our own ProcGen library (restored 2026-09-25 for procgen_v4).
+        self.assertIn("o4sfr", registered)
+
+
+class OptionalLibraryPropExclusionTest(unittest.TestCase):
+    """Props filed under a building folder must never stand in for a house."""
+
+    RUSCENERY_PROPS = (
+        "ruscenery/houses/bench.obj",
+        "ruscenery/houses/bus-column.obj",
+        "ruscenery/houses/cow.obj",
+        "ruscenery/houses/electro-column.obj",
+        "ruscenery/houses/electro-column2.obj",
+        "ruscenery/houses/lantern.obj",
+        "ruscenery/houses/lantern-double.obj",
+        "ruscenery/houses/phonepole.obj",
+        "ruscenery/houses/stall-d-01.obj",
+        "ruscenery/houses/stall-d-s.obj",
+        "ruscenery/houses/umbrella.obj",
+    )
+
+    def test_ruscenery_props_are_not_building_candidates(self):
+        for path in self.RUSCENERY_PROPS:
+            with self.subTest(path=path):
+                self.assertFalse(BLD._is_optional_library_building_candidate(path))
+
+    def test_ruscenery_buildings_stay_candidates(self):
+        for path in (
+            "ruscenery/houses/house-01.obj",
+            "ruscenery/houses/r-house-a.obj",
+            "ruscenery/houses/garage1.obj",
+            "ruscenery/houses/warehouse-d-02.obj",
+            "ruscenery/houses/hothouse-1.obj",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(BLD._is_optional_library_building_candidate(path))
+
+    def test_prop_words_match_whole_words_only(self):
+        # "cow" inside "moscow", "stall" inside "installation", "column"
+        # inside "columbus" must not reject real buildings.
+        for path in (
+            "ruscenery/houses/moscow_block.obj",
+            "ff_library/industrial/installation_hall.obj",
+            "objects/houses/US/OH/columbus_house.obj",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(BLD._is_optional_library_building_candidate(path))
+
+    def test_prop_folder_names_do_not_reject(self):
+        self.assertTrue(
+            BLD._is_optional_library_building_candidate("ruscenery/bench/houses/house-01.obj")
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

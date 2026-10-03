@@ -5,7 +5,7 @@ Created: 2026-06-25
 > **Status 2026-07-02: reverted to native-ZL inference by default.** The
 > ZL16-analysis downsample is no longer the default path; trained YOLO runs on
 > the native-resolution texture at every zoom level. The downsample machinery
-> is kept behind `O4_SFR_BLD_YOLO_ANALYSIS_ZL=<zl>` for A/B comparisons. In the
+> is kept behind `O4_BLD_YOLO_ANALYSIS_ZL=<zl>` for A/B comparisons. In the
 > same change, cross-ZL double coverage (lower-ZL textures also covered by
 > higher-ZL textures) is excluded at the source, which removes the dominant
 > feed of the tile-wide placement dedup pass.
@@ -26,13 +26,13 @@ The model currently performs much better at ZL16 scale. Native ZL19 inference se
    - Therefore a fully covered ZL16 parent should not be assumed to exist.
 
 2. Current YOLO inference in Ortho4XP-SegFormer has an RGB/BGR bug.
-   - `run_texture_regression.py` and `O4_SFR_Building_Overlay.py` pass RGB NumPy arrays to Ultralytics.
+   - `run_texture_regression.py` and `O4_Building_Overlay.py` pass RGB NumPy arrays to Ultralytics.
    - Ultralytics treats NumPy arrays as OpenCV/BGR.
    - The training project uses PIL/path input, so it feeds RGB correctly.
    - Fix: either pass PIL images, or convert RGB arrays to BGR before `model.predict()`.
 
 3. Production YOLO cap is too low for dense building textures.
-   - `src/O4_SFR_Building_Overlay.py` has `DEFAULT_YOLO_OBB_MAX_DET = 1000`.
+   - `src/O4_Building_Overlay.py` has `DEFAULT_YOLO_OBB_MAX_DET = 1000`.
    - Dense ZL16-equivalent city chips can exceed this.
    - Raise default to at least `3000`; for high-recall `conf=0.05`, consider `100000` or expose a clear setting.
 
@@ -46,7 +46,7 @@ For each building-overlay source area, create or reuse a ZL16-scale analysis ima
 - If only higher-ZL children exist, stitch/downsample them into a ZL16-equivalent image.
 - Never overwrite or delete Ortho4XP scenery textures.
 - Store derived images under a cache path such as:
-  - `tmp/sfr_yolo_zl16_cache/<tile_label>/...`
+  - `tmp/yolo_zl16_cache/<tile_label>/...`
   - or a project/tile cache directory if preferred for production reuse.
 
 The production scenery can remain high-ZL. Only the YOLO building detector should see the ZL16-scale analysis image.
@@ -58,7 +58,7 @@ The production scenery can remain high-ZL. Only the YOLO building detector shoul
 Patch these paths:
 
 - `.agents/skills/ortho4xp-yolo-obb-training/scripts/run_texture_regression.py`
-- `src/O4_SFR_Building_Overlay.py`
+- `src/O4_Building_Overlay.py`
 
 Where a PIL/RGB crop is converted to NumPy and passed to `model.predict()`, use one of:
 
@@ -80,7 +80,7 @@ Then pass `crop_bgr` to Ultralytics.
 
 Patch:
 
-- `src/O4_SFR_Building_Overlay.py`
+- `src/O4_Building_Overlay.py`
 
 Change:
 
@@ -133,7 +133,7 @@ Important: keep georeferencing metadata so detections can map back to the origin
 
 Patch:
 
-- `src/O4_SFR_Building_Overlay.py`
+- `src/O4_Building_Overlay.py`
 
 When `yolo_enabled` is true:
 

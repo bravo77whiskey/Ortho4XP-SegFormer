@@ -16,7 +16,7 @@ import subprocess
 
 import O4_File_Names as FNAMES
 import O4_UI_Utils as UI
-from O4_SFR_DSF_Utils import resolve_custom_scenery_dir
+from O4_Scenery_Packs import resolve_custom_scenery_dir
 
 LINK_PREFIX = "zOrtho4XP_"
 OVERLAY_LINK_NAME = "yOrtho4XP_Overlays"

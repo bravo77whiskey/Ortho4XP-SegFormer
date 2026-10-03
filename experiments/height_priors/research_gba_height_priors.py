@@ -45,7 +45,7 @@ CLASS_LABELS = {
     8: "extra-large footprint",
 }
 
-# Mirrors O4_SFR_Building_Overlay._class_for_footprint().
+# Mirrors O4_Building_Overlay._class_for_footprint().
 TINY_MAX_M2 = 90.0
 SMALL_MAX_M2 = 170.0
 COMPACT_MAX_M2 = 270.0
@@ -466,7 +466,7 @@ def write_report(
         "of byte ranges rather than downloading the 36 TB archive.",
         "",
         "The tables use the exact eight footprint classes in "
-        "`O4_SFR_Building_Overlay.py`. Mean is the requested statistic; median "
+        "`O4_Building_Overlay.py`. Mean is the requested statistic; median "
         "is the safer fallback prior for the skewed height distribution. P99 plus "
         "the published continental GBA height RMSE, rounded up "
         "to 5 m, is shown as a conservative hard ceiling candidate.",

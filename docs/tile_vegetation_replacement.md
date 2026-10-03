@@ -7,10 +7,10 @@ Two settings drive it, both per tile with a saved global default:
 
 | Setting | Short name | Effect |
 |---|---|---|
-| `sfr_veg_exclude_lower_forests` | `sfr_veg_excl_for` | Replace lower-priority forests throughout the tile |
-| `sfr_veg_remove_embedded_trees` | `sfr_veg_rm_trees` | Also remove supported embedded trees from lower-priority scenery |
+| `veg_exclude_lower_forests` | `veg_excl_for` | Replace lower-priority forests throughout the tile |
+| `veg_remove_embedded_trees` | `veg_rm_trees` | Also remove supported embedded trees from lower-priority scenery |
 
-They appear in the **SegFormer Veg** column of both the tile config and the
+They appear in the **Vegetation overlay** column of both the tile config and the
 saved global config, and propagate through the GUI single-tile build, the batch
 build and the CLI. Embedded-tree removal needs forest replacement; on its own it
 is ignored, with a line in the log saying so.
@@ -37,7 +37,7 @@ never rearranges `scenery_packs.ini`.
 
 ### Forest-overlap avoidance is forced off
 
-`sfr_veg_avoid_simheaven_forests` keeps generated trees out of existing
+`veg_avoid_simheaven_forests` keeps generated trees out of existing
 simHeaven forests. With replacement on, those forests are then excluded, which
 would leave a bare hole exactly where each one was. For a replacement run the
 effective value is therefore `False`; the saved setting is not rewritten and
@@ -49,7 +49,7 @@ authored airport forest exclusions all keep working unchanged.
 
 `sim/exclude_for` only suppresses *forest polygons*. Trees a package draws some
 other way survive it: standalone tree objects, trees attached to road networks,
-trees baked into autogen blocks and strings. `sfr_veg_remove_embedded_trees`
+trees baked into autogen blocks and strings. `veg_remove_embedded_trees`
 deals with those.
 
 ### How embedded trees are removed
@@ -161,7 +161,7 @@ free space on every volume involved, and stops if it is short. Pass
 | DSFTool failure | Previous overlay left untouched; no cleanup starts |
 | Imagery missing or incomplete | Generation never reaches the write; nothing is installed |
 
-The overlay subprocess writes `veg_overlay_status.json` into the tile's SFR
+The overlay subprocess writes `veg_overlay_status.json` into the tile's overlay
 cache folder; that file, not the exit code, is what decides whether a tile-wide
 exclusion is installed.
 
@@ -250,12 +250,12 @@ each DSF**. It does not state what the tile looks like in X-Plane.
 | `src/O4_Cfg_Vars.py` | Settings, defaults, labels, help text, persistence |
 | `src/O4_GUI_Utils.py` | Passes tile settings into generation; restore and status actions |
 | `src/O4_Tile_Utils.py` | Carries the settings through batch generation |
-| `src/O4_SFR_Pipeline.py` | Coordinates generation, validation and cleanup |
-| `src/O4_SFR_Vegetation_Overlay.py` | Exclusion property, effective overlap behaviour, output lifecycle |
-| `src/O4_SFR_DSF_Edit.py` | Byte-level DSF header/definition edits and usage counting |
-| `src/O4_SFR_Veg_Cleanup.py` | Inventory, classification, private assets, backups, journal, restore |
+| `src/O4_Overlay_Pipeline.py` | Coordinates generation, validation and cleanup |
+| `src/O4_Vegetation_Overlay.py` | Exclusion property, effective overlap behaviour, output lifecycle |
+| `src/O4_DSF_Edit.py` | Byte-level DSF header/definition edits and usage counting |
+| `src/O4_Veg_Replacement.py` | Inventory, classification, private assets, backups, journal, restore |
 | `src/scripts/veg_tile_replacement.py` | CLI |
 
 Tests: `tests/veg_tile_replacement_test.py`,
-`tests/sfr_veg_tile_exclusion_test.py`,
-`tests/sfr_settings_propagation_test.py`.
+`tests/veg_tile_exclusion_test.py`,
+`tests/settings_propagation_test.py`.

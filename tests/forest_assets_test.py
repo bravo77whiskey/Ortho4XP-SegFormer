@@ -14,9 +14,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import O4_Forest_Assets as FOREST_ASSETS
-import O4_SFR_Climate_Regions as CLIMATE_REGIONS
-import O4_SFR_Vegetation_Overlay as SFR_VEG
-import O4_SFR_Inference as SEGFORMER
+import O4_Climate_Regions as CLIMATE_REGIONS
+import O4_Vegetation_Overlay as VEG_OVERLAY
+import O4_Landcover_Inference as SEGFORMER
 
 
 class _IndexRng:
@@ -42,7 +42,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 arr = SEGFORMER.load_dds_or_none(
                     str(ROOT / "missing.dds"),
-                    log_prefix="[SFR Veg]",
+                    log_prefix="[Veg]",
                     display_name="264000_315952_BI19.dds",
                 )
         self.assertIsNone(arr)
@@ -74,10 +74,10 @@ class ForestAssetPolicyTests(unittest.TestCase):
             self.assertNotIn(path, approved)
 
     def test_tree_candidates_are_simheaven_only(self):
-        candidates = SFR_VEG._short_tree_candidates("subtropical", 75)
+        candidates = VEG_OVERLAY._short_tree_candidates("subtropical", 75)
         self.assertTrue(candidates)
         self.assertTrue(all(path.startswith("simheaven/") for path in candidates))
-        northnorth = SFR_VEG._short_tree_candidates("northnorth", 75)
+        northnorth = VEG_OVERLAY._short_tree_candidates("northnorth", 75)
         self.assertIn(
             "simheaven/forests/mixed.for",
             northnorth,
@@ -118,7 +118,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
             )
             self.assertIn(choice, candidates)
 
-    def test_sfr_for_entry_emits_only_allowlisted_paths(self):
+    def test_for_entry_emits_only_allowlisted_paths(self):
         cases = (
             (SEGFORMER.CLASS_TREE, 0.80, "area", None),
             (SEGFORMER.CLASS_TREE, 0.35, "treeline", "tree_row_linear"),
@@ -131,7 +131,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
             rng = _IndexRng(rng_index)
             for region in regions:
                 for veg_cls, frac, shape, veg_type in cases:
-                    path, _density = SFR_VEG._for_entry(
+                    path, _density = VEG_OVERLAY._for_entry(
                         veg_cls,
                         frac,
                         shape,
@@ -147,7 +147,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
 
     def test_dense_area_tree_polygons_use_simheaven_assets_only(self):
         for rng_index in range(20):
-            path, _density = SFR_VEG._for_entry(
+            path, _density = VEG_OVERLAY._for_entry(
                 SEGFORMER.CLASS_TREE,
                 0.80,
                 "area",
@@ -183,9 +183,9 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 FOREST_ASSETS.normalize_simheaven_tree_path(path)
             )
 
-    def test_sfr_for_entry_uses_nearby_simheaven_tree_family(self):
+    def test_for_entry_uses_nearby_simheaven_tree_family(self):
         for rng_index in range(8):
-            path, _density = SFR_VEG._for_entry(
+            path, _density = VEG_OVERLAY._for_entry(
                 SEGFORMER.CLASS_TREE,
                 0.72,
                 "area",
@@ -206,7 +206,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            SFR_VEG._dominant_simheaven_tree_path(records),
+            VEG_OVERLAY._dominant_simheaven_tree_path(records),
             "simheaven/forests/mixed.for",
         )
 
@@ -220,7 +220,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            SFR_VEG._dominant_simheaven_tree_path(records),
+            VEG_OVERLAY._dominant_simheaven_tree_path(records),
             "simheaven/forests/coni.for",
         )
 
@@ -231,7 +231,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            SFR_VEG._dominant_simheaven_tree_path(records),
+            VEG_OVERLAY._dominant_simheaven_tree_path(records),
             "simheaven/forests/broad.for",
         )
 
@@ -242,7 +242,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
             {"path": None},
         ]
 
-        self.assertIsNone(SFR_VEG._dominant_simheaven_tree_path(records))
+        self.assertIsNone(VEG_OVERLAY._dominant_simheaven_tree_path(records))
 
     def test_climate_mode_does_not_call_simheaven_type_hint_mapping(self):
         mask = np.zeros((20, 20), dtype=np.uint8)
@@ -253,7 +253,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
             "simheaven_type_hint_candidates",
             side_effect=AssertionError("simHeaven type mapping should be disabled"),
         ):
-            polygons = SFR_VEG._process_dds_mask(
+            polygons = VEG_OVERLAY._process_dds_mask(
                 mask,
                 SEGFORMER.CLASS_TREE,
                 img_w=20,
@@ -283,7 +283,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         mask[2:16, 2:16] = 255
         mask[22:36, 22:36] = 255
 
-        polygons = SFR_VEG._process_dds_mask(
+        polygons = VEG_OVERLAY._process_dds_mask(
             mask,
             SEGFORMER.CLASS_TREE,
             img_w=40,
@@ -316,7 +316,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         resolver = mock.Mock()
         resolver.resolve.return_value = "simheaven/forests/mixed.for"
 
-        polygons = SFR_VEG._process_dds_mask(
+        polygons = VEG_OVERLAY._process_dds_mask(
             mask,
             SEGFORMER.CLASS_TREE,
             img_w=40,
@@ -354,13 +354,13 @@ class ForestAssetPolicyTests(unittest.TestCase):
         ]
 
         with mock.patch.object(sys, "argv", argv):
-            args = SFR_VEG.parse_args()
+            args = VEG_OVERLAY.parse_args()
 
         self.assertFalse(args.no_simheaven_asset_proximity)
 
     def test_managed_tree_context_uses_simheaven(self):
         for rng_index in range(80):
-            path, _density = SFR_VEG._for_entry(
+            path, _density = VEG_OVERLAY._for_entry(
                 SEGFORMER.CLASS_TREE,
                 0.55,
                 "area",
@@ -410,8 +410,8 @@ class ForestAssetPolicyTests(unittest.TestCase):
             10.0,
         )
 
-        key_a = SFR_VEG._dds_mask_cache_key(*base_args, ("mesh-a", 10, 20))
-        key_b = SFR_VEG._dds_mask_cache_key(*base_args, ("mesh-b", 10, 20))
+        key_a = VEG_OVERLAY._dds_mask_cache_key(*base_args, ("mesh-a", 10, 20))
+        key_b = VEG_OVERLAY._dds_mask_cache_key(*base_args, ("mesh-b", 10, 20))
 
         self.assertNotEqual(key_a, key_b)
         self.assertEqual(key_a["version"], 4)
@@ -433,26 +433,26 @@ class ForestAssetPolicyTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "x_vegaux.pkl")
-            SFR_VEG._save_dds_mask_cache(path, key, payload)
-            loaded = SFR_VEG._load_dds_mask_cache(path, key)
-            self.assertIsNone(SFR_VEG._load_dds_mask_cache(path, {"version": 3}))
+            VEG_OVERLAY._save_dds_mask_cache(path, key, payload)
+            loaded = VEG_OVERLAY._load_dds_mask_cache(path, key)
+            self.assertIsNone(VEG_OVERLAY._load_dds_mask_cache(path, {"version": 3}))
         np.testing.assert_array_equal(loaded["road_excl"], road)
         self.assertEqual(loaded["road_excl"].dtype, np.uint8)
         self.assertIsNone(loaded["bld_excl_mask"])
         np.testing.assert_array_equal(loaded["forest_excl_mask"], odd)
         np.testing.assert_array_equal(loaded["context_masks"]["residential"], resid)
         self.assertIsNone(loaded["context_masks"]["forest"])
-        packed = SFR_VEG._pack_cache_mask(road)
+        packed = VEG_OVERLAY._pack_cache_mask(road)
         self.assertEqual(packed["__bits__"].nbytes, (road.size + 7) // 8)
 
     def test_building_exclusion_reads_nested_placements(self):
         obj = (120.4, 22.8, 271.2, "lib/garden/pools/pool_Small_7x10.obj")
         nested = {"params": (), "source": "direct_yolo",
                   "placements": {"objects": [obj], "facades": []}}
-        self.assertEqual(list(SFR_VEG._bld_cache_objects(nested)), [obj])
-        self.assertEqual(list(SFR_VEG._bld_cache_objects({"objects": [obj]})), [obj])
-        self.assertEqual(list(SFR_VEG._bld_cache_objects({"placements": {}})), [])
-        self.assertEqual(list(SFR_VEG._bld_cache_objects(None)), [])
+        self.assertEqual(list(VEG_OVERLAY._bld_cache_objects(nested)), [obj])
+        self.assertEqual(list(VEG_OVERLAY._bld_cache_objects({"objects": [obj]})), [obj])
+        self.assertEqual(list(VEG_OVERLAY._bld_cache_objects({"placements": {}})), [])
+        self.assertEqual(list(VEG_OVERLAY._bld_cache_objects(None)), [])
 
     def test_vegetation_aux_cache_key_tracks_exclusion_zones(self):
         base_args = (
@@ -477,8 +477,8 @@ class ForestAssetPolicyTests(unittest.TestCase):
             ("mesh-a", 10, 20),
         )
 
-        key_a = SFR_VEG._dds_mask_cache_key(*base_args, excl_zone_sig=(0, 0, 0.0, 0))
-        key_b = SFR_VEG._dds_mask_cache_key(*base_args, excl_zone_sig=(1, 4, 3.5, 7))
+        key_a = VEG_OVERLAY._dds_mask_cache_key(*base_args, excl_zone_sig=(0, 0, 0.0, 0))
+        key_b = VEG_OVERLAY._dds_mask_cache_key(*base_args, excl_zone_sig=(1, 4, 3.5, 7))
 
         self.assertNotEqual(key_a, key_b)
 
@@ -503,29 +503,29 @@ class ForestAssetPolicyTests(unittest.TestCase):
             "Csa",
         )
 
-        climate_key = SFR_VEG._dds_polygon_cache_key(
+        climate_key = VEG_OVERLAY._dds_polygon_cache_key(
             *base_args,
             asset_selection_mode="simheaven_climate_v1",
             forest_type_source_path=None,
         )
-        dominant_key = SFR_VEG._dds_polygon_cache_key(
+        dominant_key = VEG_OVERLAY._dds_polygon_cache_key(
             *base_args,
             asset_selection_mode="simheaven_tile_dominant",
             forest_type_source_path="simheaven/forests/broad.for",
         )
-        other_dominant_key = SFR_VEG._dds_polygon_cache_key(
+        other_dominant_key = VEG_OVERLAY._dds_polygon_cache_key(
             *base_args,
             asset_selection_mode="simheaven_tile_dominant",
             forest_type_source_path="simheaven/forests/mixed.for",
         )
 
-        closest_key = SFR_VEG._dds_polygon_cache_key(
+        closest_key = VEG_OVERLAY._dds_polygon_cache_key(
             *base_args,
             asset_selection_mode="simheaven_closest_v1",
             forest_type_source_path="simheaven/forests/broad.for",
             forest_type_sig=(12, 34, 5.6, 78),
         )
-        covered_key = SFR_VEG._dds_polygon_cache_key(
+        covered_key = VEG_OVERLAY._dds_polygon_cache_key(
             *base_args,
             asset_selection_mode="simheaven_climate_v1",
             forest_type_source_path=None,
@@ -547,7 +547,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
             {"path": "simheaven/forests/broad.for"},
         ] * 2
         self.assertEqual(
-            SFR_VEG._dominant_simheaven_tree_path(records),
+            VEG_OVERLAY._dominant_simheaven_tree_path(records),
             "simheaven/forests/mixed.for",
         )
 
@@ -555,7 +555,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         records = [
             {"path": "simheaven/forests/orchard.for"},
         ] * 10
-        self.assertIsNone(SFR_VEG._dominant_simheaven_tree_path(records))
+        self.assertIsNone(VEG_OVERLAY._dominant_simheaven_tree_path(records))
 
     def test_simheaven_type_resolver_prefers_nearest_tree_polygon(self):
         records = [
@@ -572,7 +572,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 "_bounds": (23.0, 23.3, 119.0, 119.3),
             },
         ]
-        resolver = SFR_VEG._SimHeavenTypeResolver(
+        resolver = VEG_OVERLAY._SimHeavenTypeResolver(
             records,
             dominant_path="simheaven/forests/mixed.for",
             tile_lat=23,
@@ -594,7 +594,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
                 "_bounds": (23.0, 23.001, 119.0, 119.001),
             },
         ]
-        resolver = SFR_VEG._SimHeavenTypeResolver(
+        resolver = VEG_OVERLAY._SimHeavenTypeResolver(
             records,
             dominant_path="simheaven/forests/mixed.for",
             tile_lat=23,
@@ -607,7 +607,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         )
 
     def test_simheaven_type_resolver_empty_records_returns_dominant(self):
-        resolver = SFR_VEG._SimHeavenTypeResolver(
+        resolver = VEG_OVERLAY._SimHeavenTypeResolver(
             [],
             "simheaven/forests/mixed.for",
             tile_lat=23,
@@ -621,11 +621,11 @@ class ForestAssetPolicyTests(unittest.TestCase):
         lhs = None
         rhs = np.zeros((3, 3), dtype=np.uint8)
         rhs[1, 1] = 1
-        self.assertIs(SFR_VEG._or_optional_masks(lhs, rhs), rhs)
+        self.assertIs(VEG_OVERLAY._or_optional_masks(lhs, rhs), rhs)
 
         lhs = np.zeros((3, 3), dtype=np.uint8)
         lhs[0, 0] = 1
-        combined = SFR_VEG._or_optional_masks(lhs, rhs)
+        combined = VEG_OVERLAY._or_optional_masks(lhs, rhs)
         self.assertEqual(int(combined.sum()), 2)
 
 

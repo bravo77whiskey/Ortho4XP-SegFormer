@@ -3,12 +3,12 @@
 Checks per OBJ:
   * measured VT footprint bounds match manifest dims within --tol (default
     0.05 m) and are centered within 1 cm (mirrors _read_obj8_bounds /
-    _required_centered_dimensions_for_bounds in O4_SFR_Building_Overlay);
+    _required_centered_dimensions_for_bounds in O4_Building_Overlay);
   * triangle count within budget;
   * exactly one TEXTURE directive pointing at an existing atlas PNG.
 
 Checks per virtual path (importing the REAL token tuples from
-O4_SFR_Building_Overlay so this can never drift):
+O4_Building_Overlay so this can never drift):
   * passes _is_optional_library_building_candidate;
   * not rejected as special landmark / very tall;
   * height parses to floors * 3.2.
@@ -73,7 +73,7 @@ def main(argv=None) -> int:
                         help="Only verify OBJs that exist (partial builds).")
     args = parser.parse_args(argv)
 
-    import O4_SFR_Building_Overlay as overlay
+    import O4_Building_Overlay as overlay
 
     with open(args.manifest, "r", encoding="utf-8") as fh:
         manifest = json.load(fh)

@@ -41,7 +41,8 @@ PRESERVE = {
     "Elevation_data",
     "Geotiffs",
     "tmp",
-    "SFR_cache",
+    "Overlay_cache",
+    "SFR_cache",       # pre-rename name of Overlay_cache, still used if present
     "Ortho4XP.cfg",
     ".last_gui_params.txt",
     "build_state",     # unfinished batch build journals - survive a rebuild
@@ -141,9 +142,14 @@ print(f"\nUpdated  ({len(copied)} items): {', '.join(sorted(copied))}")
 if skipped:
     print(f"Skipped  ({len(skipped)} items — user data): {', '.join(sorted(skipped))}")
 
+# Earlier builds put the loose overlay modules in other places, and before the
+# rename the folder was called sfr_scripts.
 stale_script_dirs = [
+    os.path.join(DIST_DIR, "_internal", "sfr_scripts"),
     os.path.join(DIST_DIR, "_internal", "Ortho4XP_Data", "sfr_scripts"),
+    os.path.join(DIST_DIR, "_internal", "Ortho4XP_Data", "overlay_scripts"),
     os.path.join(DIST_DIR, "_internal", "_internal", "sfr_scripts"),
+    os.path.join(DIST_DIR, "_internal", "_internal", "overlay_scripts"),
 ]
 removed_stale = []
 for stale_dir in stale_script_dirs:
@@ -151,6 +157,6 @@ for stale_dir in stale_script_dirs:
         shutil.rmtree(stale_dir)
         removed_stale.append(os.path.relpath(stale_dir, DIST_DIR))
 if removed_stale:
-    print(f"Removed stale bundled SFR scripts: {', '.join(removed_stale)}")
+    print(f"Removed stale bundled overlay scripts: {', '.join(removed_stale)}")
 
 print(f"\nDone.  Exe ready at:  {os.path.join(DIST_DIR, 'Ortho4XP.exe')}")

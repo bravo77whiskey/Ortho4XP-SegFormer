@@ -24,7 +24,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_Building_Overlay as BLD  # noqa: E402
+import O4_Building_Overlay as BLD  # noqa: E402
 
 
 def _coarse_group(family_prefix: str, depth: int = 3) -> str:

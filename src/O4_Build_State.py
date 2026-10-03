@@ -37,8 +37,8 @@ STEPS = (
     "mask",
     "dsf",
     "ovl",
-    "sfr_bld",
-    "sfr_veg",
+    "bld_overlay",
+    "veg_overlay",
 )
 
 STEP_LABELS = {
@@ -47,8 +47,14 @@ STEP_LABELS = {
     "mask": "Draw water masks",
     "dsf": "Build imagery/DSF",
     "ovl": "Extract overlays",
-    "sfr_bld": "SegFormer Bld",
-    "sfr_veg": "SegFormer Veg",
+    "bld_overlay": "Building overlay",
+    "veg_overlay": "Vegetation overlay",
+}
+
+# Step keys written by builds from before the overlay steps were renamed.
+_RENAMED_STEPS = {
+    "sfr_bld": "bld_overlay",
+    "sfr_veg": "veg_overlay",
 }
 
 # The owner touches its journal on this cadence. Only consulted when psutil is
@@ -198,6 +204,17 @@ def _read(path):
         return None
     if not state.get("tiles") or not state.get("steps"):
         return None
+    return _rename_legacy_steps(state)
+
+
+def _rename_legacy_steps(state):
+    """Translate pre-rename step keys so an older journal can still resume."""
+    state["steps"] = [_RENAMED_STEPS.get(step, step) for step in state["steps"]]
+    progress = state.get("progress")
+    if isinstance(progress, dict):
+        for key, done in progress.items():
+            if isinstance(done, list):
+                progress[key] = [_RENAMED_STEPS.get(step, step) for step in done]
     return state
 
 

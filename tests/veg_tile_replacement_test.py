@@ -19,8 +19,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_DSF_Edit as DSFEDIT
-import O4_SFR_Veg_Cleanup as CLEANUP
+import O4_DSF_Edit as DSFEDIT
+import O4_Veg_Replacement as CLEANUP
 
 
 # ── synthetic assets ─────────────────────────────────────────────────────────
@@ -785,7 +785,7 @@ class BatchDeleteRestoreTests(unittest.TestCase):
 
     def test_a_tile_with_nothing_recorded_is_skipped_silently(self):
         source = self._gui_source()
-        self.assertIn("if not SFR.has_veg_tile_replacement(lat, lon):", source)
+        self.assertIn("if not PIPELINE.has_veg_tile_replacement(lat, lon):", source)
         self.assertIn('summary["skipped"] += 1', source)
 
     def test_an_unresolved_conflict_is_raised_to_a_dialog(self):

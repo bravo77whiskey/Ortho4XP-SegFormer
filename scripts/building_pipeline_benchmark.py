@@ -1,6 +1,6 @@
-"""Run the real SFR building overlay pipeline as a speed benchmark.
+"""Run the real building overlay pipeline as a speed benchmark.
 
-This is intentionally not a unit test. It calls O4_SFR_Building_Overlay.run()
+This is intentionally not a unit test. It calls O4_Building_Overlay.run()
 with cache disabled by default so timings include the production DDS load,
 model inference, road/exclusion masks, heading grid, placement, DSF text, and
 DSFTool compile when available.
@@ -23,7 +23,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 DEFAULT_DEPLOYED_PYTHON = Path(os.environ.get(
-    "O4_SFR_BENCH_PYTHON",
+    "O4_BENCH_PYTHON",
     r"G:\Dev\Ortho4XP\.venv\Scripts\python.exe",
 ))
 
@@ -35,7 +35,7 @@ def _cfg_custom_scenery_dir() -> Path | None:
     """Return custom_scenery_dir from the repo's Ortho4XP.cfg, if usable.
 
     This is what production tile builds pass to the overlay
-    (O4_SFR_Pipeline._scenery_paths), so the benchmark should default to the
+    (O4_Overlay_Pipeline._scenery_paths), so the benchmark should default to the
     same directory instead of inferring one from the tile path -- tile
     folders are commonly junctions whose resolved parent is NOT the real
     Custom Scenery (no scenery_packs.ini, no libraries).
@@ -87,7 +87,7 @@ def _tile_name(lat: int, lon: int) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark the real SFR building generation path."
+        description="Benchmark the real building generation path."
     )
     parser.add_argument(
         "dds_or_tex_dir",
@@ -188,7 +188,7 @@ def main() -> int:
     if args.lon is not None:
         lon = args.lon
 
-    bench_root = ROOT / "tmp" / "bench_sfr_building" / _tile_name(lat, lon)
+    bench_root = ROOT / "tmp" / "bench_building" / _tile_name(lat, lon)
     cache_dir = Path(args.cache_dir).resolve() if args.cache_dir else bench_root / "cache"
     out_dsf = Path(args.out_dsf).resolve() if args.out_dsf else bench_root / "out" / f"{_tile_name(lat, lon)}.dsf"
     if args.custom_scenery_dir:
@@ -207,20 +207,20 @@ def main() -> int:
     cache_dir.mkdir(parents=True, exist_ok=True)
     out_dsf.parent.mkdir(parents=True, exist_ok=True)
 
-    old_detail = os.environ.get("O4_SFR_TIMING_DETAIL")
-    old_slow = os.environ.get("O4_SFR_TIMING_SLOW")
-    old_filter = os.environ.get("O4_SFR_FILE_FILTER")
-    os.environ["O4_SFR_TIMING_DETAIL"] = "1"
-    os.environ["O4_SFR_TIMING_SLOW"] = "0"
+    old_detail = os.environ.get("O4_OVERLAY_TIMING_DETAIL")
+    old_slow = os.environ.get("O4_OVERLAY_TIMING_SLOW")
+    old_filter = os.environ.get("O4_OVERLAY_FILE_FILTER")
+    os.environ["O4_OVERLAY_TIMING_DETAIL"] = "1"
+    os.environ["O4_OVERLAY_TIMING_SLOW"] = "0"
     if args.file_filter:
-        os.environ["O4_SFR_FILE_FILTER"] = args.file_filter
+        os.environ["O4_OVERLAY_FILE_FILTER"] = args.file_filter
     elif selected_file and not args.full_tile:
-        os.environ["O4_SFR_FILE_FILTER"] = selected_file
-    elif "O4_SFR_FILE_FILTER" in os.environ:
-        del os.environ["O4_SFR_FILE_FILTER"]
+        os.environ["O4_OVERLAY_FILE_FILTER"] = selected_file
+    elif "O4_OVERLAY_FILE_FILTER" in os.environ:
+        del os.environ["O4_OVERLAY_FILE_FILTER"]
 
     try:
-        import O4_SFR_Building_Overlay as bld
+        import O4_Building_Overlay as bld
 
         print("[bench] real building pipeline")
         print(f"[bench] python={sys.executable}")
@@ -273,17 +273,17 @@ def main() -> int:
         print(f"[bench] total wall={time.perf_counter() - t0:.2f}s")
     finally:
         if old_detail is None:
-            os.environ.pop("O4_SFR_TIMING_DETAIL", None)
+            os.environ.pop("O4_OVERLAY_TIMING_DETAIL", None)
         else:
-            os.environ["O4_SFR_TIMING_DETAIL"] = old_detail
+            os.environ["O4_OVERLAY_TIMING_DETAIL"] = old_detail
         if old_slow is None:
-            os.environ.pop("O4_SFR_TIMING_SLOW", None)
+            os.environ.pop("O4_OVERLAY_TIMING_SLOW", None)
         else:
-            os.environ["O4_SFR_TIMING_SLOW"] = old_slow
+            os.environ["O4_OVERLAY_TIMING_SLOW"] = old_slow
         if old_filter is None:
-            os.environ.pop("O4_SFR_FILE_FILTER", None)
+            os.environ.pop("O4_OVERLAY_FILE_FILTER", None)
         else:
-            os.environ["O4_SFR_FILE_FILTER"] = old_filter
+            os.environ["O4_OVERLAY_FILE_FILTER"] = old_filter
 
     return 0
 

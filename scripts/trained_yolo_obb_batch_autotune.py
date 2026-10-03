@@ -6,7 +6,7 @@ pipeline defaults; it reports whether a faster batch size is exact-parity safe
 or only visually comparable to batch=1.
 
 Run with pipeline-matched parameters (the defaults below mirror
-DEFAULT_YOLO_OBB_* in O4_SFR_Building_Overlay.py).
+DEFAULT_YOLO_OBB_* in O4_Building_Overlay.py).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ if str(SCRIPTS) not in sys.path:
 
 import stock_yolo_batch_autotune as SAB
 
-import O4_SFR_Building_Overlay as BLD
+import O4_Building_Overlay as BLD
 
 
 def _jsonable(value: Any) -> Any:

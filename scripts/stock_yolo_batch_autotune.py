@@ -25,7 +25,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_Stock_Yolo_Objects as STOCK
+import O4_Stock_Yolo_Objects as STOCK
 
 
 DEFAULT_IMAGES = (

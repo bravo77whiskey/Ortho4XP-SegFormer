@@ -18,7 +18,7 @@ try:
 except ImportError:  # pragma: no cover - exercised only in minimal envs
     torch = None
 
-import O4_SFR_Height_Model as HEIGHT
+import O4_Height_Model as HEIGHT
 
 
 @unittest.skipIf(torch is None, "torch is not installed")
@@ -37,10 +37,10 @@ class HeightModelLoaderTests(unittest.TestCase):
 
             model = HEIGHT.load_height_model(str(checkpoint), device="cpu")
 
-            self.assertEqual(model._sfr_heightnet_head_layout, "legacy")
-            self.assertEqual(model._sfr_heightnet_arch, "v1-legacy")
-            self.assertEqual(model._sfr_crop_px, HEIGHT.CROP_PX)
-            self.assertEqual(model._sfr_scalar_layout, "legacy-log10")
+            self.assertEqual(model._o4_heightnet_head_layout, "legacy")
+            self.assertEqual(model._o4_heightnet_arch, "v1-legacy")
+            self.assertEqual(model._o4_crop_px, HEIGHT.CROP_PX)
+            self.assertEqual(model._o4_scalar_layout, "legacy-log10")
             self.assertIsInstance(model.head[2], torch.nn.Linear)
 
     def test_load_height_model_accepts_dropout_head_checkpoint(self):
@@ -50,10 +50,10 @@ class HeightModelLoaderTests(unittest.TestCase):
 
             model = HEIGHT.load_height_model(str(checkpoint), device="cpu")
 
-            self.assertEqual(model._sfr_heightnet_head_layout, "dropout")
-            self.assertEqual(model._sfr_heightnet_arch, "v1-legacy")
-            self.assertEqual(model._sfr_crop_px, HEIGHT.CROP_PX)
-            self.assertEqual(model._sfr_scalar_layout, "legacy-log10")
+            self.assertEqual(model._o4_heightnet_head_layout, "dropout")
+            self.assertEqual(model._o4_heightnet_arch, "v1-legacy")
+            self.assertEqual(model._o4_crop_px, HEIGHT.CROP_PX)
+            self.assertEqual(model._o4_scalar_layout, "legacy-log10")
             self.assertIsInstance(model.head[2], torch.nn.Dropout)
             self.assertIsInstance(model.head[3], torch.nn.Linear)
 
@@ -83,10 +83,10 @@ class HeightModelLoaderTests(unittest.TestCase):
                 model = HEIGHT.load_height_model(str(checkpoint), device="cpu")
 
         build.assert_called_once_with(backbone="small")
-        self.assertEqual(model._sfr_heightnet_arch, "v2s")
-        self.assertEqual(model._sfr_crop_px, 128)
-        self.assertEqual(model._sfr_scalar_layout, "v2-normalized-ln")
-        self.assertEqual(model._sfr_heightnet_head_layout, "ordinal")
+        self.assertEqual(model._o4_heightnet_arch, "v2s")
+        self.assertEqual(model._o4_crop_px, 128)
+        self.assertEqual(model._o4_scalar_layout, "v2-normalized-ln")
+        self.assertEqual(model._o4_heightnet_head_layout, "ordinal")
 
     def test_load_height_model_maps_v2_to_tiny_backbone(self):
         class TinyV2(torch.nn.Module):
@@ -114,8 +114,8 @@ class HeightModelLoaderTests(unittest.TestCase):
                 model = HEIGHT.load_height_model(str(checkpoint), device="cpu")
 
         build.assert_called_once_with(backbone="tiny")
-        self.assertEqual(model._sfr_heightnet_arch, "v2")
-        self.assertEqual(model._sfr_crop_px, 112)
+        self.assertEqual(model._o4_heightnet_arch, "v2")
+        self.assertEqual(model._o4_crop_px, 112)
 
     def test_load_height_model_rejects_unknown_architecture(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,9 +178,9 @@ class HeightModelLoaderTests(unittest.TestCase):
                 super().__init__()
                 self.shapes = []
                 self.scalars = []
-                self._sfr_device = "cpu"
-                self._sfr_crop_px = 128
-                self._sfr_scalar_layout = "v2-normalized-ln"
+                self._o4_device = "cpu"
+                self._o4_crop_px = 128
+                self._o4_scalar_layout = "v2-normalized-ln"
 
             def forward(self, image, scalars):
                 self.shapes.append(tuple(image.shape))

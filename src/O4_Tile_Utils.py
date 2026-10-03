@@ -5,6 +5,7 @@ import queue
 import threading
 from collections import defaultdict
 import O4_UI_Utils as UI
+import O4_Cfg_Vars as CFGVARS
 import O4_File_Names as FNAMES
 import O4_Imagery_Utils as IMG
 import O4_Vector_Map as VMAP
@@ -12,7 +13,7 @@ import O4_Mesh_Utils as MESH
 import O4_Mask_Utils as MASK
 import O4_DSF_Utils as DSF
 import O4_Overlay_Utils as OVL
-import O4_SFR_Pipeline as SFR
+import O4_Overlay_Pipeline as PIPELINE
 import O4_Scenery_Links as SLINK
 import O4_Build_State as BSTATE
 from O4_Parallel_Utils import parallel_launch, parallel_join
@@ -377,12 +378,12 @@ def _end_journal_on_stop():
 ################################################################################
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume_path=None
+    do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None
 ):
     try:
         return _build_tile_list(
             tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-            do_sfr_bld, do_sfr_veg, override_cfg, resume_path,
+            do_bld_overlay, do_veg_overlay, override_cfg, resume_path,
         )
     finally:
         # However this ended - finished, stopped, or an error nobody caught -
@@ -393,7 +394,7 @@ def build_tile_list(
 ################################################################################
 def _build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-    do_sfr_bld=False, do_sfr_veg=False, override_cfg=False, resume_path=None
+    do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None
 ):
     if UI.is_working:
         return 0
@@ -408,8 +409,8 @@ def _build_tile_list(
         "mask": bool(do_mask),
         "dsf": bool(do_dsf),
         "ovl": bool(do_ovl),
-        "sfr_bld": bool(do_sfr_bld),
-        "sfr_veg": bool(do_sfr_veg),
+        "bld_overlay": bool(do_bld_overlay),
+        "veg_overlay": bool(do_veg_overlay),
     }
     BSTATE.begin(
         list_lat_lon,
@@ -457,7 +458,7 @@ def _build_tile_list(
         )
         UI.lvprint(1, f"[Batch] Steps: osm={do_osm} mesh={do_mesh} mask={do_mask} "
                    f"dsf={do_dsf} ovl={do_ovl} "
-                   f"sfr_veg={do_sfr_veg} sfr_bld={do_sfr_bld}")
+                   f"veg_overlay={do_veg_overlay} bld_overlay={do_bld_overlay}")
         (tile.lat, tile.lon) = (lat, lon)
         tile.build_dir = FNAMES.build_dir(
             tile.lat, tile.lon, tile.custom_build_dir
@@ -523,85 +524,42 @@ def _build_tile_list(
                 return 0
             if done:
                 BSTATE.mark_done(lat, lon, "ovl")
-        if do_sfr_bld and not BSTATE.is_done(lat, lon, "sfr_bld"):
+        if do_bld_overlay and not BSTATE.is_done(lat, lon, "bld_overlay"):
             UI.check_pause()
-            UI.lvprint(0, f"\nSegFormer Bld overlay for "
+            UI.lvprint(0, f"\nBuilding overlay for "
                        f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
-            SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
-            SFR.sfr_bld_close_m     = tile.sfr_bld_close_m
-            SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
-            SFR.sfr_bld_min_footprint_m2 = tile.sfr_bld_min_footprint_m2
-            SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
-            SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
-            SFR.sfr_bld_verbose_log = tile.sfr_bld_verbose_log
-            SFR.sfr_bld_avoid_custom_scenery = tile.sfr_bld_avoid_custom_scenery
-            SFR.sfr_bld_asset_mode = tile.sfr_bld_asset_mode
-            SFR.sfr_bld_roof_color_matching = tile.sfr_bld_roof_color_matching
-            SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
-            SFR.sfr_bld_yolo_checkpoint = tile.sfr_bld_yolo_checkpoint
-            SFR.sfr_bld_yolo_conf = tile.sfr_bld_yolo_conf
-            SFR.sfr_bld_yolo_iou = tile.sfr_bld_yolo_iou
-            SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
-            SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
-            SFR.sfr_bld_yolo_min_coverage = tile.sfr_bld_yolo_min_coverage
-            SFR.sfr_bld_height_checkpoint = tile.sfr_bld_height_checkpoint
-            SFR.sfr_patch_size      = tile.sfr_patch_size
-            SFR.sfr_overlap         = tile.sfr_overlap
-            SFR.sfr_batch_size      = tile.sfr_batch_size
+            PIPELINE.apply_tile_settings(tile, CFGVARS.list_bld_pipeline_vars)
             done = True
             try:
-                SFR.process_bld_tile(tile.lat, tile.lon, tile.build_dir)
+                PIPELINE.process_bld_tile(tile.lat, tile.lon, tile.build_dir)
             except Exception as exc:
                 done = False
-                UI.lvprint(0, f"[SFR] SegFormer bld overlay failed for "
+                UI.lvprint(0, f"[Overlay] Building overlay failed for "
                            f"{FNAMES.short_latlon(lat, lon)}: {exc}")
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
-                BSTATE.mark_done(lat, lon, "sfr_bld")
-        if do_sfr_veg and not BSTATE.is_done(lat, lon, "sfr_veg"):
+                BSTATE.mark_done(lat, lon, "bld_overlay")
+        if do_veg_overlay and not BSTATE.is_done(lat, lon, "veg_overlay"):
             UI.check_pause()
-            UI.lvprint(0, f"\nSegFormer Veg overlay for "
+            UI.lvprint(0, f"\nVegetation overlay for "
                        f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
-            SFR.sfr_veg_density       = tile.sfr_veg_density
-            SFR.sfr_veg_close_m       = tile.sfr_veg_close_m
-            SFR.sfr_veg_open_m        = tile.sfr_veg_open_m
-            SFR.sfr_veg_min_area_m2   = tile.sfr_veg_min_area_m2
-            SFR.sfr_veg_simplify_m    = tile.sfr_veg_simplify_m
-            SFR.sfr_veg_excl_buffer_m = tile.sfr_veg_excl_buffer_m
-            SFR.sfr_veg_use_simheaven = tile.sfr_veg_use_simheaven
-            SFR.sfr_veg_avoid_simheaven_buildings = tile.sfr_veg_avoid_simheaven_buildings
-            SFR.sfr_veg_simheaven_building_buffer_m = tile.sfr_veg_simheaven_building_buffer_m
-            SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
-            SFR.sfr_veg_simheaven_forest_buffer_m = tile.sfr_veg_simheaven_forest_buffer_m
-            SFR.sfr_veg_exclude_lower_forests = tile.sfr_veg_exclude_lower_forests
-            SFR.sfr_veg_remove_embedded_trees = tile.sfr_veg_remove_embedded_trees
-            SFR.sfr_veg_use_simheaven_asset_proximity = tile.sfr_veg_use_simheaven_asset_proximity
-            SFR.sfr_veg_use_leaf_type_maps = tile.sfr_veg_use_leaf_type_maps
-            SFR.sfr_veg_use_xp_forests = tile.sfr_veg_use_xp_forests
-            SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
-            SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
-            SFR.sfr_veg_use_gfv2_asset_proximity = tile.sfr_veg_use_gfv2_asset_proximity
-            SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
-            SFR.sfr_veg_disable_cache = tile.sfr_veg_disable_cache
-            SFR.sfr_patch_size        = tile.sfr_patch_size
-            SFR.sfr_overlap           = tile.sfr_overlap
-            SFR.sfr_batch_size        = tile.sfr_batch_size
+            PIPELINE.apply_tile_settings(tile, CFGVARS.list_veg_pipeline_vars)
             done = True
             try:
-                SFR.process_veg_tile(tile.lat, tile.lon, tile.build_dir)
+                PIPELINE.process_veg_tile(tile.lat, tile.lon, tile.build_dir)
             except Exception as exc:
                 done = False
-                UI.lvprint(0, f"[SFR] SegFormer veg overlay failed for "
+                UI.lvprint(0, f"[Overlay] Vegetation overlay failed for "
                            f"{FNAMES.short_latlon(lat, lon)}: {exc}")
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
                 return 0
             if done:
-                BSTATE.mark_done(lat, lon, "sfr_veg")
+                BSTATE.mark_done(lat, lon, "veg_overlay")
         if not do_dsf:
             # build_tile() links the tile itself; catch the runs which only
             # refreshed overlays over an already built tile.

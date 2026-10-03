@@ -1,7 +1,7 @@
 """Compile Track A visual-triage decisions into a JSON override file.
 
 Reads ``track_a_triage/decisions.yaml`` and emits
-``src/O4_SFR_Region_Overrides.json`` -- a flat list of
+``src/O4_Region_Overrides.json`` -- a flat list of
 ``[lib_id, family_prefix, [regions...]]`` triples loaded at import time by
 ``_optional_library_asset_regions()``.
 
@@ -22,7 +22,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_Building_Overlay as BLD  # noqa: E402
+import O4_Building_Overlay as BLD  # noqa: E402
 
 
 VALID_REGIONS = set(BLD.OPTIONAL_ASSET_REGION_ALIASES) | {"generic"}

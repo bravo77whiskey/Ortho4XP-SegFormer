@@ -19,7 +19,7 @@ for path in (str(PROCGEN), str(SRC)):
         sys.path.insert(0, path)
 
 import build_procgen_library  # noqa: E402
-import O4_SFR_Building_Overlay as overlay  # noqa: E402
+import O4_Building_Overlay as overlay  # noqa: E402
 from archetypes import build_archetype  # noqa: E402
 from archetypes.common import fmt_dim  # noqa: E402
 

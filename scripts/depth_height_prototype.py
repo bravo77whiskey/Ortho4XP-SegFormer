@@ -18,7 +18,7 @@ Workflow per image:
        height_proxy = max(ground_anchor, ring_depth) - roof_depth   (relative units)
   6. Calibrate: fit a single scalar `meters_per_unit` so that the median of the
      per-class height proxies matches the existing class-based heights from
-     O4_SFR_Building_Overlay.DEFAULT_FACADE_HEIGHT_M (weak prior).
+     O4_Building_Overlay.DEFAULT_FACADE_HEIGHT_M (weak prior).
   7. Print results: per-class distribution, comparison vs class-based heights,
      and save side-by-side debug PNGs (RGB + depth + OBBs colored by height).
 
@@ -124,7 +124,7 @@ def run_depth_inference(model, processor, image_rgb: np.ndarray, device: str,
 
 def load_segformer_landcover(image_rgb: np.ndarray, device: str = "cuda") -> np.ndarray:
     """Run SegFormer landcover model used by the project. Returns HxW int8 class map."""
-    import O4_SFR_Inference as SEG  # noqa
+    import O4_Landcover_Inference as SEG  # noqa
     model, proc, _dev = SEG.load_vegetation_model(device)
     return SEG.run_inference(model, _dev, image_rgb, proc)
 
@@ -132,7 +132,7 @@ def load_segformer_landcover(image_rgb: np.ndarray, device: str = "cuda") -> np.
 def load_yolo_obb(image_rgb: np.ndarray, checkpoint: str, device: str = "cuda",
                   conf: float = 0.18, iou: float = 0.5, stride: int = 512, imgsz: int = 1024):
     """Run the trained YOLO-OBB model the project already uses."""
-    import O4_SFR_Building_Overlay as BLD
+    import O4_Building_Overlay as BLD
     model = BLD._load_yolo_obb_model(checkpoint)
     # Estimate m_per_px from the image — caller is responsible for context;
     # use a placeholder of 1.0 for relative computations (we only need pixel-space OBB).
@@ -252,7 +252,7 @@ def main():
     ap.add_argument("--model", default="small", choices=["small", "base", "large"])
     ap.add_argument("--yolo", default=None,
                     help="Optional path to the trained YOLO-OBB checkpoint. "
-                         "Defaults to the one in O4_SFR_Pipeline.py.")
+                         "Defaults to the one in O4_Overlay_Pipeline.py.")
     ap.add_argument("--no-segformer", action="store_true",
                     help="Skip SegFormer landcover anchor; use only ring depth.")
     ap.add_argument("--out", default=None, help="Optional output dir for debug PNGs.")
@@ -305,7 +305,7 @@ def main():
     print(f"[depth-proto] computed proxies for {len(records)} detections", flush=True)
 
     # 5) Calibrate to meters via class priors (weak)
-    import O4_SFR_Building_Overlay as BLD
+    import O4_Building_Overlay as BLD
     priors = dict(BLD.DEFAULT_FACADE_HEIGHT_M)
     scale, offset = calibrate_to_meters(records, priors)
     print(f"[depth-proto] linear fit (proxy → meters): scale={scale:.4f} offset={offset:.4f}",

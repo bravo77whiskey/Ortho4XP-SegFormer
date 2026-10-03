@@ -1,7 +1,7 @@
 # O4SFR greenhouse library
 
 Objects the building overlay places on greenhouse detections
-(`src/O4_SFR_Agri_Structures.py`, `O4_SFR_BLD_AGRI`):
+(`src/O4_Agri_Structures.py`, `O4_BLD_AGRI`):
 
 * `o4sfr/agri/tunnels_<W>x<L>.obj` -- south-China arrays of arched film
   tunnels, 8 m pitch, 1-12 bays, 10-150 m long;

@@ -22,8 +22,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_DSF_Edit as DSFEDIT
-import O4_SFR_Veg_Cleanup as CLEANUP
+import O4_DSF_Edit as DSFEDIT
+import O4_Veg_Replacement as CLEANUP
 
 
 def _dsftool():

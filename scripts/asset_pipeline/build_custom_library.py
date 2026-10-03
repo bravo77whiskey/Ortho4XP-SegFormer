@@ -27,7 +27,7 @@ from typing import Iterable, NamedTuple
 
 
 # Region keys accepted in the manifest. Kept in sync with
-# _O4SFR_PATH_REGION_TOKENS in src/O4_SFR_Building_Overlay.py.
+# _O4SFR_PATH_REGION_TOKENS in src/O4_Building_Overlay.py.
 VALID_REGIONS = frozenset({
     "europe",
     "scandinavia",

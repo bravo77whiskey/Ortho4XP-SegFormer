@@ -24,7 +24,7 @@ this runbook.
 ## Region taxonomy
 
 Match the keys in `_O4SFR_PATH_REGION_TOKENS` (see
-[src/O4_SFR_Building_Overlay.py](../../src/O4_SFR_Building_Overlay.py)):
+[src/O4_Building_Overlay.py](../../src/O4_Building_Overlay.py)):
 
 `europe`, `scandinavia`, `mediterranean`,
 `north_america`, `south_america`,
@@ -144,7 +144,7 @@ python scripts/asset_pipeline/build_custom_library.py \
 
 ```
 # Region routing + library inventory check
-python src/scripts/audit_sfr_building_assets.py --lat <lat> --lon <lon>
+python src/scripts/audit_building_assets.py --lat <lat> --lon <lon>
 
 # Smoke / regression tests
 pytest tests/sfr_optional_library_regions_test.py \

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-import O4_SFR_Climate_Regions as CLIMATE
+import O4_Climate_Regions as CLIMATE
 
 HEIGHT_CUTOFF_METERS = 24.0
 

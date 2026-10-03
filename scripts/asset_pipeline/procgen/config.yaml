@@ -58,7 +58,7 @@ ladders:
     stop_m: 106.0
     max_aspect: 4.4
 
-# Optional-library ingestion gate in O4_SFR_Building_Overlay.py
+# Optional-library ingestion gate in O4_Building_Overlay.py
 # (_footprint_within_limits @ ~4431): area 12..7000 m^2, side 2..110 m.
 limits:
   min_area_m2: 12.0
@@ -198,7 +198,7 @@ region_flavors:
 
 # Height fit is live (2026-07-07): HeightNet per-detection heights feed the
 # overlay's object selector, which prefers the floor variant nearest the
-# predicted height among same-footprint assets (O4_SFR_Height_Model +
+# predicted height among same-footprint assets (O4_Height_Model +
 # _select_yolo_object_candidate). Floors ladders above widened accordingly.
 # 2026-07-07 (round 2): the prediction ceiling was removed (floor-only
 # clamp) and MAX_GENERATED_BUILDING_HEIGHT_M raised 24 -> 40, so apartment

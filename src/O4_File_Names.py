@@ -2,6 +2,8 @@ import os
 import sys
 from math import floor
 
+import O4_Persistent_Cache as PCACHE
+
 
 g2xpl_16_prefix = ""
 g2xpl_16_suffix = ""
@@ -47,8 +49,8 @@ Geotiff_dir   = user_path("Geotiffs")
 Tile_dir      = user_path("Tiles")
 Tmp_dir       = user_path("tmp")
 Overlay_dir   = user_path("yOrtho4XP_Overlays")
-SFR_Bld_Overlay_dir = user_path("yOrtho4XP_Bld_Overlays")
-SFR_cache_dir = user_path("SFR_cache")
+Bld_Overlay_dir = user_path("yOrtho4XP_Bld_Overlays")
+Overlay_cache_dir = PCACHE.cache_root(user_path(""))
 
 ##############################################################################
 def short_latlon(lat, lon):
@@ -100,18 +102,18 @@ def osm_dir(lat, lon):
     return os.path.join(OSM_dir, long_latlon(lat, lon))
 
 
-def sfr_cache_dir(lat, lon):
-    return os.path.join(SFR_cache_dir, long_latlon(lat, lon))
+def overlay_cache_dir(lat, lon):
+    return os.path.join(Overlay_cache_dir, long_latlon(lat, lon))
 
 
-def sfr_library_cache_dir():
+def overlay_library_cache_dir():
     """Shared (not per-tile) cache of installed scenery library scans."""
-    return os.path.join(SFR_cache_dir, "_libraries")
+    return os.path.join(Overlay_cache_dir, "_libraries")
 
 
-def sfr_leaf_type_cache_dir():
+def overlay_leaf_type_cache_dir():
     """Shared (not per-tile) cache of downloaded leaf-type maps."""
-    return os.path.join(SFR_cache_dir, "_leaf_type")
+    return os.path.join(Overlay_cache_dir, "_leaf_type")
 
 
 def mask_dir(lat, lon):

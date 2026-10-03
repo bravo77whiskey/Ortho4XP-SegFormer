@@ -31,7 +31,7 @@ MAX_FLOORS = 12       # 12 * 3.2 = 38.4 < MAX_GENERATED_BUILDING_HEIGHT_M (40)
 
 # Mirror of the overlay's filename filters that could silently reject our
 # assets.  The authoritative audit (importing the real tuples from
-# O4_SFR_Building_Overlay) lives in verify_procgen_library.py; this short
+# O4_Building_Overlay) lives in verify_procgen_library.py; this short
 # denylist just fails fast on obviously bad archetype names.
 _NAME_DENYLIST = (
     "tower", "store", "tank", "silo", "hangar", "chimney", "carport",

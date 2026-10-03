@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for Ortho4XP (with veg/building/AI overlay extensions).
+PyInstaller spec for Ortho4XP-SegFormer.
 
 Build command (run from repo root with the project venv active):
     python build.py          ← preferred (safe smart-merge into dist/)
@@ -8,15 +8,15 @@ Build command (run from repo root with the project venv active):
 
 Output:  dist/Ortho4XP/Ortho4XP.exe  (one-dir bundle)
 
-NOTE: AI packages (torch, transformers, huggingface_hub) are NOT bundled into
-the exe.  They live in sfr_venv/ next to the exe and are added to sys.path at
-runtime by O4_SFR_Pipeline._activate_venv().  This keeps the bundle small
-(<500 MB) and lets users upgrade to a CUDA torch wheel independently.
+NOTE: AI packages (torch, transformers, ultralytics) are NOT bundled into the
+exe. The overlay code that needs them runs in the .venv python next to the exe
+(created on first use by O4_Overlay_Pipeline). This keeps the bundle small and
+lets users install the CUDA torch wheel that matches their GPU.
 
 User data preserved on rebuild (never overwritten by build.py):
     Tiles, OSM_data, Orthophotos, Masks, yOrtho4XP_Overlays,
     yOrtho4XP_Veg_Overlays, yOrtho4XP_Bld_Overlays, Elevation_data, Geotiffs, tmp,
-    Ortho4XP.cfg, .last_gui_params.txt, sfr_venv/
+    Overlay_cache, Ortho4XP.cfg, .last_gui_params.txt, .venv/
 """
 
 import os
@@ -37,43 +37,64 @@ added_datas = [
     (os.path.join(SPEC_DIR, "community_server.txt"), "Ortho4XP_Data"),
     (os.path.join(SPEC_DIR, "Previews"),  "Ortho4XP_Data/Previews"),
     (os.path.join(SPEC_DIR, "Patches"),   "Ortho4XP_Data/Patches"),
-    # SFR overlay scripts + AI inference module — run as venv subprocesses.
-    # Bundled as loose .py files so the .venv Python can import them directly.
-    # Keep a repo-like layout inside sfr_scripts/src so imports work the same
-    # in source and packaged runs.
-    (os.path.join(SPEC_DIR, "src", "scripts", "__init__.py"),            "sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "generate_veg_overlay.py"),"sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "veg_tile_replacement.py"),"sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "install_gfv2_simheaven_redirects.py"),"sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "generate_bld_overlay.py"),"sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "audit_sfr_building_assets.py"),"sfr_scripts/src/scripts"),
-    # Remote-GPU offload: worker ships as a loose file because the packaged
-    # app tar-syncs sfr_scripts/src to the remote host, which then runs it.
-    (os.path.join(SPEC_DIR, "src", "scripts", "sfr_remote_worker.py"),   "sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "O4_Forest_Assets.py"),               "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Asset_Inventory.py"),         "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Library_Catalog.py"),        "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Bounds_Index.py"),            "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Climate_Regions.py"),         "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Persistent_Cache.py"),        "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Leaf_Type.py"),               "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Region_Overrides.json"),      "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Region_Boundaries.py"),       "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Texture_Selection.py"),       "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Remote.py"),             "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Inference.py"),          "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Building_Overlay.py"),   "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Roof_Color.py"),         "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Height_Model.py"),       "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Height_Priors.py"),      "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Footprint_Polygons.py"), "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Agri_Structures.py"), "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Stock_Yolo_Objects.py"), "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Utils.py"),          "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_DSF_Edit.py"),           "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Veg_Cleanup.py"),        "sfr_scripts/src"),
-    (os.path.join(SPEC_DIR, "src", "O4_SFR_Vegetation_Overlay.py"), "sfr_scripts/src"),
 ]
+
+# ── Overlay code shipped as loose files ───────────────────────────────────────
+# The vegetation and building overlays need torch, which is not bundled: they
+# run in the .venv python and import these modules as plain .py files from
+# overlay_scripts/src, which keeps the repo's src/ layout so imports work the
+# same from source and packaged runs. The packaged app also tar-syncs
+# overlay_scripts/src to a remote GPU host. Every top-level O4_* import of a
+# listed module must be listed too (tests/spec_bundles_modules_test.py).
+OVERLAY_MODULES = [
+    "O4_Agri_Structures",
+    "O4_Asset_Inventory",
+    "O4_Bounds_Index",
+    "O4_Building_Overlay",
+    "O4_Climate_Regions",
+    "O4_DSF_Edit",
+    "O4_Footprint_Polygons",
+    "O4_Forest_Assets",
+    "O4_Height_Model",
+    "O4_Height_Priors",
+    "O4_Landcover_Inference",
+    "O4_Leaf_Type",
+    "O4_Library_Catalog",
+    "O4_Persistent_Cache",
+    "O4_Region_Boundaries",
+    "O4_Remote_GPU",
+    "O4_Roof_Color",
+    "O4_Scenery_Packs",
+    "O4_Stock_Yolo_Objects",
+    "O4_Texture_Selection",
+    "O4_Veg_Replacement",
+    "O4_Vegetation_Overlay",
+]
+OVERLAY_DATA_FILES = [
+    "O4_Region_Overrides.json",
+]
+OVERLAY_SCRIPTS = [
+    "__init__.py",
+    "audit_building_assets.py",
+    "generate_bld_overlay.py",
+    "generate_veg_overlay.py",
+    "install_gfv2_simheaven_redirects.py",
+    "remote_gpu_worker.py",
+    "veg_tile_replacement.py",
+]
+added_datas += [
+    (os.path.join(SPEC_DIR, "src", name + ".py"), "overlay_scripts/src")
+    for name in OVERLAY_MODULES
+]
+added_datas += [
+    (os.path.join(SPEC_DIR, "src", name), "overlay_scripts/src")
+    for name in OVERLAY_DATA_FILES
+]
+added_datas += [
+    (os.path.join(SPEC_DIR, "src", "scripts", name), "overlay_scripts/src/scripts")
+    for name in OVERLAY_SCRIPTS
+]
+
 # pyproj CRS data is collected automatically by the pyinstaller pyproj hook
 
 # shapely and rtree ship their own DLLs; collect them as data so PyInstaller
@@ -82,8 +103,8 @@ added_datas += collect_data_files("shapely")
 added_datas += collect_data_files("rtree")
 
 # ── Binaries (native DLLs needed at runtime) ──────────────────────────────────
-# AI packages (torch, transformers, etc.) are NOT bundled — they live in
-# sfr_venv/ and are loaded at runtime via _activate_venv().
+# AI packages (torch, transformers, etc.) are NOT bundled — the overlay code
+# that needs them runs in the .venv python.
 added_binaries = []
 added_binaries += collect_dynamic_libs("shapely")
 added_binaries += collect_dynamic_libs("rtree")
@@ -100,13 +121,15 @@ hidden = [
     # pyproj internals (hook handles CRS data automatically)
     "pyproj.datadir",
     # psutil: imported lazily by O4_UI_Utils to suspend/resume the external
-    # worker trees (Triangle4XP, DSFTool, the SFR .venv python) on Pause.
+    # worker trees (Triangle4XP, DSFTool, the overlay .venv python) on Pause.
     "psutil",
     # Shapely geometry types
     "shapely.geometry",
     "shapely.ops",
     "shapely.validation",
-    # Our source modules
+]
+# The app's own modules (overlay modules are reached through OVERLAY_MODULES).
+APP_MODULES = [
     "O4_UI_Utils",
     "O4_File_Names",
     "O4_Imagery_Utils",
@@ -120,29 +143,7 @@ hidden = [
     "O4_Cfg_Vars",
     "O4_DSF_Utils",
     "O4_Overlay_Utils",
-    "O4_Forest_Assets",
-    "O4_SFR_Asset_Inventory",
-    "O4_SFR_Library_Catalog",
-    "O4_SFR_Bounds_Index",
-    "O4_SFR_Climate_Regions",
-    "O4_SFR_Persistent_Cache",
-    "O4_SFR_Leaf_Type",
-    "O4_SFR_Pipeline",
-    "O4_SFR_Region_Boundaries",
-    "O4_SFR_Remote",
-    "O4_SFR_Texture_Selection",
-    "O4_SFR_DSF_Edit",
-    "O4_SFR_Veg_Cleanup",
-    "O4_SFR_Inference",
-    "O4_SFR_Building_Overlay",
-    "O4_SFR_Roof_Color",
-    "O4_SFR_Height_Model",
-    "O4_SFR_Height_Priors",
-    "O4_SFR_Footprint_Polygons",
-    "O4_SFR_Agri_Structures",
-    "O4_SFR_Stock_Yolo_Objects",
-    "O4_SFR_DSF_Utils",
-    "O4_SFR_Vegetation_Overlay",
+    "O4_Overlay_Pipeline",
     "O4_Scenery_Links",
     "O4_Parallel_Utils",
     "O4_OSM_Utils",
@@ -151,12 +152,11 @@ hidden = [
     "O4_Vector_Utils",
     "O4_Version",
     "O4_Zone_Utils",
-    # SFR scripts are bundled as .py data files (see added_datas) and imported
-    # lazily at runtime after _activate_venv() — not via the import graph.
 ]
+hidden += APP_MODULES + OVERLAY_MODULES
 
 # ── Modules to exclude ────────────────────────────────────────────────────────
-# Explicitly exclude AI packages — they live in sfr_venv, not the bundle.
+# Explicitly exclude AI packages — they live in the .venv, not the bundle.
 # NOTE: do NOT exclude setuptools/distutils — PyInstaller hooks them internally.
 excludes = [
     "torch",

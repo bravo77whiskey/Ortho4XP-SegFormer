@@ -351,77 +351,77 @@ cfg_tile_vars = {
         "default": False,
         "hint": "Terrain files for all but water triangles will contain the maquify_1_green_key.dcl decal directive. The effect is noticeable at very low altitude and helps to overcome the orthophoto blur at such levels. Can be slightly distracting at higher altitude.",
     },
-    # SegFormer vegetation overlay (src/scripts/generate_veg_overlay.py)
-    "sfr_veg_density": {
+    # Vegetation overlay (src/scripts/generate_veg_overlay.py)
+    "veg_density": {
         "type": float,
         "default": -1.0,
-        "short_name": "sfr_veg_den",
+        "short_name": "veg_den",
         "hint": "DSF density override 0.0–1.0 (scaled to 0–255). -1 = auto-select based on how much of each polygon is covered by vegetation.",
     },
-    "sfr_veg_close_m": {
+    "veg_close_m": {
         "type": float,
         "default": 10.0,
-        "short_name": "sfr_veg_close",
+        "short_name": "veg_close",
         "hint": "Morphological close radius in metres. Fills canopy gaps within a tree patch. Larger values merge nearby trees into one polygon; smaller values preserve fine detail.",
     },
-    "sfr_veg_open_m": {
+    "veg_open_m": {
         "type": float,
         "default": 3.0,
-        "short_name": "sfr_veg_open",
+        "short_name": "veg_open",
         "hint": "Morphological open radius in metres. Removes tiny isolated detections before contouring. Raise to suppress small spurious tree patches.",
     },
-    "sfr_veg_min_area_m2": {
+    "veg_min_area_m2": {
         "type": float,
         "default": 50.0,
-        "short_name": "sfr_veg_min_a",
+        "short_name": "veg_min_a",
         "hint": "Minimum vegetation polygon area in m² to include in the DSF. Raise to reduce polygon count; lower to capture small isolated trees.",
     },
-    "sfr_veg_simplify_m": {
+    "veg_simplify_m": {
         "type": float,
         "default": 3.0,
-        "short_name": "sfr_veg_simp",
+        "short_name": "veg_simp",
         "hint": "Douglas-Peucker polygon simplification tolerance in metres. Higher values produce fewer, coarser vertices; lower values preserve exact canopy outlines.",
     },
-    "sfr_veg_excl_buffer_m": {
+    "veg_excl_buffer_m": {
         "type": float,
         "default": 5.0,
-        "short_name": "sfr_veg_excl",
+        "short_name": "veg_excl",
         "hint": "Dilation buffer in metres applied around detected roads and buildings before subtracting them from the tree mask. Prevents trees bleeding onto building edges or road surfaces.",
     },
-    "sfr_veg_use_simheaven": {
+    "veg_use_simheaven": {
         "type": bool,
         "default": True,
-        "short_name": "sfr_veg_simh",
+        "short_name": "veg_simh",
         "hint": "Use simHeaven X-World network roads for road-width tree exclusion. This setting is only for road masks; simHeaven building overlap is controlled separately by the simh_bd / simh_bd_b settings.",
     },
-    "sfr_veg_avoid_simheaven_buildings": {
+    "veg_avoid_simheaven_buildings": {
         "type": bool,
         "default": True,
-        "short_name": "sfr_veg_simh_bd",
-        "hint": "Avoid overlapping simHeaven building footprints and objects when generating vegetation. This is separate from the SFR building-placement cache exclusion.",
+        "short_name": "veg_simh_bd",
+        "hint": "Avoid overlapping simHeaven building footprints and objects when generating vegetation. This is separate from the building overlay's own placement exclusion.",
     },
-    "sfr_veg_simheaven_building_buffer_m": {
+    "veg_simheaven_building_buffer_m": {
         "type": float,
         "default": 10.0,
-        "short_name": "sfr_veg_simh_bd_b",
+        "short_name": "veg_simh_bd_b",
         "hint": "Extra exclusion buffer in metres around simHeaven building footprints and objects.",
     },
-    "sfr_veg_avoid_simheaven_forests": {
+    "veg_avoid_simheaven_forests": {
         "type": bool,
         "default": True,
-        "short_name": "sfr_veg_simh_for",
+        "short_name": "veg_simh_for",
         "hint": "Avoid overlapping polygons from enabled simHeaven X-World 7-forests packages.",
     },
-    "sfr_veg_simheaven_forest_buffer_m": {
+    "veg_simheaven_forest_buffer_m": {
         "type": float,
         "default": 0.0,
-        "short_name": "sfr_veg_simh_for_b",
+        "short_name": "veg_simh_for_b",
         "hint": "Extra exclusion buffer in metres around simHeaven X-World forest polygons.",
     },
-    "sfr_veg_exclude_lower_forests": {
+    "veg_exclude_lower_forests": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_veg_excl_for",
+        "short_name": "veg_excl_for",
         "hint": "Replace lower-priority forests throughout this tile. The "
                 "generated vegetation DSF carries a sim/exclude_for property "
                 "covering the WHOLE one-degree tile, so every forest placed by "
@@ -431,178 +431,166 @@ cfg_tile_vars = {
                 "are unaffected. Off by default; turn it on only for tiles you "
                 "intend to re-vegetate completely.",
     },
-    "sfr_veg_remove_embedded_trees": {
+    "veg_remove_embedded_trees": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_veg_rm_trees",
+        "short_name": "veg_rm_trees",
         "hint": "Also remove supported embedded trees from lower-priority "
                 "scenery in this tile. sim/exclude_for only suppresses forest "
                 "polygons; trees baked into autogen blocks, road vegetation or "
                 "standalone tree objects survive it. This edits the affected "
                 "source DSFs in place, keeping a verified backup of every "
-                "original, and needs sfr_veg_exclude_lower_forests enabled. "
+                "original, and needs veg_exclude_lower_forests enabled. "
                 "Unticking it later does NOT undo installed edits — use "
                 "the Restore Veg Tile action for that.",
     },
-    "sfr_veg_use_simheaven_asset_proximity": {
+    "veg_use_simheaven_asset_proximity": {
         "type": bool,
         "default": True,
-        "short_name": "sfr_veg_simh_typ",
+        "short_name": "veg_simh_typ",
         "hint": "Choose broadleaf, conifer, or mixed assets from the nearest "
                 "simHeaven forest polygon, with the tile's most common tree "
                 "family as fallback.",
     },
-    "sfr_veg_use_leaf_type_maps": {
+    "veg_use_leaf_type_maps": {
         "type": bool,
         "default": True,
-        "short_name": "sfr_veg_leaf_maps",
+        "short_name": "veg_leaf_maps",
         "hint": "Choose broadleaf, conifer, or mixed assets from leaf-type maps "
                 "(Copernicus HRL 10 m in Europe, GLC_FCS30D 30 m and CGLS "
                 "100 m worldwide, explicit OSM leaf_type) and split forests "
                 "along their boundaries. Map data downloads once per tile "
                 "(once per 5x5 degrees for GLC_FCS30D, 10-700 MB) into "
-                "SFR_cache/_leaf_type. Falls back to the simHeaven closest "
+                "Overlay_cache/_leaf_type. Falls back to the simHeaven closest "
                 "asset where no map covers the tile.",
     },
-    "sfr_veg_use_xp_forests": {
+    "veg_use_xp_forests": {
         "type": bool,
         "default": True,
-        "short_name": "sfr_veg_xp_for",
+        "short_name": "veg_xp_for",
         "hint": "Plant X-Plane 12's own climate forests (lib/g8 broad/coni/"
                 "mixed per temperature and moisture band, orchard sets in "
                 "orchards) instead of the three simHeaven forest aliases. The "
                 "band follows the default global scenery's nearest forest, "
                 "with Koppen climate as fallback.",
     },
-    "sfr_veg_avoid_gfv2": {
+    "veg_avoid_gfv2": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_veg_gfv2",
+        "short_name": "veg_gfv2",
         "hint": "Legacy compatibility setting. Global Forests is no longer read by the vegetation pipeline.",
     },
-    "sfr_veg_gfv2_buffer_m": {
+    "veg_gfv2_buffer_m": {
         "type": float,
         "default": 0.0,
-        "short_name": "sfr_veg_gfv2_b",
+        "short_name": "veg_gfv2_b",
         "hint": "Legacy compatibility setting. Global Forests is no longer read by the vegetation pipeline.",
     },
-    "sfr_veg_use_gfv2_asset_proximity": {
+    "veg_use_gfv2_asset_proximity": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_veg_gfv2_typ",
+        "short_name": "veg_gfv2_typ",
         "hint": "Legacy compatibility setting. New vegetation always uses simHeaven X-World forest assets.",
     },
-    "sfr_veg_res_m": {
+    "veg_res_m": {
         "type": float,
         "default": 0.0,
-        "short_name": "sfr_veg_res",
+        "short_name": "veg_res",
         "hint": "Downsample inference maps to this ground resolution in metres before polygon extraction. 0 = native DDS detail (about 2 m at ZL16). Use 5–10 m to reduce polygon count on performance-critical tiles.",
     },
-    "sfr_veg_disable_cache": {
+    "veg_disable_cache": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_veg_no_cache",
+        "short_name": "veg_no_cache",
         "hint": "Disable persistent per-DDS vegetation cache files for this tile. When enabled, vegetation cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
-    "sfr_patch_size": {
+    "segformer_patch_size": {
         "type": int,
         "default": 512,
-        "short_name": "sfr_patch",
+        "short_name": "seg_patch",
         "hint": "SegFormer inference patch size. 512 matches the model's training resolution and covers roughly 1 km of ZL16 imagery edge to edge. Larger values need more VRAM; smaller may reduce accuracy at patch boundaries.",
     },
-    "sfr_overlap": {
+    "segformer_overlap": {
         "type": int,
         "default": 64,
-        "short_name": "sfr_overlap",
+        "short_name": "segformer_overlap",
         "hint": "Overlap between adjacent inference patches. Higher values reduce seam artifacts at patch boundaries at the cost of more inference passes. 64 is a good balance for 512-size patches and is roughly 120 m on ZL16 imagery.",
     },
-    "sfr_batch_size": {
+    "segformer_batch_size": {
         "type": int,
         "default": 0,
-        "short_name": "sfr_batch",
+        "short_name": "seg_batch",
         "hint": "SegFormer inference batch size. 0 = recommended default (8 on CUDA, 1 on CPU). Raise only after timing a representative tile.",
     },
-    # SegFormer building overlay (src/scripts/generate_bld_overlay.py)
-    "sfr_bld_spacing_m": {
+    # Building overlay (src/scripts/generate_bld_overlay.py)
+    "bld_spacing_m": {
         "type": float,
         "default": 0.0,
         "short_name": "bld_spacing_m",
         "hint": "Minimum target gap in metres between building footprint edges. Candidate centre spacing is derived from this gap plus the smallest asset footprint span in each size class.",
     },
-    "sfr_bld_close_m": {
+    "bld_close_m": {
         "type": float,
         "default": 30.0,
         "short_name": "bld_gap_m",
         "hint": "Gap-closing radius in metres for building zones. Larger values bridge wider gaps between nearby building detections.",
     },
-    "sfr_bld_open_m": {
+    "bld_open_m": {
         "type": float,
         "default": 10.0,
         "short_name": "bld_cleanup_m",
         "hint": "Cleanup radius in metres for building zones. Larger values remove more tiny isolated detections.",
     },
-    "sfr_bld_close_k": {
-        "type": int,
-        "default": 15,
-        "short_name": "sfr_bld_close",
-        "hint": "Gap-closing radius for building zones. On typical ZL16 imagery, 15 is roughly a 30 m radius. Raise it to bridge wider gaps between nearby building detections.",
-    },
-    "sfr_bld_open_k": {
-        "type": int,
-        "default": 5,
-        "short_name": "sfr_bld_open",
-        "hint": "Small-feature cleanup size for building zones. On typical ZL16 imagery, 5 removes features around 10 m across. Raise it to suppress more tiny isolated detections.",
-    },
-    "sfr_bld_min_footprint_m2": {
+    "bld_min_footprint_m2": {
         "type": float,
         "default": 12.0,
         "short_name": "bld_min_footprint_m2",
         "hint": "Minimum building footprint area in square metres. Individual detections smaller than this are discarded up front, before any placement. Building zones are otherwise accepted regardless of size.",
     },
-    "sfr_bld_grid_n": {
+    "bld_grid_n": {
         "type": int,
         "default": 16,
-        "short_name": "sfr_bld_grid",
+        "short_name": "bld_grid",
         "hint": "Heading-grid resolution per texture tile. Higher values follow street direction changes more closely but can make orientation noisier.",
     },
-    "sfr_bld_disable_cache": {
+    "bld_disable_cache": {
         "type": bool,
         "default": False,
-        "short_name": "sfr_bld_no_cache",
+        "short_name": "bld_no_cache",
         "hint": "Disable persistent per-DDS building cache files for this tile. When enabled, building cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
-    "sfr_bld_verbose_log": {
+    "bld_verbose_log": {
         "type": bool,
         "default": False,
         "short_name": "bld_verbose_log",
         "hint": "Verbose per-texture building-overlay logging (placement class counts, YOLO accept/block statistics, coverage percentages). When disabled, each texture logs a single summary line like the vegetation overlay.",
     },
-    "sfr_bld_avoid_custom_scenery": {
+    "bld_avoid_custom_scenery": {
         "type": bool,
         "default": True,
         "short_name": "bld_avoid_custom",
-        "hint": "Avoid overlapping enabled Custom Scenery objects and facade polygons from scenery_packs.ini when generating SegFormer building overlays.",
+        "hint": "Avoid overlapping enabled Custom Scenery objects and facade polygons from scenery_packs.ini when generating building overlays.",
     },
-    "sfr_bld_asset_mode": {
+    "bld_asset_mode": {
         "type": str,
         "default": "both",
         "values": ["objects", "facades", "both"],
         "short_name": "bld_assets",
         "hint": "Which building placement assets to use: object models, scalable facades, or object-first placement with facade fallback.",
     },
-    "sfr_bld_roof_color_matching": {
+    "bld_roof_color_matching": {
         "type": bool,
         "default": False,
         "short_name": "bld_roof_color",
         "hint": "Prefer object assets whose analyzed roof texture color matches each detected rooftop. Disabled by default. Existing fit, containment, occupancy, height, and fallback selection rules remain authoritative.",
     },
-    "sfr_bld_yolo_enabled": {
+    "bld_yolo_enabled": {
         "type": bool,
         "default": True,
         "short_name": "bld_yolo",
         "hint": "Use the YOLO OBB building-placement model as the primary source of building object placements before filling remaining SegFormer building-zone gaps.",
     },
-    "sfr_bld_yolo_checkpoint": {
+    "bld_yolo_checkpoint": {
         "type": str,
         "default": r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt",
         "short_name": "bld_yolo_ckpt",
@@ -614,31 +602,31 @@ cfg_tile_vars = {
         ],
         "hint": "YOLO OBB checkpoint used for primary building placements.",
     },
-    "sfr_bld_yolo_conf": {
+    "bld_yolo_conf": {
         "type": float,
         "default": 0.18,
         "short_name": "bld_yolo_conf",
         "hint": "YOLO OBB confidence threshold for direct building placements.",
     },
-    "sfr_bld_yolo_iou": {
+    "bld_yolo_iou": {
         "type": float,
         "default": 0.5,
         "short_name": "bld_yolo_iou",
         "hint": "YOLO OBB NMS IoU threshold for direct building placements.",
     },
-    "sfr_bld_yolo_stride": {
+    "bld_yolo_stride": {
         "type": int,
         "default": 512,
         "short_name": "bld_yolo_stride",
         "hint": "YOLO OBB inference crop stride in pixels.",
     },
-    "sfr_bld_yolo_max_det": {
+    "bld_yolo_max_det": {
         "type": int,
         "default": 100000,
         "short_name": "bld_yolo_max",
         "hint": "YOLO OBB maximum detections per inference crop.",
     },
-    "sfr_bld_height_checkpoint": {
+    "bld_height_checkpoint": {
         "type": str,
         "default": r"H:\model_training\models\heightnet.pt",
         "short_name": "bld_height_ckpt",
@@ -653,7 +641,7 @@ cfg_tile_vars = {
                 "trained a replacement. If the file is missing, buildings fall "
                 "back to class-default heights.",
     },
-    "sfr_bld_yolo_min_coverage": {
+    "bld_yolo_min_coverage": {
         "type": float,
         "default": 0.80,
         "short_name": "bld_yolo_min_cov",
@@ -766,63 +754,68 @@ list_dsf_vars = [
 
 list_other_vars = ["custom_dem", "fill_nodata"]
 
-list_sfr_veg_vars = [
-    "sfr_veg_density",
-    "sfr_veg_close_m",
-    "sfr_veg_open_m",
-    "sfr_veg_min_area_m2",
-    "sfr_veg_simplify_m",
-    "sfr_veg_excl_buffer_m",
-    "sfr_veg_use_simheaven",
-    "sfr_veg_avoid_simheaven_buildings",
-    "sfr_veg_simheaven_building_buffer_m",
-    "sfr_veg_avoid_simheaven_forests",
-    "sfr_veg_simheaven_forest_buffer_m",
-    "sfr_veg_exclude_lower_forests",
-    "sfr_veg_remove_embedded_trees",
-    "sfr_veg_use_simheaven_asset_proximity",
-    "sfr_veg_use_leaf_type_maps",
-    "sfr_veg_use_xp_forests",
-    "sfr_veg_res_m",
-    "sfr_veg_disable_cache",
-    "sfr_patch_size",
-    "sfr_overlap",
-    "sfr_batch_size",
+list_veg_vars = [
+    "veg_density",
+    "veg_close_m",
+    "veg_open_m",
+    "veg_min_area_m2",
+    "veg_simplify_m",
+    "veg_excl_buffer_m",
+    "veg_use_simheaven",
+    "veg_avoid_simheaven_buildings",
+    "veg_simheaven_building_buffer_m",
+    "veg_avoid_simheaven_forests",
+    "veg_simheaven_forest_buffer_m",
+    "veg_exclude_lower_forests",
+    "veg_remove_embedded_trees",
+    "veg_use_simheaven_asset_proximity",
+    "veg_use_leaf_type_maps",
+    "veg_use_xp_forests",
+    "veg_res_m",
+    "veg_disable_cache",
+    "segformer_patch_size",
+    "segformer_overlap",
+    "segformer_batch_size",
 ]
 
 # Keep removed Global Forests settings loadable so old tile/global config files
 # remain valid and code that copies a Tile object does not lose attributes. They
-# are intentionally excluded from the SegFormer vegetation settings UI above.
-list_sfr_veg_legacy_vars = [
-    "sfr_veg_avoid_gfv2",
-    "sfr_veg_gfv2_buffer_m",
-    "sfr_veg_use_gfv2_asset_proximity",
+# are intentionally excluded from the vegetation settings UI above.
+list_veg_legacy_vars = [
+    "veg_avoid_gfv2",
+    "veg_gfv2_buffer_m",
+    "veg_use_gfv2_asset_proximity",
 ]
 
-list_sfr_bld_vars = [
-    "sfr_bld_spacing_m",
-    "sfr_bld_close_m",
-    "sfr_bld_open_m",
-    "sfr_bld_min_footprint_m2",
-    "sfr_bld_grid_n",
-    "sfr_bld_disable_cache",
-    "sfr_bld_verbose_log",
-    "sfr_bld_avoid_custom_scenery",
-    "sfr_bld_asset_mode",
-    "sfr_bld_roof_color_matching",
-    "sfr_bld_yolo_enabled",
-    "sfr_bld_yolo_checkpoint",
-    "sfr_bld_yolo_conf",
-    "sfr_bld_yolo_iou",
-    "sfr_bld_yolo_stride",
-    "sfr_bld_yolo_max_det",
-    "sfr_bld_yolo_min_coverage",
-    "sfr_bld_height_checkpoint",
+list_bld_vars = [
+    "bld_spacing_m",
+    "bld_close_m",
+    "bld_open_m",
+    "bld_min_footprint_m2",
+    "bld_grid_n",
+    "bld_disable_cache",
+    "bld_verbose_log",
+    "bld_avoid_custom_scenery",
+    "bld_asset_mode",
+    "bld_roof_color_matching",
+    "bld_yolo_enabled",
+    "bld_yolo_checkpoint",
+    "bld_yolo_conf",
+    "bld_yolo_iou",
+    "bld_yolo_stride",
+    "bld_yolo_max_det",
+    "bld_yolo_min_coverage",
+    "bld_height_checkpoint",
 ]
 
-list_sfr_overlay_vars = list_sfr_veg_vars + list_sfr_bld_vars
+list_overlay_vars = list_veg_vars + list_bld_vars
 
-list_overlay_vars = list_sfr_overlay_vars
+_segformer_vars = ["segformer_patch_size", "segformer_overlap", "segformer_batch_size"]
+
+# What O4_Overlay_Pipeline.apply_tile_settings() copies from a Tile before each
+# overlay step; the GUI single-tile buttons and batch builds share these lists.
+list_veg_pipeline_vars = list_veg_vars + list_veg_legacy_vars
+list_bld_pipeline_vars = list_bld_vars + _segformer_vars
 
 list_tile_vars = (
     list_vector_vars
@@ -830,7 +823,7 @@ list_tile_vars = (
     + list_mask_vars
     + list_dsf_vars
     + list_overlay_vars
-    + list_sfr_veg_legacy_vars
+    + list_veg_legacy_vars
     + list_other_vars
     + ["default_website", "default_zl", "zone_list"]
 )
@@ -842,8 +835,8 @@ list_global_tile_vars = [
         + list_mesh_vars
         + list_mask_vars
         + list_dsf_vars
-        + list_sfr_overlay_vars
-        + list_sfr_veg_legacy_vars
+        + list_overlay_vars
+        + list_veg_legacy_vars
         + list_other_vars
     )
 ]
@@ -856,10 +849,10 @@ list_global_dsf_vars = [global_prefix + item for item in list_dsf_vars]
 
 list_global_mask_vars = [global_prefix + item for item in list_mask_vars]
 
-list_global_sfr_veg_vars = [global_prefix + item for item in list_sfr_veg_vars]
+list_global_veg_vars = [global_prefix + item for item in list_veg_vars]
 
-list_global_sfr_bld_vars = [global_prefix + item for item in list_sfr_bld_vars]
+list_global_bld_vars = [global_prefix + item for item in list_bld_vars]
 
-list_global_sfr_overlay_vars = [global_prefix + item for item in list_sfr_overlay_vars]
+list_global_overlay_vars = [global_prefix + item for item in list_overlay_vars]
 
 list_cfg_vars = list_tile_vars + list_global_tile_vars + list_app_vars

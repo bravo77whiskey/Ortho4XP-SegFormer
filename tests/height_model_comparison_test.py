@@ -11,12 +11,12 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+for path in (ROOT / "src", ROOT / "scripts"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-from scripts import compare_sfr_height_models as COMPARE
-from scripts import merge_sfr_height_comparisons as MERGE
+import compare_height_models as COMPARE  # noqa: E402
+import merge_height_comparisons as MERGE  # noqa: E402
 
 
 HAS_PANDAS = importlib.util.find_spec("pandas") is not None

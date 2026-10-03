@@ -27,9 +27,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_Asset_Inventory as ASSETINV  # noqa: E402
-import O4_SFR_Building_Overlay as BLD  # noqa: E402
-import O4_SFR_DSF_Utils as DSF  # noqa: E402
+import O4_Asset_Inventory as ASSETINV  # noqa: E402
+import O4_Building_Overlay as BLD  # noqa: E402
+import O4_Scenery_Packs as DSF  # noqa: E402
 
 
 def _dim_bucket(width_m: float, depth_m: float) -> str:
@@ -60,7 +60,7 @@ def parse_args(argv=None):
     parser.add_argument("--cache-dir", default=None,
                         help="Optional bounds cache directory.")
     parser.add_argument("--policy", default=None,
-                        help="Override O4_SFR_BLD_EXTRA_LIBRARIES; default is "
+                        help="Override O4_BLD_EXTRA_LIBRARIES; default is "
                              "whatever the environment / 'auto' produces.")
     parser.add_argument("--show-empty-cells", action="store_true",
                         help="Include zero-count cells in the per-library "
@@ -74,7 +74,7 @@ def main(argv=None):
     if not custom:
         raise SystemExit(f"--custom-scenery-dir not usable: {args.custom_scenery_dir}")
     if args.policy is not None:
-        os.environ["O4_SFR_BLD_EXTRA_LIBRARIES"] = args.policy
+        os.environ["O4_BLD_EXTRA_LIBRARIES"] = args.policy
     enabled = BLD._enabled_extra_library_ids()
 
     exports = BLD._scan_runtime_library_exports(

@@ -22,7 +22,7 @@ for path in (SRC, PIPELINE):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-import O4_SFR_Building_Overlay as BLD
+import O4_Building_Overlay as BLD
 import build_custom_library as PIPE
 
 

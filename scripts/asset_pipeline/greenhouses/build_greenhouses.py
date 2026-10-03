@@ -14,7 +14,7 @@ Writes ``<pkg>/library.txt`` and ``<pkg>/objects/``:
   greenhouses, L along the ridge (OBJ x), W deep (OBJ z), earth wall on
   -z; ``_b`` has its anteroom at the other end.
 
-Virtual paths are ``o4sfr/agri/<name>`` (O4_SFR_Agri_Structures).  Bounds
+Virtual paths are ``o4sfr/agri/<name>`` (O4_Agri_Structures).  Bounds
 are centred and within the declared footprint.  Geometry: ``geometry.py``.
 """
 
@@ -32,7 +32,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "src"))
-import O4_SFR_Agri_Structures as AGRI  # noqa: E402
+import O4_Agri_Structures as AGRI  # noqa: E402
 import geometry as G  # noqa: E402
 import layout as L  # noqa: E402
 

@@ -6,7 +6,7 @@ Generated 2026-08-29T11:46:30.012825+00:00.
 
 The sample contains 681,511 joined buildings from 33 five-degree tiles. It transfers at most 1.42 GB of byte ranges rather than downloading the 36 TB archive.
 
-The tables use the exact eight footprint classes in `O4_SFR_Building_Overlay.py`. Mean is the requested statistic; median is the safer fallback prior for the skewed height distribution. P99 plus the published continental GBA height RMSE, rounded up to 5 m, is shown as a conservative hard ceiling candidate.
+The tables use the exact eight footprint classes in `O4_Building_Overlay.py`. Mean is the requested statistic; median is the safer fallback prior for the skewed height distribution. P99 plus the published continental GBA height RMSE, rounded up to 5 m, is shown as a conservative hard ceiling candidate.
 
 ### Mean height in metres
 

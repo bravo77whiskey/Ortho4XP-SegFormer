@@ -10,7 +10,7 @@ for path in (str(PROCGEN), str(SRC)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-import O4_SFR_Building_Overlay as overlay  # noqa: E402
+import O4_Building_Overlay as overlay  # noqa: E402
 from archetypes.styles import CLASS_PROFILE_BY_CLASS, reference_styles, \
     style_for_profile  # noqa: E402
 

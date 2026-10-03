@@ -35,16 +35,16 @@ from O4_Cfg_Vars import (
     list_cfg_vars,
     list_dsf_vars,
     list_global_dsf_vars,
-    list_global_sfr_bld_vars,
-    list_global_sfr_veg_vars,
+    list_global_bld_vars,
+    list_global_veg_vars,
     list_global_mask_vars,
     list_global_mesh_vars,
     list_global_tile_vars,
     list_global_vector_vars,
     list_mask_vars,
     list_mesh_vars,
-    list_sfr_bld_vars,
-    list_sfr_veg_vars,
+    list_bld_vars,
+    list_veg_vars,
     list_tile_vars,
     list_vector_vars,
 )
@@ -97,40 +97,52 @@ def config_compatibility(value) -> str:
     return value
 
 
+# Settings were called sfr_veg_* / sfr_bld_* (SFR = SegFormer) before the
+# overlays outgrew that model; old tile and global configs still use them.
+_RENAMED_PREFIXES = (
+    ("sfr_veg_", "veg_"),
+    ("sfr_bld_", "bld_"),
+)
+_RENAMED_KEYS = {
+    "sfr_patch_size": "segformer_patch_size",
+    "sfr_overlap": "segformer_overlap",
+    "sfr_batch_size": "segformer_batch_size",
+}
+# Keys that were replaced by a differently named setting.
+_KEY_ALIASES = {
+    "bld_del": "bld_disable_cache",
+    "veg_del": "veg_disable_cache",
+    "bld_extra_library_assets": "bld_asset_mode",
+    "bld_o4sfr_library_assets": "bld_asset_mode",
+    "bld_o4sfr_assets": "bld_asset_mode",
+    "bld_assets": "bld_asset_mode",
+}
+# Morphology radii once stored as ZL16 kernel pixels (~2 m/px), now metres.
+_PIXEL_RADIUS_ALIASES = {
+    "bld_close_k": "bld_close_m",
+    "bld_open_k": "bld_open_m",
+}
+
+
 def normalize_config_entry(var: str, value: str) -> tuple[str, str]:
     """Map legacy config keys/values to the current user-facing schema."""
-    pixel_radius_aliases = {
-        "sfr_bld_close_k": "sfr_bld_close_m",
-        "sfr_bld_open_k": "sfr_bld_open_m",
-        f"{global_prefix}sfr_bld_close_k": f"{global_prefix}sfr_bld_close_m",
-        f"{global_prefix}sfr_bld_open_k": f"{global_prefix}sfr_bld_open_m",
-    }
-    simple_aliases = {
-        "sfr_bld_del": "sfr_bld_disable_cache",
-        "sfr_veg_del": "sfr_veg_disable_cache",
-        "sfr_bld_extra_library_assets": "sfr_bld_asset_mode",
-        "sfr_bld_o4sfr_library_assets": "sfr_bld_asset_mode",
-        "bld_o4sfr_assets": "sfr_bld_asset_mode",
-        "bld_assets": "sfr_bld_asset_mode",
-        f"{global_prefix}sfr_bld_del": f"{global_prefix}sfr_bld_disable_cache",
-        f"{global_prefix}sfr_veg_del": f"{global_prefix}sfr_veg_disable_cache",
-        f"{global_prefix}sfr_bld_extra_library_assets": f"{global_prefix}sfr_bld_asset_mode",
-        f"{global_prefix}sfr_bld_o4sfr_library_assets": f"{global_prefix}sfr_bld_asset_mode",
-        f"{global_prefix}bld_o4sfr_assets": f"{global_prefix}sfr_bld_asset_mode",
-        f"{global_prefix}bld_assets": f"{global_prefix}sfr_bld_asset_mode",
-    }
-
-    if var in simple_aliases:
-        return simple_aliases[var], value
-    if var not in pixel_radius_aliases:
-        return var, value
-
-    try:
-        # Older configs stored ZL16 kernel radii in pixels (~2 m/px).
-        value = str(float(value) * 2.0)
-    except Exception:
-        pass
-    return pixel_radius_aliases[var], value
+    prefix = ""
+    if var.startswith(global_prefix):
+        prefix, var = global_prefix, var[len(global_prefix):]
+    var = _RENAMED_KEYS.get(var, var)
+    for old, new in _RENAMED_PREFIXES:
+        if var.startswith(old):
+            var = new + var[len(old):]
+            break
+    if var in _PIXEL_RADIUS_ALIASES:
+        try:
+            value = str(float(value) * 2.0)
+        except Exception:
+            pass
+        var = _PIXEL_RADIUS_ALIASES[var]
+    else:
+        var = _KEY_ALIASES.get(var, var)
+    return prefix + var, value
 
 
 def is_missing_model_path(var: str, value: str) -> bool:
@@ -546,8 +558,8 @@ class Ortho4XP_Config(tk.Toplevel):
             ("Mesh", list_mesh_vars),
             ("Masks", list_mask_vars),
             ("DSF/Imagery", list_dsf_vars),
-            ("SegFormer Bld", list_sfr_bld_vars),
-            ("SegFormer Veg", list_sfr_veg_vars),
+            ("Building overlay", list_bld_vars),
+            ("Vegetation overlay", list_veg_vars),
         ):
             tk.Label(
                 frame_cfg,
@@ -769,8 +781,8 @@ class Ortho4XP_Config(tk.Toplevel):
             ("Mesh", list_global_mesh_vars),
             ("Masks", list_global_mask_vars),
             ("DSF/Imagery", list_global_dsf_vars),
-            ("SegFormer Bld", list_global_sfr_bld_vars),
-            ("SegFormer Veg", list_global_sfr_veg_vars),
+            ("Building overlay", list_global_bld_vars),
+            ("Vegetation overlay", list_global_veg_vars),
         ):
             tk.Label(
                 frame_cfg,

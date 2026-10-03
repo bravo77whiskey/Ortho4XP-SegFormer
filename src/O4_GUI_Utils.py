@@ -32,6 +32,7 @@ from O4_Cfg_Vars import (
     list_tile_vars,
 )
 import O4_Version
+import O4_Cfg_Vars as CFGVARS
 import O4_Imagery_Utils as IMG
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
@@ -45,8 +46,8 @@ import O4_GUI_Theme as THEME
 import O4_Config_Utils as CFG
 import O4_Zone_Utils as ZONE
 import O4_PBF_Utils as PBF
-import O4_SFR_Pipeline as SFR
-import O4_SFR_Remote as SFR_REMOTE
+import O4_Overlay_Pipeline as PIPELINE
+import O4_Remote_GPU as REMOTE_GPU
 import O4_Scenery_Links as SLINK
 import O4_Build_State as BSTATE
 
@@ -243,7 +244,7 @@ class Ortho4XP_GUI(tk.Tk):
             self.frame_tile,
             takefocus=False,
             text="Libraries",
-            command=self.rescan_sfr_libraries,
+            command=self.rescan_overlay_libraries,
             style="Flat.TButton",
         ).grid(row=0, column=9, rowspan=2, padx=5, pady=0)
         ttk.Button(
@@ -323,13 +324,13 @@ class Ortho4XP_GUI(tk.Tk):
         ).grid(row=0, column=3, padx=5, pady=0, sticky=N + S + E + W)
         ttk.Button(
             self.frame_steps,
-            text=" SegFormer Bld ",
-            command=self.build_sfr_bld,
+            text=" Building Overlay ",
+            command=self.build_bld_overlay,
         ).grid(row=0, column=4, padx=5, pady=0, sticky=N + S + E + W)
         ttk.Button(
             self.frame_steps,
-            text=" SegFormer Veg ",
-            command=self.build_sfr_veg,
+            text=" Vegetation Overlay ",
+            command=self.build_veg_overlay,
         ).grid(row=0, column=5, padx=5, pady=0, sticky=N + S + E + W)
         ttk.Button(
             self.frame_steps, text="    All in one     ", command=self.build_all
@@ -732,7 +733,7 @@ class Ortho4XP_GUI(tk.Tk):
         )
         self.working_thread.start()
 
-    def build_sfr_veg(self):
+    def build_veg_overlay(self):
         try:
             tile = self.tile_from_interface()
             if not tile:
@@ -746,38 +747,15 @@ class Ortho4XP_GUI(tk.Tk):
         # (O4_Tile_Utils) so Tile-config-tab overrides actually reach the build.
         tile.read_from_config(use_global=True)
         tile.read_from_config()
-        SFR.sfr_veg_density       = tile.sfr_veg_density
-        SFR.sfr_veg_close_m       = tile.sfr_veg_close_m
-        SFR.sfr_veg_open_m        = tile.sfr_veg_open_m
-        SFR.sfr_veg_min_area_m2   = tile.sfr_veg_min_area_m2
-        SFR.sfr_veg_simplify_m    = tile.sfr_veg_simplify_m
-        SFR.sfr_veg_excl_buffer_m = tile.sfr_veg_excl_buffer_m
-        SFR.sfr_veg_use_simheaven = tile.sfr_veg_use_simheaven
-        SFR.sfr_veg_avoid_simheaven_buildings = tile.sfr_veg_avoid_simheaven_buildings
-        SFR.sfr_veg_simheaven_building_buffer_m = tile.sfr_veg_simheaven_building_buffer_m
-        SFR.sfr_veg_avoid_simheaven_forests = tile.sfr_veg_avoid_simheaven_forests
-        SFR.sfr_veg_simheaven_forest_buffer_m = tile.sfr_veg_simheaven_forest_buffer_m
-        SFR.sfr_veg_exclude_lower_forests = tile.sfr_veg_exclude_lower_forests
-        SFR.sfr_veg_remove_embedded_trees = tile.sfr_veg_remove_embedded_trees
-        SFR.sfr_veg_use_simheaven_asset_proximity = tile.sfr_veg_use_simheaven_asset_proximity
-        SFR.sfr_veg_use_leaf_type_maps = tile.sfr_veg_use_leaf_type_maps
-        SFR.sfr_veg_use_xp_forests = tile.sfr_veg_use_xp_forests
-        SFR.sfr_veg_avoid_gfv2    = tile.sfr_veg_avoid_gfv2
-        SFR.sfr_veg_gfv2_buffer_m = tile.sfr_veg_gfv2_buffer_m
-        SFR.sfr_veg_use_gfv2_asset_proximity = tile.sfr_veg_use_gfv2_asset_proximity
-        SFR.sfr_veg_res_m         = tile.sfr_veg_res_m
-        SFR.sfr_veg_disable_cache = tile.sfr_veg_disable_cache
-        SFR.sfr_patch_size        = tile.sfr_patch_size
-        SFR.sfr_overlap           = tile.sfr_overlap
-        SFR.sfr_batch_size        = tile.sfr_batch_size
+        PIPELINE.apply_tile_settings(tile, CFGVARS.list_veg_pipeline_vars)
         self.working_thread = threading.Thread(
-            target=SFR.process_veg_tile,
+            target=PIPELINE.process_veg_tile,
             args=[tile.lat, tile.lon, tile.build_dir],
             daemon=True,
         )
         self.working_thread.start()
 
-    def build_sfr_bld(self):
+    def build_bld_overlay(self):
         try:
             tile = self.tile_from_interface()
             if not tile:
@@ -792,49 +770,29 @@ class Ortho4XP_GUI(tk.Tk):
         # toggle) actually reach the build instead of staying at the default.
         tile.read_from_config(use_global=True)
         tile.read_from_config()
-        SFR.sfr_bld_spacing_m   = tile.sfr_bld_spacing_m
-        SFR.sfr_bld_close_m     = tile.sfr_bld_close_m
-        SFR.sfr_bld_open_m      = tile.sfr_bld_open_m
-        SFR.sfr_bld_min_footprint_m2 = tile.sfr_bld_min_footprint_m2
-        SFR.sfr_bld_grid_n      = tile.sfr_bld_grid_n
-        SFR.sfr_bld_disable_cache = tile.sfr_bld_disable_cache
-        SFR.sfr_bld_verbose_log = tile.sfr_bld_verbose_log
-        SFR.sfr_bld_avoid_custom_scenery = tile.sfr_bld_avoid_custom_scenery
-        SFR.sfr_bld_asset_mode = tile.sfr_bld_asset_mode
-        SFR.sfr_bld_roof_color_matching = tile.sfr_bld_roof_color_matching
-        SFR.sfr_bld_yolo_enabled = tile.sfr_bld_yolo_enabled
-        SFR.sfr_bld_yolo_checkpoint = tile.sfr_bld_yolo_checkpoint
-        SFR.sfr_bld_yolo_conf = tile.sfr_bld_yolo_conf
-        SFR.sfr_bld_yolo_iou = tile.sfr_bld_yolo_iou
-        SFR.sfr_bld_yolo_stride = tile.sfr_bld_yolo_stride
-        SFR.sfr_bld_yolo_max_det = tile.sfr_bld_yolo_max_det
-        SFR.sfr_bld_yolo_min_coverage = tile.sfr_bld_yolo_min_coverage
-        SFR.sfr_bld_height_checkpoint = tile.sfr_bld_height_checkpoint
-        SFR.sfr_patch_size      = tile.sfr_patch_size
-        SFR.sfr_overlap         = tile.sfr_overlap
-        SFR.sfr_batch_size      = tile.sfr_batch_size
+        PIPELINE.apply_tile_settings(tile, CFGVARS.list_bld_pipeline_vars)
         self.working_thread = threading.Thread(
-            target=SFR.process_bld_tile,
+            target=PIPELINE.process_bld_tile,
             args=[tile.lat, tile.lon, tile.build_dir],
             daemon=True,
         )
         self.working_thread.start()
 
-    def rescan_sfr_libraries(self):
-        """Rebuild the scenery-library catalog SegFormer Bld reuses across tiles."""
+    def rescan_overlay_libraries(self):
+        """Rebuild the scenery-library catalog the building overlay reuses across tiles."""
         running = getattr(self, "working_thread", None)
         if running is not None and running.is_alive():
             UI.vprint(0, "Wait for the running job to finish before rescanning libraries.")
             return
         self.working_thread = threading.Thread(
-            target=SFR.rescan_building_libraries, daemon=True
+            target=PIPELINE.rescan_building_libraries, daemon=True
         )
         self.working_thread.start()
 
-    def setup_sfr_models(self):
+    def setup_overlay_models(self):
         """Download SegFormer model weights and check/install dependencies."""
         self.working_thread = threading.Thread(
-            target=SFR.setup_sfr_models, daemon=True
+            target=PIPELINE.setup_overlay_models, daemon=True
         )
         self.working_thread.start()
 
@@ -844,14 +802,14 @@ class Ortho4XP_GUI(tk.Tk):
         Ticking the box opens a host picker that lists SSH machines found on
         the local network; the box only stays ticked once a host has been
         selected and its key-based SSH login verified. Sets
-        SFR.sfr_remote_host for every subsequent build started from this
+        PIPELINE.remote_gpu_host for every subsequent build started from this
         window (single steps, All in one, and batch builds). Never persisted:
         the checkbox resets on restart, and each tile re-probes the host so a
         box that goes offline mid-batch just means local inference resumes.
         """
         if not self.use_remote_gpu.get():
-            SFR.sfr_remote_host = ""
-            print("Remote GPU off — SFR model inference runs locally.")
+            PIPELINE.remote_gpu_host = ""
+            print("Remote GPU off — model inference runs locally.")
             return
         # Stay unticked until the picker validates a host.
         self.use_remote_gpu.set(False)
@@ -944,7 +902,7 @@ class Ortho4XP_GUI(tk.Tk):
     def set_red_flag(self):
         UI.user_stopped = True
         UI.red_flag = True
-        # External workers (SFR .venv python, Triangle4XP, DSFTool) never see
+        # External workers (overlay .venv python, Triangle4XP, DSFTool) never see
         # red_flag — kill them (and their children) directly.
         # kill_all_subprocesses() lifts any pause first, so a paused build
         # unblocks and reaches its own red_flag test.
@@ -1045,7 +1003,7 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
             row=2, column=0, sticky=W, **pad
         )
         self.host_var = tk.StringVar(
-            value=parent.remote_gpu_last_host or SFR_REMOTE.default_host()
+            value=parent.remote_gpu_last_host or REMOTE_GPU.default_host()
         )
         self.host_entry = tk.Entry(
             self, width=40, textvariable=self.host_var, **THEME.entry_options()
@@ -1092,9 +1050,9 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
         self.listbox.insert(END, description)
 
     def _add_ssh_config_rows(self):
-        default = SFR_REMOTE.default_host()
+        default = REMOTE_GPU.default_host()
         seen_default = False
-        for entry in SFR_REMOTE.parse_ssh_config_hosts():
+        for entry in REMOTE_GPU.parse_ssh_config_hosts():
             alias = entry["alias"]
             details = entry["hostname"] or "?"
             if entry["user"]:
@@ -1129,7 +1087,7 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
             # with the alias they belong to (queued before any 'found' event).
             import socket as _socket
             alias_map = {}
-            for entry in SFR_REMOTE.parse_ssh_config_hosts():
+            for entry in REMOTE_GPU.parse_ssh_config_hosts():
                 target = entry["hostname"] or entry["alias"]
                 try:
                     for info in _socket.getaddrinfo(
@@ -1140,7 +1098,7 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
                     pass
             self._queue.put(("alias_map", alias_map))
             try:
-                SFR_REMOTE.discover_ssh_hosts(
+                REMOTE_GPU.discover_ssh_hosts(
                     progress_cb=lambda entry: self._queue.put(("found", entry))
                 )
             except Exception as exc:
@@ -1163,14 +1121,14 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
         self.status_var.set(f"Checking key-based SSH login to {host} …")
 
         def _probe():
-            ok = SFR_REMOTE.probe(host)
+            ok = REMOTE_GPU.probe(host)
             self._queue.put(("probe_ok" if ok else "probe_fail", host))
 
         threading.Thread(target=_probe, daemon=True).start()
 
     def cancel(self):
         self._closed = True
-        SFR.sfr_remote_host = ""
+        PIPELINE.remote_gpu_host = ""
         self.parent.use_remote_gpu.set(False)
         self.destroy()
 
@@ -1208,7 +1166,7 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
                     self.rescan_button.state(["!disabled"])
                     self.status_var.set(f"Network scan failed: {payload}")
                 elif kind == "probe_ok":
-                    SFR.sfr_remote_host = payload
+                    PIPELINE.remote_gpu_host = payload
                     self.parent.remote_gpu_last_host = payload
                     self.parent.use_remote_gpu.set(True)
                     print(
@@ -2288,8 +2246,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "OSM data",
         "Mask data",
         "Jpeg imagery",
-        "SFR bld cache",
-        "SFR veg cache",
+        "Building overlay cache",
+        "Vegetation overlay cache",
         "Veg replacement",
         "Tile (whole)",
         "Tile (textures)",
@@ -2300,8 +2258,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "Draw water masks",
         "Build imagery/DSF",
         "Extract overlays",
-        "SegFormer Bld",
-        "SegFormer Veg",
+        "Building overlay",
+        "Vegetation overlay",
         "Override tile configs",
     ]
     # Journal step keys -> the checkbutton that drives them.
@@ -2311,8 +2269,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "mask": "Draw water masks",
         "dsf": "Build imagery/DSF",
         "ovl": "Extract overlays",
-        "sfr_bld": "SegFormer Bld",
-        "sfr_veg": "SegFormer Veg",
+        "bld_overlay": "Building overlay",
+        "veg_overlay": "Vegetation overlay",
     }
 
     canvas_min_x = 900
@@ -2850,10 +2808,10 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                 data_deleted |= bool(self.delete_mask_data(lat, lon))
             if self.v_["Jpeg imagery"].get():
                 data_deleted |= bool(self.delete_jpeg_imagery(lat, lon))
-            if self.v_["SFR bld cache"].get():
-                data_deleted |= bool(self.delete_sfr_bld_cache(lat, lon))
-            if self.v_["SFR veg cache"].get():
-                data_deleted |= bool(self.delete_sfr_veg_cache(lat, lon))
+            if self.v_["Building overlay cache"].get():
+                data_deleted |= bool(self.delete_bld_cache(lat, lon))
+            if self.v_["Vegetation overlay cache"].get():
+                data_deleted |= bool(self.delete_veg_cache(lat, lon))
             # Erasing a tile has to undo the scenery edits that were made for
             # it, or the packages below keep their trees removed with nothing
             # of ours left to replace them.
@@ -2879,11 +2837,11 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         replacement, and a "nothing to restore" line per tile would bury the
         one that actually needs attention.
         """
-        if not SFR.has_veg_tile_replacement(lat, lon):
+        if not PIPELINE.has_veg_tile_replacement(lat, lon):
             summary["skipped"] += 1
             return False
         try:
-            result = SFR.restore_veg_tile_replacement(lat, lon)
+            result = PIPELINE.restore_veg_tile_replacement(lat, lon)
         except Exception as e:
             summary["conflicts"].append(
                 (FNAMES.short_latlon(lat, lon), str(e))
@@ -2992,36 +2950,36 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             UI.vprint(3, e)
             _LOGGER.exception(e)
 
-    def delete_sfr_veg_cache(self, lat: int, lon: int) -> bool:
+    def delete_veg_cache(self, lat: int, lon: int) -> bool:
         """Delete SegFormer vegetation inference maps (*_veg.npy) for this tile."""
         import glob as _glob
-        cache_dir = FNAMES.sfr_cache_dir(lat, lon)
+        cache_dir = FNAMES.overlay_cache_dir(lat, lon)
         files = _glob.glob(os.path.join(cache_dir, '*_veg.npy'))
         if not files:
-            UI.vprint(3, "No SFR veg cache exists for tile at " + str(lat) + str(lon))
+            UI.vprint(3, "No vegetation overlay cache exists for tile at " + str(lat) + str(lon))
             return False
         for f in files:
             try:
                 os.remove(f)
             except Exception as e:
                 UI.vprint(3, e)
-        UI.vprint(3, f"SFR veg cache removed for tile at {lat}{lon} ({len(files)} files)")
+        UI.vprint(3, f"Vegetation overlay cache removed for tile at {lat}{lon} ({len(files)} files)")
         return True
 
-    def delete_sfr_bld_cache(self, lat: int, lon: int) -> bool:
+    def delete_bld_cache(self, lat: int, lon: int) -> bool:
         """Delete SegFormer building placement caches (*_bld.pkl) for this tile."""
         import glob as _glob
-        cache_dir = FNAMES.sfr_cache_dir(lat, lon)
+        cache_dir = FNAMES.overlay_cache_dir(lat, lon)
         files = _glob.glob(os.path.join(cache_dir, '*_bld.pkl'))
         if not files:
-            UI.vprint(3, "No SFR bld cache exists for tile at " + str(lat) + str(lon))
+            UI.vprint(3, "No building overlay cache exists for tile at " + str(lat) + str(lon))
             return False
         for f in files:
             try:
                 os.remove(f)
             except Exception as e:
                 UI.vprint(3, e)
-        UI.vprint(3, f"SFR bld cache removed for tile at {lat}{lon} ({len(files)} files)")
+        UI.vprint(3, f"Building overlay cache removed for tile at {lat}{lon} ({len(files)} files)")
         return True
 
     def delete_tile_whole(self, lat: int, lon: int) -> None:
@@ -3146,7 +3104,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         """Put back the source scenery this tool edited, for the selected tiles.
 
         Deliberately separate from the vegetation settings: unticking
-        "sfr_veg_exclude_lower_forests" changes what the *next* build does and
+        "veg_exclude_lower_forests" changes what the *next* build does and
         cannot undo edits already installed on disk. This is what undoes them.
         """
         list_lat_lon = sorted(self.dico_tiles_todo.keys())
@@ -3177,21 +3135,21 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
     def _restore_veg_scenery_worker(list_lat_lon):
         for lat, lon in list_lat_lon:
             try:
-                SFR.restore_veg_tile_replacement(int(lat), int(lon))
+                PIPELINE.restore_veg_tile_replacement(int(lat), int(lon))
             except Exception as exc:
                 UI.lvprint(
                     0,
-                    f"[SFR Veg] restore failed for "
+                    f"[Veg] restore failed for "
                     f"{FNAMES.short_latlon(lat, lon)}: {exc}",
                 )
-        UI.lvprint(1, "[SFR Veg] Restore finished.")
+        UI.lvprint(1, "[Veg] Restore finished.")
 
     def veg_replacement_status(self):
         """Report which tiles carry an installed replacement, and any half-done one."""
         try:
-            import O4_SFR_Veg_Cleanup as CLEANUP
+            import O4_Veg_Replacement as CLEANUP
 
-            store = CLEANUP.ManagedStore(SFR.veg_replacement_root())
+            store = CLEANUP.ManagedStore(PIPELINE.veg_replacement_root())
             tiles = store.tiles()
             pending = store.pending()
         except Exception as exc:
@@ -3320,8 +3278,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             steps["mask"],
             steps["dsf"],
             steps["ovl"],
-            steps["sfr_bld"],
-            steps["sfr_veg"],
+            steps["bld_overlay"],
+            steps["veg_overlay"],
             override_cfg,
             resume_path,
         ]

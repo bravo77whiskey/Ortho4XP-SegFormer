@@ -4,7 +4,7 @@ Builds the shipped X-Plane 12 building object library `O4SFR_Library/` from a
 curated catalog of open-source 3D models. The library is consumed by the SFR
 building overlay through the existing `library.txt` plumbing — see
 `CURATED_EXTRA_BUILDING_LIBRARIES["o4sfr"]` in
-[`src/O4_SFR_Building_Overlay.py`](../../src/O4_SFR_Building_Overlay.py).
+[`src/O4_Building_Overlay.py`](../../src/O4_Building_Overlay.py).
 
 ## Why this pipeline
 
@@ -107,7 +107,7 @@ python scripts/asset_pipeline/build_custom_library.py \
 
 ```
 pytest tests/sfr_optional_library_regions_test.py tests/custom_library_manifest_test.py
-python src/scripts/audit_sfr_building_assets.py --lat <lat> --lon <lon>
+python src/scripts/audit_building_assets.py --lat <lat> --lon <lon>
 ```
 
 The audit script reports per-curated-library install state and per-region

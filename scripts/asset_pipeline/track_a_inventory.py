@@ -31,7 +31,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import O4_SFR_Building_Overlay as BLD  # noqa: E402
+import O4_Building_Overlay as BLD  # noqa: E402
 
 
 _TRAILING_NUMBER_RE = re.compile(r"/(\d+)\.obj$", re.IGNORECASE)

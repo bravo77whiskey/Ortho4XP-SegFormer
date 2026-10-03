@@ -26,7 +26,7 @@ _SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-import O4_SFR_Veg_Cleanup as CLEANUP  # noqa: E402
+import O4_Veg_Replacement as CLEANUP  # noqa: E402
 
 
 def _default_managed_root():

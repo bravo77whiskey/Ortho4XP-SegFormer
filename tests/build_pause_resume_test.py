@@ -161,6 +161,25 @@ class BuildJournalTest(JournalTestCase):
         BSTATE.close()
         self.assertIsNotNone(BSTATE.resumable())
 
+    def test_a_journal_with_pre_rename_step_keys_still_resumes(self):
+        steps = {"dsf": True, "bld_overlay": True, "veg_overlay": True}
+        BSTATE.begin(self.tiles, steps, "", False)
+        path = BSTATE.journal_path()
+        BSTATE.close()
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+        state["steps"] = ["dsf", "sfr_bld", "sfr_veg"]
+        state["progress"] = {"+45+005": ["dsf", "sfr_bld"]}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+        found = BSTATE.resumable()
+        self.assertIsNotNone(found)
+        self.assertEqual(found[1]["steps"], ["dsf", "bld_overlay", "veg_overlay"])
+        BSTATE.begin(self.tiles, steps, "", False, resume_path=found[0])
+        self.assertTrue(BSTATE.is_done(45, 5, "bld_overlay"))
+        self.assertFalse(BSTATE.is_done(45, 5, "veg_overlay"))
+
     def test_resume_against_a_different_batch_starts_afresh(self):
         # Skipping steps recorded for another tile set would ship half-built
         # tiles, so a mismatched journal is not trusted.

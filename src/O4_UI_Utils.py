@@ -19,7 +19,7 @@ log = True
 
 ################################################################################
 # Registry of external worker subprocesses.
-# Long build steps (Triangle4XP, DSFTool, the SFR .venv python) run as
+# Long build steps (Triangle4XP, DSFTool, the overlay .venv python) run as
 # external processes which never see red_flag. They register here so that
 # the GUI Stop button and window close can terminate them immediately
 # instead of letting them run on in the background shell.
@@ -81,7 +81,7 @@ def kill_all_subprocesses():
 # test red_flag, so a pause lands between units of work rather than in the
 # middle of one and nothing half-written is left behind.
 #
-# External workers (Triangle4XP, DSFTool, the SFR .venv python) never see the
+# External workers (Triangle4XP, DSFTool, the overlay .venv python) never see the
 # flag, so their process trees are suspended instead. That needs psutil, which
 # rides along with ultralytics; without it a pause still stops the Python side
 # and the external step simply finishes before the pause takes hold.
