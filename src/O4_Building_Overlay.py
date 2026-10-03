@@ -2587,8 +2587,11 @@ EXCLUDED_BUILDING_FILLER_ASSETS = {
 
 EXCLUDED_BUILDING_ASSETS = {
     # 60 m apartment slab: too wide for apartment-block placement and visually
-    # unsuitable as a generated large-footprint fallback.
+    # unsuitable as a generated large-footprint fallback. SFD Global Autogen
+    # exports it as Apartment_2_1.obj (variants Asia/Apartment_2_1/_2_2.obj);
+    # the bare name is kept for older library setups.
     "sfd_global/asia/apartment_2.obj",
+    "sfd_global/asia/apartment_2_1.obj",
     # Unresolved by current simHeaven/X-Plane library setups; do not emit a DSF
     # OBJECT_DEF that leaves X-Plane with a missing scenery resource.
     "simheaven/houses/house_05x05x1.obj",
@@ -2609,6 +2612,7 @@ EXCLUDED_BUILDING_ASSETS = {
     "simheaven/houses/house_15x35x3.obj",
     "simheaven/residential/residential_10x20x4.obj",
     "simheaven/residential/residential_10x20x5.obj",
+    "simheaven/residential/residential_10x20x6.obj",
     "simheaven/residential/residential_12x30x2.obj",
     "simheaven/residential/residential_12x30x3.obj",
     "simheaven/residential/residential_15x20x3.obj",
