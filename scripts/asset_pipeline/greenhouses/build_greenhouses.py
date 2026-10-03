@@ -4,7 +4,9 @@
 
 ``--pages`` holds the four texture pages (tunnels.png, tunnels_nml.png,
 solar.png, solar_nml.png) from one texture set -- ``textures_cycles.py``
-(Cycles bake) or ``textures_ai.py`` (AI images); both follow ``layout``.
+(Cycles bake), ``textures_ai.py`` (AI images) or ``textures_photo.py``
+(real photographs); all follow ``layout``.  A ``LICENSES.json`` beside the
+pages (photo set) is shipped with the library.
 
 Writes ``<pkg>/library.txt`` and ``<pkg>/objects/``:
 
@@ -133,7 +135,11 @@ def main():
     doors = os.path.join(args.pages, "doors.json")
     if os.path.isfile(doors):
         with open(doors, "r", encoding="utf-8") as fh:
-            L.TUNNEL_DOORS.update({k: tuple(v) for k, v in json.load(fh).items()})
+            L.TUNNEL_DOORS.update({k: tuple(v) if v else None
+                                   for k, v in json.load(fh).items()})
+    licenses = os.path.join(args.pages, "LICENSES.json")
+    if os.path.isfile(licenses):
+        shutil.copyfile(licenses, os.path.join(args.out, "LICENSES.json"))
     lines = ["A", "800", "LIBRARY", ""]
     stats = {}
 

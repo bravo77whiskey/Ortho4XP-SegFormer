@@ -157,9 +157,9 @@ def tunnel_mesh(bays, length_m, lod):
                 ring.append(m.v((cx + w + s * span, y * h, z), (0, 0, nz),
                                 reg.uv(s + 0.5, y)))
             m.fan(centre, ring)
-            if lod == 0:
-                _door_frame(m, reg, L.TUNNEL_DOORS[p["gables"][end]],
-                            cx + w, z, nz, span, h)
+            door = L.TUNNEL_DOORS[p["gables"][end]]
+            if lod == 0 and door is not None:      # None: an open tunnel end
+                _door_frame(m, reg, door, cx + w, z, nz, span, h)
         if lod == 0:
             for side in (-1.0, 1.0):
                 _berm(m, roof, cx, span, height, side, z0, z1, p["voff"])

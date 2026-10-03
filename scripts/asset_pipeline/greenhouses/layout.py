@@ -65,7 +65,8 @@ FOOT_SOIL = 0.03
 # door in the tunnel gable image (across = width, along = height), as
 # (a0, a1, b0, b1) fractions
 TUNNEL_DOOR = (0.42, 0.58, 0.0, 0.62)
-# per gable image; a texture set may override (its pages' doors.json)
+# per gable image; a texture set may override (its pages' doors.json);
+# None is an open tunnel end with no door frame
 TUNNEL_DOORS = {name: TUNNEL_DOOR for name in TUNNEL_GABLES}
 
 SOLAR = {
