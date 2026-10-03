@@ -33,6 +33,31 @@ else:
     dsftool_cmd = os.path.join(FNAMES.Utils_dir, "lin", "DSFTool ")
 
 ################################################################################
+def find_source_dsf(lat, lon):
+    """Find a tile's DSF in custom_overlay_src, then custom_overlay_src_alternate.
+
+    Returns (path, None) when found, else (None, report) where report says,
+    for each setting, its value, the path looked at and why it failed, so a
+    missing file can be told apart from an empty setting or a read error.
+    """
+    report = []
+    for name, root in (
+        ("custom_overlay_src", custom_overlay_src),
+        ("custom_overlay_src_alternate", custom_overlay_src_alternate),
+    ):
+        path = os.path.join(root, "Earth nav data", FNAMES.long_latlon(lat, lon) + ".dsf")
+        try:
+            os.stat(path)
+            return path, None
+        except FileNotFoundError:
+            reason = "not found"
+        except OSError as exc:
+            reason = str(exc)
+        report.append(f"     {name} = {root!r}\n       {path}: {reason}")
+    return None, "\n".join(report)
+
+
+################################################################################
 def build_overlay(lat, lon):
     if UI.is_working:
         return 0
@@ -45,23 +70,12 @@ def build_overlay(lat, lon):
         + FNAMES.short_latlon(lat, lon)
         + " : \n--------\n",
     )
-    file_to_sniff = os.path.join(
-        custom_overlay_src,
-        "Earth nav data",
-        FNAMES.long_latlon(lat, lon) + ".dsf",
-        )
-    if not os.path.exists(file_to_sniff):
-        file_to_sniff = os.path.join(
-        custom_overlay_src_alternate,
-        "Earth nav data",
-        FNAMES.long_latlon(lat, lon) + ".dsf",
-        )
-    if not os.path.exists(file_to_sniff):
+    file_to_sniff, report = find_source_dsf(lat, lon)
+    if file_to_sniff is None:
         UI.exit_message_and_bottom_line(
-            "   ERROR: file ",
-            file_to_sniff,
-            "absent. Recall that the overlay source directory needs to be set ",
-            "in the config window first.",
+            "   ERROR: no overlay source DSF for this tile. Recall that the ",
+            "overlay source directory needs to be set in the config window.\n",
+            report,
         )
         return 0
     file_to_sniff_loc = os.path.join(

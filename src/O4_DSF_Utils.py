@@ -493,23 +493,12 @@ def create_terrain_file(
 ################################################################################
 def extract_elevation_and_bathymetry_data(lat, lon):
     UI.vprint(1, "     Extracting some rasters from X-Plane's Global Scenery")
-    global_scenery_dsf = os.path.join(
-        OVL.custom_overlay_src,
-        "Earth nav data",
-        FNAMES.long_latlon(lat, lon) + ".dsf",
-    )
-    if not os.path.exists(global_scenery_dsf):
-        global_scenery_dsf = os.path.join(
-        OVL.custom_overlay_src_alternate,
-        "Earth nav data",
-        FNAMES.long_latlon(lat, lon) + ".dsf",
-        )
-    if not os.path.exists(global_scenery_dsf):
+    global_scenery_dsf, report = OVL.find_source_dsf(lat, lon)
+    if global_scenery_dsf is None:
         UI.exit_message_and_bottom_line(
-            "   ERROR: file ",
-            global_scenery_dsf,
-            "absent. Global Scenery directory needs to be set in the config ",
-            "window first.",
+            "   ERROR: no Global Scenery DSF for this tile. The Global Scenery ",
+            "directory needs to be set in the config window.\n",
+            report,
         )
         return (b"", b"")
     tmp_file = os.path.join(
