@@ -57,8 +57,8 @@ TEXTURES = (
 
 # ── Scenarios ────────────────────────────────────────────────────────────────
 # name -> (run() keyword overrides, environment, keep caches from previous).
-# make_viz runs use the ZL16 textures only: the overview grid assumes a single
-# zoom level (a mixed-ZL tile would need a multi-gigabyte canvas).
+# Most make_viz runs use the ZL16 textures only, so they stay comparable with
+# trees from before the mixed-zoom overview fix; viz_mixed_zl covers the rest.
 SCENARIOS = {
     "default": ({}, {}, False),
     "warm_placement_cache": ({}, {}, True),
@@ -66,6 +66,7 @@ SCENARIOS = {
     "self_avoid": ({"verbose_log": True}, {"O4_BLD_OBJECT_SELF_AVOID": "1"}, False),
     "objects_only": ({}, {"O4_BLD_ASSET_MODE": "objects"}, False),
     "viz_zl16": ({"make_viz": True, "dds_filter": "ZL16"}, {}, False),
+    "viz_mixed_zl": ({"make_viz": True}, {}, False),
     "facades_only": ({"make_viz": True, "dds_filter": "ZL16"},
                      {"O4_BLD_ASSET_MODE": "facades"}, False),
     "seg_all_agri_drop": ({}, {"O4_BLD_SEG_FIRST": "all", "O4_BLD_AGRI": "drop"}, False),

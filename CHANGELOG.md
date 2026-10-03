@@ -118,6 +118,11 @@ folders, which installed libraries and generated DSFs refer to.
   the launch scripts used `venv/` while the overlays and `build.py` use
   `.venv/`.
 - Tests that picked the wrong DSFTool binary on Linux or assumed Windows paths.
+- Building overlay overview images (`make_viz`) of a tile with textures at
+  more than one zoom level tried to allocate a canvas of tens of gigabytes,
+  and textures that were not next to each other overwrote each other's
+  panels. Panels are now placed by geographic position, with higher zoom
+  levels drawn at their true (smaller) size.
 
 ### Changed
 

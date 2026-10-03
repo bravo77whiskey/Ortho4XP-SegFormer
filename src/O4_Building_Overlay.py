@@ -7622,6 +7622,14 @@ def _ccw_lonlat_ring(lonlat_ring):
     return ring[::-1] if twice_area < 0.0 else ring
 
 
+def _paste_panel(canvas, panel, x, y):
+    """Copy ``panel`` onto ``canvas`` at ``(x, y)``, clipped to the canvas."""
+    h = min(panel.shape[0], canvas.shape[0] - y)
+    w = min(panel.shape[1], canvas.shape[1] - x)
+    if h > 0 and w > 0:
+        canvas[y:y + h, x:x + w] = panel[:h, :w]
+
+
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 # {til_y_top}_{til_x_left}_{provider}{zl}.dds
 _DDS_NAME_RE = re.compile(
@@ -7810,14 +7818,7 @@ class _BuildingOverlayRun:
         _used_zls = sorted(set(int(_DDS_NAME_RE.match(_f).group(4)) for _f in self.files))
         _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
 
-        # Grid geometry for visualisation
-        xs = sorted(set(int(f.split('_')[1]) for f in self.files))
-        ys = sorted(set(int(f.split('_')[0]) for f in self.files))
-        self.x_step = xs[1]-xs[0] if len(xs)>1 else 16
-        self.y_step = ys[1]-ys[0] if len(ys)>1 else 16
-        self.x_min, self.y_min = xs[0], ys[0]
-        self.n_cols = (xs[-1]-xs[0])//self.x_step + 1
-        self.n_rows = (ys[-1]-ys[0])//self.y_step + 1
+        self._layout_overview(min(_used_zls))
 
         print(f"Tile: lat={self.lat} lon={self.lon}  DDS: {len(self.files)} ({_zl_str})  Grid: {self.n_cols}×{self.n_rows}")
         print(
@@ -7825,6 +7826,41 @@ class _BuildingOverlayRun:
             f"min_footprint={self.min_footprint_m2}m²"
         )
         return True
+
+    def _layout_overview(self, base_zl):
+        """Place every texture on the overview canvas at its true position.
+
+        Positions are measured in textures of ``base_zl`` (the lowest zoom
+        level present); a texture at a higher zoom level covers a smaller
+        square, so mixed-ZL tiles and selections with gaps share one canvas
+        without overlapping.
+        """
+        self._overview_cells = {}
+        for name in self.files:
+            match = _DDS_NAME_RE.match(name)
+            textures_per_cell = 2 ** (int(match.group(4)) - base_zl)
+            cell_tiles = 16 * textures_per_cell
+            self._overview_cells[name] = (
+                int(match.group(2)) / cell_tiles,
+                int(match.group(1)) / cell_tiles,
+                1.0 / textures_per_cell,
+            )
+        cells = self._overview_cells.values()
+        self._overview_origin = (min(c[0] for c in cells), min(c[1] for c in cells))
+        self.n_cols = int(math.ceil(
+            max(c[0] + c[2] for c in cells) - self._overview_origin[0] - 1e-9))
+        self.n_rows = int(math.ceil(
+            max(c[1] + c[2] for c in cells) - self._overview_origin[1] - 1e-9))
+
+    def _overview_panel(self, fname):
+        """``(x, y, size)`` in pixels of a texture's square on the overview canvas."""
+        col, row, cells = self._overview_cells[fname]
+        x0, y0 = self._overview_origin
+        return (
+            int(round((col - x0) * self.TILE_VIZ)),
+            int(round((row - y0) * self.TILE_VIZ)),
+            max(1, int(round(cells * self.TILE_VIZ))),
+        )
 
     def _load_osm_vectors(self):
         """Load the tile's OSM roads and water/airport polygons."""
@@ -8821,13 +8857,13 @@ class _BuildingOverlayRun:
                 os.makedirs(os.path.dirname(os.path.abspath(self.out_dsf)), exist_ok=True)
                 viz_path = self.out_dsf.replace('.dsf', '_overview.png')
                 Image.fromarray(self.composite).save(viz_path)
-                print(f"Overview  → {viz_path}  ({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)")
+                print(f"Overview  → {viz_path}  ({self.composite.shape[1]}×{self.composite.shape[0]}px)")
                 if self.footprint_composite is not None:
                     footprint_viz_path = self.out_dsf.replace('.dsf', '_footprints.png')
                     Image.fromarray(self.footprint_composite).save(footprint_viz_path)
                     print(
                         f"Footprints → {footprint_viz_path}  "
-                        f"({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)"
+                        f"({self.composite.shape[1]}×{self.composite.shape[0]}px)"
                     )
             print("[Bld] Debug image-only mode: skipped DSF text write and compile.")
             return total_placements
@@ -8896,13 +8932,13 @@ class _BuildingOverlayRun:
         if self.make_viz and self.composite is not None:
             viz_path = self.out_dsf.replace('.dsf', '_overview.png')
             Image.fromarray(self.composite).save(viz_path)
-            print(f"Overview  → {viz_path}  ({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)")
+            print(f"Overview  → {viz_path}  ({self.composite.shape[1]}×{self.composite.shape[0]}px)")
             if self.footprint_composite is not None:
                 footprint_viz_path = self.out_dsf.replace('.dsf', '_footprints.png')
                 Image.fromarray(self.footprint_composite).save(footprint_viz_path)
                 print(
                     f"Footprints → {footprint_viz_path}  "
-                    f"({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)"
+                    f"({self.composite.shape[1]}×{self.composite.shape[0]}px)"
                 )
 
         print(
@@ -10478,8 +10514,6 @@ class _TexturePass:
         """Print the texture summary and save its placement cache."""
         self.file_counts['placed'] = len(self.pts_this)
 
-        self.col = (self.til_x_left - self.run.x_min) // self.run.x_step
-        self.row = (self.til_y_top  - self.run.y_min) // self.run.y_step
         # Placed-footprint coverage: fraction of the tile actually covered by
         # placed building footprints (objects + facades), the packing-density
         # metric to watch when tuning overlap removal vs. coverage.
@@ -10545,14 +10579,15 @@ class _TexturePass:
                 if self.img is None:
                     return
                 _record_elapsed(self.run.timings, self.file_timings, 'dds_load', _img_t)
-            scale = self.run.TILE_VIZ / self.img_w
-            panel = np.array(Image.fromarray(self.img).resize((self.run.TILE_VIZ, self.run.TILE_VIZ), Image.LANCZOS))
+            panel_x, panel_y, size = self.run._overview_panel(self.fname)
+            scale = size / self.img_w
+            panel = np.array(Image.fromarray(self.img).resize((size, size), Image.LANCZOS))
             def _blend_viz_mask(src_mask, colour, alpha):
                 if src_mask is None or not np.any(src_mask):
                     return
                 viz_mask = np.array(
                     Image.fromarray((src_mask != 0).astype(np.uint8) * 255)
-                    .resize((self.run.TILE_VIZ, self.run.TILE_VIZ), Image.NEAREST)
+                    .resize((size, size), Image.NEAREST)
                 ) > 127
                 panel[viz_mask] = (
                     panel[viz_mask] * (1.0 - alpha) +
@@ -10579,7 +10614,7 @@ class _TexturePass:
                 BLD_CLASS_EXTRA_LARGE: (135, 90, 255),
             }
             footprint_fill = (255, 255, 255)
-            yolo_line_w = max(1, int(round(self.run.TILE_VIZ / 2048)))
+            yolo_line_w = max(1, int(round(size / 2048)))
             for poly, placed in self.yolo_viz_polys:
                 pts = [
                     (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
@@ -10637,18 +10672,18 @@ class _TexturePass:
                         fill=(255, 245, 80, 255 if placed else 190),
                         width=yolo_line_w,
                     )
-            _draw_roof_color_viz_legend(draw, self.roof_color_viz_polys, self.run.TILE_VIZ)
-            self.run.composite[self.row*self.run.TILE_VIZ:(self.row+1)*self.run.TILE_VIZ, self.col*self.run.TILE_VIZ:(self.col+1)*self.run.TILE_VIZ] = np.array(pil)
+            _draw_roof_color_viz_legend(draw, self.roof_color_viz_polys, size)
+            _paste_panel(self.run.composite, np.array(pil), panel_x, panel_y)
 
             if self.run.footprint_composite is not None:
                 fp_base = Image.fromarray(
                     np.array(
-                        Image.fromarray(self.img).resize((self.run.TILE_VIZ, self.run.TILE_VIZ), Image.LANCZOS)
+                        Image.fromarray(self.img).resize((size, size), Image.LANCZOS)
                     )
                 ).convert('RGBA')
-                fp_layer = Image.new('RGBA', (self.run.TILE_VIZ, self.run.TILE_VIZ), (0, 0, 0, 0))
+                fp_layer = Image.new('RGBA', (size, size), (0, 0, 0, 0))
                 fp_draw = ImageDraw.Draw(fp_layer)
-                yolo_line_w = max(1, int(round(self.run.TILE_VIZ / 2048)))
+                yolo_line_w = max(1, int(round(size / 2048)))
                 for poly, placed in self.yolo_viz_polys:
                     if not placed:
                         continue
@@ -10711,13 +10746,12 @@ class _TexturePass:
                             width=yolo_line_w,
                         )
                 _draw_roof_color_viz_legend(
-                    fp_draw, self.roof_color_viz_polys, self.run.TILE_VIZ
+                    fp_draw, self.roof_color_viz_polys, size
                 )
                 fp_img = Image.alpha_composite(fp_base, fp_layer).convert('RGB')
-                self.run.footprint_composite[
-                    self.row*self.run.TILE_VIZ:(self.row+1)*self.run.TILE_VIZ,
-                    self.col*self.run.TILE_VIZ:(self.col+1)*self.run.TILE_VIZ,
-                ] = np.array(fp_img)
+                _paste_panel(
+                    self.run.footprint_composite, np.array(fp_img), panel_x, panel_y
+                )
             _record_elapsed(self.run.timings, self.file_timings, 'viz', _t_viz)
 
 def run(
