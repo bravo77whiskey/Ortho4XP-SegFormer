@@ -157,16 +157,11 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("yolo_suppress", "yolo_suppress"),
         ("heightnet", "heightnet"),
         ("stock_yolo", "stock_yolo_inference"),
-        ("zone", "zone_cleanup"),
         ("lookup", "lookup"),
         ("road", "road_raster"),
-        ("road_cache", "road_cache"),
         ("meshwater", "mesh_water"),
-        ("heading", "heading_grid"),
         ("excl", "existing_bld_excl"),
         ("mask", "mask_apply"),
-        ("cc", "connected_components"),
-        ("candidates", "candidate_grid"),
         ("greenhouses", "greenhouses"),
         ("seg_first", "seg_first"),
         ("place", "fit_loop"),
@@ -176,7 +171,6 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("place_prep", "place_prep"),
         ("place_fits", "place_fits"),
         ("place_select", "place_select"),
-        ("place_blockers", "place_blockers"),
         ("place_maskfill", "place_maskfill"),
         ("save", "cache_save"),
         ("viz", "viz"),
@@ -191,7 +185,6 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         parts.extend(
             f"{label}={int(file_counts.get(key, 0))}"
             for label, key in (
-                ("cand", "candidates"),
                 ("yolo_raw", "yolo_raw_detections"),
                 ("yolo_det", "yolo_detections"),
                 ("heightnet_dets", "heightnet_dets"),
@@ -214,23 +207,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
                 ("yolo_obj_occ", "yolo_object_occupancy_reject"),
                 ("yolo_blocked", "yolo_blocked"),
                 ("yolo_overlap_blocked", "yolo_overlap_blocked"),
-                ("yolo_tpl", "yolo_template_placed"),
-                ("zone_yolo_tpl", "same_zone_yolo_template_placed"),
-                ("gap_yolo_tpl", "gap_yolo_template_placed"),
-                ("initial_blocked", "initial_center_blocked"),
-                ("static_clearance_blocked", "static_clearance_blocked"),
-                ("dynamic_blocked", "dynamic_center_blocked"),
-                ("dynamic_clearance_blocked", "dynamic_clearance_blocked"),
-                ("cap", "candidate_cap"),
-                ("gap_cand", "gap_candidates"),
-                ("gap_static_blocked", "gap_static_blocked"),
-                ("gap_dynamic_blocked", "gap_dynamic_blocked"),
-                ("gap_comp", "gap_components"),
-                ("gap_cap", "gap_candidate_cap"),
-                ("gap_placed", "gap_placed"),
                 ("res_asset_skip", "residential_asset_skipped"),
-                ("side_head", "side_heading_zones"),
-                ("sh_head", "simheaven_heading_zones"),
                 ("fit_checks", "fit_checks"),
                 # O4_BLD_PLACE_PROFILE candidate-scan accounting.
                 ("place_select_calls", "place_select_calls"),
@@ -251,141 +228,6 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
 def _env_patterns(name):
     value = os.environ.get(name, "")
     return [part.strip() for part in value.split(",") if part.strip()]
-
-
-def _limit_candidates_by_component(cand_x, cand_y, cand_cls, cand_labels, max_candidates, rng):
-    """Keep a deterministic, component-balanced sample of placement candidates."""
-    n_candidates = int(cand_x.size)
-    if max_candidates <= 0 or n_candidates <= max_candidates:
-        return cand_x, cand_y, cand_cls, cand_labels, 0
-
-    labels, inverse, counts = np.unique(cand_labels, return_inverse=True, return_counts=True)
-    n_labels = labels.size
-    if n_labels == 0:
-        return cand_x[:0], cand_y[:0], cand_cls[:0], cand_labels[:0], n_candidates
-
-    reserve = np.minimum(counts, 64)
-    if int(reserve.sum()) > max_candidates:
-        reserve = np.zeros_like(counts)
-
-    remaining = max_candidates - int(reserve.sum())
-    alloc = reserve.astype(np.int64, copy=True)
-    needs = counts - alloc
-    if remaining > 0 and np.any(needs > 0):
-        weights = np.sqrt(needs.astype(np.float64))
-        raw = remaining * (weights / weights.sum())
-        extra = np.minimum(needs, np.floor(raw).astype(np.int64))
-        alloc += extra
-        leftover = max_candidates - int(alloc.sum())
-        if leftover > 0:
-            fractional_order = np.argsort(raw - np.floor(raw))[::-1]
-            for idx in fractional_order:
-                if leftover <= 0:
-                    break
-                if alloc[idx] < counts[idx]:
-                    alloc[idx] += 1
-                    leftover -= 1
-
-    selected = []
-    for label_idx in range(n_labels):
-        label_candidates = np.flatnonzero(inverse == label_idx)
-        keep_count = int(min(alloc[label_idx], label_candidates.size))
-        if keep_count <= 0:
-            continue
-        if keep_count == label_candidates.size:
-            selected.append(label_candidates)
-        else:
-            selected.append(
-                label_candidates[
-                    np.linspace(0, label_candidates.size - 1, keep_count, dtype=np.int64)
-                ]
-            )
-
-    if not selected:
-        return cand_x[:0], cand_y[:0], cand_cls[:0], cand_labels[:0], n_candidates
-
-    keep_idx = np.sort(np.concatenate(selected))
-    return cand_x[keep_idx], cand_y[keep_idx], cand_cls[keep_idx], cand_labels[keep_idx], n_candidates - keep_idx.size
-
-
-def _leftover_gap_candidates(leftover_mask, zone_class, max_candidates, rng,
-                             max_per_component=24):
-    """Return high-value gap-fill centers from leftover connected components."""
-    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        leftover_mask.astype(np.uint8), connectivity=8
-    )
-    if n_labels <= 1:
-        empty_i = np.empty(0, dtype=np.int32)
-        empty_c = np.empty(0, dtype=np.uint8)
-        return empty_i, empty_i, empty_c, empty_i, 0, 0
-
-    rows = []
-    min_area_px = 4
-    peak_kernel = np.ones((3, 3), dtype=np.uint8)
-    for label in range(1, n_labels):
-        x = int(stats[label, cv2.CC_STAT_LEFT])
-        y = int(stats[label, cv2.CC_STAT_TOP])
-        w = int(stats[label, cv2.CC_STAT_WIDTH])
-        h = int(stats[label, cv2.CC_STAT_HEIGHT])
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        if area < min_area_px or w <= 0 or h <= 0:
-            continue
-
-        local_labels = labels[y:y + h, x:x + w]
-        component = (local_labels == label).astype(np.uint8)
-        dist = cv2.distanceTransform(component, cv2.DIST_L2, 3)
-        dilated = cv2.dilate(dist, peak_kernel)
-        peak_mask = (component != 0) & (dist >= dilated - 1e-6) & (dist >= 1.0)
-        py, px = np.nonzero(peak_mask)
-        if px.size == 0:
-            py = np.array([int(round(float(centroids[label, 1]) - y))], dtype=np.int32)
-            px = np.array([int(round(float(centroids[label, 0]) - x))], dtype=np.int32)
-            px = np.clip(px, 0, w - 1)
-            py = np.clip(py, 0, h - 1)
-
-        scores = dist[py, px]
-        order = np.argsort(scores)[::-1]
-        component_budget = max(
-            int(max_per_component),
-            min(512, int(math.sqrt(float(area)) * 0.5)),
-        )
-        keep = order[:max(1, min(component_budget, order.size))]
-        gx = (px[keep] + x).astype(np.int32)
-        gy = (py[keep] + y).astype(np.int32)
-        gcls = zone_class[gy, gx].astype(np.uint8)
-        valid = gcls != 0
-        gx = gx[valid]
-        gy = gy[valid]
-        gcls = gcls[valid]
-        if gx.size:
-            glabels = np.full(gx.shape, label, dtype=np.int32)
-            rows.append((gx, gy, gcls, glabels))
-
-    if not rows:
-        empty_i = np.empty(0, dtype=np.int32)
-        empty_c = np.empty(0, dtype=np.uint8)
-        return empty_i, empty_i, empty_c, empty_i, max(0, n_labels - 1), 0
-
-    gap_x = np.concatenate([row[0] for row in rows])
-    gap_y = np.concatenate([row[1] for row in rows])
-    gap_cls = np.concatenate([row[2] for row in rows])
-    gap_labels = np.concatenate([row[3] for row in rows])
-    if max_candidates and gap_x.size > max_candidates:
-        gap_x, gap_y, gap_cls, gap_labels, n_dropped = _limit_candidates_by_component(
-            gap_x, gap_y, gap_cls, gap_labels, max_candidates, rng
-        )
-    else:
-        n_dropped = 0
-
-    order = rng.permutation(gap_x.size) if gap_x.size else np.empty(0, dtype=np.int64)
-    return (
-        gap_x[order],
-        gap_y[order],
-        gap_cls[order],
-        gap_labels[order] if gap_labels.size == gap_x.size else gap_labels,
-        max(0, n_labels - 1),
-        int(n_dropped),
-    )
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -619,34 +461,6 @@ def _prepare_roads(roads):
     return prepared
 
 
-def _prepare_segment_arrays(roads):
-    """Flatten road ways into arrays used for fast per-DDS heading lookup."""
-    rows = []
-    for road in roads or []:
-        pts = road.get('pts', ())
-        for i in range(len(pts) - 1):
-            lat1, lon1 = pts[i]
-            lat2, lon2 = pts[i + 1]
-            mid_lat = (lat1 + lat2) / 2
-            mid_lon = (lon1 + lon2) / 2
-            dlat = lat2 - lat1
-            dlon = (lon2 - lon1) * math.cos(math.radians(mid_lat))
-            raw_deg = math.degrees(math.atan2(dlat, dlon))
-            heading = (90.0 - (raw_deg % 180.0)) % 360.0
-            seg_len = math.hypot(dlat, dlon * 111320 / 110540)
-            rows.append((mid_lat, mid_lon, raw_deg, heading, seg_len))
-    if not rows:
-        return None
-    arr = np.asarray(rows, dtype=np.float32)
-    return {
-        'lat': arr[:, 0],
-        'lon': arr[:, 1],
-        'raw_deg': arr[:, 2],
-        'heading': arr[:, 3],
-        'len': arr[:, 4],
-    }
-
-
 def _roads_signature(roads):
     """Small deterministic signature for cache invalidation."""
     n_roads = 0
@@ -688,424 +502,6 @@ def _polys_signature(polys):
             len(pts)
         )
     return (n_polys, n_pts, round(checksum, 6))
-
-
-def _dds_road_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
-                        grid_n, road_width_px, road_dilate_px,
-                        separator_sig, rail_sig, heading_sig,
-                        residential_poly_sig, excl_poly_sig,
-                        existing_bld_poly_sig, sh_bld_sig,
-                        custom_bld_sig=None):
-    return {
-        'version': 7,
-        'fname': fname,
-        'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
-        'shape': (int(img_h), int(img_w)),
-        'grid_n': int(grid_n),
-        'road_width_px': int(road_width_px),
-        'road_dilate_px': int(road_dilate_px),
-        'separator_sig': separator_sig,
-        'rail_sig': rail_sig,
-        'heading_sig': heading_sig,
-        'residential_poly_sig': residential_poly_sig,
-        'excl_poly_sig': excl_poly_sig,
-        'existing_bld_poly_sig': existing_bld_poly_sig,
-        'sh_bld_sig': sh_bld_sig,
-        'custom_bld_sig': custom_bld_sig,
-        'residential_road_types': tuple(sorted(RESIDENTIAL_HIGHWAY_TYPES)),
-        'residential_buffer_m': float(RESIDENTIAL_FALLBACK_BUFFER_M),
-        'residential_buffer_px_min': int(RESIDENTIAL_FALLBACK_BUFFER_PX_MIN),
-    }
-
-
-def _load_dds_road_cache(cache_path, key):
-    import pickle as _pickle
-    if not os.path.exists(cache_path):
-        return None
-    try:
-        with open(cache_path, 'rb') as f:
-            data = _pickle.load(f)
-        if data.get('key') == key:
-            return data
-    except Exception:
-        return None
-    return None
-
-
-def _cell_edge_hist(patch, bin_deg=5.0, resize_to=128):
-    """Edge direction histogram in [0°, 180°) from an image patch via Sobel.
-
-    Returns a float array of length int(180/bin_deg), or None if featureless.
-    Convention: 0° = E-W edge, 90° = N-S edge (matches road angle space).
-    Keeping the full histogram (rather than a single peak) means callers can
-    score multiple candidate orientations against it independently — important
-    when a cell contains blocks at different orientations.
-    """
-    if patch is None or patch.size == 0:
-        return None
-    gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY) if patch.ndim == 3 else patch
-    if gray.shape[0] > resize_to or gray.shape[1] > resize_to:
-        gray = cv2.resize(gray, (resize_to, resize_to))
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    mag = np.hypot(gx, gy).ravel()
-    if mag.sum() == 0:
-        return None
-    edge_deg = (np.degrees(np.arctan2(gy.ravel(), gx.ravel())) + 90.0) % 180.0
-    n_bins = int(180 / bin_deg)
-    hist, _ = np.histogram(edge_deg, bins=n_bins, range=(0.0, 180.0), weights=mag)
-    return hist
-
-
-def _contact_patch_straightness(xs, ys, band_px):
-    """Return (is_straight, length_px) for one road-contact patch."""
-    if len(xs) < 2:
-        return False, 0.0
-    pts = np.column_stack([
-        np.asarray(xs, dtype=np.float32),
-        np.asarray(ys, dtype=np.float32),
-    ])
-    centred = pts - pts.mean(axis=0, keepdims=True)
-    if float(np.sum(centred * centred)) <= 0.0:
-        return False, 0.0
-    _, singular_values, vh = np.linalg.svd(centred, full_matrices=False)
-    axis = vh[0]
-    along = centred @ axis
-    length_px = float(along.max() - along.min())
-    if length_px <= 0.0:
-        return False, 0.0
-    if singular_values.size < 2 or float(singular_values[1]) <= 1e-6:
-        rms_off_axis = 0.0
-    else:
-        off_axis = centred @ vh[1]
-        rms_off_axis = float(np.sqrt(np.mean(off_axis * off_axis)))
-    min_len = max(10.0, float(band_px) * 2.0)
-    max_rms = max(2.0, length_px * 0.12)
-    return length_px >= min_len and rms_off_axis <= max_rms, length_px
-
-
-def _component_side_touch_headings(labels, stats, valid_labels, roads,
-                                   lat_n, lat_s, lon_w, lon_e, img_h, img_w,
-                                   band_px=8, img=None, bin_deg=5.0,
-                                   contact_px=None, road_mask=None):
-    """Estimate component headings from distinct road contacts on its outline.
-
-    The contact search follows the actual component boundary rather than an
-    axis-aligned bounding box, so rotated or irregular blocks are handled the
-    same way as rectangular blocks. When a road mask is available, only road
-    mask pixels touching the component boundary can vote; the wider band is kept
-    for grouping and straightness checks.
-    Each connected contact patch contributes one vote, so short local streets
-    framing a block are not overwhelmed by a longer nearby segment.
-    """
-    headings = np.full(labels.max() + 1 if labels.size else 0, np.nan, dtype=np.float32)
-    contact_counts = np.zeros(headings.shape, dtype=np.uint8)
-    if headings.size == 0 or len(valid_labels) == 0:
-        return headings, contact_counts
-    if not roads:
-        return headings, contact_counts
-
-    n_bins90 = int(90 / bin_deg)
-    n_bins180 = int(180 / bin_deg)
-    band_px = max(2, int(band_px))
-    contact_px = max(
-        1,
-        min(band_px, 6 if contact_px is None else int(contact_px)),
-    )
-    ring_labels = np.zeros(labels.shape, dtype=np.int32)
-    contact_kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (contact_px * 2 + 1, contact_px * 2 + 1)
-    )
-    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    for label in valid_labels:
-        label = int(label)
-        x = int(stats[label, cv2.CC_STAT_LEFT])
-        y = int(stats[label, cv2.CC_STAT_TOP])
-        w = int(stats[label, cv2.CC_STAT_WIDTH])
-        h = int(stats[label, cv2.CC_STAT_HEIGHT])
-        if w <= 0 or h <= 0:
-            continue
-        x0 = max(0, x - band_px - 1)
-        y0 = max(0, y - band_px - 1)
-        x1 = min(img_w, x + w + band_px + 1)
-        y1 = min(img_h, y + h + band_px + 1)
-        local_component = (labels[y0:y1, x0:x1] == label).astype(np.uint8)
-        if not local_component.any():
-            continue
-        eroded = cv2.erode(local_component, erode_kernel)
-        contact_dilated = cv2.dilate(local_component, contact_kernel)
-        if road_mask is not None:
-            local_roads = road_mask[y0:y1, x0:x1] != 0
-            touch_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            touch_seed = (
-                (cv2.dilate(local_component, touch_kernel) != 0) &
-                (local_component == 0) &
-                local_roads
-            )
-            boundary_ring = (
-                (cv2.dilate(touch_seed.astype(np.uint8), contact_kernel) != 0) &
-                local_roads
-            )
-        else:
-            boundary_ring = (contact_dilated != 0) & (eroded == 0)
-        target = ring_labels[y0:y1, x0:x1]
-        target[(target == 0) & boundary_ring] = label
-
-    def ll_to_px(lat, lon):
-        x = (float(lon) - lon_w) / (lon_e - lon_w) * img_w
-        y = (lat_n - float(lat)) / (lat_n - lat_s) * img_h
-        return x, y
-
-    mid_lat_rad = math.radians((lat_n + lat_s) * 0.5)
-    m_per_lon = 111320.0 * math.cos(mid_lat_rad)
-    m_per_lat = 110540.0
-    margin = float(band_px + 2)
-    contact_points = {}
-    for road in roads:
-        pts = road.get('pts', ())
-        if len(pts) < 2:
-            continue
-        for (lat1, lon1), (lat2, lon2) in zip(pts[:-1], pts[1:]):
-            x1, y1 = ll_to_px(lat1, lon1)
-            x2, y2 = ll_to_px(lat2, lon2)
-            if (
-                max(x1, x2) < -margin or min(x1, x2) >= img_w + margin or
-                max(y1, y2) < -margin or min(y1, y2) >= img_h + margin
-            ):
-                continue
-            px_len = math.hypot(x2 - x1, y2 - y1)
-            if px_len <= 0.0:
-                continue
-            dx_m = (float(lon2) - float(lon1)) * m_per_lon
-            dy_m = (float(lat2) - float(lat1)) * m_per_lat
-            if dx_m == 0.0 and dy_m == 0.0:
-                continue
-            raw_deg = (math.degrees(math.atan2(dy_m, dx_m)) % 180.0)
-            b180 = int((raw_deg % 180.0) / bin_deg) % n_bins180
-            n_samples = max(2, min(192, int(px_len / max(1.0, band_px * 0.5)) + 1))
-            xs = np.rint(np.linspace(x1, x2, n_samples)).astype(np.int32)
-            ys = np.rint(np.linspace(y1, y2, n_samples)).astype(np.int32)
-            valid = (xs >= 0) & (xs < img_w) & (ys >= 0) & (ys < img_h)
-            if not np.any(valid):
-                continue
-            xs = xs[valid]
-            ys = ys[valid]
-            touched_labels = ring_labels[ys, xs]
-            touched = touched_labels != 0
-            if not np.any(touched):
-                continue
-            for label, px, py in zip(touched_labels[touched], xs[touched], ys[touched]):
-                contact_points.setdefault(int(label), []).append((int(px), int(py), b180))
-
-    for label in valid_labels:
-        label = int(label)
-        points = contact_points.get(label)
-        if not points:
-            continue
-
-        pts_arr = np.asarray(points, dtype=np.int32)
-        pxs = pts_arr[:, 0]
-        pys = pts_arr[:, 1]
-        bins = pts_arr[:, 2]
-        x0 = max(0, int(pxs.min()) - band_px)
-        x1 = min(img_w, int(pxs.max()) + band_px + 1)
-        y0 = max(0, int(pys.min()) - band_px)
-        y1 = min(img_h, int(pys.max()) + band_px + 1)
-        if x1 <= x0 or y1 <= y0:
-            continue
-
-        connect_px = max(1, min(3, band_px // 2))
-        connect_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (connect_px * 2 + 1, connect_px * 2 + 1)
-        )
-
-        votes90 = np.zeros(n_bins90, dtype=np.float32)
-        votes180 = np.zeros(n_bins180, dtype=np.float32)
-        contact_votes = []
-        remaining = np.ones(bins.shape, dtype=bool)
-        while np.any(remaining):
-            orient_hist = np.bincount(bins[remaining], minlength=n_bins180)
-            peak_bin = int(np.argmax(orient_hist))
-            circular_dist = np.abs(
-                ((bins - peak_bin + n_bins180 // 2) % n_bins180) - n_bins180 // 2
-            )
-            orient_sel = remaining & (circular_dist <= 1)
-            remaining[orient_sel] = False
-            if not np.any(orient_sel):
-                continue
-
-            sel_x = pxs[orient_sel]
-            sel_y = pys[orient_sel]
-            sel_bins = bins[orient_sel]
-            local_contact = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-            local_contact[sel_y - y0, sel_x - x0] = 1
-            local_contact = cv2.dilate(local_contact, connect_kernel)
-            n_contact_labels, contact_labels = cv2.connectedComponents(
-                local_contact, connectivity=8
-            )
-            sample_contact_labels = contact_labels[sel_y - y0, sel_x - x0]
-            for contact_label in range(1, n_contact_labels):
-                patch_mask = sample_contact_labels == contact_label
-                contact_bins = sel_bins[patch_mask]
-                if contact_bins.size == 0:
-                    continue
-                straight, length_px = _contact_patch_straightness(
-                    sel_x[patch_mask],
-                    sel_y[patch_mask],
-                    band_px,
-                )
-                side_hist = np.bincount(contact_bins, minlength=n_bins180).astype(np.float32)
-                smooth = (
-                    np.roll(side_hist, 1) +
-                    side_hist +
-                    np.roll(side_hist, -1)
-                ) / 3.0
-                peak180 = int(np.argmax(smooth))
-                contact_votes.append((peak180, bool(straight), length_px))
-
-        if not contact_votes:
-            continue
-
-        straight_votes = [vote for vote in contact_votes if vote[1]]
-        usable_votes = straight_votes or contact_votes
-        contact_counts[label] = min(len(usable_votes), 255)
-        for peak180, _straight, _length_px in usable_votes:
-            raw_angle = peak180 * bin_deg + bin_deg * 0.5
-            votes180[peak180] += 1.0
-            votes90[int((raw_angle % 90.0) / bin_deg) % n_bins90] += 1.0
-        v90s = (np.roll(votes90, 1) + votes90 + np.roll(votes90, -1)) / 3.0
-        dom_mod90 = int(np.argmax(v90s)) * bin_deg + bin_deg * 0.5
-        opt1 = dom_mod90
-        opt2 = dom_mod90 + 90.0
-
-        dom_angle = None
-        if img is not None:
-            x = int(stats[label, cv2.CC_STAT_LEFT])
-            y = int(stats[label, cv2.CC_STAT_TOP])
-            w = int(stats[label, cv2.CC_STAT_WIDTH])
-            h = int(stats[label, cv2.CC_STAT_HEIGHT])
-            x0 = max(0, x - band_px)
-            y0 = max(0, y - band_px)
-            x1 = min(img_w, x + w + band_px)
-            y1 = min(img_h, y + h + band_px)
-            edge_hist = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=bin_deg)
-            if edge_hist is not None:
-                def _img_score(angle):
-                    b = int(angle / bin_deg) % n_bins180
-                    return (
-                        edge_hist[(b - 1) % n_bins180] +
-                        edge_hist[b] +
-                        edge_hist[(b + 1) % n_bins180]
-                    )
-                dom_angle = opt1 if _img_score(opt1) >= _img_score(opt2) else opt2
-
-        if dom_angle is None:
-            def _road_score(angle):
-                b = int(angle / bin_deg) % n_bins180
-                return (
-                    votes180[(b - 1) % n_bins180] +
-                    votes180[b] +
-                    votes180[(b + 1) % n_bins180]
-                )
-            dom_angle = opt1 if _road_score(opt1) >= _road_score(opt2) else opt2
-
-        headings[label] = (90.0 - dom_angle) % 360.0
-
-    return headings, contact_counts
-
-
-def _simheaven_building_zone_headings(objects, labels, valid_labels,
-                                      lat_n, lat_s, lon_w, lon_e,
-                                      img_h, img_w, bin_deg=5.0):
-    """Return per-component headings from simHeaven buildings inside it."""
-    headings = np.full(labels.max() + 1 if labels.size else 0, np.nan, dtype=np.float32)
-    counts = np.zeros(headings.shape, dtype=np.uint16)
-    if headings.size == 0 or len(valid_labels) == 0 or not objects:
-        return headings, counts
-
-    px = np.rint((objects['lon'] - lon_w) / (lon_e - lon_w) * img_w).astype(np.int32)
-    py = np.rint((lat_n - objects['lat']) / (lat_n - lat_s) * img_h).astype(np.int32)
-    in_img = (px >= 0) & (px < img_w) & (py >= 0) & (py < img_h)
-    if not bool(np.any(in_img)):
-        return headings, counts
-
-    px = px[in_img]
-    py = py[in_img]
-    obj_heading = objects['heading'][in_img].astype(np.float32)
-    obj_w = objects['w_m'][in_img].astype(np.float32)
-    obj_h = objects['h_m'][in_img].astype(np.float32)
-    obj_labels = labels[py, px]
-    valid_label_set = set(int(label) for label in valid_labels)
-
-    n_bins = int(180 / bin_deg)
-    per_label_votes = {}
-    for label, heading, width_m, height_m in zip(obj_labels, obj_heading, obj_w, obj_h):
-        label = int(label)
-        if label == 0 or label not in valid_label_set:
-            continue
-        long_side = max(float(width_m), float(height_m))
-        short_side = max(1e-6, min(float(width_m), float(height_m)))
-        aspect = long_side / short_side
-        if aspect < 1.15:
-            continue
-        b = int((float(heading) % 180.0) / bin_deg) % n_bins
-        weight = min(4.0, max(1.0, aspect - 0.15))
-        per_label_votes.setdefault(label, np.zeros(n_bins, dtype=np.float32))[b] += weight
-        counts[label] += 1
-
-    for label, hist in per_label_votes.items():
-        if counts[label] <= 0 or float(hist.sum()) <= 0.0:
-            continue
-        smooth = (np.roll(hist, 1) + hist + np.roll(hist, -1)) / 3.0
-        peak = int(np.argmax(smooth))
-        headings[label] = (peak * bin_deg + bin_deg * 0.5) % 180.0
-
-    return headings, counts
-
-
-def _building_zone_cell_mask(bld_zone, img_h, img_w, grid_n):
-    """Return grid cells that contain building-zone pixels."""
-    cell_mask = np.zeros((grid_n, grid_n), dtype=bool)
-    ys, xs = np.nonzero(bld_zone)
-    if xs.size == 0:
-        return cell_mask
-    cell_h = img_h / grid_n
-    cell_w = img_w / grid_n
-    gi = np.minimum(grid_n - 1, (ys / cell_h).astype(np.int32))
-    gj = np.minimum(grid_n - 1, (xs / cell_w).astype(np.int32))
-    cell_mask[gi, gj] = True
-    return cell_mask
-
-
-def _image_heading_grid(img, img_h, img_w, grid_n, cell_mask=None):
-    """Estimate per-cell heading from imagery edges when road vectors are absent."""
-    hgrid = np.full((grid_n, grid_n), np.nan)
-    if img is None:
-        return hgrid
-    bin_deg = 5.0
-    cell_h = img_h / grid_n
-    cell_w = img_w / grid_n
-    cells = (
-        np.argwhere(cell_mask)
-        if cell_mask is not None else
-        np.indices((grid_n, grid_n)).reshape(2, -1).T
-    )
-    for gi, gj in cells:
-        gi = int(gi)
-        gj = int(gj)
-        y0 = int(gi * cell_h)
-        y1 = min(img_h, int((gi + 1) * cell_h))
-        x0 = int(gj * cell_w)
-        x1 = min(img_w, int((gj + 1) * cell_w))
-        hist = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=bin_deg)
-        if hist is None:
-            continue
-        smooth = np.convolve(np.r_[hist[-1], hist, hist[0]], [1, 2, 1], mode='same')[1:-1]
-        if float(smooth.max()) <= 0.0:
-            continue
-        edge_angle = float(np.argmax(smooth) * bin_deg + bin_deg / 2.0)
-        hgrid[gi, gj] = (90.0 - edge_angle) % 360.0
-    return hgrid
 
 
 # ── OSM polygon / exclusion helpers ──────────────────────────────────────────
@@ -2097,8 +1493,8 @@ BLD_CLASS_SMALL_APARTMENT = 5
 BLD_CLASS_APARTMENT_BLOCK = 6
 BLD_CLASS_LARGE = 7
 BLD_CLASS_EXTRA_LARGE = 8
-# Legacy internal name retained for compatibility with any existing callers.
-BLD_CLASS_STANDARD_RESIDENTIAL = BLD_CLASS_MEDIUM
+
+
 BLD_PLACEMENT_CLASSES = (
     BLD_CLASS_TINY_RESIDENTIAL,
     BLD_CLASS_SMALL_RESIDENTIAL,
@@ -2127,16 +1523,7 @@ ZONE_COMPACT_PX = 1_500
 ZONE_MEDIUM_PX = 3_000
 ZONE_SMALL_APARTMENT_PX = 10_000
 ZONE_APARTMENT_BLOCK_PX = 30_000
-ZL16_SMALL_ZONE_M2 = 7_500.0
-ZL16_COMPACT_ZONE_M2 = 18_000.0
-ZL16_MEDIUM_ZONE_M2 = 38_000.0
-ZL16_SMALL_APARTMENT_ZONE_M2 = 80_000.0
-ZL16_APARTMENT_BLOCK_ZONE_M2 = 180_000.0
-ZL16_LARGE_ROOF_M2 = 2_200.0
-ZL16_EXTRA_LARGE_ROOF_M2 = 7_000.0
-ZL16_APARTMENT_ROOF_M2 = 900.0
-ZL16_FINE_GRAIN_FRAGS_PER_HA = 14.0
-ZL16_LOCAL_HEADING_ZONE_M2 = 55_000.0
+
 
 # Asset footprint thresholds in square metres. Height is intentionally ignored:
 # tall objects are acceptable when the footprint is modest.
@@ -2160,9 +1547,7 @@ ASSET_LARGE_MAX_SIDE_M = 100.0
 # to the tile-wide median, then random.
 # Jitter: small per-building random offset so the result isn't perfectly rigid.
 HEADING_GRID_N       = 16     # NxN heading grid per DDS  (16 → ~350 m cells at ZL16)
-HEADING_JITTER_DEG   = 2.0
-HOUGH_MIN_LINES      = 8      # minimum Hough line segments to trust the result
-HOUGH_PREVIEW_PX     = 512    # resize cell to this before Hough (speed vs precision)
+
 
 # Minimum clearance radius (metres) between building centres, by class.
 # After placing a building its centre is marked with a filled circle on an
@@ -2347,7 +1732,8 @@ OBJ_FOOTPRINTS: dict = {
     "SFD_Global/South_America/Med_8.obj": (-6.00, 6.00, -8.25, 8.25),
     "SFD_Global/US_West_Coast/Suburban_4.obj": (-7.19, 7.18, -5.87, 7.53),
 }
-PLACEMENT_MARGIN_M = 6.0   # legacy fallback margin if mark bounds are missing
+
+
 FOOTPRINT_PAD_M = 4.0      # expand known footprints before fit/mark to reduce overlaps
 # Tallest generated/pooled non-skyscraper asset (procgen floors <= 12 at
 # 3.2 m). Gates which library assets may pool.
@@ -2705,7 +2091,8 @@ DEFAULT_YOLO_OBB_CONF = 0.18
 DEFAULT_YOLO_OBB_IOU = 0.5
 DEFAULT_YOLO_OBB_MAX_DET = 100000
 DEFAULT_YOLO_OBB_BATCH = 1
-YOLO_GUIDANCE_MAX_DISTANCE_M = 70.0
+
+
 YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
 YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
 YOLO_TEMPLATE_SHAPE_REL_TOL = 0.20
@@ -3307,17 +2694,6 @@ SIMHEAVEN_SPECIAL_ASSET_TOKENS = (
     "lighthouse",
 )
 
-# Viz colours per zone class (BGR→RGB in numpy overlay)
-ZONE_COLOURS = {
-    BLD_CLASS_TINY_RESIDENTIAL: np.array([ 80, 220,  80]),
-    BLD_CLASS_SMALL_RESIDENTIAL: np.array([150, 230,  60]),
-    BLD_CLASS_COMPACT_RESIDENTIAL: np.array([245, 220,  70]),
-    BLD_CLASS_MEDIUM: np.array([255, 165,  50]),
-    BLD_CLASS_SMALL_APARTMENT: np.array([255,  90,  70]),
-    BLD_CLASS_APARTMENT_BLOCK: np.array([ 80, 200, 255]),
-    BLD_CLASS_LARGE: np.array([ 70, 130, 255]),
-    BLD_CLASS_EXTRA_LARGE: np.array([135,  90, 255]),
-}
 
 ROOF_COLOR_VIZ_STYLES = {
     "match": (65, 235, 125),
@@ -4432,109 +3808,6 @@ def _mark_pad_for_edge_spacing_m(edge_spacing_m, footprint_pad_m=FOOTPRINT_PAD_M
     return max(0.0, float(edge_spacing_m) - float(footprint_pad_m))
 
 
-def _asset_retry_sequence(pool, rng, prefer_small=False):
-    """Yield every asset once, randomized while optionally biasing smaller assets."""
-    n_assets = len(pool)
-    if n_assets <= 0:
-        return
-    if prefer_small:
-        # Pools are sorted by footprint. Shuffle small windows to keep visual
-        # variety while still trying compact assets first in leftover gaps.
-        window = 4
-        for start in range(0, n_assets, window):
-            idx = np.arange(start, min(start + window, n_assets), dtype=np.int32)
-            rng.shuffle(idx)
-            for i in idx:
-                yield pool[int(i)]
-        return
-    start = 0 if n_assets == 1 else int(rng.integers(0, n_assets))
-    for offset in range(n_assets):
-        yield pool[(start + offset) % n_assets]
-
-
-def _asset_retry_context(pool):
-    """Return cached context-filter metadata for one sorted asset pool."""
-    requires = tuple(bool(_asset_requires_residential_context(asset)) for asset in pool)
-    prefix = [0]
-    for flag in requires:
-        prefix.append(prefix[-1] + int(flag))
-    eligible = tuple(i for i, flag in enumerate(requires) if not flag)
-    return {
-        'requires_residential': requires,
-        'residential_prefix': tuple(prefix),
-        'nonresidential_indices': eligible,
-    }
-
-
-def _residential_skip_count(retry_context, start, end):
-    """Count residential-only assets in cyclic [start, end)."""
-    prefix = retry_context['residential_prefix']
-    n_assets = len(prefix) - 1
-    if n_assets <= 0 or start == end:
-        return 0
-    if start < end:
-        return int(prefix[end] - prefix[start])
-    return int((prefix[n_assets] - prefix[start]) + prefix[end])
-
-
-def _asset_retry_sequence_for_context(pool, rng, prefer_small, residential_context,
-                                      retry_context=None):
-    """Yield ``(asset, skipped)`` while avoiding known-ineligible assets.
-
-    In nonresidential context, house-like assets can never be selected.  This
-    preserves the original random start/shuffle order for eligible assets and
-    reports the same skipped count without walking every skipped asset in the
-    hot fit loop.
-    """
-    if residential_context or retry_context is None:
-        for asset in _asset_retry_sequence(pool, rng, prefer_small=prefer_small):
-            yield asset, 0
-        return
-
-    n_assets = len(pool)
-    if n_assets <= 0:
-        return
-
-    requires = retry_context['requires_residential']
-    if prefer_small:
-        skipped = 0
-        window = 4
-        for start in range(0, n_assets, window):
-            idx = np.arange(start, min(start + window, n_assets), dtype=np.int32)
-            rng.shuffle(idx)
-            for i in idx:
-                i = int(i)
-                if requires[i]:
-                    skipped += 1
-                    continue
-                yield pool[i], skipped
-                skipped = 0
-        if skipped:
-            yield None, skipped
-        return
-
-    start = 0 if n_assets == 1 else int(rng.integers(0, n_assets))
-    cursor = start
-    eligible = retry_context['nonresidential_indices']
-    yielded = False
-    for i in eligible:
-        if i >= start:
-            yield pool[i], _residential_skip_count(retry_context, cursor, i)
-            cursor = (i + 1) % n_assets
-            yielded = True
-    for i in eligible:
-        if i < start:
-            yield pool[i], _residential_skip_count(retry_context, cursor, i)
-            cursor = (i + 1) % n_assets
-            yielded = True
-    if yielded:
-        trailing = _residential_skip_count(retry_context, cursor, start)
-    else:
-        trailing = int(retry_context['residential_prefix'][-1])
-    if trailing:
-        yield None, trailing
-
-
 def _asset_requires_residential_context(asset):
     """Return True for house-like assets that should stay in residential areas."""
     if 'requires_residential_context' in asset:
@@ -4560,31 +3833,6 @@ def _asset_requires_residential_context(asset):
         '/buildings/residential/' in path or
         '/terraced/' in path
     )
-
-
-def _asset_fit_inradius_m(asset):
-    """Return the guaranteed occupied centre radius for an asset fit footprint."""
-    bounds_m = asset.get('fit_bounds_m')
-    if bounds_m is None:
-        base_bounds_m = asset.get('bounds_m')
-        if base_bounds_m is None:
-            return None
-        bounds_m = _expand_bounds(base_bounds_m, FOOTPRINT_PAD_M)
-    xmin, xmax, zmin, zmax = bounds_m
-    return 0.5 * min(float(xmax) - float(xmin), float(zmax) - float(zmin))
-
-
-def _class_min_fit_inradius_m(asset_pools):
-    """Return the smallest centre-blocker clearance needed by each class."""
-    min_by_class = {}
-    for zone_class in BLD_PLACEMENT_CLASSES:
-        radii = [
-            radius
-            for radius in (_asset_fit_inradius_m(asset) for asset in asset_pools[zone_class])
-            if radius is not None
-        ]
-        min_by_class[zone_class] = min(radii) if radii else 0.0
-    return min_by_class
 
 
 def _extra_library_policy():
@@ -5787,174 +5035,6 @@ def _residential_roads(roads):
     ]
 
 
-def _zone_class_from_area_m2(area_m2):
-    if area_m2 < ZL16_SMALL_ZONE_M2:
-        return BLD_CLASS_SMALL_RESIDENTIAL
-    if area_m2 < ZL16_COMPACT_ZONE_M2:
-        return BLD_CLASS_COMPACT_RESIDENTIAL
-    if area_m2 < ZL16_MEDIUM_ZONE_M2:
-        return BLD_CLASS_MEDIUM
-    if area_m2 < ZL16_SMALL_APARTMENT_ZONE_M2:
-        return BLD_CLASS_SMALL_APARTMENT
-    if area_m2 < ZL16_APARTMENT_BLOCK_ZONE_M2:
-        return BLD_CLASS_APARTMENT_BLOCK
-    return BLD_CLASS_LARGE
-
-
-def _image_edge_mask_for_zone_classification(img, cc_labels):
-    if img is None:
-        return None
-    try:
-        if img.ndim == 3:
-            gray = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2GRAY)
-        else:
-            gray = img.astype(np.uint8, copy=False)
-        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        grad = cv2.magnitude(grad_x, grad_y)
-        zone_grad = grad[cc_labels != 0]
-        if zone_grad.size == 0:
-            return None
-        threshold = max(24.0, float(np.percentile(zone_grad, 72.0)))
-        return grad >= threshold
-    except Exception:
-        return None
-
-
-def _classify_building_zones_zl16(
-    labels,
-    stats,
-    valid_labels,
-    bld_raw,
-    img,
-    residential_area_mask,
-    m_per_px,
-):
-    """Classify broad ZL16 building zones by urban fabric, not just blob area."""
-    n_labels = int(stats.shape[0])
-    label_class = np.zeros(n_labels, dtype=np.uint8)
-    feature_counts = {
-        'fine_grain_zones': 0,
-        'large_roof_zones': 0,
-        'apartment_roof_zones': 0,
-        'low_density_zones': 0,
-    }
-    if len(valid_labels) == 0:
-        return label_class, feature_counts
-
-    edge_mask = _image_edge_mask_for_zone_classification(img, labels)
-    px_area_m2 = max(float(m_per_px) * float(m_per_px), 1e-6)
-    min_fragment_px = max(2, int(round(18.0 / px_area_m2)))
-
-    for label in valid_labels:
-        label = int(label)
-        x = int(stats[label, cv2.CC_STAT_LEFT])
-        y = int(stats[label, cv2.CC_STAT_TOP])
-        w = int(stats[label, cv2.CC_STAT_WIDTH])
-        h = int(stats[label, cv2.CC_STAT_HEIGHT])
-        area_px = int(stats[label, cv2.CC_STAT_AREA])
-        if area_px <= 0 or w <= 0 or h <= 0:
-            continue
-
-        area_m2 = float(area_px) * px_area_m2
-        component = labels[y:y + h, x:x + w] == label
-        raw_component = (bld_raw[y:y + h, x:x + w] != 0) & component
-        raw_px = int(np.count_nonzero(raw_component))
-        raw_density = raw_px / max(float(area_px), 1.0)
-        bbox_fill = area_px / max(float(w * h), 1.0)
-
-        fragment_count = 0
-        mean_fragment_m2 = 0.0
-        max_fragment_m2 = 0.0
-        if raw_px:
-            n_frag, _, frag_stats, _ = cv2.connectedComponentsWithStats(
-                raw_component.astype(np.uint8), connectivity=8
-            )
-            if n_frag > 1:
-                frag_areas = frag_stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
-                frag_areas = frag_areas[frag_areas >= min_fragment_px]
-                fragment_count = int(frag_areas.size)
-                if fragment_count:
-                    mean_fragment_m2 = float(np.mean(frag_areas) * px_area_m2)
-                    max_fragment_m2 = float(np.max(frag_areas) * px_area_m2)
-
-        frag_density_ha = fragment_count * 10_000.0 / max(area_m2, 1.0)
-        edge_density = 0.0
-        if edge_mask is not None:
-            edge_density = (
-                np.count_nonzero(edge_mask[y:y + h, x:x + w] & component) /
-                max(float(area_px), 1.0)
-            )
-        residential_fraction = 0.0
-        if residential_area_mask is not None:
-            residential_fraction = (
-                np.count_nonzero((residential_area_mask[y:y + h, x:x + w] != 0) & component) /
-                max(float(area_px), 1.0)
-            )
-
-        cls = _zone_class_from_area_m2(area_m2)
-        extra_large_roof = max_fragment_m2 >= ZL16_EXTRA_LARGE_ROOF_M2
-        large_roof_candidate = (
-            extra_large_roof or
-            max_fragment_m2 >= ZL16_LARGE_ROOF_M2 or
-            mean_fragment_m2 >= ZL16_APARTMENT_ROOF_M2 * 1.4
-        )
-        large_roof = large_roof_candidate and (
-            edge_mask is None or edge_density < 0.22
-        )
-        apartment_roof = (
-            large_roof_candidate or
-            max_fragment_m2 >= ZL16_APARTMENT_ROOF_M2 or
-            mean_fragment_m2 >= 420.0
-        )
-        fine_grain = (
-            frag_density_ha >= ZL16_FINE_GRAIN_FRAGS_PER_HA and
-            max_fragment_m2 < ZL16_APARTMENT_ROOF_M2
-        )
-
-        if large_roof:
-            feature_counts['large_roof_zones'] += 1
-            if residential_fraction >= 0.45:
-                cls = BLD_CLASS_APARTMENT_BLOCK
-            elif extra_large_roof:
-                cls = BLD_CLASS_EXTRA_LARGE
-            else:
-                cls = BLD_CLASS_LARGE
-        elif apartment_roof:
-            feature_counts['apartment_roof_zones'] += 1
-            cls = max(cls, BLD_CLASS_SMALL_APARTMENT)
-        elif fine_grain:
-            feature_counts['fine_grain_zones'] += 1
-            if residential_fraction >= 0.40 or raw_density >= 0.35:
-                if mean_fragment_m2 <= 95.0:
-                    cls = BLD_CLASS_TINY_RESIDENTIAL
-                elif mean_fragment_m2 <= 180.0:
-                    cls = BLD_CLASS_SMALL_RESIDENTIAL
-                elif mean_fragment_m2 <= 300.0:
-                    cls = BLD_CLASS_COMPACT_RESIDENTIAL
-                elif mean_fragment_m2 <= 520.0:
-                    cls = BLD_CLASS_MEDIUM
-                else:
-                    cls = BLD_CLASS_SMALL_APARTMENT
-                if raw_density > 0.62 and cls < BLD_CLASS_MEDIUM:
-                    cls += 1
-            else:
-                cls = max(cls, BLD_CLASS_MEDIUM)
-
-        if raw_density < 0.28 and not large_roof and edge_density < 0.20:
-            feature_counts['low_density_zones'] += 1
-            cls = min(cls, BLD_CLASS_COMPACT_RESIDENTIAL)
-        elif raw_density > 0.62 and area_m2 >= ZL16_SMALL_APARTMENT_ZONE_M2:
-            cls = max(cls, BLD_CLASS_SMALL_APARTMENT)
-
-        if bbox_fill < 0.18 and not large_roof:
-            cls = min(cls, BLD_CLASS_MEDIUM)
-
-        label_class[label] = int(cls)
-
-    return label_class, feature_counts
-
-
 def _roof_fragment_class(area_m2, max_side_m, fill_ratio):
     """Classify one raw roof fragment before zone cleanup merges it into a blob."""
     area_m2 = float(area_m2)
@@ -7010,164 +6090,6 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
     return detections
 
 
-def _build_yolo_guidance(detections, img_h, img_w, m_per_px):
-    """Build nearest-YOLO-center guidance for fallback class and heading."""
-    if not detections:
-        return None
-
-    center_mask = np.ones((img_h, img_w), dtype=np.uint8)
-    center_to_det = {}
-    for det_idx, det in enumerate(detections, 1):
-        cx = int(round(float(det['center'][0])))
-        cy = int(round(float(det['center'][1])))
-        if 0 <= cx < img_w and 0 <= cy < img_h:
-            center_mask[cy, cx] = 0
-            center_to_det[(cx, cy)] = det_idx
-
-    if not center_to_det:
-        return None
-
-    n_centers, center_components = cv2.connectedComponents(
-        (center_mask == 0).astype(np.uint8), connectivity=8
-    )
-    class_by_label = np.zeros(n_centers, dtype=np.uint8)
-    heading_by_label = np.full(n_centers, np.nan, dtype=np.float32)
-    height_by_label = np.full(n_centers, np.nan, dtype=np.float32)
-    confidence_by_label = np.zeros(n_centers, dtype=np.float32)
-    area_by_label_m2 = np.zeros(n_centers, dtype=np.float32)
-    center_by_label = np.full((n_centers, 2), np.nan, dtype=np.float32)
-    points_by_label = [None] * n_centers
-    for (cx, cy), det_idx in center_to_det.items():
-        label = int(center_components[cy, cx])
-        if label <= 0:
-            continue
-        det = detections[det_idx - 1]
-        if float(det['confidence']) < float(confidence_by_label[label]):
-            continue
-        class_by_label[label] = int(det['placement_class'])
-        heading_by_label[label] = float(det['heading'])
-        height_by_label[label] = float(det.get(
-            'height_m',
-            DEFAULT_FACADE_HEIGHT_M.get(int(det['placement_class']), 8.0),
-        ))
-        confidence_by_label[label] = float(det['confidence'])
-        area_by_label_m2[label] = float(det['area_m2'])
-        center_by_label[label] = np.asarray(det['center'], dtype=np.float32)
-        points_by_label[label] = np.asarray(det['points'], dtype=np.float32)
-
-    dist_px, nearest_label = cv2.distanceTransformWithLabels(
-        center_mask,
-        cv2.DIST_L2,
-        5,
-        labelType=cv2.DIST_LABEL_CCOMP,
-    )
-    return {
-        'distance_px': dist_px.astype(np.float32, copy=False),
-        'nearest_label': nearest_label.astype(np.int32, copy=False),
-        'class_by_label': class_by_label,
-        'heading_by_label': heading_by_label,
-        'height_by_label': height_by_label,
-        'confidence_by_label': confidence_by_label,
-        'area_by_label_m2': area_by_label_m2,
-        'center_by_label': center_by_label,
-        'points_by_label': points_by_label,
-        'max_distance_m': float(YOLO_GUIDANCE_MAX_DISTANCE_M),
-        'm_per_px': float(m_per_px),
-        'image_size': (int(img_h), int(img_w)),
-    }
-
-
-def _yolo_guidance_label(yolo_guidance, jx, jy, max_distance_m=None):
-    if yolo_guidance is None:
-        return 0
-    label = int(yolo_guidance['nearest_label'][jy, jx])
-    class_by_label = yolo_guidance['class_by_label']
-    if label <= 0 or label >= class_by_label.shape[0]:
-        return 0
-    max_dist = (
-        float(yolo_guidance.get('max_distance_m', YOLO_GUIDANCE_MAX_DISTANCE_M))
-        if max_distance_m is None else float(max_distance_m)
-    )
-    dist_m = (
-        float(yolo_guidance['distance_px'][jy, jx]) *
-        float(yolo_guidance.get('m_per_px', 1.0))
-    )
-    if dist_m > max_dist:
-        return 0
-    return label
-
-
-def _yolo_heading_for_candidate(yolo_guidance, jx, jy, max_distance_m=None):
-    label = _yolo_guidance_label(yolo_guidance, jx, jy, max_distance_m)
-    if label <= 0:
-        return float('nan')
-    heading = float(yolo_guidance['heading_by_label'][label])
-    return heading if not np.isnan(heading) else float('nan')
-
-
-def _yolo_template_for_candidate(yolo_guidance, jx, jy, max_distance_m=None):
-    """Return nearest YOLO OBB footprint translated to a candidate center."""
-    label = _yolo_guidance_label(yolo_guidance, jx, jy, max_distance_m)
-    if label <= 0:
-        return None
-    points = yolo_guidance.get('points_by_label', ())
-    centers = yolo_guidance.get('center_by_label')
-    class_by_label = yolo_guidance.get('class_by_label')
-    heading_by_label = yolo_guidance.get('heading_by_label')
-    if (
-        label >= len(points) or points[label] is None or
-        centers is None or label >= centers.shape[0] or
-        class_by_label is None or label >= class_by_label.shape[0] or
-        heading_by_label is None or label >= heading_by_label.shape[0]
-    ):
-        return None
-    source_center = centers[label]
-    if np.any(np.isnan(source_center)):
-        return None
-    translated = np.asarray(points[label], dtype=np.float32).copy()
-    translated[:, 0] += float(jx) - float(source_center[0])
-    translated[:, 1] += float(jy) - float(source_center[1])
-    img_h, img_w = yolo_guidance.get('image_size', (0, 0))
-    if (
-        translated[:, 0].min() < 0 or translated[:, 0].max() >= int(img_w) or
-        translated[:, 1].min() < 0 or translated[:, 1].max() >= int(img_h)
-    ):
-        return None
-    placement_cls = int(class_by_label[label])
-    if placement_cls not in BLD_PLACEMENT_CLASSES:
-        return None
-    heading = float(heading_by_label[label])
-    if np.isnan(heading):
-        heading = 0.0
-    return np.rint(translated).astype(np.int32), placement_cls, heading
-
-
-def _angle_delta_180(a_deg, b_deg):
-    """Return the unsigned difference between 180-periodic headings."""
-    return abs(((float(a_deg) - float(b_deg) + 90.0) % 180.0) - 90.0)
-
-
-def _yolo_template_metrics(template):
-    """Return long/short side lengths and edge direction for a YOLO template."""
-    pts = np.asarray(template.get('points', ()), dtype=np.float32)
-    if pts.shape != (4, 2):
-        return None
-    edges = np.roll(pts, -1, axis=0) - pts
-    edge_lengths = np.linalg.norm(edges, axis=1)
-    long_idx = int(np.argmax(edge_lengths))
-    long_len = float(edge_lengths[long_idx])
-    short_len = float(edge_lengths[(long_idx + 1) % 4])
-    if long_len < 1.0 or short_len < 1.0:
-        return None
-    if short_len > long_len:
-        long_len, short_len = short_len, long_len
-    return {
-        'long_len': long_len,
-        'short_len': short_len,
-        'area_px': long_len * short_len,
-    }
-
-
 def _points_from_yolo_heading(center, long_len, short_len, heading):
     """Build an image-space rotated rectangle from YOLO heading and dimensions."""
     cx, cy = np.asarray(center, dtype=np.float32)
@@ -7185,570 +6107,6 @@ def _points_from_yolo_heading(center, long_len, short_len, heading):
         ),
         dtype=np.float32,
     )
-
-
-def _weighted_heading_mean_180(headings, weights):
-    headings = np.asarray(headings, dtype=np.float64)
-    weights = np.asarray(weights, dtype=np.float64)
-    if headings.size == 0:
-        return float('nan')
-    if not np.any(weights > 0):
-        weights = np.ones_like(headings, dtype=np.float64)
-    angles = np.deg2rad(headings * 2.0)
-    mean = math.atan2(
-        float(np.sum(np.sin(angles) * weights)),
-        float(np.sum(np.cos(angles) * weights)),
-    )
-    return (math.degrees(mean) * 0.5) % 180.0
-
-
-def _consensus_yolo_template(
-    zone_templates,
-    heading_tol_deg=YOLO_TEMPLATE_HEADING_TOL_DEG,
-    shape_rel_tol=YOLO_TEMPLATE_SHAPE_REL_TOL,
-    shape_abs_tol_px=YOLO_TEMPLATE_SHAPE_ABS_TOL_PX,
-):
-    """Return a synthetic zone template from fuzzy heading and shape majorities."""
-    records = []
-    for template in zone_templates or ():
-        metrics = _yolo_template_metrics(template)
-        if metrics is None:
-            continue
-        records.append({
-            'template': template,
-            'heading': float(template.get('heading', 0.0)) % 180.0,
-            'class': int(template.get('class', BLD_CLASS_MEDIUM)),
-            'height_m': float(template.get(
-                'height_m',
-                DEFAULT_FACADE_HEIGHT_M.get(int(template.get('class', BLD_CLASS_MEDIUM)), 8.0),
-            )),
-            'confidence': max(0.0, float(template.get('confidence', 0.0))),
-            **metrics,
-        })
-    if not records:
-        return None
-
-    headings = np.asarray([rec['heading'] for rec in records], dtype=np.float32)
-    weights = np.asarray(
-        [max(0.01, rec['confidence']) for rec in records], dtype=np.float32
-    )
-    best_heading_idx = []
-    best_heading_key = (-1, -1.0, -1.0)
-    for idx, heading in enumerate(headings):
-        cluster = [
-            cand_idx for cand_idx, cand_heading in enumerate(headings)
-            if _angle_delta_180(cand_heading, heading) <= float(heading_tol_deg)
-        ]
-        key = (
-            len(cluster),
-            float(np.sum(weights[cluster])),
-            float(np.sum([records[cand_idx]['area_px'] for cand_idx in cluster])),
-        )
-        if key > best_heading_key:
-            best_heading_key = key
-            best_heading_idx = cluster
-    consensus_heading = _weighted_heading_mean_180(
-        headings[best_heading_idx], weights[best_heading_idx]
-    )
-
-    best_shape_idx = []
-    best_shape_key = (-1, -1.0, -1.0)
-    for idx, rec in enumerate(records):
-        long_tol = max(float(shape_abs_tol_px), float(shape_rel_tol) * rec['long_len'])
-        short_tol = max(float(shape_abs_tol_px), float(shape_rel_tol) * rec['short_len'])
-        cluster = [
-            cand_idx for cand_idx, cand in enumerate(records)
-            if (
-                cand['class'] == rec['class'] and
-                abs(cand['long_len'] - rec['long_len']) <= long_tol and
-                abs(cand['short_len'] - rec['short_len']) <= short_tol
-            )
-        ]
-        key = (
-            len(cluster),
-            float(np.sum(weights[cluster])),
-            float(np.sum([records[cand_idx]['area_px'] for cand_idx in cluster])),
-        )
-        if key > best_shape_key:
-            best_shape_key = key
-            best_shape_idx = cluster
-
-    shape_records = [records[idx] for idx in best_shape_idx]
-    long_len = float(np.median([rec['long_len'] for rec in shape_records]))
-    short_len = float(np.median([rec['short_len'] for rec in shape_records]))
-    placement_cls = int(shape_records[0]['class'])
-    height_m = float(np.median([rec['height_m'] for rec in shape_records]))
-    centers = np.asarray(
-        [records[idx]['template']['center'] for idx in best_shape_idx],
-        dtype=np.float32,
-    )
-    center = np.mean(centers, axis=0)
-    points = _points_from_yolo_heading(center, long_len, short_len, consensus_heading)
-    return {
-        'center': center.astype(np.float32),
-        'points': points,
-        'class': placement_cls,
-        'height_m': height_m,
-        'heading': float(consensus_heading),
-        'confidence': float(np.mean([rec['confidence'] for rec in shape_records])),
-        'area_px': float(long_len * short_len),
-        'consensus_heading_votes': int(len(best_heading_idx)),
-        'consensus_shape_votes': int(len(best_shape_idx)),
-    }
-
-
-def _retarget_yolo_template_heading(template, heading):
-    """Return the same YOLO shape/class centered at template center with a new heading."""
-    metrics = _yolo_template_metrics(template)
-    if metrics is None:
-        return None
-    center = np.asarray(template.get('center', ()), dtype=np.float32)
-    if center.shape != (2,) or np.any(np.isnan(center)):
-        return None
-    retargeted = dict(template)
-    retargeted['center'] = center.copy()
-    retargeted['heading'] = float(heading) % 180.0
-    retargeted['points'] = _points_from_yolo_heading(
-        center,
-        float(metrics['long_len']),
-        float(metrics['short_len']),
-        retargeted['heading'],
-    )
-    return retargeted
-
-
-def _scaled_template_points(template, jx, jy, long_scale=1.0, short_scale=1.0):
-    """Translate a YOLO template and scale long/short axes independently."""
-    metrics = _yolo_template_metrics(template)
-    center = np.asarray(template.get('center', ()), dtype=np.float32)
-    if metrics is None or center.shape != (2,):
-        return None
-    long_scale = float(np.clip(long_scale, 0.0, 1.0))
-    short_scale = float(np.clip(short_scale, 0.0, 1.0))
-    target = np.asarray([float(jx), float(jy)], dtype=np.float32)
-    return _points_from_yolo_heading(
-        target,
-        float(metrics['long_len']) * long_scale,
-        float(metrics['short_len']) * short_scale,
-        float(template.get('heading', 0.0)),
-    )
-
-
-def _template_poly_in_bounds(poly, img_w, img_h):
-    return (
-        poly is not None and
-        poly.shape == (4, 2) and
-        float(poly[:, 0].min()) >= 0.0 and
-        float(poly[:, 0].max()) < float(img_w) and
-        float(poly[:, 1].min()) >= 0.0 and
-        float(poly[:, 1].max()) < float(img_h)
-    )
-
-
-def _largest_fitting_yolo_template_poly(
-    template,
-    jx,
-    jy,
-    img_w,
-    img_h,
-    static_occ_mask,
-    building_spacing_mask,
-    scratch_mask,
-    static_occ_integral=None,
-    min_scale=0.25,
-    iterations=6,
-):
-    """Return largest-area <= original YOLO footprint that fits current blockers."""
-    min_scale = float(np.clip(min_scale, 0.05, 1.0))
-
-    def _fits(long_scale, short_scale):
-        poly_f = _scaled_template_points(template, jx, jy, long_scale, short_scale)
-        if not _template_poly_in_bounds(poly_f, img_w, img_h):
-            return None
-        poly_i = np.rint(poly_f).astype(np.int32)
-        if abs(float(cv2.contourArea(poly_i.astype(np.float32)))) <= 1.0:
-            return None
-        if not _poly_fits_with_integral(
-            static_occ_mask,
-            poly_i,
-            scratch_mask=scratch_mask,
-            occ_integral=static_occ_integral,
-        ):
-            return None
-        if not _poly_fits(building_spacing_mask, poly_i, scratch_mask):
-            return None
-        return poly_i
-
-    full = _fits(1.0, 1.0)
-    if full is not None:
-        return full, (1.0, 1.0)
-
-    def _best_long_for_short(short_scale):
-        low_poly = _fits(min_scale, short_scale)
-        if low_poly is None:
-            return None, 0.0, short_scale
-        lo = min_scale
-        hi = 1.0
-        best_poly = low_poly
-        best_long = lo
-        for _ in range(max(1, int(iterations))):
-            mid = (lo + hi) * 0.5
-            mid_poly = _fits(mid, short_scale)
-            if mid_poly is None:
-                hi = mid
-            else:
-                lo = mid
-                best_long = mid
-                best_poly = mid_poly
-        return best_poly, float(best_long), float(short_scale)
-
-    def _best_short_for_long(long_scale):
-        low_poly = _fits(long_scale, min_scale)
-        if low_poly is None:
-            return None, long_scale, 0.0
-        lo = min_scale
-        hi = 1.0
-        best_poly = low_poly
-        best_short = lo
-        for _ in range(max(1, int(iterations))):
-            mid = (lo + hi) * 0.5
-            mid_poly = _fits(long_scale, mid)
-            if mid_poly is None:
-                hi = mid
-            else:
-                lo = mid
-                best_short = mid
-                best_poly = mid_poly
-        return best_poly, float(long_scale), float(best_short)
-
-    # Three targeted binary searches replace the 10-sample grid:
-    # (a) shrink long only  (b) shrink short only  (c) uniform shrink.
-    # Worst case: 3 × (1 + iterations) = 21 poly fits vs 140 in the grid.
-    def _best_uniform():
-        low_poly = _fits(min_scale, min_scale)
-        if low_poly is None:
-            return None, 0.0, 0.0
-        lo, hi = min_scale, 1.0
-        best_p, best_s = low_poly, lo
-        for _ in range(max(1, int(iterations))):
-            mid = (lo + hi) * 0.5
-            mid_poly = _fits(mid, mid)
-            if mid_poly is None:
-                hi = mid
-            else:
-                lo = mid
-                best_s = mid
-                best_p = mid_poly
-        return best_p, float(best_s), float(best_s)
-
-    best_poly = None
-    best_scales = (0.0, 0.0)
-    best_key = (-1.0, -1.0, -1.0)
-    for poly, long_scale, short_scale in (
-        _best_long_for_short(1.0),
-        _best_short_for_long(1.0),
-        _best_uniform(),
-    ):
-        if poly is not None:
-            key = (long_scale * short_scale, max(long_scale, short_scale), min(long_scale, short_scale))
-            if key > best_key:
-                best_key = key
-                best_poly = poly
-                best_scales = (long_scale, short_scale)
-    return best_poly, best_scales
-
-
-def _neighbor_yolo_templates_by_zone(cc_labels, cc_stats, valid_labels,
-                                     yolo_templates_by_zone, radius_px):
-    """Collect original OBB-zone templates for neighboring labels without OBBs.
-
-    This is intentionally one-hop only: zones filled from a neighbor template do
-    not become template sources for further zones.
-    """
-    if not yolo_templates_by_zone or cc_labels is None or cc_labels.size == 0:
-        return {}
-    source_labels = {int(label) for label in yolo_templates_by_zone if int(label) > 0}
-    if not source_labels:
-        return {}
-
-    radius_px = max(1, int(radius_px))
-
-    # Pre-compute source-zone bboxes (x0, y0, x1, y1) for fast proximity test.
-    src_bboxes = {}
-    for sl in source_labels:
-        if sl < cc_stats.shape[0]:
-            sx0 = int(cc_stats[sl, cv2.CC_STAT_LEFT])
-            sy0 = int(cc_stats[sl, cv2.CC_STAT_TOP])
-            src_bboxes[sl] = (
-                sx0,
-                sy0,
-                sx0 + int(cc_stats[sl, cv2.CC_STAT_WIDTH]),
-                sy0 + int(cc_stats[sl, cv2.CC_STAT_HEIGHT]),
-            )
-
-    result = {}
-    for label in (int(v) for v in valid_labels):
-        if label <= 0 or label in source_labels or label >= cc_stats.shape[0]:
-            continue
-        x0 = int(cc_stats[label, cv2.CC_STAT_LEFT])
-        y0 = int(cc_stats[label, cv2.CC_STAT_TOP])
-        zone_w = int(cc_stats[label, cv2.CC_STAT_WIDTH])
-        zone_h = int(cc_stats[label, cv2.CC_STAT_HEIGHT])
-        if zone_w <= 0 or zone_h <= 0:
-            continue
-        ex0 = x0 - radius_px
-        ey0 = y0 - radius_px
-        ex1 = x0 + zone_w + radius_px
-        ey1 = y0 + zone_h + radius_px
-        zone_cx = x0 + zone_w * 0.5
-        zone_cy = y0 + zone_h * 0.5
-        best_key = None
-        best_templates = ()
-        for sl, (sx0, sy0, sx1, sy1) in src_bboxes.items():
-            if sx1 >= ex0 and sx0 <= ex1 and sy1 >= ey0 and sy0 <= ey1:
-                src_cx = (sx0 + sx1) * 0.5
-                src_cy = (sy0 + sy1) * 0.5
-                dist2 = (src_cx - zone_cx) ** 2 + (src_cy - zone_cy) ** 2
-                key = (float(dist2), int(sl))
-                if best_key is None or key < best_key:
-                    best_key = key
-                    best_templates = yolo_templates_by_zone.get(sl, ())
-        if best_templates:
-            result[label] = list(best_templates)
-    return result
-
-
-def _nearest_obb_zone_headings(cc_stats, cc_centroids, valid_labels,
-                               yolo_templates_by_zone,
-                               heading_tol_deg=YOLO_TEMPLATE_HEADING_TOL_DEG,
-                               shape_rel_tol=YOLO_TEMPLATE_SHAPE_REL_TOL,
-                               shape_abs_tol_px=YOLO_TEMPLATE_SHAPE_ABS_TOL_PX):
-    """Return heading evidence from the nearest zone with same-zone OBBs.
-
-    This intentionally ignores placement class.  The OBB-neighbor path is only
-    about borrowing local orientation, while spacing/class fit remains on the
-    normal candidate-placement path.
-    """
-    n_labels = cc_stats.shape[0] if cc_stats is not None else 0
-    headings = np.full(n_labels, np.nan, dtype=np.float32)
-    counts = np.zeros(n_labels, dtype=np.uint16)
-    source_labels = np.zeros(n_labels, dtype=np.int32)
-    distances = np.full(n_labels, np.nan, dtype=np.float32)
-    if n_labels == 0 or not yolo_templates_by_zone:
-        return headings, counts, source_labels, distances
-
-    sources = []
-    for source_label, templates in yolo_templates_by_zone.items():
-        source_label = int(source_label)
-        if source_label <= 0 or source_label >= n_labels:
-            continue
-        consensus = _consensus_yolo_template(
-            templates,
-            heading_tol_deg=heading_tol_deg,
-            shape_rel_tol=shape_rel_tol,
-            shape_abs_tol_px=shape_abs_tol_px,
-        )
-        if consensus is None:
-            continue
-        left = float(cc_stats[source_label, cv2.CC_STAT_LEFT])
-        top = float(cc_stats[source_label, cv2.CC_STAT_TOP])
-        width = float(cc_stats[source_label, cv2.CC_STAT_WIDTH])
-        height = float(cc_stats[source_label, cv2.CC_STAT_HEIGHT])
-        if width <= 0.0 or height <= 0.0:
-            continue
-        sources.append({
-            'label': source_label,
-            'heading': float(consensus['heading']) % 360.0,
-            'votes': int(consensus.get('consensus_heading_votes', len(templates))),
-            'left': left,
-            'top': top,
-            'right': left + width - 1.0,
-            'bottom': top + height - 1.0,
-            'cx': float(cc_centroids[source_label, 0]),
-            'cy': float(cc_centroids[source_label, 1]),
-        })
-    if not sources:
-        return headings, counts, source_labels, distances
-
-    source_label_set = {item['label'] for item in sources}
-    for zone_label in valid_labels:
-        zone_label = int(zone_label)
-        if zone_label <= 0 or zone_label >= n_labels or zone_label in source_label_set:
-            continue
-        left = float(cc_stats[zone_label, cv2.CC_STAT_LEFT])
-        top = float(cc_stats[zone_label, cv2.CC_STAT_TOP])
-        width = float(cc_stats[zone_label, cv2.CC_STAT_WIDTH])
-        height = float(cc_stats[zone_label, cv2.CC_STAT_HEIGHT])
-        if width <= 0.0 or height <= 0.0:
-            continue
-        right = left + width - 1.0
-        bottom = top + height - 1.0
-        cx = float(cc_centroids[zone_label, 0])
-        cy = float(cc_centroids[zone_label, 1])
-        best = None
-        best_key = None
-        for source in sources:
-            dx = max(source['left'] - right, left - source['right'], 0.0)
-            dy = max(source['top'] - bottom, top - source['bottom'], 0.0)
-            bbox_dist = math.hypot(dx, dy)
-            center_dist = math.hypot(cx - source['cx'], cy - source['cy'])
-            key = (bbox_dist, center_dist, -source['votes'])
-            if best_key is None or key < best_key:
-                best_key = key
-                best = source
-        if best is None:
-            continue
-        headings[zone_label] = best['heading']
-        counts[zone_label] = min(best['votes'], 65535)
-        source_labels[zone_label] = best['label']
-        distances[zone_label] = float(best_key[0])
-    return headings, counts, source_labels, distances
-
-
-def _refine_candidate_classes_from_yolo(cand_x, cand_y, cand_cls, yolo_guidance):
-    if yolo_guidance is None or cand_x.size == 0:
-        return cand_cls, 0
-    labels = yolo_guidance['nearest_label'][cand_y, cand_x]
-    dist_m = (
-        yolo_guidance['distance_px'][cand_y, cand_x] *
-        float(yolo_guidance.get('m_per_px', 1.0))
-    )
-    class_by_label = yolo_guidance['class_by_label']
-    valid = (
-        (labels > 0) &
-        (labels < class_by_label.shape[0]) &
-        (dist_m <= float(yolo_guidance.get('max_distance_m', YOLO_GUIDANCE_MAX_DISTANCE_M)))
-    )
-    if not np.any(valid):
-        return cand_cls, 0
-    refined = cand_cls.copy()
-    local_cls = np.zeros_like(cand_cls)
-    local_cls[valid] = class_by_label[labels[valid]]
-    apply = valid & (local_cls != 0)
-    refined[apply] = local_cls[apply]
-    return refined, int(np.count_nonzero(apply))
-
-
-def _pca_long_axis_heading(xs, ys):
-    """Return compass heading of a pixel cloud's long axis, or NaN if weak."""
-    if xs.size < 6:
-        return float('nan'), 1.0
-    coords = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))
-    coords -= np.mean(coords, axis=0)
-    cov = coords.T @ coords / max(float(coords.shape[0] - 1), 1.0)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    order = np.argsort(eigvals)
-    major = eigvecs[:, order[-1]]
-    minor_val = max(float(eigvals[order[-2]]), 1e-6)
-    aspect = math.sqrt(max(float(eigvals[order[-1]]), 1e-6) / minor_val)
-    if aspect < 1.35:
-        return float('nan'), aspect
-    img_angle = math.degrees(math.atan2(float(major[1]), float(major[0])))
-    return (90.0 - img_angle) % 180.0, aspect
-
-
-def _build_local_roof_evidence(bld_raw, bld_zone, m_per_px):
-    """Build nearest-raw-roof class and heading evidence for candidate placement."""
-    raw_mask = ((bld_raw != 0) & (bld_zone != 0)).astype(np.uint8)
-    if not raw_mask.any():
-        return None
-
-    n_frag, frag_labels, frag_stats, _ = cv2.connectedComponentsWithStats(
-        raw_mask, connectivity=8
-    )
-    if n_frag <= 1:
-        return None
-
-    px_area_m2 = max(float(m_per_px) * float(m_per_px), 1e-6)
-    min_fragment_px = max(2, int(round(18.0 / px_area_m2)))
-    class_by_label = np.zeros(n_frag, dtype=np.uint8)
-    heading_by_label = np.full(n_frag, np.nan, dtype=np.float32)
-    aspect_by_label = np.ones(n_frag, dtype=np.float32)
-    area_by_label_m2 = np.zeros(n_frag, dtype=np.float32)
-
-    for label in range(1, n_frag):
-        area_px = int(frag_stats[label, cv2.CC_STAT_AREA])
-        if area_px < min_fragment_px:
-            continue
-        x = int(frag_stats[label, cv2.CC_STAT_LEFT])
-        y = int(frag_stats[label, cv2.CC_STAT_TOP])
-        w = int(frag_stats[label, cv2.CC_STAT_WIDTH])
-        h = int(frag_stats[label, cv2.CC_STAT_HEIGHT])
-        area_m2 = float(area_px) * px_area_m2
-        max_side_m = max(float(w), float(h)) * float(m_per_px)
-        fill_ratio = area_px / max(float(w * h), 1.0)
-        class_by_label[label] = _roof_fragment_class(area_m2, max_side_m, fill_ratio)
-        area_by_label_m2[label] = area_m2
-
-        local = frag_labels[y:y + h, x:x + w] == label
-        ys, xs = np.nonzero(local)
-        heading, aspect = _pca_long_axis_heading(xs + x, ys + y)
-        heading_by_label[label] = heading
-        aspect_by_label[label] = aspect
-
-    if not np.any(class_by_label):
-        return None
-
-    dist_src = np.where(raw_mask != 0, 0, 1).astype(np.uint8)
-    dist_px, nearest_label = cv2.distanceTransformWithLabels(
-        dist_src,
-        cv2.DIST_L2,
-        5,
-        labelType=cv2.DIST_LABEL_CCOMP,
-    )
-    return {
-        'distance_px': dist_px.astype(np.float32, copy=False),
-        'nearest_label': nearest_label.astype(np.int32, copy=False),
-        'class_by_label': class_by_label,
-        'heading_by_label': heading_by_label,
-        'aspect_by_label': aspect_by_label,
-        'area_by_label_m2': area_by_label_m2,
-    }
-
-
-def _refine_candidate_classes_from_roofs(cand_x, cand_y, cand_cls, roof_evidence,
-                                         m_per_px, max_distance_m=30.0):
-    """Use nearby raw roof fragments to fix classes inside broad cleaned zones."""
-    if roof_evidence is None or cand_x.size == 0:
-        return cand_cls, 0
-    labels = roof_evidence['nearest_label'][cand_y, cand_x]
-    dist_m = roof_evidence['distance_px'][cand_y, cand_x] * float(m_per_px)
-    class_by_label = roof_evidence['class_by_label']
-    valid = (
-        (labels > 0) &
-        (labels < class_by_label.shape[0]) &
-        (dist_m <= float(max_distance_m))
-    )
-    if not np.any(valid):
-        return cand_cls, 0
-
-    local_cls = np.zeros_like(cand_cls)
-    local_cls[valid] = class_by_label[labels[valid]]
-    # Raw SegFormer building islands can still be over-merged at ZL16, so use
-    # local evidence as a conservative correction for oversized zone classes.
-    apply = valid & (local_cls != 0) & (local_cls < cand_cls)
-    if not np.any(apply):
-        return cand_cls, 0
-    refined = cand_cls.copy()
-    refined[apply] = local_cls[apply]
-    return refined, int(np.count_nonzero(apply))
-
-
-def _roof_heading_for_candidate(roof_evidence, jx, jy, m_per_px,
-                                max_distance_m=18.0, min_area_m2=140.0):
-    """Return local raw-roof long-axis heading when the evidence is rectangular."""
-    if roof_evidence is None:
-        return float('nan')
-    label = int(roof_evidence['nearest_label'][jy, jx])
-    if label <= 0 or label >= roof_evidence['heading_by_label'].shape[0]:
-        return float('nan')
-    if float(roof_evidence['distance_px'][jy, jx]) * float(m_per_px) > max_distance_m:
-        return float('nan')
-    if float(roof_evidence['area_by_label_m2'][label]) < float(min_area_m2):
-        return float('nan')
-    if float(roof_evidence['aspect_by_label'][label]) < 1.45:
-        return float('nan')
-    return float(roof_evidence['heading_by_label'][label])
 
 
 def _spacing_for_zone_class_m(edge_spacing_m, zone_class,
@@ -7775,18 +6133,6 @@ def _class_spacing_px(edge_spacing_m, m_per_px, class_min_footprint_span_m=None)
     }
 
 
-def _residential_infill_class(zone_class):
-    """Return a smaller house-like class for residential subareas in coarse zones."""
-    zone_class = int(zone_class)
-    if zone_class <= BLD_CLASS_MEDIUM:
-        return zone_class
-    if zone_class == BLD_CLASS_SMALL_APARTMENT:
-        return BLD_CLASS_SMALL_RESIDENTIAL
-    if zone_class == BLD_CLASS_APARTMENT_BLOCK:
-        return BLD_CLASS_COMPACT_RESIDENTIAL
-    return BLD_CLASS_MEDIUM
-
-
 def _format_class_spacing(spacing_px_by_class, m_per_px):
     """Return compact spacing summary for footprint classes."""
     metres = "/".join(
@@ -7796,8 +6142,7 @@ def _format_class_spacing(spacing_px_by_class, m_per_px):
     return f"spacing≈{metres}m ({pixels}px tiny/small/compact/medium/apt/block/large/xl)"
 
 
-def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_count,
-                                grid_n, spacing_label, yolo_counts=None):
+def _describe_placement_summary(class_counts, spacing_label, yolo_counts=None):
     """Return a user-facing summary for one DDS building-placement pass."""
     total_count = sum(class_counts.values())
     class_bits = "  ".join(
@@ -7829,8 +6174,6 @@ def _describe_placement_summary(class_counts, building_coverage_pct, osm_cell_co
         f"placed={total_count:4d}  "
         f"{class_bits}  "
         f"{yolo_bits}"
-        f"building cover={building_coverage_pct:.1f}%  "
-        f"street-guided cells={osm_cell_count}/{grid_n * grid_n}  "
         f"{spacing_label}"
     )
 
@@ -7887,17 +6230,6 @@ def _footprint_poly(cx: int, cy: int, bounds_m, heading_deg: float, m_per_px: fl
     """
     pts, _ = _footprint_poly_with_bbox(cx, cy, bounds_m, heading_deg, m_per_px)
     return pts
-
-
-def _orientation_angles_for_bounds(bounds_m, desired_long_axis_heading):
-    """Return headings ordered to align an asset's longer footprint side first."""
-    xmin, xmax, zmin, zmax = bounds_m
-    width_m = abs(float(xmax) - float(xmin))
-    depth_m = abs(float(zmax) - float(zmin))
-    heading = float(desired_long_axis_heading) % 360.0
-    if width_m > depth_m * 1.10:
-        return ((heading - 90.0) % 360.0, heading)
-    return (heading, (heading - 90.0) % 360.0)
 
 
 def _fit_bbox_for_poly(pts: np.ndarray, img_w: int, img_h: int):
@@ -8133,91 +6465,6 @@ def _required_centered_dimensions_for_bounds(bounds_m):
     return width_m, depth_m
 
 
-def _yolo_object_dimension_key(detection):
-    """Return floored integer-metre (length, width) lookup key for a detection."""
-    try:
-        length_m = float(detection.get('length_m'))
-        width_m = float(detection.get('width_m'))
-    except (TypeError, ValueError):
-        return None
-    if not (math.isfinite(length_m) and math.isfinite(width_m)):
-        return None
-    length_key = int(math.floor(max(length_m, width_m) + 1e-4))
-    width_key = int(math.floor(min(length_m, width_m) + 1e-4))
-    if length_key <= 0 or width_key <= 0:
-        return None
-    return length_key, width_key
-
-
-def _build_yolo_object_fit_table(
-    asset_pools,
-    min_coverage=YOLO_OBJECT_MIN_COVERAGE,
-):
-    """Return a full integer-metre detection-dimension lookup for object assets."""
-    table = {}
-    min_coverage = max(1e-6, float(min_coverage))
-    seen_orientations = set()
-    for asset in _all_object_assets_by_size(asset_pools):
-        bounds_m = asset.get('bounds_m')
-        if bounds_m is None:
-            continue
-        try:
-            footprint_area_m2, _ = _footprint_metrics(bounds_m)
-            req_width_m, req_depth_m = _required_centered_dimensions_for_bounds(bounds_m)
-        except Exception:
-            continue
-        if footprint_area_m2 <= 0.0 or req_width_m <= 0.0 or req_depth_m <= 0.0:
-            continue
-
-        orientations = (
-            (req_depth_m, req_width_m, 0.0),
-            (req_width_m, req_depth_m, -90.0),
-        )
-        for required_length_m, required_width_m, heading_delta in orientations:
-            min_length_key = int(math.ceil(required_length_m - 1e-6))
-            min_width_key = int(math.ceil(required_width_m - 1e-6))
-            if min_length_key <= 0 or min_width_key <= 0:
-                continue
-            max_detection_area_m2 = footprint_area_m2 / min_coverage
-            max_length_key = int(math.floor(max_detection_area_m2 / min_width_key))
-            orientation_id = (
-                asset.get('path', ''),
-                round(float(heading_delta), 6),
-                min_length_key,
-                min_width_key,
-            )
-            if orientation_id in seen_orientations:
-                continue
-            seen_orientations.add(orientation_id)
-            for length_key in range(min_length_key, max_length_key + 1):
-                max_width_key = int(math.floor(max_detection_area_m2 / length_key))
-                if max_width_key < min_width_key:
-                    continue
-                for width_key in range(min_width_key, max_width_key + 1):
-                    key = (int(length_key), int(width_key))
-                    coverage = footprint_area_m2 / max(1.0, float(length_key * width_key))
-                    table.setdefault(key, []).append({
-                        'asset': asset,
-                        'heading_delta': float(heading_delta),
-                        'required_length_m': float(required_length_m),
-                        'required_width_m': float(required_width_m),
-                        'coverage': float(coverage),
-                        'footprint_area_m2': float(footprint_area_m2),
-                    })
-
-    for key, candidates in table.items():
-        candidates.sort(
-            key=lambda item: (
-                -float(item['coverage']),
-                -float(item['footprint_area_m2']),
-                item['asset'].get('source', ''),
-                item['asset'].get('path', ''),
-                float(item['heading_delta']),
-            )
-        )
-    return table
-
-
 def _yolo_object_min_coverage_for_class(zone_class, default=YOLO_OBJECT_MIN_COVERAGE):
     """Return the minimum object/YOLO footprint coverage for a detection class."""
     try:
@@ -8450,9 +6697,6 @@ def _bundle_enabled_view(bundle, enabled_assets_by_path, zone_class):
     return view
 
 
-_GLOBAL_YOLO_OBJECT_FIT_TABLE = None
-
-
 def _select_yolo_object_candidate_once(
     fit_table,
     detection,
@@ -8487,65 +6731,6 @@ def _select_yolo_object_candidate_once(
     """
     if profile_out is not None:
         profile_out['calls'] = profile_out.get('calls', 0) + 1
-    if not isinstance(fit_table, dict) or fit_table.get('kind') != 'scored_yolo_object_candidates':
-        key = _yolo_object_dimension_key(detection)
-        if key is None:
-            return None, 'miss'
-        candidates = (fit_table or {}).get(key)
-        if not candidates:
-            return None, 'miss'
-        if profile_out is not None:
-            profile_out['entries'] = profile_out.get('entries', 0) + len(candidates)
-
-        try:
-            detection_area_m2 = float(detection.get('area_m2') or 0.0)
-        except (TypeError, ValueError):
-            detection_area_m2 = 0.0
-        if detection_area_m2 <= 0.0:
-            detection_area_m2 = (
-                abs(float(cv2.contourArea(np.asarray(yolo_poly, dtype=np.float32)))) *
-                float(m_per_px) * float(m_per_px)
-            )
-        if detection_area_m2 <= 0.0:
-            return None, 'miss'
-
-        context_skipped = 0
-        for candidate in candidates:
-            if profile_out is not None:
-                profile_out['seen'] = profile_out.get('seen', 0) + 1
-            candidate_asset = candidate['asset']
-            path = candidate_asset.get('path')
-            if enabled_assets_by_path is not None:
-                asset = enabled_assets_by_path.get(path)
-                if asset is None:
-                    continue
-            else:
-                asset = candidate_asset
-            if not residential_context and _asset_requires_residential_context(asset):
-                context_skipped += 1
-                continue
-            legacy_gate_m = _detection_height_gate_m(detection)
-            if legacy_gate_m is not None and asset.get('height_m') is not None:
-                if float(asset['height_m']) > legacy_gate_m + 1e-6:
-                    continue
-            footprint_area_m2 = float(candidate['footprint_area_m2'])
-            if footprint_area_m2 / detection_area_m2 < float(min_coverage):
-                continue
-            final_heading = (float(heading) + float(candidate['heading_delta'])) % 360.0
-            footprint_poly = _footprint_poly(
-                int(jx), int(jy), asset['bounds_m'], final_heading, m_per_px
-            )
-            if not _footprint_inside_detection(footprint_poly, yolo_poly, m_per_px):
-                continue
-            return {
-                'asset': asset,
-                'heading': final_heading,
-                'footprint_poly': footprint_poly,
-            }, 'selected'
-
-        if context_skipped:
-            return None, 'context_skipped'
-        return None, 'miss'
 
     def _detection_dimensions_m():
         try:
@@ -9310,174 +7495,6 @@ def _poly_mask_overlap_frac(occ_mask, pts, scratch_mask=None, bbox=None):
     return cv2.countNonZero(tmp) / float(poly_area)
 
 
-def _find_fitting_asset(pool, rng, jx, jy, heading, m_per_px,
-                        static_occ_mask, building_spacing_mask, fit_scratch,
-                        file_counts, mark_pad_m=None, prefer_small=False,
-                        residential_context=True, footprint_pad_m=FOOTPRINT_PAD_M,
-                        static_occ_integral=None, fit_cache_enabled=True,
-                        retry_context=None, prefer_largest_fit=False):
-    """Return the selected asset when it fits this candidate."""
-    unknown_skipped = 0
-    candidate_fit_cache = {}
-    angle_basis_cache = {}
-
-    def _bounds_key(bounds):
-        return tuple(float(v) for v in bounds)
-
-    def _angle_basis(angle):
-        angle_norm = float(angle) % 360.0
-        cached = angle_basis_cache.get(angle_norm)
-        if cached is None:
-            rad = math.radians(float(angle))
-            sin_a = math.sin(rad)
-            cos_a = math.cos(rad)
-            cached = (1.0 / float(m_per_px), cos_a, sin_a, sin_a, -cos_a)
-            angle_basis_cache[angle_norm] = cached
-        return angle_norm, cached
-
-    def _orientation_fit(bounds_m, fit_bounds, mark_bounds, bounds_cache_key, angle):
-        if bounds_cache_key is None:
-            raw_key = _bounds_key(bounds_m)
-            fit_key = _bounds_key(fit_bounds)
-            mark_key = _bounds_key(mark_bounds)
-            bounds_cache_key = (raw_key, fit_key, mark_key)
-        else:
-            raw_key, fit_key, mark_key = bounds_cache_key
-        angle_norm, basis = _angle_basis(angle)
-        cache_key = (bounds_cache_key, angle_norm)
-        cached = candidate_fit_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        static_poly, static_bbox = _footprint_poly_with_bbox_basis(
-            jx, jy, bounds_m, *basis
-        )
-        dynamic_poly, dynamic_bbox = _footprint_poly_with_bbox_basis(
-            jx, jy, fit_bounds, *basis
-        )
-        if (
-            _poly_fits_with_integral(
-                static_occ_mask, static_poly, fit_scratch, static_occ_integral,
-                bbox=static_bbox,
-            ) and
-            _poly_fits_with_integral(
-                building_spacing_mask, dynamic_poly, fit_scratch,
-                bbox=dynamic_bbox,
-            )
-        ):
-            mark_poly, _ = _footprint_poly_with_bbox_basis(
-                jx, jy, mark_bounds, *basis
-            )
-            result = (
-                True,
-                static_poly,
-                mark_poly,
-            )
-        else:
-            result = (False, None, None)
-        candidate_fit_cache[cache_key] = result
-        return result
-
-    def _fit_asset(asset):
-        bounds_m = asset.get('bounds_m')
-        if bounds_m is None:
-            return None, None, None, None, 1
-
-        fit_bounds = asset.get('fit_bounds_m')
-        mark_bounds = asset.get('mark_bounds_m')
-        bounds_cache_key = asset.get('fit_cache_key')
-        if fit_bounds is None or mark_bounds is None:
-            fit_bounds = _expand_bounds(bounds_m, footprint_pad_m)
-            mark_pad = (
-                footprint_pad_m + PLACEMENT_MARGIN_M
-                if mark_pad_m is None else float(mark_pad_m)
-            )
-            mark_bounds = _expand_bounds(bounds_m, mark_pad)
-            bounds_cache_key = None
-
-        heading_options = _orientation_angles_for_bounds(bounds_m, heading)
-        if not fit_cache_enabled:
-            for fit_heading in heading_options:
-                static_poly = _footprint_poly(jx, jy, bounds_m, fit_heading, m_per_px)
-                dynamic_poly = _footprint_poly(jx, jy, fit_bounds, fit_heading, m_per_px)
-                file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-                if (
-                    _poly_fits(static_occ_mask, static_poly, fit_scratch) and
-                    _poly_fits(building_spacing_mask, dynamic_poly, fit_scratch)
-                ):
-                    return (
-                        asset,
-                        fit_heading,
-                        static_poly,
-                        _footprint_poly(jx, jy, mark_bounds, fit_heading, m_per_px),
-                        0,
-                    )
-            return None, None, None, None, 0
-
-        for fit_heading in heading_options:
-            file_counts['fit_checks'] = file_counts.get('fit_checks', 0) + 1
-            fits, static_poly, mark_poly = _orientation_fit(
-                bounds_m, fit_bounds, mark_bounds, bounds_cache_key, fit_heading
-            )
-            if fits:
-                return asset, fit_heading, static_poly, mark_poly, 0
-        return None, None, None, None, 0
-
-    if prefer_largest_fit:
-        skipped_residential = 0
-        for asset in sorted(pool, key=_asset_retry_sort_key, reverse=True):
-            if not residential_context and _asset_requires_residential_context(asset):
-                skipped_residential += 1
-                continue
-            fitted_asset, final_h, footprint_poly, spacing_poly, skipped_unknown = _fit_asset(asset)
-            unknown_skipped += skipped_unknown
-            if fitted_asset is not None:
-                if skipped_residential:
-                    file_counts['residential_asset_skipped'] = (
-                        file_counts.get('residential_asset_skipped', 0) + skipped_residential
-                    )
-                file_counts['largest_fit_asset_selected'] = (
-                    file_counts.get('largest_fit_asset_selected', 0) + 1
-                )
-                return fitted_asset, final_h, footprint_poly, spacing_poly, unknown_skipped
-        if skipped_residential:
-            file_counts['residential_asset_skipped'] = (
-                file_counts.get('residential_asset_skipped', 0) + skipped_residential
-            )
-        return None, None, None, None, unknown_skipped
-
-    selected_asset = None
-    for asset, skipped_before in _asset_retry_sequence_for_context(
-        pool,
-        rng,
-        prefer_small=prefer_small,
-        residential_context=residential_context,
-        retry_context=retry_context,
-    ):
-        if skipped_before:
-            file_counts['residential_asset_skipped'] = (
-                file_counts.get('residential_asset_skipped', 0) + int(skipped_before)
-            )
-        if asset is None:
-            break
-        if not residential_context and _asset_requires_residential_context(asset):
-            file_counts['residential_asset_skipped'] = (
-                file_counts.get('residential_asset_skipped', 0) + 1
-            )
-            continue
-        selected_asset = asset
-        break
-
-    if selected_asset is None:
-        return None, None, None, None, unknown_skipped
-
-    fitted_asset, final_h, footprint_poly, spacing_poly, skipped_unknown = _fit_asset(selected_asset)
-    unknown_skipped += skipped_unknown
-    if fitted_asset is not None:
-        return fitted_asset, final_h, footprint_poly, spacing_poly, unknown_skipped
-    return None, None, None, None, unknown_skipped
-
-
 def _expand_bounds(bounds_m, pad_m: float):
     xmin, xmax, zmin, zmax = bounds_m
     return (xmin - pad_m, xmax + pad_m, zmin - pad_m, zmax + pad_m)
@@ -9486,24 +7503,6 @@ def _expand_bounds(bounds_m, pad_m: float):
 def _mark_poly(occ_mask: np.ndarray, pts: np.ndarray) -> None:
     """Fill polygon footprint into occ_mask (in-place)."""
     cv2.fillPoly(occ_mask, [np.int32(pts)], 1)
-
-
-def _mark_dynamic_center_blockers(center_block_masks, cx, cy, heading, mark_bounds,
-                                  m_per_px, class_min_fit_inradius_m):
-    """Mark centers where no future class-minimum footprint can fit."""
-    if mark_bounds is None:
-        return
-    rad = math.radians(float(heading))
-    sin_a = math.sin(rad)
-    cos_a = math.cos(rad)
-    basis = (1.0 / float(m_per_px), cos_a, sin_a, sin_a, -cos_a)
-    for zone_class, center_mask in center_block_masks.items():
-        radius_m = class_min_fit_inradius_m.get(zone_class, 0.0)
-        if radius_m <= 0.0:
-            continue
-        block_bounds = _expand_bounds(mark_bounds, radius_m)
-        block_poly, _ = _footprint_poly_with_bbox_basis(cx, cy, block_bounds, *basis)
-        cv2.fillPoly(center_mask, [np.int32(block_poly)], 1)
 
 
 def _place_greenhouses(
@@ -9867,16 +7866,11 @@ def run(
         'seg_first': 0.0,
         'greenhouses': 0.0,
         'stock_yolo_inference': 0.0,
-        'zone_cleanup': 0.0,
         'lookup': 0.0,
-        'road_cache': 0.0,
         'road_raster': 0.0,
         'mesh_water': 0.0,
         'existing_bld_excl': 0.0,
-        'heading_grid': 0.0,
         'mask_apply': 0.0,
-        'connected_components': 0.0,
-        'candidate_grid': 0.0,
         'fit_loop': 0.0,
         'cache_save': 0.0,
         'viz': 0.0,
@@ -9887,7 +7881,6 @@ def run(
         'place_prep': 0.0,
         'place_fits': 0.0,
         'place_select': 0.0,
-        'place_blockers': 0.0,
         'place_maskfill': 0.0,
     }
     detail_timing = _env_flag("O4_OVERLAY_TIMING_DETAIL")
@@ -9897,55 +7890,13 @@ def run(
     slow_timing_s = _env_float(
         "O4_OVERLAY_TIMING_SLOW", 3.0 if verbose_log else 0.0
     )
-    max_candidates_per_dds = max(
-        0, int(_env_float("O4_BLD_MAX_CANDIDATES", BLD_MAX_CANDIDATES_PER_DDS))
-    )
-    # Pipeline is permanently in direct-YOLO mode: only detected footprints
-    # are placed (no inferred/smart gap fill, no legacy gap-fill pass).
+    # Only detected footprints are placed: the inferred candidate-grid / gap
+    # fill placement was retired.
     yolo_cuda_cleanup_every = max(
         0, int(_env_float("O4_BLD_YOLO_CUDA_CLEANUP_EVERY", 0))
     )
     footprint_pad_m = max(0.0, _env_float("O4_BLD_FOOTPRINT_PAD_M", FOOTPRINT_PAD_M))
-    disable_center_blockers = _env_flag("O4_BLD_DISABLE_CENTER_BLOCKERS")
-    max_gap_candidates_per_dds = max(
-        0, int(_env_float("O4_BLD_GAP_MAX_CANDIDATES", max_candidates_per_dds))
-    )
-    max_gap_candidates_per_component = max(
-        1, int(_env_float("O4_BLD_GAP_MAX_PER_COMPONENT", 24))
-    )
-    yolo_template_gap_m = max(
-        0.0, _env_float("O4_BLD_YOLO_TEMPLATE_GAP_M", spacing_m)
-    )
-    yolo_template_max_candidates_per_zone = max(
-        1,
-        int(_env_float(
-            "O4_BLD_YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE",
-            YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE,
-        )),
-    )
-    yolo_template_heading_tol_deg = max(
-        0.0,
-        _env_float(
-            "O4_BLD_YOLO_TEMPLATE_HEADING_TOL_DEG",
-            YOLO_TEMPLATE_HEADING_TOL_DEG,
-        ),
-    )
-    yolo_template_shape_rel_tol = max(
-        0.0,
-        _env_float(
-            "O4_BLD_YOLO_TEMPLATE_SHAPE_REL_TOL",
-            YOLO_TEMPLATE_SHAPE_REL_TOL,
-        ),
-    )
-    yolo_template_shape_abs_tol_px = max(
-        0.0,
-        _env_float(
-            "O4_BLD_YOLO_TEMPLATE_SHAPE_ABS_TOL_PX",
-            YOLO_TEMPLATE_SHAPE_ABS_TOL_PX,
-        ),
-    )
     strict_fit = _env_flag("O4_BLD_STRICT_FIT")
-    n_unknown_skipped = 0
     _t = time.perf_counter()
 
     if yolo_checkpoint is None:
@@ -10041,7 +7992,6 @@ def run(
     else:
         yolo_enabled = bool(yolo_enabled)
     yolo_model = None
-    yolo_available = False
     yolo_allow_missing = _env_flag("O4_BLD_YOLO_ALLOW_MISSING")
     yolo_signature = _checkpoint_signature(yolo_checkpoint) if yolo_enabled else None
     if yolo_enabled and yolo_signature is None:
@@ -10075,7 +8025,6 @@ def run(
                 yolo_checkpoint,
                 fuse=yolo_fuse_model,
             )
-            yolo_available = True
         except Exception as exc:
             if yolo_allow_missing:
                 print(
@@ -10463,10 +8412,6 @@ def run(
         print("Building assets: none available for placement")
         return 0
     _sort_asset_pools_for_retry(asset_pools)
-    asset_retry_context = {
-        cls: _asset_retry_context(asset_pools[cls])
-        for cls in BLD_PLACEMENT_CLASSES
-    }
     class_min_footprint_span_m = _class_min_footprint_span_m(asset_pools)
     mark_pad_m = _mark_pad_for_edge_spacing_m(spacing_m, footprint_pad_m)
     for pool in asset_pools.values():
@@ -10484,9 +8429,6 @@ def run(
                 tuple(float(v) for v in asset['fit_bounds_m']),
                 tuple(float(v) for v in asset['mark_bounds_m']),
             )
-    class_min_fit_inradius_m = _class_min_fit_inradius_m(asset_pools)
-    if disable_center_blockers:
-        class_min_fit_inradius_m = {cls: 0.0 for cls in BLD_PLACEMENT_CLASSES}
     yolo_object_fit_table = _build_yolo_object_candidate_index(asset_pools)
     asset_catalog_signature = _asset_pools_signature(
         asset_pools, include_roof_color=roof_color_matching_active
@@ -10506,7 +8448,6 @@ def run(
     )
 
     osm_roads = _prepare_roads(osm_roads)
-    osm_roads_index = BBOX.build_bounds_index(osm_roads)
     excl_rails = _prepare_roads(excl_rails)
     excl_rails_index = BBOX.build_bounds_index(excl_rails)
     sh_network = _prepare_roads(sh_network)
@@ -10515,7 +8456,6 @@ def run(
     existing_bld_polys = _prepare_polygons(existing_bld_polys)
     existing_bld_polys_index = BBOX.build_bounds_index(existing_bld_polys)
     residential_polys = _prepare_polygons(residential_polys)
-    residential_polys_index = BBOX.build_bounds_index(residential_polys)
     _t = time.perf_counter()
     mesh_water_path = _mesh_file_for_tile(tex_dir, lat, lon)
     mesh_water_sig = _mesh_water_signature(mesh_water_path)
@@ -10537,22 +8477,16 @@ def run(
     # the road heading grid empty.
     all_roads = sh_network if sh_network else osm_roads
     separator_roads_index = BBOX.build_bounds_index(separator_roads)
-    heading_seg_index = _prepare_segment_arrays(all_roads)
     separator_sig = _roads_signature(separator_roads)
     rail_sig = _roads_signature(excl_rails)
     heading_sig = _roads_signature(all_roads)
     excl_poly_sig = _polys_signature(excl_polys)
     existing_bld_poly_sig = _polys_signature(existing_bld_polys)
     residential_poly_sig = _polys_signature(residential_polys)
-    n_road_cache_hits = 0
-    n_road_cache_misses = 0
 
     # Load model lazily only when a DDS has no shared vegetation class-map cache.
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = proc = None
-
-    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k*2+1,)*2)
-    k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k*2+1,)*2)
 
     TILE_VIZ = max(256, int(_env_float("O4_BLD_VIZ_SIZE", 512)))
     composite = np.zeros((n_rows*TILE_VIZ, n_cols*TILE_VIZ, 3), dtype=np.uint8) if make_viz else None
@@ -10562,7 +8496,7 @@ def run(
     placed_facades = []   # list of (lonlat_ring, facade_path, height_m)
     placed_draped = []    # list of (lonlat_ring, pol_path) — stock YOLO ground polys (.pol)
     direct_yolo_facade_placements = 0
-    candidate_grid_cache = {}
+
     def _building_cache_params(effective_yolo_batch, effective_stock_yolo_batch):
         return (
             (
@@ -10570,19 +8504,23 @@ def run(
                 if strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
             ),
             spacing_m, close_k, open_k, min_footprint_m2,
-            max_candidates_per_dds,
+            # The entries marked "retired" belonged to the removed
+            # candidate-grid placement. They keep the values they always had
+            # so existing *_bld.pkl caches stay valid; drop them with the next
+            # BLD_PLACEMENT_*CACHE_VERSION bump.
+            max(0, int(BLD_MAX_CANDIDATES_PER_DDS)),          # retired
             PLACE_UNKNOWN_OBJECTS,
             footprint_pad_m,
             mark_pad_m,
             smallest_asset_only,
-            disable_center_blockers,
-            max_gap_candidates_per_dds,
-            max_gap_candidates_per_component,
-            yolo_template_gap_m,
-            yolo_template_max_candidates_per_zone,
-            yolo_template_heading_tol_deg,
-            yolo_template_shape_rel_tol,
-            yolo_template_shape_abs_tol_px,
+            False,                                            # retired
+            max(0, int(BLD_MAX_CANDIDATES_PER_DDS)),          # retired
+            24,                                               # retired
+            max(0.0, spacing_m),                              # retired
+            max(1, int(YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE)),  # retired
+            max(0.0, YOLO_TEMPLATE_HEADING_TOL_DEG),          # retired
+            max(0.0, YOLO_TEMPLATE_SHAPE_REL_TOL),            # retired
+            max(0.0, YOLO_TEMPLATE_SHAPE_ABS_TOL_PX),         # retired
             tuple(sorted(class_min_footprint_span_m.items())),
             ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
             ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
@@ -10725,7 +8663,6 @@ def run(
             'img_w': 0,
             'm_per_px': 1.0,
             'yolo_detections': [],
-            'yolo_guidance': None,
             'effective_yolo_batch_size': yolo_batch_size,
             'yolo_batch_fell_back': False,
             'effective_stock_yolo_batch_size': stock_yolo_batch_size,
@@ -10880,7 +8817,6 @@ def run(
         m_per_px   = (m_per_px_x + m_per_px_y) / 2
 
         yolo_detections = []
-        yolo_guidance = None
         # Regions of this texture covered by kept higher-ZL textures: those are
         # detected/placed at the higher ZL, so exclude them here entirely.
         _covered_rects_px = covered_rects_to_px(
@@ -11139,7 +9075,7 @@ def run(
         # lazily for gate-passers only (see the pre-pass above the fit loop).
         # Min-footprint gate — the earliest per-detection filter. Detections
         # whose footprint is below the configured area are dropped here, before
-        # guidance, HeightNet, zone building and placement ever see them. It
+        # HeightNet and placement ever see them. It
         # runs after the raw YOLO cache is written (line above), so the cache
         # stays footprint-complete and tuning this value needs no cache rebuild.
         if yolo_detections and min_footprint_m2 > 0.0:
@@ -11152,8 +9088,6 @@ def run(
             if _footprint_dropped:
                 file_counts['yolo_min_footprint_dropped'] = _footprint_dropped
         file_counts['yolo_detections'] = len(yolo_detections)
-        if yolo_detections:
-            yolo_guidance = _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
 
         prep['img'] = img
         prep['veg_map'] = veg_map
@@ -11163,7 +9097,6 @@ def run(
         prep['img_w'] = img_w
         prep['m_per_px'] = m_per_px
         prep['yolo_detections'] = yolo_detections
-        prep['yolo_guidance'] = yolo_guidance
         return prep
 
     # One-ahead inference prefetch: a single worker thread keeps the GPU busy
@@ -11222,13 +9155,9 @@ def run(
             for _tk, _tv in _prep['local_timings'].items():
                 timings[_tk] = timings.get(_tk, 0.0) + _tv
 
-            # Per-tile deterministic rng so cached and non-cached tiles both reproduce.
             import pickle as _pickle
-            rng_seed = int.from_bytes(
-                hashlib.sha1(f"bld-place:{fname}".encode("utf-8")).digest()[:8],
-                "big",
-            )
-            rng = np.random.default_rng(rng_seed)
+            # Per-texture deterministic stream for randomized facade heights,
+            # so cached and fresh runs reproduce.
             height_rng_seed = int.from_bytes(
                 hashlib.sha1(f"bld-height:{fname}".encode("utf-8")).digest()[:8],
                 "big",
@@ -11267,7 +9196,6 @@ def run(
             img_w = _prep['img_w']
             m_per_px = _prep['m_per_px']
             yolo_detections = _prep['yolo_detections']
-            yolo_guidance = _prep['yolo_guidance']
             roof_color_image = img if roof_color_matching_active else None
             roof_color_load_attempted = (
                 img is not None or not roof_color_matching_active
@@ -11302,25 +9230,16 @@ def run(
                 or stock_res.placed_draped
             )
 
-            # Zone cleanup
-            _t = time.perf_counter()
-            bld_raw = np.zeros((img_h, img_w), dtype=np.uint8)
-            bld_zone = bld_raw
-            _record_elapsed(timings, file_timings, 'zone_cleanup', _t)
-
             # Stock placements force the full path: the blocker filter below
             # needs the rasterized addon-object masks before they can merge.
-            if not bld_zone.any() and not yolo_detections and not _stock_has_placements:
-                file_counts['candidates'] = 0
+            if not yolo_detections and not _stock_has_placements:
                 file_counts['placed'] = 0
                 if verbose_log:
-                    bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
                     spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
                     class_counts = {cls: 0 for cls in BLD_PLACEMENT_CLASSES}
                     print(
                         f"  [{fi:3d}/{n_files}] {fname}  "
-                        f"{_describe_placement_summary(class_counts, bld_pct, 0, grid_n, spacing_label, file_counts)}"
-                        f"  small-house areas=unavailable"
+                        f"{_describe_placement_summary(class_counts, spacing_label, file_counts)}"
                     )
                 else:
                     print(f"  [{fi:3d}/{n_files}] {fname}  (0 placements)", flush=True)
@@ -11355,98 +9274,59 @@ def run(
                 sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
             local_custom_bld_objects = _simheaven_objects_for_bounds(
                 custom_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
-            local_residential_roads = []
-            local_residential_polys = []
-            local_heading_segments = []
-            nearest_heading_segments = []
             _record_elapsed(timings, file_timings, 'lookup', _t)
 
-            _road_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_road.pkl'))
-            _road_key = _dds_road_cache_key(
-                fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
-                grid_n, road_width_px, road_dilate_px,
-                separator_sig, rail_sig, heading_sig, residential_poly_sig,
-                excl_poly_sig, existing_bld_poly_sig, sh_bld_sig,
-                custom_bld_sig,
-            )
-            _road_cached = None
-            if not disable_cache:
-                _t = time.perf_counter()
-                _road_cached = _load_dds_road_cache(_road_cache_file, _road_key)
-                _record_elapsed(timings, file_timings, 'road_cache', _t)
-
-            if _road_cached is not None:
-                road_mask = _road_cached['road_mask']
-                rail_mask = _road_cached['rail_mask']
-                hgrid = _road_cached['hgrid'].copy()
-                n_osm_cells = int(_road_cached['n_osm_cells'])
-                residential_area_mask = _road_cached.get('residential_area_mask')
-                residential_area_source = _road_cached.get(
-                    'residential_area_source', 'unknown'
-                )
-                poly_mask = _road_cached.get('poly_mask')
-                existing_bld_mask = _road_cached.get('existing_bld_mask')
-                sh_bld_mask = _road_cached.get('sh_bld_mask')
-                custom_bld_mask = _road_cached.get('custom_bld_mask')
-                n_road_cache_hits += 1
+            _t = time.perf_counter()
+            if local_separator_roads:
+                road_mask = _rasterize_roads(
+                    local_separator_roads, lat_n, lat_s, lon_w, lon_e,
+                    img_h, img_w, road_width_px=road_width_px)
+                road_mask = cv2.dilate(road_mask, k_road)
             else:
-                n_road_cache_misses += 1
-                _t = time.perf_counter()
-                if local_separator_roads:
-                    road_mask = _rasterize_roads(
-                        local_separator_roads, lat_n, lat_s, lon_w, lon_e,
-                        img_h, img_w, road_width_px=road_width_px)
-                    road_mask = cv2.dilate(road_mask, k_road)
-                else:
-                    road_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                road_mask = np.zeros((img_h, img_w), dtype=np.uint8)
 
-                if local_rails:
-                    rail_mask = _rasterize_roads(
-                        local_rails, lat_n, lat_s, lon_w, lon_e,
-                        img_h, img_w, road_width_px=road_width_px)
-                    rail_mask = cv2.dilate(rail_mask, k_road)
-                else:
-                    rail_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            if local_rails:
+                rail_mask = _rasterize_roads(
+                    local_rails, lat_n, lat_s, lon_w, lon_e,
+                    img_h, img_w, road_width_px=road_width_px)
+                rail_mask = cv2.dilate(rail_mask, k_road)
+            else:
+                rail_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            _record_elapsed(timings, file_timings, 'road_raster', _t)
+
+            poly_mask = None
+            if local_excl_polys:
+                _t = time.perf_counter()
+                poly_mask = _rasterize_polygons(
+                    local_excl_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
                 _record_elapsed(timings, file_timings, 'road_raster', _t)
 
-                hgrid = np.full((grid_n, grid_n), np.nan)
-                n_osm_cells = 0
-                residential_area_mask = None
-                residential_area_source = 'none'
+            existing_bld_mask = None
+            if local_existing_bld_polys:
+                _t = time.perf_counter()
+                existing_bld_mask = _rasterize_polygons(
+                    local_existing_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
+                )
+                _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
-                poly_mask = None
-                if local_excl_polys:
-                    _t = time.perf_counter()
-                    poly_mask = _rasterize_polygons(
-                        local_excl_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                    )
-                    _record_elapsed(timings, file_timings, 'road_raster', _t)
+            sh_bld_mask = None
+            if local_sh_bld_objects:
+                _t = time.perf_counter()
+                sh_bld_mask = _rasterize_simheaven_objects(
+                    local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
+                    img_h, img_w, m_per_px
+                )
+                _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
-                existing_bld_mask = None
-                if local_existing_bld_polys:
-                    _t = time.perf_counter()
-                    existing_bld_mask = _rasterize_polygons(
-                        local_existing_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                    )
-                    _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
-
-                sh_bld_mask = None
-                if local_sh_bld_objects:
-                    _t = time.perf_counter()
-                    sh_bld_mask = _rasterize_simheaven_objects(
-                        local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
-                        img_h, img_w, m_per_px
-                    )
-                    _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
-
-                custom_bld_mask = None
-                if local_custom_bld_objects:
-                    _t = time.perf_counter()
-                    custom_bld_mask = _rasterize_simheaven_objects(
-                        local_custom_bld_objects, lat_n, lat_s, lon_w, lon_e,
-                        img_h, img_w, m_per_px
-                    )
-                    _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
+            custom_bld_mask = None
+            if local_custom_bld_objects:
+                _t = time.perf_counter()
+                custom_bld_mask = _rasterize_simheaven_objects(
+                    local_custom_bld_objects, lat_n, lat_s, lon_w, lon_e,
+                    img_h, img_w, m_per_px
+                )
+                _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
 
             # Merge the stock YOLO pre-step placements in file order, after
             # dropping detections that overlap scenery objects other addons
@@ -11481,23 +9361,15 @@ def run(
             static_occ_mask = np.zeros_like(road_mask)
             if allow_road_overlap:
                 file_counts['road_overlap_allowed'] = 1
-            else:
-                # Roads always carve the gap-fill zone so it stays street-divided.
-                bld_zone = bld_zone & (~road_mask)
 
             if poly_mask is not None and poly_mask.any():
-                bld_zone  = bld_zone & (~poly_mask)
                 static_occ_mask  = static_occ_mask | poly_mask
 
             if mesh_water_mask is not None and mesh_water_mask.any():
-                bld_zone = bld_zone & (~mesh_water_mask)
                 static_occ_mask = static_occ_mask | mesh_water_mask
 
             if existing_bld_mask is not None and existing_bld_mask.any():
                 static_occ_mask = static_occ_mask | existing_bld_mask
-
-            if rail_mask.any():
-                bld_zone  = bld_zone & (~rail_mask)
 
             if sh_bld_mask is not None and sh_bld_mask.any():
                 static_occ_mask = static_occ_mask | sh_bld_mask
@@ -11550,27 +9422,9 @@ def run(
             placed_yolo_mask = np.zeros_like(static_occ_mask)
             fit_scratch = np.zeros_like(static_occ_mask)
             pts_this = []
-            dynamic_center_block_masks = {
-                cls: np.zeros_like(static_occ_mask)
-                for cls in BLD_PLACEMENT_CLASSES
-            }
             placed_viz_polys = []
             roof_color_viz_polys = []
             yolo_viz_polys = []
-            road_divided_zone = (
-                (bld_zone != 0) &
-                (static_occ_mask == 0)
-            ).astype(np.uint8)
-            n_cc, cc_labels, cc_stats, cc_centroids = cv2.connectedComponentsWithStats(
-                road_divided_zone, connectivity=8
-            )
-            cc_area = cc_stats[:, cv2.CC_STAT_AREA]
-            cc_area_m2 = cc_area.astype(np.float32) * float(m_per_px * m_per_px)
-            # Every building zone is accepted regardless of area; small buildings
-            # are already removed up front by the min-footprint gate applied to
-            # the raw detections during inference prep.
-            valid_labels = np.flatnonzero(np.arange(n_cc) != 0)
-            yolo_templates_by_zone = {}
             _record_elapsed(timings, file_timings, 'mask_apply', _t)
 
             # Farmland sorting (O4_Agri_Structures): drop open-ground
@@ -11610,10 +9464,6 @@ def run(
                 )
                 if len(yolo_detections) != _n_agri_in:
                     file_counts['yolo_detections'] = len(yolo_detections)
-                    yolo_guidance = (
-                        _build_yolo_guidance(yolo_detections, img_h, img_w, m_per_px)
-                        if yolo_detections else None
-                    )
                 if greenhouse_detections:
                     # A greenhouse block the landcover model reads as roof
                     # must not be traced again as a building (segment-first,
@@ -11767,7 +9617,7 @@ def run(
                 # accounting for the placement loop. perf_counter is only called
                 # when the flag is on, so the default path is unaffected.
                 _pf = place_profile
-                _pf_prep = _pf_fits = _pf_select = _pf_blockers = _pf_maskfill = 0.0
+                _pf_prep = _pf_fits = _pf_select = _pf_maskfill = 0.0
                 _pf_select_acc = {} if _pf else None
                 placed_yolo_integral = cv2.integral(placed_yolo_mask, sdepth=cv2.CV_32S)
                 recent_yolo_mask = np.zeros_like(placed_yolo_mask)
@@ -12036,10 +9886,6 @@ def run(
                             _blkdbg.append(('out_of_tile', jx, jy, yolo_poly))
                         continue
 
-                    residential_context = (
-                        residential_area_mask is None or
-                        bool(residential_area_mask[jy, jx])
-                    )
                     object_candidate = None
                     object_status = 'objects_disabled'
                     if _asset_kind_enabled('object', building_asset_mode):
@@ -12077,7 +9923,7 @@ def run(
                             jy,
                             heading,
                             m_per_px,
-                            residential_context=residential_context,
+                            residential_context=True,
                             min_coverage=yolo_min_coverage,
                             enabled_assets_by_path=enabled_yolo_object_assets_by_path,
                             static_occ_mask=placement_occ_mask,
@@ -12111,8 +9957,8 @@ def run(
                             roof_viz_status,
                             _asset_roof_viz_rgb(asset),
                         ))
-                        # Spacing/center-block marks only feed per-candidate
-                        # self-avoidance; skip them when relying on tile-wide dedup.
+                        # Spacing marks only feed per-candidate self-avoidance;
+                        # skip them when relying on tile-wide dedup.
                         if _obj_avoid:
                             _t_pf = time.perf_counter() if _pf else 0.0
                             _mark_poly(building_spacing_mask, footprint_poly)
@@ -12120,18 +9966,6 @@ def run(
                             if _pf:
                                 _pf_maskfill += time.perf_counter() - _t_pf
                             recent_spacing_marks += 1
-                            _t_pf = time.perf_counter() if _pf else 0.0
-                            _mark_dynamic_center_blockers(
-                                dynamic_center_block_masks,
-                                jx,
-                                jy,
-                                final_h,
-                                asset.get('mark_bounds_m'),
-                                m_per_px,
-                                class_min_fit_inradius_m,
-                            )
-                            if _pf:
-                                _pf_blockers += time.perf_counter() - _t_pf
                         pts_this.append((jx, jy, final_h, facade_cls))
                         file_counts['yolo_object_placed'] = (
                             file_counts.get('yolo_object_placed', 0) + 1
@@ -12275,7 +10109,6 @@ def run(
                         ('place_prep', _pf_prep),
                         ('place_fits', _pf_fits),
                         ('place_select', _pf_select),
-                        ('place_blockers', _pf_blockers),
                         ('place_maskfill', _pf_maskfill),
                     ):
                         timings[_k] += _v
@@ -12294,400 +10127,12 @@ def run(
                         file_counts.get('place_cands_offered', 0) + int(_acc.get('entries', 0))
                     )
 
-            cell_h = img_h // grid_n
-            cell_w = img_w // grid_n
-
-            if np.any(np.isnan(hgrid)):
-                fallback_heading = float(rng.integers(0, 360))
-                hgrid = np.where(np.isnan(hgrid), fallback_heading, hgrid)
-
-            _t = time.perf_counter()
-            fallback_zone = np.zeros((img_h, img_w), dtype=np.uint8)
-            label_class = np.zeros(n_cc, dtype=np.uint8)
-            zone_class = label_class[cc_labels]
-            roof_evidence = None
-            zone_heading = np.full(n_cc, np.nan, dtype=np.float32)
-            side_band_px = max(
-                8,
-                road_width_px + road_dilate_px + 2,
-                int(round(14.0 / max(m_per_px, 1e-6))),
-            )
-            neighbor_yolo_templates_by_zone = {}
-            nearest_obb_heading = np.full(n_cc, np.nan, dtype=np.float32)
-            nearest_obb_counts = np.zeros(n_cc, dtype=np.int32)
-            nearest_obb_source_labels = np.full(n_cc, -1, dtype=np.int32)
-            nearest_obb_distances = np.full(n_cc, np.inf, dtype=np.float32)
-            cc_elapsed = _record_elapsed(timings, file_timings, 'connected_components', _t)
-            timings['placement'] += cc_elapsed
-
-            _t = time.perf_counter()
-            cand_x_parts = []
-            cand_y_parts = []
-            cand_cls_parts = []
-            cand_label_parts = []
-            n_initial_blocked = 0
-            n_candidates_total = 0
-            candidate_available = fallback_zone != 0
-            for target_cls in BLD_PLACEMENT_CLASSES:
-                spacing_passes = []
-                coarse_sp_px = spacing_px_by_class[target_cls]
-                if target_cls > BLD_CLASS_MEDIUM and residential_area_mask is not None:
-                    residential_cls = _residential_infill_class(target_cls)
-                    residential_sp_px = spacing_px_by_class[residential_cls]
-                    spacing_passes.append((residential_sp_px, True, residential_cls))
-                    spacing_passes.append((coarse_sp_px, False, target_cls))
-                else:
-                    spacing_passes.append((coarse_sp_px, None, target_cls))
-
-                for cls_sp_px, residential_only, placement_cls in spacing_passes:
-                    half = cls_sp_px // 2
-                    candidate_grid_key = (img_w, img_h, cls_sp_px)
-                    base_candidates = candidate_grid_cache.get(candidate_grid_key)
-                    if base_candidates is None:
-                        xs = np.arange(half, img_w, cls_sp_px, dtype=np.int32)
-                        ys = np.arange(half, img_h, cls_sp_px, dtype=np.int32)
-                        if xs.size and ys.size:
-                            grid_x, grid_y = np.meshgrid(xs, ys)
-                            base_candidates = (grid_x.ravel(), grid_y.ravel())
-                        else:
-                            base_candidates = (
-                                np.empty(0, dtype=np.int32),
-                                np.empty(0, dtype=np.int32),
-                            )
-                        candidate_grid_cache[candidate_grid_key] = base_candidates
-
-                    base_x, base_y = base_candidates
-                    if not (base_x.size and base_y.size):
-                        continue
-
-                    n_candidates = base_x.size
-                    jitter = rng.integers(
-                        -half, half + 1, size=(n_candidates, 2), dtype=np.int32
-                    )
-                    cls_cand_x = np.clip(base_x + jitter[:, 0], 0, img_w - 1)
-                    cls_cand_y = np.clip(base_y + jitter[:, 1], 0, img_h - 1)
-                    keep = (
-                        candidate_available[cls_cand_y, cls_cand_x] &
-                        (zone_class[cls_cand_y, cls_cand_x] == target_cls)
-                    )
-                    if residential_only is True:
-                        keep &= residential_area_mask[cls_cand_y, cls_cand_x] != 0
-                    elif residential_only is False:
-                        keep &= residential_area_mask[cls_cand_y, cls_cand_x] == 0
-                    cls_cand_x = cls_cand_x[keep]
-                    cls_cand_y = cls_cand_y[keep]
-                    n_candidates_total += int(cls_cand_x.size)
-                    if not cls_cand_x.size:
-                        continue
-
-                    cls_labels = cc_labels[cls_cand_y, cls_cand_x]
-                    open_center = placement_occ_mask[cls_cand_y, cls_cand_x] == 0
-                    n_initial_blocked += int(
-                        cls_cand_x.size - np.count_nonzero(open_center)
-                    )
-                    cls_cand_x = cls_cand_x[open_center]
-                    cls_cand_y = cls_cand_y[open_center]
-                    cls_labels = cls_labels[open_center]
-                    if not cls_cand_x.size:
-                        continue
-
-                    cand_x_parts.append(cls_cand_x)
-                    cand_y_parts.append(cls_cand_y)
-                    cand_cls_parts.append(
-                        np.full(cls_cand_x.shape, placement_cls, dtype=np.uint8)
-                    )
-                    cand_label_parts.append(cls_labels)
-
-            file_counts['candidates'] = n_candidates_total
-            file_counts['initial_center_blocked'] = n_initial_blocked
-            if cand_x_parts:
-                cand_x = np.concatenate(cand_x_parts)
-                cand_y = np.concatenate(cand_y_parts)
-                cand_cls = np.concatenate(cand_cls_parts)
-                cand_labels = np.concatenate(cand_label_parts)
-                cand_cls, n_local_class_refined = _refine_candidate_classes_from_roofs(
-                    cand_x, cand_y, cand_cls, roof_evidence, m_per_px
-                )
-                if n_local_class_refined:
-                    file_counts['local_roof_class_refined'] = int(n_local_class_refined)
-                if max_candidates_per_dds and cand_x.size > max_candidates_per_dds:
-                    cand_x, cand_y, cand_cls, cand_labels, n_dropped = _limit_candidates_by_component(
-                        cand_x, cand_y, cand_cls, cand_labels, max_candidates_per_dds, rng
-                    )
-                    file_counts['candidate_cap'] = int(n_dropped)
-            else:
-                cand_x = np.empty(0, dtype=np.int32)
-                cand_y = np.empty(0, dtype=np.int32)
-                cand_cls = np.empty(0, dtype=np.uint8)
-            # Direct-YOLO mode: inferred gap-fill candidates are never placed.
-            if cand_x.size:
-                file_counts['inferred_fill_disabled_candidates'] = int(cand_x.size)
-            cand_x = np.empty(0, dtype=np.int32)
-            cand_y = np.empty(0, dtype=np.int32)
-            cand_cls = np.empty(0, dtype=np.uint8)
-            cand_labels = np.empty(0, dtype=np.int32)
-            candidate_elapsed = _record_elapsed(timings, file_timings, 'candidate_grid', _t)
-            timings['placement'] += candidate_elapsed
-            if detail_timing:
-                fit_input_count = int(cand_x.size)
-                print(
-                    f"    [Bld stage] {fname} placement start  candidates={fit_input_count}",
-                    flush=True,
-                )
-
-            _t = time.perf_counter()
-
-            def _zone_yolo_template(jx, jy, zone_label):
-                zone_templates = yolo_templates_by_zone.get(int(zone_label), ())
-                if not zone_templates:
-                    return None
-                return min(
-                    zone_templates,
-                    key=lambda item: (
-                        float(item['center'][0] - jx) ** 2 +
-                        float(item['center'][1] - jy) ** 2,
-                        -float(item.get('confidence', 0.0)),
-                    ),
-                )
-
-            _neighbor_tpl_cache: dict = {}
-
-            def _dominant_neighbor_yolo_template(zone_label):
-                zone_int = int(zone_label)
-                if zone_int in _neighbor_tpl_cache:
-                    return _neighbor_tpl_cache[zone_int]
-                zone_templates = neighbor_yolo_templates_by_zone.get(zone_int, ())
-                if not zone_templates:
-                    _neighbor_tpl_cache[zone_int] = None
-                    return None
-                consensus = _consensus_yolo_template(
-                    zone_templates,
-                    heading_tol_deg=yolo_template_heading_tol_deg,
-                    shape_rel_tol=yolo_template_shape_rel_tol,
-                    shape_abs_tol_px=yolo_template_shape_abs_tol_px,
-                )
-                if consensus is not None:
-                    consensus['template_source'] = 'neighbor_zone'
-                _neighbor_tpl_cache[zone_int] = consensus
-                return consensus
-
-            def _old_heading_for_candidate(jx, jy, zone_label):
-                roof_h = _roof_heading_for_candidate(roof_evidence, jx, jy, m_per_px)
-                if not np.isnan(roof_h):
-                    file_counts['local_roof_heading'] = (
-                        file_counts.get('local_roof_heading', 0) + 1
-                    )
-                    return roof_h
-                local_h = float(hgrid[
-                    min(grid_n - 1, jy // cell_h),
-                    min(grid_n - 1, jx // cell_w),
-                ])
-                if (
-                    0 <= zone_label < zone_heading.shape[0] and
-                    not np.isnan(zone_heading[zone_label]) and
-                    cc_area_m2[zone_label] < ZL16_LOCAL_HEADING_ZONE_M2
-                ):
-                    return float(zone_heading[zone_label])
-                return local_h
-
-            def _heading_for_candidate(jx, jy, zone_label, zone_template=None):
-                if zone_template is None:
-                    zone_template = _zone_yolo_template(jx, jy, zone_label)
-                if zone_template is not None:
-                    file_counts['yolo_heading'] = (
-                        file_counts.get('yolo_heading', 0) + 1
-                    )
-                    return float(zone_template['heading'])
-                if int(zone_label) not in yolo_templates_by_zone:
-                    if (
-                        0 <= int(zone_label) < nearest_obb_heading.shape[0] and
-                        not np.isnan(nearest_obb_heading[int(zone_label)])
-                    ):
-                        file_counts['non_obb_zone_nearest_obb_heading'] = (
-                            file_counts.get('non_obb_zone_nearest_obb_heading', 0) + 1
-                        )
-                        return float(nearest_obb_heading[int(zone_label)])
-                    file_counts['non_obb_zone_heading_fallback'] = (
-                        file_counts.get('non_obb_zone_heading_fallback', 0) + 1
-                    )
-                    return _old_heading_for_candidate(jx, jy, zone_label)
-                return _old_heading_for_candidate(jx, jy, zone_label)
-
-            def _try_place_yolo_template(
-                jx, jy, zone_label, count_key, template=None, use_center_blockers=True
-            ):
-                if not _asset_kind_enabled('facade', building_asset_mode):
-                    return False
-                best = template if template is not None else _zone_yolo_template(jx, jy, zone_label)
-                if best is None:
-                    best = _dominant_neighbor_yolo_template(zone_label)
-                if best is None:
-                    return False
-                try_cls = int(best['class'])
-                final_h = float(best['heading'])
-                if try_cls not in BLD_PLACEMENT_CLASSES:
-                    return False
-                if use_center_blockers and dynamic_center_block_masks[try_cls][jy, jx]:
-                    return False
-                footprint_poly, footprint_scales = _largest_fitting_yolo_template_poly(
-                    best,
-                    jx,
-                    jy,
-                    img_w,
-                    img_h,
-                    placement_occ_mask,
-                    building_spacing_mask,
-                    fit_scratch,
-                    static_occ_integral=placement_occ_integral,
-                )
-                if footprint_poly is None:
-                    file_counts['yolo_template_blocked'] = (
-                        file_counts.get('yolo_template_blocked', 0) + 1
-                    )
-                    return False
-                long_scale, short_scale = footprint_scales
-                if long_scale < 0.999 or short_scale < 0.999:
-                    file_counts['yolo_template_shrunk'] = (
-                        file_counts.get('yolo_template_shrunk', 0) + 1
-                    )
-                    file_counts['yolo_template_long_scale_sum_x1000'] = (
-                        file_counts.get('yolo_template_long_scale_sum_x1000', 0) +
-                        int(round(float(long_scale) * 1000))
-                    )
-                    file_counts['yolo_template_short_scale_sum_x1000'] = (
-                        file_counts.get('yolo_template_short_scale_sum_x1000', 0) +
-                        int(round(float(short_scale) * 1000))
-                    )
-
-                o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
-                                            lat_n, lat_s, lon_w, lon_e)
-                if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
-                    return False
-
-                facade_path = _facade_for_detection(
-                    try_cls, veg_map, jx, jy, m_per_px,
-                    lat=float(o_lat), lon=float(o_lon),
-                    include_simheaven_assets=simheaven_assets_available,
-                )
-                pts_this.append((jx, jy, final_h, try_cls))
-                placed_facades.append((
-                    _pixel_ring_to_latlon(
-                        footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-                    ),
-                    facade_path,
-                    _yolo_facade_height_m(
-                        best, height_rng, height_priors_by_class, try_cls
-                    ),
-                ))
-                placed_viz_polys.append((footprint_poly.copy(), try_cls))
-                _mark_poly(building_spacing_mask, footprint_poly)
-                if use_center_blockers:
-                    _mark_dynamic_center_blockers(
-                        dynamic_center_block_masks,
-                        jx,
-                        jy,
-                        final_h,
-                        DEFAULT_FACADE_BOUNDS.get(try_cls),
-                        m_per_px,
-                        class_min_fit_inradius_m,
-                    )
-                actual_count_key = count_key
-                if (
-                    count_key == 'yolo_template_placed' and
-                    best.get('template_source') == 'neighbor_zone'
-                ):
-                    actual_count_key = 'neighbor_yolo_template_placed'
-                file_counts[actual_count_key] = file_counts.get(actual_count_key, 0) + 1
-                return True
-
-            # Direct-YOLO mode: template tiling of gap-fill zones is retired
-            # (cand_x/cand_y/cand_cls are always empty, so this loop is inert).
-            for jx, jy, zone_cls in zip(cand_x, cand_y, cand_cls):
-                jx = int(jx)
-                jy = int(jy)
-                zone_cls = int(zone_cls)
-                if placement_occ_mask[jy, jx]:
-                    file_counts['dynamic_center_blocked'] = (
-                        file_counts.get('dynamic_center_blocked', 0) + 1
-                    )
-                    continue
-                if dynamic_center_block_masks[zone_cls][jy, jx]:
-                    file_counts['dynamic_clearance_blocked'] = (
-                        file_counts.get('dynamic_clearance_blocked', 0) + 1
-                    )
-                    continue
-
-                zone_label = int(cc_labels[jy, jx])
-                zone_tpl   = _zone_yolo_template(jx, jy, zone_label)
-                dom_h = _heading_for_candidate(jx, jy, zone_label, zone_template=zone_tpl)
-                jitter  = rng.uniform(-HEADING_JITTER_DEG, HEADING_JITTER_DEG)
-                heading = (dom_h + jitter) % 360.0
-
-                residential_context = (
-                    residential_area_mask is None or
-                    bool(residential_area_mask[jy, jx])
-                )
-                if _try_place_yolo_template(jx, jy, zone_label, 'yolo_template_placed', template=zone_tpl):
-                    continue
-                for try_cls in (zone_cls,):
-                    pool = asset_pools[try_cls]
-                    if not pool:
-                        continue
-
-                    asset, final_h, footprint_poly, spacing_poly, skipped = _find_fitting_asset(
-                        pool, rng, jx, jy, heading, m_per_px,
-                        placement_occ_mask, building_spacing_mask, fit_scratch,
-                        file_counts, mark_pad_m,
-                        prefer_small=(try_cls != zone_cls),
-                        residential_context=residential_context,
-                        footprint_pad_m=footprint_pad_m,
-                        static_occ_integral=placement_occ_integral,
-                        fit_cache_enabled=not strict_fit,
-                        retry_context=asset_retry_context.get(try_cls),
-                        prefer_largest_fit=(zone_label not in yolo_templates_by_zone),
-                    )
-                    n_unknown_skipped += skipped
-                    if asset is None:
-                        continue
-
-                    o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
-                                                lat_n, lat_s, lon_w, lon_e)
-                    if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
-                        break
-                    pts_this.append((jx, jy, final_h, try_cls))
-                    if asset['kind'] == 'object':
-                        placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
-                    else:
-                        placed_facades.append((
-                            _pixel_ring_to_latlon(footprint_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e),
-                            asset['path'],
-                            _randomized_facade_height_m(
-                                height_rng, height_priors_by_class, try_cls
-                            ),
-                        ))
-                    placed_viz_polys.append((footprint_poly.copy(), try_cls))
-                    _mark_poly(building_spacing_mask, spacing_poly)
-                    _mark_dynamic_center_blockers(
-                        dynamic_center_block_masks,
-                        jx,
-                        jy,
-                        final_h,
-                        asset.get('mark_bounds_m'),
-                        m_per_px,
-                        class_min_fit_inradius_m,
-                    )
-                    break
-
-            fit_elapsed = _record_elapsed(timings, file_timings, 'fit_loop', _t)
-            timings['placement'] += fit_elapsed
             file_counts['placed'] = len(pts_this)
 
             col = (til_x_left - x_min) // x_step
             row = (til_y_top  - y_min) // y_step
-            bld_pct = 100 * np.sum(bld_raw) / (img_w * img_h)
             # Placed-footprint coverage: fraction of the tile actually covered by
-            # placed building footprints (objects + facades). Unlike bld_pct
-            # (segmentation coverage) this reflects packing density, so it is the
+            # placed building footprints (objects + facades), the packing-density
             # metric to watch when tuning overlap removal vs. coverage.
             if placed_viz_polys:
                 _placed_mask = np.zeros((img_h, img_w), dtype=np.uint8)
@@ -12708,9 +10153,8 @@ def run(
             if verbose_log:
                 print(
                     f"  [{fi:3d}/{n_files}] {fname}  "
-                    f"{_describe_placement_summary(class_counts, bld_pct, n_osm_cells, grid_n, spacing_label, file_counts)}"
+                    f"{_describe_placement_summary(class_counts, spacing_label, file_counts)}"
                     f"  placed%={placed_pct:.1f}"
-                    f"  small-house areas={residential_area_source}"
                 )
             else:
                 # Same accounting as the cached-replay line: objects + facades
@@ -12752,12 +10196,6 @@ def run(
                     _record_elapsed(timings, file_timings, 'dds_load', _img_t)
                 scale = TILE_VIZ / img_w
                 panel = np.array(Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS))
-                for cls, colour in ZONE_COLOURS.items():
-                    mask = np.array(
-                        Image.fromarray((zone_class == cls).astype(np.uint8) * 255)
-                        .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)
-                    ) > 127
-                    panel[mask] = (panel[mask] * 0.45 + colour * 0.55).astype(np.uint8)
                 def _blend_viz_mask(src_mask, colour, alpha):
                     if src_mask is None or not np.any(src_mask):
                         return
@@ -12939,19 +10377,15 @@ def run(
             file_elapsed = time.perf_counter() - file_t0
             if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
                 _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
-            img = roof_color_image = veg_map = mesh_water_mask = bld_raw = bld_zone = None
+            img = roof_color_image = veg_map = mesh_water_mask = None
             road_mask = rail_mask = poly_mask = existing_bld_mask = sh_bld_mask = custom_bld_mask = None
             static_occ_mask = static_occ_integral = building_spacing_mask = None
             route_excl_mask = placement_occ_mask = placement_occ_integral = None
             placed_yolo_mask = fit_scratch = None
-            road_divided_zone = fallback_zone = zone_class = roof_evidence = None
-            yolo_detections = yolo_guidance = yolo_viz_polys = placed_viz_polys = None
+            yolo_detections = yolo_viz_polys = placed_viz_polys = None
             roof_color_viz_polys = None
-            cc_labels = cc_stats = cc_centroids = valid_labels = None
             local_separator_roads = local_rails = local_excl_polys = None
             local_existing_bld_polys = local_sh_bld_objects = local_custom_bld_objects = None
-            local_residential_roads = local_residential_polys = local_heading_segments = None
-            residential_area_mask = dynamic_center_block_masks = None
             if (
                 yolo_cuda_cleanup_every > 0 and
                 fi % yolo_cuda_cleanup_every == 0 and
@@ -13083,7 +10517,6 @@ def run(
     print(f"DSF text → {txt_path}")
 
     # Compile
-    dsf_dir = os.path.dirname(os.path.abspath(out_dsf))
     _t = time.perf_counter()
     ok = SEGFORMER.compile_dsf(txt_path, out_dsf)
     timings['dsf_compile'] += time.perf_counter() - _t
@@ -13117,25 +10550,18 @@ def run(
         f"segformer={timings['segformer_inference']:.1f}s  "
         f"trained_yolo={timings['trained_yolo_inference']:.1f}s  "
         f"stock_yolo={timings['stock_yolo_inference']:.1f}s  "
-        f"road_cache={timings['road_cache']:.1f}s  "
         f"road_raster={timings['road_raster']:.1f}s  "
         f"mesh_water={timings['mesh_water']:.1f}s  "
         f"existing_bld_excl={timings['existing_bld_excl']:.1f}s  "
-        f"heading={timings['heading_grid']:.1f}s  "
         f"placement={timings['placement']:.1f}s  "
         f"dsf_text={timings['dsf_text']:.1f}s  "
-        f"dsf_compile={timings['dsf_compile']:.1f}s  "
-        f"road_cache_hits={n_road_cache_hits}/{n_files}  "
-        f"unknown_skipped={n_unknown_skipped}"
+        f"dsf_compile={timings['dsf_compile']:.1f}s"
     )
     if detail_timing:
         print(
             "[Bld timing detail] "
-            f"zone={timings['zone_cleanup']:.1f}s  "
             f"lookup={timings['lookup']:.1f}s  "
             f"mask={timings['mask_apply']:.1f}s  "
-            f"cc={timings['connected_components']:.1f}s  "
-            f"candidates={timings['candidate_grid']:.1f}s  "
             f"place={timings['fit_loop']:.1f}s  "
             f"cache_save={timings['cache_save']:.1f}s  "
             f"viz={timings['viz']:.1f}s"

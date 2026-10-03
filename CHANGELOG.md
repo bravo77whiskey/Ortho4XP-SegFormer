@@ -93,6 +93,15 @@ folders, which installed libraries and generated DSFs refer to.
   settings (old values are still converted to `bld_close_m` / `bld_open_m`).
 - The built-in default remote GPU host; headless runs set
   `O4_REMOTE_GPU_HOST`.
+- The building overlay's retired candidate-grid placement (zone templates,
+  gap fill, road-heading grids, dynamic centre blockers), which no longer
+  placed anything but still ran on every texture, and the never-read
+  `yolo_guidance` distance transforms (about 2,600 lines in all). Its
+  environment variables (`O4_BLD_MAX_CANDIDATES`, `O4_BLD_GAP_*`,
+  `O4_BLD_YOLO_TEMPLATE_*`, `O4_BLD_DISABLE_CENTER_BLOCKERS`) are no longer
+  read. Existing `*_bld.pkl` placement caches stay valid.
+- The reader for per-texture `*_road.pkl` caches, which nothing has written
+  since May 2026.
 - `segmentation-models-pytorch`, `Wand` and `torch` from `requirements.txt`
   (the first two were unused; see the file for installing PyTorch).
 

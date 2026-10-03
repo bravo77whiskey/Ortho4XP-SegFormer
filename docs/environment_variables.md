@@ -62,17 +62,6 @@ Until the cleanup in [CHANGELOG.md](../CHANGELOG.md) these were all named
 | `O4_BLD_SMALLEST_ASSET_ONLY` | off | Keep only the smallest asset of each class |
 | `O4_BLD_STRICT_FIT` | off | Strict asset-fit test |
 | `O4_BLD_FOOTPRINT_PAD_M` | module constant | Padding around detected footprints |
-| `O4_BLD_DISABLE_CENTER_BLOCKERS` | off | Skip the detection-centre blockers |
-
-### Candidate-grid placement
-
-These tune the candidate-grid placement path (zone templates and gap fill),
-which the direct-detection pipeline no longer drives:
-`O4_BLD_MAX_CANDIDATES`, `O4_BLD_GAP_MAX_CANDIDATES`,
-`O4_BLD_GAP_MAX_PER_COMPONENT`, `O4_BLD_YOLO_TEMPLATE_GAP_M`,
-`O4_BLD_YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE`,
-`O4_BLD_YOLO_TEMPLATE_HEADING_TOL_DEG`, `O4_BLD_YOLO_TEMPLATE_SHAPE_REL_TOL`,
-`O4_BLD_YOLO_TEMPLATE_SHAPE_ABS_TOL_PX`.
 
 ## Diagnostics
 
