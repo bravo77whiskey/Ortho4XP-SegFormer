@@ -88,7 +88,7 @@ else (caching, placement, DSF writing) stays local.
 
 | Module | Purpose |
 | --- | --- |
-| `O4_Building_Overlay` | The building pass: detections, filtering, asset choice, placement, DSF output |
+| `O4_Building_Overlay` | The building pass: detections, filtering, asset choice, placement, DSF output. `run()` drives `_BuildingOverlayRun` (tile-wide stages) and one `_TexturePass` per texture |
 | `O4_Stock_Yolo_Objects` | Stock DOTA YOLO pass for tanks, pools, courts, cranes |
 | `O4_Height_Model`, `O4_Height_Priors` | HeightNet building heights and regional limits |
 | `O4_Footprint_Polygons` | Polygon footprints for large non-rectangular buildings |
@@ -130,3 +130,11 @@ as they are even though they predate the current naming:
   `SFR_cache` folder and the remote `~/.ortho4xp_sfr` folder are still read so
   older configs, unfinished batches, caches and remote setups keep working
   (see [CHANGELOG.md](../CHANGELOG.md)).
+
+## Checking a refactor of the building overlay
+
+`scripts/building_overlay_parity_harness.py` runs `O4_Building_Overlay.run()`
+on a generated tile (textures, OSM, scenery packs, mesh water) with stand-in
+models, over a matrix of settings, and records hashes of every output. Run it
+on the old and the new source tree and compare; it needs no GPU and no real
+scenery. It complements, not replaces, a byte-diff of real tiles.

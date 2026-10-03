@@ -31,6 +31,7 @@ Example:
         --spacing 15 --close 15 --open 5
 """
 import os, json, argparse, warnings, time, math, re, hashlib, fnmatch
+import pickle
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
@@ -1828,7 +1829,9 @@ SEG_FIRST_CLAIM_FRAC = 0.5
 # O4SFR greenhouse library is not installed.  Facade wall height.
 GREENHOUSE_FACADE_PATHS = ("facades/agricultural/greenhouse_1.fac",)
 GREENHOUSE_HEIGHT_M = 4.0
-BLD_MAX_CANDIDATES_PER_DDS = 180_000  # 0 = exhaustive search; override with O4_BLD_MAX_CANDIDATES.
+# Settings of the retired candidate-grid placement. Only the placement-cache
+# key still carries them (see _BuildingOverlayRun._building_cache_params).
+BLD_MAX_CANDIDATES_PER_DDS = 180_000
 
 CURATED_EXTRA_BUILDING_LIBRARIES = {
     "opensceneryx": {
@@ -2093,6 +2096,7 @@ DEFAULT_YOLO_OBB_MAX_DET = 100000
 DEFAULT_YOLO_OBB_BATCH = 1
 
 
+# Retired with the candidate-grid placement; kept for the placement-cache key.
 YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE = 5000
 YOLO_TEMPLATE_HEADING_TOL_DEG = 10.0
 YOLO_TEMPLATE_SHAPE_REL_TOL = 0.20
@@ -5103,7 +5107,6 @@ def _load_yolo_obb_cache(cache_path, key):
     if not cache_path or not os.path.exists(cache_path):
         return None
     try:
-        import pickle
         with open(cache_path, 'rb') as handle:
             data = pickle.load(handle)
         if data.get('key') == key:
@@ -5117,7 +5120,6 @@ def _save_yolo_obb_cache(cache_path, key, detections):
     if not cache_path:
         return
     try:
-        import pickle
         os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
         with open(cache_path, 'wb') as handle:
             pickle.dump({'key': key, 'detections': detections}, handle)
@@ -7405,9 +7407,8 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
                 grid.setdefault((cxx, cyy), []).append(i)
     if debug_path:
         try:
-            import pickle as _dd_pickle
             with open(debug_path, 'wb') as _f:
-                _dd_pickle.dump(
+                pickle.dump(
                     {
                         'placements': list(placements),
                         'keep': keep,
@@ -7622,6 +7623,3103 @@ def _ccw_lonlat_ring(lonlat_ring):
 
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
+# {til_y_top}_{til_x_left}_{provider}{zl}.dds
+_DDS_NAME_RE = re.compile(
+    r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", re.IGNORECASE
+)
+
+
+class _BuildingOverlayRun:
+    """One building-overlay run: the stages of run() and the state they share."""
+
+    def __init__(
+        self,
+        tex_dir, lat, lon, out_dsf, spacing_m, close_k, open_k,
+        min_footprint_m2, make_viz, cache_dir, disable_cache,
+        verbose_log, grid_n, osm_roads_path, dsftool_path,
+        custom_scenery_dir, avoid_custom_scenery, debug_image_only,
+        allow_road_overlap, dds_filter, ignore_placement_cache,
+        yolo_enabled, yolo_checkpoint, yolo_conf, yolo_iou, yolo_stride,
+        yolo_max_det, yolo_imgsz, yolo_min_coverage, height_checkpoint,
+        roof_color_matching, library_cache_dir,
+    ):
+        self.tex_dir = tex_dir
+        self.lat = lat
+        self.lon = lon
+        self.out_dsf = out_dsf
+        self.spacing_m = spacing_m
+        self.close_k = close_k
+        self.open_k = open_k
+        self.min_footprint_m2 = min_footprint_m2
+        self.make_viz = make_viz
+        self.cache_dir = cache_dir
+        self.disable_cache = disable_cache
+        self.verbose_log = verbose_log
+        self.grid_n = grid_n
+        self.osm_roads_path = osm_roads_path
+        self.dsftool_path = dsftool_path
+        self.custom_scenery_dir = custom_scenery_dir
+        self.avoid_custom_scenery = avoid_custom_scenery
+        self.debug_image_only = debug_image_only
+        self.allow_road_overlap = allow_road_overlap
+        self.dds_filter = dds_filter
+        self.ignore_placement_cache = ignore_placement_cache
+        self.yolo_enabled = yolo_enabled
+        self.yolo_checkpoint = yolo_checkpoint
+        self.yolo_conf = yolo_conf
+        self.yolo_iou = yolo_iou
+        self.yolo_stride = yolo_stride
+        self.yolo_max_det = yolo_max_det
+        self.yolo_imgsz = yolo_imgsz
+        self.yolo_min_coverage = yolo_min_coverage
+        self.height_checkpoint = height_checkpoint
+        self.roof_color_matching = roof_color_matching
+        self.library_cache_dir = library_cache_dir
+
+    def execute(self):
+        """Run every stage; returns run()'s result."""
+        self._prepare_inputs()
+        if not self._select_textures():
+            return None
+        self._load_osm_vectors()
+        self._resolve_settings()
+        self._load_yolo_model()
+        self._load_height_model()
+        self._load_stock_yolo_model()
+        self._load_scenery_exclusions()
+        if not self._prepare_assets():
+            return 0
+        self._prepare_tile_vectors()
+        self._start_outputs()
+        self._process_textures()
+        return self._finish()
+
+    def _prepare_inputs(self):
+        """Normalise arguments and set up the sidecar cache folder."""
+        if self.min_footprint_m2 is None:
+            self.min_footprint_m2 = 12.0
+        self.min_footprint_m2 = max(0.0, float(self.min_footprint_m2))
+
+        # Lives as long as this run object, i.e. until run() returns.
+        self._transient_cache_ctx = None
+        self.sidecar_cache_dir = self.cache_dir
+        if self.disable_cache:
+            import tempfile as _tempfile
+            self._transient_cache_ctx = _tempfile.TemporaryDirectory(
+                prefix="bld_nocache_"
+            )
+            self.sidecar_cache_dir = self._transient_cache_ctx.name
+
+    def _collect_source_files(self):
+        return SEGFORMER.collect_source_texture_files(self.tex_dir, self.lat, self.lon)
+
+    def _orthophoto_path(self, fname, ortho_dir):
+        m = _DDS_NAME_RE.match(fname)
+        if not m or SEGFORMER.is_mask_texture_name(fname):
+            return None
+        provider = m.group(3)
+        zl = int(m.group(4))
+        stem = os.path.splitext(fname)[0]
+        subdir = os.path.join(ortho_dir, f"{provider}_{zl}")
+        for ext in ('.jpg', '.jpeg', '.png'):
+            p = os.path.join(subdir, stem + ext)
+            if os.path.exists(p) and not SEGFORMER.is_mask_texture_name(os.path.basename(p)):
+                return p
+        return None
+
+    def _source_image_path(self, fname, source_mode, ortho_dir):
+        if source_mode == 'dds':
+            return os.path.join(self.tex_dir, fname)
+        return self._orthophoto_path(fname, ortho_dir)
+
+    def _load_source_image(self, fname, source_mode, ortho_dir):
+        p = self._source_image_path(fname, source_mode, ortho_dir)
+        if not p:
+            return None
+        if source_mode == 'dds':
+            return SEGFORMER.load_dds_or_none(
+                p,
+                log_prefix='[Bld]',
+                display_name=fname,
+            )
+        try:
+            return np.asarray(Image.open(p).convert('RGB'))
+        except Exception:
+            return None
+
+    def _dds_cache_paths(self, fname):
+        if not self.cache_dir:
+            return ()
+        stem = fname.replace('.dds', '')
+        return tuple(
+            os.path.join(self.cache_dir, stem + suffix)
+            for suffix in (
+                '_veg.npy',
+                '_road.pkl',
+                '_bld.pkl',
+                '_yolo_obb.pkl',
+                '_vegaux.pkl',
+                '_vegpoly.pkl',
+            )
+        )
+
+    def _remove_cache_files(self, paths):
+        for path in paths:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+    def _select_textures(self):
+        """Pick the textures to process; False when there are none."""
+        # Pick the textures that actually render, and the part of each one they own.
+        # The tile cfg is the source of truth: it is what Ortho4XP turned into the
+        # per-mesh-cell texture assignment at build time, so replaying it drops
+        # leftovers from earlier builds with a different provider and resolves both
+        # kinds of overlap — a zone boundary splitting one footprint between two
+        # providers, and a higher-ZL texture covering part of a lower-ZL one. The
+        # regions another texture owns are recorded as (x0,y0,x1,y1) fractions of
+        # this texture's footprint and excluded from detection/placement, which was
+        # the dominant source of the duplicate placements the tile-wide dedup pass
+        # had to mop up. Computed from the pre-filter kept set so debug/benchmark
+        # file filters see the same per-texture behaviour as a full production run.
+        _source_files, self._source_mode, self._orthophoto_dir = self._collect_source_files()
+        self.files, self._covered_fracs_by_file, _selection_report = TEXSEL.select_textures(
+            _source_files, self.tex_dir, self.lat, self.lon
+        )
+        if not self.files:
+            print("No DDS files found.")
+            return False
+        for _line in TEXSEL.format_selection_report(_selection_report):
+            print(_line)
+        file_filter = _env_patterns("O4_OVERLAY_FILE_FILTER")
+        if self.dds_filter:
+            self.dds_filter = [os.path.basename(str(name)) for name in self.dds_filter]
+            self.files = [name for name in self.files if name in set(self.dds_filter)]
+            print(f"DDS debug filter: {', '.join(self.dds_filter)} -> {len(self.files)} files")
+        if file_filter:
+            self.files = [
+                name for name in self.files
+                if any(fnmatch.fnmatchcase(name, pattern) for pattern in file_filter)
+            ]
+            print(f"DDS filter: {', '.join(file_filter)} -> {len(self.files)} files")
+        if not self.files:
+            print("No DDS files found.")
+            return False
+        _used_zls = sorted(set(int(_DDS_NAME_RE.match(_f).group(4)) for _f in self.files))
+        _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
+
+        # Grid geometry for visualisation
+        xs = sorted(set(int(f.split('_')[1]) for f in self.files))
+        ys = sorted(set(int(f.split('_')[0]) for f in self.files))
+        self.x_step = xs[1]-xs[0] if len(xs)>1 else 16
+        self.y_step = ys[1]-ys[0] if len(ys)>1 else 16
+        self.x_min, self.y_min = xs[0], ys[0]
+        self.n_cols = (xs[-1]-xs[0])//self.x_step + 1
+        self.n_rows = (ys[-1]-ys[0])//self.y_step + 1
+
+        print(f"Tile: lat={self.lat} lon={self.lon}  DDS: {len(self.files)} ({_zl_str})  Grid: {self.n_cols}×{self.n_rows}")
+        print(
+            f"Params: edge_spacing={self.spacing_m}m  close={self.close_k}px  open={self.open_k}px  "
+            f"min_footprint={self.min_footprint_m2}m²"
+        )
+        return True
+
+    def _load_osm_vectors(self):
+        """Load the tile's OSM roads and water/airport polygons."""
+        # ── Load OSM roads ────────────────────────────────────────────────────────
+        if self.osm_roads_path is None:
+            # Auto-discover: <tex_dir>/../../.. = Ortho4XP root
+            o4xp_root  = os.path.dirname(os.path.dirname(os.path.dirname(self.tex_dir)))
+            lat_g = int(math.floor(self.lat / 10)) * 10
+            lon_g = int(math.floor(self.lon / 10)) * 10
+            lat_s_str = f"{'+' if self.lat >= 0 else '-'}{abs(int(self.lat)):02d}"
+            lon_s_str = f"{'+' if self.lon >= 0 else '-'}{abs(int(self.lon)):03d}"
+            lat_g_str = f"{'+' if lat_g >= 0 else '-'}{abs(lat_g):02d}"
+            lon_g_str = f"{'+' if lon_g >= 0 else '-'}{abs(lon_g):03d}"
+            self.osm_roads_path = os.path.join(
+                o4xp_root, 'OSM_data',
+                f'{lat_g_str}{lon_g_str}',
+                f'{lat_s_str}{lon_s_str}',
+                f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
+        osm_big_roads = _load_osm_roads(self.osm_roads_path, cache_dir=self.sidecar_cache_dir)
+        osm_small_roads_path = _osm_tile_peer_path(self.osm_roads_path, "_small_roads.osm.bz2")
+        osm_small_roads = (
+            _load_osm_roads(osm_small_roads_path, cache_dir=self.sidecar_cache_dir)
+            if osm_small_roads_path else []
+        )
+        # Ortho4XP's own OSM extracts; the full street grid and the railways come
+        # from the installed simHeaven network below. Nothing is downloaded here.
+        self.osm_roads = (osm_big_roads or []) + (osm_small_roads or [])
+        print(
+            f"OSM roads: {len(self.osm_roads)} ways "
+            f"(big={len(osm_big_roads)} small={len(osm_small_roads)})"
+        )
+
+        # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
+        self.excl_polys = []           # hard exclusions: water / airports
+        self.existing_bld_polys = []   # occupancy-only blockers: simHeaven facade footprints
+        self.excl_rails = []           # road-style dicts for railways (simHeaven network)
+        self.residential_polys = []    # no residential landuse source
+
+        for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
+            p = _osm_tile_peer_path(self.osm_roads_path, suffix) or self.osm_roads_path.replace(
+                '_big_roads.osm.bz2', suffix
+            )
+            self.excl_polys.extend(_load_osm_closed_ways(p, cache_dir=self.sidecar_cache_dir))
+        print(f"Exclusion polygons (water+airports): {len(self.excl_polys)}")
+
+    def _resolve_settings(self):
+        """Resolve model and placement settings from arguments and environment."""
+        self.timings = {
+            'simheaven_parse': 0.0,
+            'custom_scenery_parse': 0.0,
+            'cache_load': 0.0,
+            'dds_load': 0.0,
+            'segformer_inference': 0.0,
+            'trained_yolo_inference': 0.0,
+            'yolo_suppress': 0.0,
+            'heightnet': 0.0,
+            'footprint_polygons': 0.0,
+            'seg_first': 0.0,
+            'greenhouses': 0.0,
+            'stock_yolo_inference': 0.0,
+            'lookup': 0.0,
+            'road_raster': 0.0,
+            'mesh_water': 0.0,
+            'existing_bld_excl': 0.0,
+            'mask_apply': 0.0,
+            'fit_loop': 0.0,
+            'cache_save': 0.0,
+            'viz': 0.0,
+            'placement': 0.0,
+            'dsf_text': 0.0,
+            'dsf_compile': 0.0,
+            # O4_BLD_PLACE_PROFILE sub-phase breakdown of the fit_loop.
+            'place_prep': 0.0,
+            'place_fits': 0.0,
+            'place_select': 0.0,
+            'place_maskfill': 0.0,
+        }
+        self.detail_timing = _env_flag("O4_OVERLAY_TIMING_DETAIL")
+        self.place_profile = _env_flag("O4_BLD_PLACE_PROFILE")
+        # Slow-texture timing lines are verbose output; an explicitly set
+        # O4_OVERLAY_TIMING_SLOW still enables them regardless of verbose_log.
+        self.slow_timing_s = _env_float(
+            "O4_OVERLAY_TIMING_SLOW", 3.0 if self.verbose_log else 0.0
+        )
+        # Only detected footprints are placed: the inferred candidate-grid / gap
+        # fill placement was retired.
+        self.yolo_cuda_cleanup_every = max(
+            0, int(_env_float("O4_BLD_YOLO_CUDA_CLEANUP_EVERY", 0))
+        )
+        self.footprint_pad_m = max(0.0, _env_float("O4_BLD_FOOTPRINT_PAD_M", FOOTPRINT_PAD_M))
+        self.strict_fit = _env_flag("O4_BLD_STRICT_FIT")
+        self._t = time.perf_counter()
+
+        if self.yolo_checkpoint is None:
+            self.yolo_checkpoint = os.environ.get(
+                "O4_BLD_YOLO_CHECKPOINT",
+                DEFAULT_YOLO_OBB_CHECKPOINT,
+            )
+        self.yolo_conf = float(
+            DEFAULT_YOLO_OBB_CONF if self.yolo_conf is None
+            else self.yolo_conf
+        )
+        self.yolo_iou = float(
+            DEFAULT_YOLO_OBB_IOU if self.yolo_iou is None
+            else self.yolo_iou
+        )
+        self.yolo_stride = int(
+            DEFAULT_YOLO_OBB_STRIDE if self.yolo_stride is None
+            else self.yolo_stride
+        )
+        self.yolo_max_det = int(
+            DEFAULT_YOLO_OBB_MAX_DET if self.yolo_max_det is None
+            else self.yolo_max_det
+        )
+        self.yolo_imgsz = int(self.yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
+        # Trained-YOLO inference runs on the native-resolution texture at every
+        # zoom level. The legacy ZL16-analysis downsample (build a target-ZL PNG,
+        # infer on it, scale detections back up) is kept only as an env opt-in for
+        # A/B comparisons: O4_BLD_YOLO_ANALYSIS_ZL=<zl> (0 = native, default).
+        self.yolo_analysis_target_zl = max(
+            0,
+            _env_int("O4_BLD_YOLO_ANALYSIS_ZL", 0),
+        )
+        # Batch stays 1 by default: the scripts/*_batch_autotune.py harnesses
+        # showed batch>1 changes borderline detections on dense tiles (not
+        # placement-exact), for ~0.3s/DDS saved on an RTX 4080. Opting in via the
+        # env vars is OOM-safe — the inference loops retry at batch=1 on CUDA OOM.
+        self.yolo_batch_size = max(
+            1,
+            _env_int("O4_BLD_YOLO_BATCH", DEFAULT_YOLO_OBB_BATCH),
+        )
+        self.stock_yolo_batch_size = max(
+            1,
+            _env_int("O4_STOCK_YOLO_BATCH", _stock_yolo_batch_default()),
+        )
+        self.yolo_fuse_model = _env_flag("O4_BLD_YOLO_FUSE")
+        # Overlap-free placement is the product behaviour: no two objects may
+        # overlap. Overlaps are removed with NO minimum limit — drop on ANY
+        # overlap, smallest-first — so the behaviour is consistent at every zoom
+        # level (legacy 25 m^2 / 0.35-coverage thresholds let fine higher-ZL
+        # overlaps survive).
+        self.yolo_suppress_coverage = 0.0
+        self.yolo_suppress_min_overlap_m2 = 0.0
+        # Per-overlap containment rule for the zero-threshold drop: a bigger
+        # detection survives when the smaller kept detections inside it explain
+        # less than yolo_suppress_explain_frac of its ground area (it then evicts
+        # the contained ones that do not beat its confidence); sliver contacts
+        # keep the smallest-first drop. Chosen from a 9-variant overlay A/B on
+        # +22+113 28512_53472_BI16 (sliver=smaller, evict=conf). Disable with
+        # O4_BLD_PAIR_OVERLAP_RULE=0 to restore the blanket smaller-wins drop.
+        self.yolo_pair_overlap_rule = _env_flag("O4_BLD_PAIR_OVERLAP_RULE", True)
+        self.yolo_suppress_containment_frac = _env_float(
+            "O4_BLD_SUPPRESS_CONTAINMENT_FRAC", 0.35
+        )
+        self.yolo_suppress_explain_frac = _env_float(
+            "O4_BLD_SUPPRESS_EXPLAIN_FRAC", 0.60
+        )
+        # Road/rail exclusion is always on, but metre-accurate and footprint-only:
+        # the paved surface is rasterized at real per-class carriageway widths
+        # (ROAD_EXCLUSION_WIDTH_M) and blocks only the *placed* footprint (objects,
+        # shrunk facade templates, gap fill) plus detection centers. The loose
+        # detection OBB is never gated on roads — the old all-roads >=6px lattice
+        # with an any-pixel OBB gate killed most of a dense city texture (measured
+        # +22+120 57072_109328_Arc17: 8,544 of 10,900 kept detections blocked;
+        # see commit ac28808b). --allow-road-overlap disables it entirely.
+        # Per-candidate object self-avoidance (selector occupancy check + OBB dedup +
+        # spacing-mask marking + incremental integral rebuilds) is redundant now that
+        # inter-object overlaps are removed tile-wide after placement
+        # (_dedupe_overlapping_placements). Skip that per-texture work by default for
+        # speed: static obstacles (roads/water/OSM/scenery) are still enforced by the
+        # detection center gate + footprint containment, and detection suppression
+        # still drops overlapping detections. ``_obj_avoid`` therefore gates only the
+        # inter-object machinery. Restore per-candidate self-avoidance (which can
+        # substitute a smaller fitting object instead of dropping) via the env var.
+        self._obj_avoid = _env_flag("O4_BLD_OBJECT_SELF_AVOID", False)
+        # Minimum fraction of a detection polygon an object must cover to be placed.
+        # Lower it to admit smaller objects when no near-detection-size object fits
+        # (the per-class floors in YOLO_OBJECT_MIN_COVERAGE_BY_CLASS still apply).
+        if self.yolo_min_coverage is None:
+            self.yolo_min_coverage = YOLO_OBJECT_MIN_COVERAGE
+        self.yolo_min_coverage = min(1.0, max(1e-6, float(self.yolo_min_coverage)))
+        if "O4_BLD_YOLO_ENABLED" in os.environ:
+            self.yolo_enabled = _env_flag("O4_BLD_YOLO_ENABLED", bool(self.yolo_enabled))
+        else:
+            self.yolo_enabled = bool(self.yolo_enabled)
+
+    def _load_yolo_model(self):
+        """Load the trained YOLO OBB building detector."""
+        self.yolo_model = None
+        yolo_allow_missing = _env_flag("O4_BLD_YOLO_ALLOW_MISSING")
+        self.yolo_signature = _checkpoint_signature(self.yolo_checkpoint) if self.yolo_enabled else None
+        if self.yolo_enabled and self.yolo_signature is None:
+            if yolo_allow_missing:
+                print(f"YOLO OBB placement: checkpoint unavailable ({self.yolo_checkpoint}); using SegFormer-only fallback")
+                self.yolo_enabled = False
+            else:
+                raise RuntimeError(
+                    f"YOLO OBB checkpoint not found: {self.yolo_checkpoint}. "
+                    "Set bld_yolo_enabled=False (or O4_BLD_YOLO_ENABLED=0) to opt out, "
+                    "or set O4_BLD_YOLO_ALLOW_MISSING=1 to fall back to SegFormer-only placement."
+                )
+        elif self.yolo_enabled:
+            print(
+                f"YOLO OBB placement: enabled checkpoint={self.yolo_checkpoint} "
+                f"conf={self.yolo_conf} iou={self.yolo_iou} stride={self.yolo_stride} "
+                f"max_det={self.yolo_max_det} batch={self.yolo_batch_size} "
+                f"analysis_zl={self.yolo_analysis_target_zl or 'native'} "
+                f"fuse={self.yolo_fuse_model}"
+            )
+            print(
+                "YOLO OBB placement: direct detections only "
+                f"(asset pool heights up to {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
+            )
+            print(
+                "YOLO OBB placement: object/facade mode controlled by bld_assets"
+                f" (strict containment, +{YOLO_OBJECT_OUTLINE_MARGIN_M:.2f}m quantisation margin)"
+            )
+            try:
+                self.yolo_model = _load_yolo_obb_model(
+                    self.yolo_checkpoint,
+                    fuse=self.yolo_fuse_model,
+                )
+            except Exception as exc:
+                if yolo_allow_missing:
+                    print(
+                        f"YOLO OBB placement unavailable ({exc}); using SegFormer-only fallback"
+                    )
+                    self.yolo_enabled = False
+                    self.yolo_model = None
+                else:
+                    raise RuntimeError(
+                        f"YOLO OBB model failed to load from {self.yolo_checkpoint}: {exc}. "
+                        "Set O4_BLD_YOLO_ALLOW_MISSING=1 to fall back to SegFormer-only placement."
+                    ) from exc
+
+    def _load_height_model(self):
+        """Load HeightNet, the second-stage building height model."""
+        # ── HeightNet second-stage building heights ────────────────────────────
+        # Optional per-detection height regression (64 m window crops around each
+        # YOLO OBB). Missing checkpoint degrades to the class-default heights, so
+        # the stage never blocks a build.
+        self.height_model = None
+        self.height_signature = None
+        height_enabled = self.yolo_enabled and _env_flag("O4_BLD_HEIGHT_ENABLED", True)
+        if height_enabled:
+            # cfg value wins; env var / module default apply when unset (mirrors
+            # the yolo_checkpoint resolution above).
+            if not self.height_checkpoint:
+                self.height_checkpoint = HEIGHTMODEL.default_checkpoint_path()
+            self.height_signature = _checkpoint_signature(self.height_checkpoint)
+            if self.height_signature is None:
+                print(
+                    f"HeightNet heights: checkpoint unavailable ({self.height_checkpoint}); "
+                    "using class-default building heights"
+                )
+            else:
+                try:
+                    self.height_model = HEIGHTMODEL.load_height_model(
+                        self.height_checkpoint,
+                        device=("cuda" if torch.cuda.is_available() else "cpu"),
+                    )
+                    print(
+                        f"HeightNet heights: enabled checkpoint={self.height_checkpoint} "
+                        f"arch={self.height_model._o4_heightnet_arch} "
+                        f"crop={self.height_model._o4_crop_px}px "
+                        f"window={self.height_model._o4_window_m:.0f}m "
+                        f"floor={HEIGHTMODEL.HEIGHT_MODEL_MIN_M:.1f}m (no ceiling)"
+                    )
+                except Exception as exc:
+                    print(
+                        f"HeightNet heights unavailable ({exc}); "
+                        "using class-default building heights"
+                    )
+                    self.height_model = None
+                    self.height_signature = None
+
+    def _load_stock_yolo_model(self):
+        """Load the stock DOTA YOLO model for tanks and pools."""
+        # ── Stock YOLO-OBB (DOTAv1) for static objects pre-step ───────────────────
+        # Detects storage tanks and swimming pools BEFORE
+        # the trained-YOLO facade pass so their footprints can occupy static_occ_mask.
+        # The loader downloads the checkpoint from ultralytics/assets when it is
+        # absent locally, so first-run installs don't need a manual sync step.
+        self.stock_yolo_model = None
+        try:
+            self.stock_yolo_model = STOCKYOLO.load_stock_yolo_model(
+                STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT
+            )
+            print(
+                f"Stock YOLO OBB (DOTAv1): loaded "
+                f"{STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT}; "
+                f"batch={self.stock_yolo_batch_size}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"Stock YOLO OBB unavailable ({exc}); skipping pre-step", flush=True)
+            self.stock_yolo_model = None
+
+    def _load_scenery_exclusions(self):
+        """Read the simHeaven network/buildings and other installed scenery."""
+        # simHeaven network roads provide the local street grid when available.
+        if self.dsftool_path is None:
+            self.dsftool_path = SEGFORMER._dsftool
+
+        if self.dsftool_path and os.path.exists(self.dsftool_path):
+            self.sh_network = _load_simheaven_network(self.custom_scenery_dir, self.lat, self.lon, self.dsftool_path, self.sidecar_cache_dir)
+            self.timings['simheaven_parse'] += time.perf_counter() - self._t
+            self.excl_rails.extend(way for way in self.sh_network if way['type'] == 'rail')
+            print(
+                f"simHeaven network: {len(self.sh_network)} road segments "
+                f"({len(self.excl_rails)} railway)"
+            )
+        else:
+            self.sh_network = []
+            self.timings['simheaven_parse'] += time.perf_counter() - self._t
+            print("simHeaven network: skipped (DSFTool unavailable)")
+
+        self._t = time.perf_counter()
+        if self.dsftool_path and os.path.exists(self.dsftool_path):
+            sh_bld_polys, self.sh_bld_objects = _load_simheaven_building_exclusions(
+                self.custom_scenery_dir,
+                self.lat,
+                self.lon,
+                self.dsftool_path,
+                self.sidecar_cache_dir,
+            )
+        else:
+            sh_bld_polys, self.sh_bld_objects = [], []
+        self.timings['simheaven_parse'] += time.perf_counter() - self._t
+        if sh_bld_polys or self.sh_bld_objects:
+            self.existing_bld_polys.extend(sh_bld_polys)
+        self.sh_bld_index = _prepare_simheaven_objects(self.sh_bld_objects)
+        self.sh_bld_sig = (_polys_signature(sh_bld_polys),
+                      _simheaven_objects_signature(self.sh_bld_objects))
+        print(f"simHeaven buildings: {len(self.sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
+
+        # Installed libraries rarely change between tiles: read their exports and
+        # OBJ footprints from the shared catalog instead of re-scanning the disk.
+        global _LIBRARY_CATALOG
+        _LIBRARY_CATALOG = LIBCAT.open_catalog(self.custom_scenery_dir, self.library_cache_dir)
+
+        self._t = time.perf_counter()
+        if self.avoid_custom_scenery and self.dsftool_path and os.path.exists(self.dsftool_path):
+            custom_bld_polys, custom_bld_objects, custom_bld_skipped, custom_bld_layers = (
+                _load_custom_scenery_building_exclusions(
+                    self.custom_scenery_dir,
+                    self.lat,
+                    self.lon,
+                    self.out_dsf,
+                    self.dsftool_path,
+                    self.sidecar_cache_dir,
+                )
+            )
+        else:
+            custom_bld_polys, custom_bld_objects = [], []
+            custom_bld_skipped = 0
+            custom_bld_layers = 0
+        self.timings['custom_scenery_parse'] += time.perf_counter() - self._t
+        if custom_bld_polys or custom_bld_objects:
+            self.existing_bld_polys.extend(custom_bld_polys)
+        self.custom_bld_index = _prepare_simheaven_objects(custom_bld_objects)
+        self.custom_bld_sig = (
+            _polys_signature(custom_bld_polys),
+            _simheaven_objects_signature(custom_bld_objects),
+        )
+        if self.avoid_custom_scenery:
+            print(
+                "Custom scenery buildings: "
+                f"{len(custom_bld_objects)} objects  "
+                f"{len(custom_bld_polys)} facade polys  "
+                f"layers={custom_bld_layers}  skipped_objects={custom_bld_skipped}"
+            )
+        else:
+            print("Custom scenery buildings: disabled")
+
+    def _prepare_assets(self):
+        """Build the asset pools placements choose from; False when there are none."""
+        self.default_assets_available = True
+        self.sfd_assets_available = _find_library_export(self.custom_scenery_dir, 'sfd_global/')
+        self.simheaven_assets_available = (
+            bool(self.sh_bld_objects) or _find_library_export(self.custom_scenery_dir, 'simheaven/')
+        )
+        self.enabled_extra_library_ids = _enabled_extra_library_ids()
+        self.building_asset_mode = _building_asset_mode()
+        self.roof_color_matching = _env_flag(
+            "O4_BLD_ROOF_COLOR_MATCHING", bool(self.roof_color_matching)
+        )
+        self.roof_color_matching_active = bool(
+            self.roof_color_matching
+            and self.yolo_enabled
+            and _asset_kind_enabled("object", self.building_asset_mode)
+        )
+        # Filter every scanned export down to the ones X-Plane will actually
+        # resolve on this tile: packs like SFD Global ship simHeaven-alias shims
+        # inside REGION blocks (e.g. REGION scandinavia), and referencing those
+        # aliases on other tiles produces "Failed to find resource" at sim load.
+        _tile_natural_region = _natural_asset_region(self.lat + 0.5, self.lon + 0.5)
+        runtime_library_exports = _filter_exports_for_tile_region(
+            _scan_runtime_library_exports(
+                self.custom_scenery_dir,
+                include_sfd=self.sfd_assets_available,
+                include_simheaven=self.simheaven_assets_available,
+                extra_library_ids=self.enabled_extra_library_ids,
+            ),
+            _tile_natural_region,
+        )
+        stock_yolo_library_exports = _filter_exports_for_tile_region(
+            _scan_runtime_library_exports(
+                self.custom_scenery_dir,
+                include_sfd=self.sfd_assets_available,
+                include_simheaven=self.simheaven_assets_available,
+                extra_library_ids=self.enabled_extra_library_ids,
+                suffixes=(".obj", ".fac"),
+            ),
+            _tile_natural_region,
+        )
+        stock_yolo_exported_paths = _exported_virtual_library_paths(
+            stock_yolo_library_exports,
+            suffixes=(".obj", ".fac"),
+        )
+        # Greenhouse assets: the O4SFR greenhouse library's tunnel arrays when
+        # installed, else one greenhouse facade over the detection, else nothing.
+        self.greenhouse_tunnel_paths = frozenset(
+            p for p in stock_yolo_exported_paths
+            if p.startswith(AGRI.GREENHOUSE_LIBRARY_PREFIX)
+        )
+        self.greenhouse_facade_path = next(
+            (p for p in GREENHOUSE_FACADE_PATHS if p in stock_yolo_exported_paths),
+            None,
+        )
+        self.greenhouse_asset_signature = (
+            len(self.greenhouse_tunnel_paths),
+            hashlib.sha1(
+                "|".join(sorted(self.greenhouse_tunnel_paths)).encode("utf-8")
+            ).hexdigest()[:12],
+            self.greenhouse_facade_path,
+            GREENHOUSE_HEIGHT_M,
+        )
+        if _agri_mode() == "greenhouse":
+            print(
+                "Greenhouses: "
+                + (
+                    f"{len(self.greenhouse_tunnel_paths)} O4SFR tunnel-array objects"
+                    if self.greenhouse_tunnel_paths else
+                    f"facade {self.greenhouse_facade_path}" if self.greenhouse_facade_path
+                    else "no greenhouse assets installed; greenhouse detections are dropped"
+                ),
+                flush=True,
+            )
+        self.stock_yolo_asset_map, dropped_stock_paths, dropped_stock_classes = (
+            _filter_stock_yolo_asset_map(
+                STOCKYOLO.STOCK_YOLO_ASSET_MAP,
+                stock_yolo_exported_paths,
+            )
+        )
+        self.stock_yolo_static_classes = tuple(
+            cls for cls in STOCKYOLO.STATIC_DOTA_CLASSES
+            if cls in self.stock_yolo_asset_map
+        )
+        if self.stock_yolo_model is not None:
+            if self.stock_yolo_static_classes:
+                print(
+                    "Stock YOLO OBB (DOTAv1): "
+                    f"keeping classes {self.stock_yolo_static_classes}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Stock YOLO OBB (DOTAv1): no resolvable stock assets; "
+                    "skipping pre-step",
+                    flush=True,
+                )
+                self.stock_yolo_model = None
+            if dropped_stock_paths:
+                sample = ", ".join(dropped_stock_paths[:5])
+                print(
+                    "Stock YOLO OBB (DOTAv1): disabled unavailable asset refs "
+                    f"{len(dropped_stock_paths)}"
+                    + (f" ({sample})" if sample else ""),
+                    flush=True,
+                )
+            if dropped_stock_classes:
+                labels = ", ".join(
+                    f"{cls}:{STOCKYOLO.DOTA_CLASS_NAMES.get(cls, cls)}"
+                    for cls in dropped_stock_classes
+                )
+                print(
+                    "Stock YOLO OBB (DOTAv1): disabled classes with no assets "
+                    f"({labels})",
+                    flush=True,
+                )
+        self.exported_simheaven_object_paths = _exported_simheaven_object_paths(
+            runtime_library_exports
+        )
+        asset_lat = self.lat + 0.5
+        asset_lon = self.lon + 0.5
+        self.natural_asset_region = _natural_asset_region(asset_lat, asset_lon)
+        self.simheaven_package_region, simheaven_package_folder = (
+            find_simheaven_package_region_for_tile(self.custom_scenery_dir, self.lat, self.lon)
+        )
+        self.effective_asset_region = _asset_region(
+            asset_lat, asset_lon, self.simheaven_package_region
+        )
+        if self.simheaven_package_region:
+            print(
+                "Asset region: "
+                f"natural={self.natural_asset_region}  "
+                f"simHeaven={self.simheaven_package_region} "
+                f"({simheaven_package_folder})  "
+                f"effective={self.effective_asset_region}"
+            )
+        else:
+            print(
+                "Asset region: "
+                f"natural={self.natural_asset_region}  "
+                f"simHeaven=none  effective={self.effective_asset_region}"
+            )
+
+        enabled_asset_pools = [
+            _build_default_asset_pools(asset_lat, asset_lon, self.effective_asset_region)
+        ]
+        if self.sfd_assets_available:
+            enabled_asset_pools.append(
+                _build_sfd_asset_pools(
+                    asset_lat,
+                    asset_lon,
+                    self.effective_asset_region,
+                    library_exports=runtime_library_exports,
+                    cache_dir=self.sidecar_cache_dir,
+                )
+            )
+        if self.simheaven_assets_available:
+            enabled_asset_pools.append(_build_simheaven_asset_pools(
+                self.sh_bld_objects,
+                asset_lat,
+                asset_lon,
+                self.effective_asset_region,
+                library_exports=runtime_library_exports,
+            ))
+        extra_asset_pools = _build_optional_library_asset_pools(
+            custom_scenery_dir=self.custom_scenery_dir,
+            library_exports=runtime_library_exports,
+            enabled_library_ids=self.enabled_extra_library_ids,
+            cache_dir=self.sidecar_cache_dir,
+            asset_region=self.effective_asset_region,
+        )
+        if any(extra_asset_pools.values()):
+            enabled_asset_pools.append(extra_asset_pools)
+        asset_pools = _merge_asset_pools(*enabled_asset_pools)
+        asset_pools = _filter_asset_pools_for_mode(asset_pools, self.building_asset_mode)
+        # Auto-reject library aliases whose resolved mesh is far larger/taller than the
+        # footprint their virtual-path name declares (third-party library_txt mistakes,
+        # e.g. a small simHeaven residential exported to a tall SFD apartment). This
+        # generalises the hand-maintained EXCLUDED_BUILDING_ASSETS list.
+        if not _env_flag("O4_BLD_ALLOW_OVERSIZED_ALIASES", False):
+            asset_pools, _alias_dropped, _alias_paths = _drop_oversized_aliased_assets(
+                asset_pools, runtime_library_exports, self.sidecar_cache_dir
+            )
+            if _alias_dropped:
+                print(
+                    f"[Bld] Dropped {_alias_dropped} oversized library alias(es) "
+                    f"(resolved mesh >> declared footprint): "
+                    + ", ".join(_alias_paths[:8])
+                    + (" ..." if len(_alias_paths) > 8 else "")
+                )
+        self.smallest_asset_only = _env_flag("O4_BLD_SMALLEST_ASSET_ONLY")
+        if self.smallest_asset_only:
+            _keep_smallest_asset_per_class(asset_pools)
+        roof_color_counts = _prepare_asset_roof_colors(
+            self.roof_color_matching_active,
+            self.custom_scenery_dir,
+            asset_pools,
+            runtime_library_exports,
+            self.sidecar_cache_dir,
+        )
+        if _LIBRARY_CATALOG is not None:
+            _LIBRARY_CATALOG.save_if_dirty()
+        asset_sources_label = _describe_asset_sources(
+            self.default_assets_available,
+            self.sfd_assets_available,
+            self.simheaven_assets_available,
+            sorted({
+                asset.get('source', '')
+                for pool in extra_asset_pools.values()
+                for asset in pool
+                if asset.get('source')
+            }),
+        )
+        if self.smallest_asset_only:
+            asset_sources_label += " (smallest asset per class)"
+        print(f"Building assets: {asset_sources_label}")
+        print(f"Building asset mode: {self.building_asset_mode}")
+        print(
+            "Optional building libraries: "
+            + _describe_optional_library_diagnostics(
+                runtime_library_exports,
+                self.enabled_extra_library_ids,
+                self.effective_asset_region,
+                extra_asset_pools,
+            )
+        )
+        asset_pool_counts = _describe_asset_pool_counts(asset_pools)
+        if asset_pool_counts:
+            print(f"Building asset pool counts: {asset_pool_counts}")
+        if roof_color_counts is None:
+            print("Roof-colour object matching: disabled (fit-only selection)")
+        else:
+            print(
+                "Roof-colour object aliases: "
+                f"match-safe={roof_color_counts['safe']}  "
+                f"inconsistent={roof_color_counts['inconsistent']}  "
+                f"unavailable={roof_color_counts['unavailable']}"
+            )
+        if not any(asset_pools.values()):
+            print("Building assets: none available for placement")
+            return False
+        _sort_asset_pools_for_retry(asset_pools)
+        self.class_min_footprint_span_m = _class_min_footprint_span_m(asset_pools)
+        self.mark_pad_m = _mark_pad_for_edge_spacing_m(self.spacing_m, self.footprint_pad_m)
+        for pool in asset_pools.values():
+            for asset in pool:
+                asset['requires_residential_context'] = _asset_requires_residential_context(asset)
+                bounds_m = asset.get('bounds_m')
+                if bounds_m is None:
+                    continue
+                asset['fit_bounds_m'] = _expand_bounds(bounds_m, self.footprint_pad_m)
+                asset['mark_bounds_m'] = _expand_bounds(
+                    bounds_m, self.mark_pad_m
+                )
+                asset['fit_cache_key'] = (
+                    tuple(float(v) for v in bounds_m),
+                    tuple(float(v) for v in asset['fit_bounds_m']),
+                    tuple(float(v) for v in asset['mark_bounds_m']),
+                )
+        self.yolo_object_fit_table = _build_yolo_object_candidate_index(asset_pools)
+        self.asset_catalog_signature = _asset_pools_signature(
+            asset_pools, include_roof_color=self.roof_color_matching_active
+        )
+        self.height_priors_by_class = _height_priors_by_class(asset_pools)
+        self.height_priors_signature = _height_priors_signature(self.height_priors_by_class)
+        self.enabled_yolo_object_assets_by_path = {
+            asset['path']: asset
+            for pool in asset_pools.values()
+            for asset in pool
+            if asset.get('kind') == 'object' and asset.get('path')
+        }
+        self.enabled_yolo_color_assets_by_family = (
+            ROOFCOLOR.color_assets_by_family(asset_pools)
+            if self.roof_color_matching_active
+            else {}
+        )
+        return True
+
+    def _prepare_tile_vectors(self):
+        """Index the tile's roads and polygons and load the mesh water."""
+        self.osm_roads = _prepare_roads(self.osm_roads)
+        self.excl_rails = _prepare_roads(self.excl_rails)
+        self.excl_rails_index = BBOX.build_bounds_index(self.excl_rails)
+        self.sh_network = _prepare_roads(self.sh_network)
+        self.excl_polys = _prepare_polygons(self.excl_polys)
+        self.excl_polys_index = BBOX.build_bounds_index(self.excl_polys)
+        self.existing_bld_polys = _prepare_polygons(self.existing_bld_polys)
+        self.existing_bld_polys_index = BBOX.build_bounds_index(self.existing_bld_polys)
+        self.residential_polys = _prepare_polygons(self.residential_polys)
+        self._t = time.perf_counter()
+        mesh_water_path = _mesh_file_for_tile(self.tex_dir, self.lat, self.lon)
+        self.mesh_water_sig = _mesh_water_signature(mesh_water_path)
+        self.mesh_water_index = _load_mesh_water_index(mesh_water_path, self.sidecar_cache_dir)
+        self.timings['mesh_water'] += time.perf_counter() - self._t
+        if self.mesh_water_index:
+            print(
+                f"Mesh water: {len(self.mesh_water_index['tris'])} water triangles from "
+                f"{mesh_water_path}"
+            )
+        else:
+            print(f"Mesh water: unavailable from {mesh_water_path}")
+
+        # Split zones with every road source we have: cached OSM all-highway ways
+        # (or Ortho4XP big+small extracts) plus simHeaven network roads.
+        separator_roads = (self.osm_roads or []) + (self.sh_network or [])
+        # For heading, prefer simHeaven because it is the local street grid. If it
+        # is unavailable, fall back to the all-road OSM source instead of leaving
+        # the road heading grid empty.
+        all_roads = self.sh_network if self.sh_network else self.osm_roads
+        self.separator_roads_index = BBOX.build_bounds_index(separator_roads)
+        self.separator_sig = _roads_signature(separator_roads)
+        self.rail_sig = _roads_signature(self.excl_rails)
+        self.heading_sig = _roads_signature(all_roads)
+        self.excl_poly_sig = _polys_signature(self.excl_polys)
+        self.existing_bld_poly_sig = _polys_signature(self.existing_bld_polys)
+        self.residential_poly_sig = _polys_signature(self.residential_polys)
+
+    def _start_outputs(self):
+        """Allocate the run-wide placement lists and overview canvases."""
+        # Load model lazily only when a DDS has no shared vegetation class-map cache.
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = self.proc = None
+
+        self.TILE_VIZ = max(256, int(_env_float("O4_BLD_VIZ_SIZE", 512)))
+        self.composite = np.zeros((self.n_rows*self.TILE_VIZ, self.n_cols*self.TILE_VIZ, 3), dtype=np.uint8) if self.make_viz else None
+        self.footprint_composite = np.zeros_like(self.composite) if self.composite is not None else None
+
+        self.placed_stock_objects = []   # list of (lon, lat, heading, obj_path) — from stock YOLO
+        self.placed_facades = []   # list of (lonlat_ring, facade_path, height_m)
+        self.placed_draped = []    # list of (lonlat_ring, pol_path) — stock YOLO ground polys (.pol)
+        self.direct_yolo_facade_placements = 0
+
+        self._requested_bld_params = self._building_cache_params(
+            self.yolo_batch_size, self.stock_yolo_batch_size
+        )
+
+    def _building_cache_params(self, effective_yolo_batch, effective_stock_yolo_batch):
+        return (
+            (
+                BLD_PLACEMENT_CACHE_VERSION
+                if self.strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
+            ),
+            self.spacing_m, self.close_k, self.open_k, self.min_footprint_m2,
+            # The entries marked "retired" belonged to the removed
+            # candidate-grid placement. They keep the values they always had
+            # so existing *_bld.pkl caches stay valid; drop them with the next
+            # BLD_PLACEMENT_*CACHE_VERSION bump.
+            max(0, int(BLD_MAX_CANDIDATES_PER_DDS)),          # retired
+            PLACE_UNKNOWN_OBJECTS,
+            self.footprint_pad_m,
+            self.mark_pad_m,
+            self.smallest_asset_only,
+            False,                                            # retired
+            max(0, int(BLD_MAX_CANDIDATES_PER_DDS)),          # retired
+            24,                                               # retired
+            max(0.0, self.spacing_m),                              # retired
+            max(1, int(YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE)),  # retired
+            max(0.0, YOLO_TEMPLATE_HEADING_TOL_DEG),          # retired
+            max(0.0, YOLO_TEMPLATE_SHAPE_REL_TOL),            # retired
+            max(0.0, YOLO_TEMPLATE_SHAPE_ABS_TOL_PX),         # retired
+            tuple(sorted(self.class_min_footprint_span_m.items())),
+            ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
+            ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
+            bool(self.allow_road_overlap),
+            self.separator_sig, self.heading_sig,
+            self.excl_poly_sig, self.existing_bld_poly_sig, self.rail_sig, self.sh_bld_sig,
+            self.custom_bld_sig, bool(self.avoid_custom_scenery),
+            self.mesh_water_sig,
+            self.residential_poly_sig,
+            self.default_assets_available, self.sfd_assets_available, self.simheaven_assets_available,
+            tuple(self.enabled_extra_library_ids),
+            self.building_asset_mode,
+            self.roof_color_matching_active,
+            self.asset_catalog_signature,
+            self.height_priors_signature,
+            HEIGHTPRIORS.POLICY_VERSION,
+            HEIGHTPRIORS.P95_EXCESS_RETAIN,
+            LARGE_FOOTPRINT_HEIGHT_CAP_M,
+            (
+                _env_flag("O4_BLD_HEIGHT_GATE", True),
+                _env_flag("O4_BLD_HEIGHT_CONTEXT", True),
+                _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True),
+                _seg_first_mode(),
+                _agri_mode(), self.greenhouse_asset_signature,
+                SEG_FIRST_MIN_M2, SEG_FIRST_GUARD_MIN_M2,
+                SEG_FIRST_GUARD_MAX_SMALL, SEG_FIRST_GUARD_MAX_EDGE,
+                FOOTPRINTS.SPLIT_MIN_DE, FOOTPRINTS.SPLIT_MIN_LINE,
+                FOOTPRINTS.SPLIT_MIN_GAP_L, FOOTPRINTS.RECT_MIN_FILL,
+                FOOTPRINTS.MAX_IRREGULARITY,
+                _env_flag("O4_BLD_SEG_FIRST_GROUND", True),
+                FOOTPRINTS.GROUND_MAX_DE, FOOTPRINTS.GROUND_MAX_EDGE,
+            ),
+            self.natural_asset_region,
+            self.simheaven_package_region,
+            self.effective_asset_region,
+            bool(self.yolo_enabled), self.yolo_signature,
+            self.yolo_imgsz, self.yolo_stride, round(float(self.yolo_conf), 6),
+            round(float(self.yolo_iou), 6), self.yolo_max_det,
+            int(self.yolo_analysis_target_zl),
+            int(effective_yolo_batch), int(effective_stock_yolo_batch),
+            bool(self.yolo_fuse_model),
+            round(float(YOLO_OBJECT_OUTLINE_MARGIN_M), 6),
+            round(float(self.yolo_min_coverage), 6),
+            float(MAX_GENERATED_BUILDING_HEIGHT_M),
+            # Bump on schema-breaking changes to per-DDS cache contents.
+            # v14: invalidate v13 caches with native-ZL/RGB-interpreted YOLO detections.
+            # v15: coverage-preserving overlap removal knobs (keep_mode/freearea/facade_clip).
+            # v16: no_overlap_removal default on (roads/rail/self-overlap not avoided).
+            # v17: bounded-margin containment + configurable yolo_min_coverage.
+            # v18: metre-based outline margin + facade-fallback default off (objects only).
+            # v19: overlap removal default on (drop, smallest-first, no min-overlap area).
+            # v20: blacklist update + tile-wide cross-texture object dedup.
+            # v21: auto-drop library aliases whose resolved mesh >> declared footprint.
+            # v22: per-overlap containment rule (big survives when contained
+            #      smalls explain < explain_frac; conf-gated eviction).
+            bool(self.yolo_pair_overlap_rule),
+            round(float(self.yolo_suppress_containment_frac), 6),
+            round(float(self.yolo_suppress_explain_frac), 6),
+            # v23: roads/railways no longer in static_occ_mask by default.
+            # v24: native-ZL YOLO inference (no ZL16 analysis downsample) +
+            #      cross-ZL covered regions excluded from detection/placement.
+            # v25: retired feature knobs removed (smart gap fill, marginal
+            #      keep mode, suppress thresholds, freearea downsize, facade
+            #      clip/fallback, no_overlap_removal); behaviour fixed to the
+            #      zero-threshold drop with detection free-area clipping.
+            # v26: stock-YOLO asset pool widened to curated extra libraries,
+            #      OBB heading for directional classes, and placements now
+            #      filtered against addon scenery-object masks; the effective
+            #      (availability-filtered) asset map keys the cache so
+            #      library installs/removals invalidate stale placements.
+            tuple(sorted(
+                (
+                    int(cls), str(ptype), tuple(paths),
+                    None if height_m is None else round(float(height_m), 3),
+                )
+                for cls, (ptype, paths, height_m) in self.stock_yolo_asset_map.items()
+            )),
+            # v27: metre-accurate per-class road/rail exclusion of placed
+            #      building footprints (loose detection OBBs unaffected);
+            #      replaces the retired all-or-nothing
+            #      O4_BLD_ROAD_AVOIDANCE lattice blocking.
+            tuple(sorted(
+                (str(k), round(float(v), 3))
+                for k, v in ROAD_EXCLUSION_WIDTH_M.items()
+            )),
+            round(float(RAIL_EXCLUSION_WIDTH_M), 3),
+            round(float(DIRECT_FACADE_ROAD_OVERLAP_FRAC), 6),
+            # v28: HeightNet moved after overlap suppression; heights are no
+            #      longer stored in the YOLO OBB cache, so the height
+            #      checkpoint must key the placement cache directly (before,
+            #      a checkpoint swap invalidated placements only via the
+            #      heights baked into the YOLO cache).
+            self.height_signature,
+            # v30: rooftop colour selection is opt-in and keys placement
+            #      caches separately. Raw YOLO geometry remains unchanged.
+            # v31: sports classes (baseball diamond / ground track field /
+            #      soccer ball field) place size-matched OBJECTS instead of a
+            #      stadium facade ring, take the OBB heading, and skip
+            #      entirely when no asset matches the detected footprint.
+            # v32: every sports class dropped from the stock-YOLO pass —
+            #      pitches, diamonds, tracks and courts place nothing at all,
+            #      and their OBBs no longer occupy the building masks.
+            "schema=v32-no-sports-classes",
+        )
+
+    def _prepare_dds_inference(self, fi, fname, m):
+        """Inference phase for one DDS: veg class map, trained YOLO, stock YOLO.
+
+        Runs one DDS ahead on the prefetch worker thread so GPU inference
+        overlaps the CPU placement stages of the previous DDS. Only touches
+        this DDS's own cache files and thread-local accumulators; all global
+        state merges happen on the main thread in file order, so the output
+        is identical to the sequential path.
+        """
+        return _TextureInference(self, fi, fname, m).execute()
+
+    def _process_textures(self):
+        """Run inference and placement over every texture, in order."""
+        # One-ahead inference prefetch: a single worker thread keeps the GPU busy
+        # with the next DDS while the main thread runs the CPU placement stages.
+        # Disable with O4_BLD_PREFETCH=0 to get the fully sequential path.
+        prefetch_enabled = os.environ.get("O4_BLD_PREFETCH", "1").strip() != "0"
+        self.n_files = len(self.files)
+        self.prefetch_executor = None
+        self._prefetch_futures = {}
+        if prefetch_enabled and self.n_files > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            self.prefetch_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="bld-prefetch"
+            )
+
+        self.t_start = time.time()
+        for fi, fname in enumerate(self.files, 1):
+            m = _DDS_NAME_RE.match(fname)
+            if not m: continue
+            _dds_cache_files = self._dds_cache_paths(fname)
+            file_timings = {}
+            file_counts = {}
+            file_t0 = time.perf_counter()
+
+            try:
+                if self.verbose_log:
+                    print(f"  [{fi:3d}/{self.n_files}] {fname}  (starting)", flush=True)
+                _prep_future = self._prefetch_futures.pop(fi, None)
+                if _prep_future is None and self.prefetch_executor is not None:
+                    # Not prefetched yet (first DDS): still run it on the worker
+                    # thread so ALL inference happens on one thread — cuDNN
+                    # handles are per-thread and re-warm on a new thread.
+                    _prep_future = self.prefetch_executor.submit(
+                        self._prepare_dds_inference, fi, fname, m
+                    )
+                if _prep_future is not None:
+                    _prep = _prep_future.result()
+                else:
+                    _prep = self._prepare_dds_inference(fi, fname, m)
+                self._submit_prefetch(fi + 1)
+                file_timings = _prep['file_timings']
+                file_counts = _prep['file_counts']
+                for _tk, _tv in _prep['local_timings'].items():
+                    self.timings[_tk] = self.timings.get(_tk, 0.0) + _tv
+
+                self._place_texture(fi, fname, m, _prep, file_timings, file_counts)
+            except BaseException:
+                if self.prefetch_executor is not None:
+                    self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
+                    self.prefetch_executor = None
+                raise
+            finally:
+                file_elapsed = time.perf_counter() - file_t0
+                if self.detail_timing or (self.slow_timing_s > 0 and file_elapsed >= self.slow_timing_s):
+                    _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
+                if (
+                    self.yolo_cuda_cleanup_every > 0 and
+                    fi % self.yolo_cuda_cleanup_every == 0 and
+                    torch.cuda.is_available()
+                ):
+                    try:
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                if self.disable_cache:
+                    self._remove_cache_files(_dds_cache_files)
+
+        if self.prefetch_executor is not None:
+            self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
+
+    def _submit_prefetch(self, start_idx):
+        if self.prefetch_executor is None or self._prefetch_futures:
+            return
+        for nfi in range(start_idx, self.n_files + 1):
+            nfname = self.files[nfi - 1]
+            nm = _DDS_NAME_RE.match(nfname)
+            if not nm:
+                continue
+            self._prefetch_futures[nfi] = self.prefetch_executor.submit(
+                self._prepare_dds_inference, nfi, nfname, nm
+            )
+            return
+
+    def _place_texture(self, fi, fname, m, _prep, file_timings, file_counts):
+        """Filter, place and record one texture's detections."""
+        _TexturePass(self, fi, fname, m, _prep, file_timings, file_counts).execute()
+
+    def _finish(self):
+        """Deduplicate, write and compile the DSF; returns the placement count."""
+        # Tile-wide cross-texture / cross-pass object dedup — DEPRECATED as a
+        # required stage: cross-ZL double coverage (its dominant feed) is now
+        # removed at the source, so this pass only mops up rare coverage-boundary
+        # straddlers and stock-vs-trained coincidences. Kept as a cheap safety net;
+        # disable with O4_BLD_TILE_DEDUP=0.
+        if (
+            self.placed_stock_objects and
+            _env_flag("O4_BLD_TILE_DEDUP", True)
+        ):
+            self._t = time.perf_counter()
+            _before = len(self.placed_stock_objects)
+            self.placed_stock_objects, _seam_dropped = _dedupe_overlapping_placements(
+                self.placed_stock_objects, self.lat, self.lon,
+                debug_path=(
+                    os.path.join(self.cache_dir, 'tile_dedup_debug.pkl')
+                    if _env_flag("O4_BLD_BLOCK_DEBUG", False) else None
+                ),
+                # Graze tolerance: keep adjacent distinct buildings whose
+                # footprints clip by less than this fraction of the smaller one;
+                # seam duplicates/stacks overlap near-100% and still drop.
+                overlap_frac=_env_float("O4_BLD_DEDUP_OVERLAP_FRAC", 0.20),
+            )
+            self.timings['global_dedup'] = self.timings.get('global_dedup', 0.0) + (
+                time.perf_counter() - self._t
+            )
+            if _seam_dropped:
+                print(
+                    f"[Bld] Cross-texture object dedup: dropped {_seam_dropped:,} "
+                    f"overlapping objects ({_before:,} -> {len(self.placed_stock_objects):,})"
+                )
+
+        total_time = time.time() - self.t_start
+        total_placements = (
+            len(self.placed_stock_objects) + len(self.placed_facades) + len(self.placed_draped)
+        )
+        # NOTE: legacy direct-YOLO total-count assertion removed — the trained-YOLO
+        # facade pass and the stock-YOLO pre-step now both contribute placements,
+        # and the building-overlay tracks only the trained-YOLO subtotals
+        # (direct_yolo_facade_placements). Stock-YOLO counts live in
+        # file_counts['stock_yolo_detections'] per DDS file.
+        print(
+            f"\nTotal: {total_placements:,} placements  "
+            f"({len(self.placed_stock_objects):,} stock-yolo objects, "
+            f"{len(self.placed_facades):,} facades, "
+            f"{len(self.placed_draped):,} draped polys)  "
+            f"trained_yolo_facades={self.direct_yolo_facade_placements:,}  "
+            f"({total_time/60:.1f}min)"
+        )
+
+        if self.debug_image_only:
+            if self.make_viz and self.composite is not None:
+                os.makedirs(os.path.dirname(os.path.abspath(self.out_dsf)), exist_ok=True)
+                viz_path = self.out_dsf.replace('.dsf', '_overview.png')
+                Image.fromarray(self.composite).save(viz_path)
+                print(f"Overview  → {viz_path}  ({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)")
+                if self.footprint_composite is not None:
+                    footprint_viz_path = self.out_dsf.replace('.dsf', '_footprints.png')
+                    Image.fromarray(self.footprint_composite).save(footprint_viz_path)
+                    print(
+                        f"Footprints → {footprint_viz_path}  "
+                        f"({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)"
+                    )
+            print("[Bld] Debug image-only mode: skipped DSF text write and compile.")
+            return total_placements
+
+        # ── Write DSF text ────────────────────────────────────────────────────────
+        os.makedirs(os.path.dirname(os.path.abspath(self.out_dsf)), exist_ok=True)
+        txt_path = self.out_dsf.replace('.dsf', '_bld.txt')
+        _assert_no_unexported_simheaven_object_placements(
+            self.placed_stock_objects,
+            self.exported_simheaven_object_paths,
+        )
+
+        obj_paths = sorted(set(obj_path for _, _, _, obj_path in self.placed_stock_objects))
+        obj_idx = {path: i for i, path in enumerate(obj_paths)}
+        # POLYGON_DEFs are shared between facade (.fac, extruded) and draped (.pol, ground)
+        # entries — both use BEGIN_POLYGON, distinguished only by param semantics at sim load.
+        facade_paths_set = set(facade_path for _, facade_path, _ in self.placed_facades)
+        draped_paths_set = set(pol_path for _, pol_path in self.placed_draped)
+        poly_paths = sorted(facade_paths_set | draped_paths_set)
+        poly_idx = {path: i for i, path in enumerate(poly_paths)}
+        self._t = time.perf_counter()
+        with open(txt_path, 'w') as f:
+            f.write("PROPERTY sim/planet earth\n")
+            f.write("PROPERTY sim/overlay 1\n")
+            f.write(f"PROPERTY sim/west  {int(self.lon)}\n")
+            f.write(f"PROPERTY sim/east  {int(self.lon)+1}\n")
+            f.write(f"PROPERTY sim/south {int(self.lat)}\n")
+            f.write(f"PROPERTY sim/north {int(self.lat)+1}\n")
+            f.write("\n")
+            for p in poly_paths:
+                f.write(f"POLYGON_DEF {p}\n")
+            for p in obj_paths:
+                f.write(f"OBJECT_DEF {p}\n")
+            f.write("\n")
+            for lonlat_ring, facade_path, height_m in self.placed_facades:
+                idx = poly_idx[facade_path]
+                f.write(f"BEGIN_POLYGON {idx} {int(round(height_m))} 2\n")
+                _write_polygon_winding(f, _ccw_lonlat_ring(lonlat_ring))
+                f.write("END_POLYGON\n")
+            for lonlat_ring, pol_path in self.placed_draped:
+                idx = poly_idx[pol_path]
+                # Draped polygons (.pol) use param=0 — sim treats geometry as ground-pinned.
+                f.write(f"BEGIN_POLYGON {idx} 0 2\n")
+                _write_polygon_winding(f, lonlat_ring)
+                f.write("END_POLYGON\n")
+            for o_lon, o_lat, heading, obj_path in self.placed_stock_objects:
+                idx = obj_idx[obj_path]
+                f.write(f"OBJECT {idx} {o_lon:.7f} {o_lat:.7f} {heading:.1f}\n")
+        self.timings['dsf_text'] += time.perf_counter() - self._t
+
+        print(f"DSF text → {txt_path}")
+
+        # Compile
+        self._t = time.perf_counter()
+        ok = SEGFORMER.compile_dsf(txt_path, self.out_dsf)
+        self.timings['dsf_compile'] += time.perf_counter() - self._t
+        if ok:
+            print(f"DSF compiled → {self.out_dsf}")
+            print(f"[debug] DSF text preserved at {txt_path}")
+            # try: os.remove(txt_path)
+            # except: pass
+        else:
+            print(f"DSFTool failed — text file kept at {txt_path}")
+
+        # ── Save overview image ───────────────────────────────────────────────────
+        if self.make_viz and self.composite is not None:
+            viz_path = self.out_dsf.replace('.dsf', '_overview.png')
+            Image.fromarray(self.composite).save(viz_path)
+            print(f"Overview  → {viz_path}  ({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)")
+            if self.footprint_composite is not None:
+                footprint_viz_path = self.out_dsf.replace('.dsf', '_footprints.png')
+                Image.fromarray(self.footprint_composite).save(footprint_viz_path)
+                print(
+                    f"Footprints → {footprint_viz_path}  "
+                    f"({self.n_cols*self.TILE_VIZ}×{self.n_rows*self.TILE_VIZ}px)"
+                )
+
+        print(
+            "[Bld timing] "
+            f"simHeaven={self.timings['simheaven_parse']:.1f}s  "
+            f"customScenery={self.timings['custom_scenery_parse']:.1f}s  "
+            f"cache_load={self.timings['cache_load']:.1f}s  "
+            f"dds_load={self.timings['dds_load']:.1f}s  "
+            f"segformer={self.timings['segformer_inference']:.1f}s  "
+            f"trained_yolo={self.timings['trained_yolo_inference']:.1f}s  "
+            f"stock_yolo={self.timings['stock_yolo_inference']:.1f}s  "
+            f"road_raster={self.timings['road_raster']:.1f}s  "
+            f"mesh_water={self.timings['mesh_water']:.1f}s  "
+            f"existing_bld_excl={self.timings['existing_bld_excl']:.1f}s  "
+            f"placement={self.timings['placement']:.1f}s  "
+            f"dsf_text={self.timings['dsf_text']:.1f}s  "
+            f"dsf_compile={self.timings['dsf_compile']:.1f}s"
+        )
+        if self.detail_timing:
+            print(
+                "[Bld timing detail] "
+                f"lookup={self.timings['lookup']:.1f}s  "
+                f"mask={self.timings['mask_apply']:.1f}s  "
+                f"place={self.timings['fit_loop']:.1f}s  "
+                f"cache_save={self.timings['cache_save']:.1f}s  "
+                f"viz={self.timings['viz']:.1f}s"
+            )
+
+        return total_placements
+
+
+
+class _TextureInference:
+    """Inference for one texture: class map, trained YOLO, stock YOLO, filtering.
+
+    Runs on the prefetch worker thread, one texture ahead of placement, so it
+    keeps its state on itself and returns it as the ``prep`` dict; all merges
+    into the run happen on the main thread.
+    """
+
+    def __init__(self, run, fi, fname, m):
+        self.run = run
+        self.fi = fi
+        self.fname = fname
+        self.m = m
+
+    def _rec(self, key, start):
+        """Add the time since ``start`` to this texture's timings."""
+        elapsed = time.perf_counter() - start
+        self.local_timings[key] = self.local_timings.get(key, 0.0) + elapsed
+        self.file_timings[key] = self.file_timings.get(key, 0.0) + elapsed
+
+    def execute(self):
+        """Inference phase for one DDS: veg class map, trained YOLO, stock YOLO.
+
+        Runs one DDS ahead on the prefetch worker thread so GPU inference
+        overlaps the CPU placement stages of the previous DDS. Only touches
+        this DDS's own cache files and thread-local accumulators; all global
+        state merges happen on the main thread in file order, so the output
+        is identical to the sequential path.
+        """
+        self._start()
+        prep = self._reuse_cached_placements() or self._load_class_map()
+        if prep is not None:
+            return prep
+        self._detect_buildings()
+        self._detect_stock_objects()
+        self._filter_detections()
+        return self._publish()
+
+    def _start(self):
+        """Set up this texture's accumulators and its prep record."""
+        self.local_timings = local_timings = {}
+        self.file_timings = file_timings = {}
+        self.file_counts = {}
+
+        self.prep = {
+            'fi': self.fi,
+            'fname': self.fname,
+            'cached_bld': None,
+            'no_image': False,
+            'img': None,
+            'veg_map': None,
+            'mesh_water_mask': None,
+            'mesh_water_full': False,
+            'img_h': 0,
+            'img_w': 0,
+            'm_per_px': 1.0,
+            'yolo_detections': [],
+            'effective_yolo_batch_size': self.run.yolo_batch_size,
+            'yolo_batch_fell_back': False,
+            'effective_stock_yolo_batch_size': self.run.stock_yolo_batch_size,
+            'stock_yolo_batch_fell_back': False,
+            'stock_res': None,
+            'file_timings': file_timings,
+            'file_counts': self.file_counts,
+            'local_timings': local_timings,
+        }
+        if self.run.disable_cache:
+            # Drop any stale per-DDS cache before starting this DDS.
+            self.run._remove_cache_files(self.run._dds_cache_paths(self.fname))
+
+    def _reuse_cached_placements(self):
+        """Return the prep record when a valid placement cache exists."""
+        # ── Building placement cache ──────────────────────────────────────
+        # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
+        _bld_cache_file = os.path.join(self.run.cache_dir, self.fname.replace('.dds', '_bld.pkl'))
+        if (
+            not self.run.ignore_placement_cache and
+            not self.run.disable_cache and
+            os.path.exists(_bld_cache_file)
+        ):
+            try:
+                with open(_bld_cache_file, 'rb') as _f:
+                    _cd = pickle.load(_f)
+                if (
+                    _cd.get('params') == self.run._requested_bld_params and
+                    _cd.get('covered') == self.run._covered_fracs_by_file.get(self.fname)
+                ):
+                    if _cd.get('source') == 'direct_yolo':
+                        _placements = _cd.get('placements') or {}
+                        _bad_simheaven = _count_unexported_simheaven_object_placements(
+                            _placements.get('objects', ()),
+                            self.run.exported_simheaven_object_paths,
+                        )
+                        if _bad_simheaven:
+                            self.file_counts['stale_bld_cache_unexported_simheaven'] = (
+                                int(_bad_simheaven)
+                            )
+                            try:
+                                os.remove(_bld_cache_file)
+                            except OSError:
+                                pass
+                            print(
+                                f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  "
+                                "stale bld cache ignored: "
+                                f"{_bad_simheaven} unexported simHeaven object refs",
+                                flush=True,
+                            )
+                        else:
+                            self.prep['cached_bld'] = _placements
+                            return self.prep
+            except Exception:
+                pass
+
+    def _load_class_map(self):
+        """Landcover class map (cache, mesh water or SegFormer) and pixel size; prep when the image is missing."""
+        self.til_y_top  = int(self.m.group(1))
+        self.til_x_left = int(self.m.group(2))
+        self.zl         = int(self.m.group(4))
+
+        # Geographic bounds
+        self.lat_n, self.lat_s, self.lon_w, self.lon_e = dds_bounds(self.til_y_top, self.til_x_left, self.zl)
+
+        # Inference (cached per DDS filename — filename encodes tile coords + ZL)
+        cache_path = os.path.join(self.run.cache_dir, self.fname.replace('.dds', '_veg.npy'))
+        self.img = None
+        self.veg_map = None
+        self.mesh_water_mask = None
+        self.mesh_water_full = False
+        self.img_h = self.img_w = 0
+        if not self.run.disable_cache and os.path.exists(cache_path):
+            _t = time.perf_counter()
+            self.veg_map = np.load(cache_path)
+            self._rec('cache_load', _t)
+            self.img_h, self.img_w = self.veg_map.shape[:2]
+            _t = time.perf_counter()
+            self.mesh_water_mask = _rasterize_mesh_water_mask(
+                self.run.mesh_water_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w
+            )
+            self._rec('mesh_water', _t)
+            mesh_water_px = int(np.count_nonzero(self.mesh_water_mask)) if self.mesh_water_mask is not None else 0
+            self.mesh_water_full = mesh_water_px == int(self.img_h * self.img_w)
+            if (
+                not self.mesh_water_full and
+                bool(np.all(self.veg_map == SEGFORMER.CLASS_WATER))
+            ):
+                # Earlier mesh-water shortcut builds could write a synthetic
+                # all-water map into the shared inference cache.  Treat that
+                # shape as stale when the fixed mesh reader says this DDS is
+                # not fully water.
+                self.veg_map = None
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+                if self.run.detail_timing:
+                    print(
+                        f"    [Bld stage] {self.fname} stale all-water class-map ignored",
+                        flush=True,
+                    )
+            if self.run.detail_timing:
+                if self.veg_map is not None:
+                    print(f"    [Bld stage] {self.fname} class-map cached", flush=True)
+        if self.veg_map is None:
+            _t = time.perf_counter()
+            self.img = self.run._load_source_image(self.fname, self.run._source_mode, self.run._orthophoto_dir)
+            if self.img is None:
+                self.prep['no_image'] = True
+                return self.prep
+            self.img_h, self.img_w = self.img.shape[:2]
+            self._rec('dds_load', _t)
+            _t = time.perf_counter()
+            self.mesh_water_mask = _rasterize_mesh_water_mask(
+                self.run.mesh_water_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w
+            )
+            self._rec('mesh_water', _t)
+            self.mesh_water_full = (
+                self.mesh_water_mask is not None and
+                int(np.count_nonzero(self.mesh_water_mask)) == int(self.img_h * self.img_w)
+            )
+            if self.mesh_water_full:
+                self.veg_map = np.full(
+                    (self.img_h, self.img_w), SEGFORMER.CLASS_WATER, dtype=np.int8
+                )
+                if self.run.detail_timing:
+                    print(
+                        f"    [Bld stage] {self.fname} mesh water full; inference skipped",
+                        flush=True,
+                    )
+            else:
+                if self.run.model is None:
+                    self.run.model, self.run.proc, self.run.device = SEGFORMER.load_vegetation_model(self.run.device)
+                _t = time.perf_counter()
+                self.veg_map = SEGFORMER.run_inference(self.run.model, self.run.device, self.img, self.run.proc)
+                self._rec('segformer_inference', _t)
+            if not self.run.disable_cache and not self.mesh_water_full:
+                _t = time.perf_counter()
+                np.save(cache_path, self.veg_map)
+                self._rec('cache_save', _t)
+            if self.run.detail_timing:
+                if not self.mesh_water_full:
+                    print(f"    [Bld stage] {self.fname} inference complete", flush=True)
+        if self.mesh_water_mask is not None:
+            mesh_water_px = int(np.count_nonzero(self.mesh_water_mask))
+            self.file_counts['mesh_water_px'] = mesh_water_px
+            self.mesh_water_full = mesh_water_px == int(self.img_h * self.img_w)
+
+        # Pixel size in metres (approximate, using mid-latitude)
+        mid_lat_rad = math.radians((self.lat_n + self.lat_s) / 2)
+        lon_span_m  = (self.lon_e - self.lon_w) * 111320 * math.cos(mid_lat_rad)
+        lat_span_m  = (self.lat_n - self.lat_s) * 110540
+        m_per_px_x = lon_span_m / self.img_w
+        m_per_px_y = lat_span_m / self.img_h
+        self.m_per_px   = (m_per_px_x + m_per_px_y) / 2
+
+    def _detect_buildings(self):
+        """Trained YOLO OBB building detections (cached or inferred)."""
+        self.yolo_detections = []
+        # Regions of this texture covered by kept higher-ZL textures: those are
+        # detected/placed at the higher ZL, so exclude them here entirely.
+        self._covered_rects_px = covered_rects_to_px(
+            self.run._covered_fracs_by_file.get(self.fname), self.img_w, self.img_h
+        )
+        if self._covered_rects_px:
+            self.file_counts['covered_rects'] = len(self._covered_rects_px)
+        if self.run.yolo_enabled:
+            _source_path = self.run._source_image_path(self.fname, self.run._source_mode, self.run._orthophoto_dir)
+            # Native-ZL inference is the default; the ZL16-analysis downsample
+            # survives only behind O4_BLD_YOLO_ANALYSIS_ZL for A/B runs.
+            _use_analysis = (
+                self.run.yolo_analysis_target_zl > 0 and self.zl > self.run.yolo_analysis_target_zl
+            )
+            _analysis_signature = (
+                _yolo_analysis_signature(
+                    self.fname, _source_path, self.img_w, self.img_h, self.zl, self.run.yolo_analysis_target_zl
+                )
+                if _use_analysis else None
+            )
+            _yolo_cache_file = os.path.join(self.run.cache_dir, self.fname.replace('.dds', '_yolo_obb.pkl'))
+            _yolo_key = _yolo_obb_cache_key(
+                self.fname, self.img_w, self.img_h, self.run.yolo_checkpoint, self.run.yolo_imgsz,
+                self.run.yolo_stride, self.run.yolo_conf, self.run.yolo_iou, self.run.yolo_max_det,
+                batch_size=self.run.yolo_batch_size,
+                fused=self.run.yolo_fuse_model,
+                analysis_signature=_analysis_signature,
+                analysis_target_zl=(
+                    self.run.yolo_analysis_target_zl if _use_analysis else None
+                ),
+                # Fully covered crops are skipped at inference time on the
+                # native path, so the raw detection set depends on coverage.
+                covered_rects=(
+                    None if _use_analysis else (self._covered_rects_px or None)
+                ),
+            )
+            if not self.run.disable_cache:
+                _t = time.perf_counter()
+                cached_yolo = _load_yolo_obb_cache(_yolo_cache_file, _yolo_key)
+                self._rec('cache_load', _t)
+            else:
+                cached_yolo = None
+            if cached_yolo is not None:
+                self.yolo_detections = cached_yolo
+            else:
+                if self.img is None:
+                    _img_t = time.perf_counter()
+                    self.img = self.run._load_source_image(self.fname, self.run._source_mode, self.run._orthophoto_dir)
+                    if self.img is not None:
+                        self._rec('dds_load', _img_t)
+                if self.img is not None:
+                    try:
+                        if self.run.detail_timing:
+                            _cuda_counts = _cuda_memory_counts_mb()
+                            if _cuda_counts is not None:
+                                (
+                                    self.file_counts['yolo_cuda_alloc_before_mb'],
+                                    self.file_counts['yolo_cuda_reserved_before_mb'],
+                                ) = _cuda_counts
+                        _t = time.perf_counter()
+                        if _use_analysis:
+                            yolo_analysis = _load_yolo_analysis_image(
+                                self.run.tex_dir,
+                                self.fname,
+                                self.til_y_top,
+                                self.til_x_left,
+                                self.m.group(3),
+                                self.zl,
+                                self.run.yolo_analysis_target_zl,
+                                self.run.sidecar_cache_dir,
+                                self.img,
+                                _source_path,
+                                (self.lat_n, self.lat_s, self.lon_w, self.lon_e),
+                            )
+                            analysis_scale_x = float(yolo_analysis['scale_x'])
+                            analysis_scale_y = float(yolo_analysis['scale_y'])
+                            analysis_m_per_px = (
+                                float(self.m_per_px) * (analysis_scale_x + analysis_scale_y) / 2.0
+                            )
+                            self.file_counts['yolo_analysis_zl'] = int(self.run.yolo_analysis_target_zl)
+                            self.file_counts['yolo_analysis_scale_x1000'] = int(
+                                round(((analysis_scale_x + analysis_scale_y) / 2.0) * 1000)
+                            )
+                            yolo_result = _run_yolo_obb_inference(
+                                self.run.yolo_model,
+                                yolo_analysis['image'],
+                                imgsz=self.run.yolo_imgsz,
+                                stride=self.run.yolo_stride,
+                                conf=self.run.yolo_conf,
+                                iou=self.run.yolo_iou,
+                                max_det=self.run.yolo_max_det,
+                                device=("0" if torch.cuda.is_available() else "cpu"),
+                                m_per_px=analysis_m_per_px,
+                                batch_size=self.run.yolo_batch_size,
+                                return_metadata=True,
+                            )
+                            self.yolo_detections = _scale_yolo_detections_to_image(
+                                yolo_result['detections'],
+                                analysis_scale_x,
+                                analysis_scale_y,
+                                self.img_w,
+                                self.img_h,
+                            )
+                        else:
+                            yolo_result = _run_yolo_obb_inference(
+                                self.run.yolo_model,
+                                self.img,
+                                imgsz=self.run.yolo_imgsz,
+                                stride=self.run.yolo_stride,
+                                conf=self.run.yolo_conf,
+                                iou=self.run.yolo_iou,
+                                max_det=self.run.yolo_max_det,
+                                device=("0" if torch.cuda.is_available() else "cpu"),
+                                m_per_px=self.m_per_px,
+                                batch_size=self.run.yolo_batch_size,
+                                return_metadata=True,
+                                skip_rects_px=self._covered_rects_px,
+                            )
+                            self.yolo_detections = yolo_result['detections']
+                        self.prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
+                        self.prep['yolo_batch_fell_back'] = yolo_result['fell_back']
+                        if yolo_result['fell_back']:
+                            self.file_counts['yolo_batch_fallback'] = 1
+                        self._rec('trained_yolo_inference', _t)
+                        if self.run.detail_timing:
+                            _cuda_counts = _cuda_memory_counts_mb()
+                            if _cuda_counts is not None:
+                                (
+                                    self.file_counts['yolo_cuda_alloc_after_mb'],
+                                    self.file_counts['yolo_cuda_reserved_after_mb'],
+                                ) = _cuda_counts
+                        if not self.run.disable_cache:
+                            _save_yolo_obb_cache(
+                                _yolo_cache_file,
+                                _yolo_obb_cache_key(
+                                    self.fname, self.img_w, self.img_h, self.run.yolo_checkpoint, self.run.yolo_imgsz,
+                                    self.run.yolo_stride, self.run.yolo_conf, self.run.yolo_iou, self.run.yolo_max_det,
+                                    batch_size=yolo_result['effective_batch'],
+                                    fused=self.run.yolo_fuse_model,
+                                    analysis_signature=_analysis_signature,
+                                    analysis_target_zl=(
+                                        self.run.yolo_analysis_target_zl if _use_analysis else None
+                                    ),
+                                    covered_rects=(
+                                        None if _use_analysis
+                                        else (self._covered_rects_px or None)
+                                    ),
+                                ),
+                                self.yolo_detections,
+                            )
+                    except Exception as exc:
+                        print(f"    [Bld stage] {self.fname} YOLO OBB failed: {exc}")
+                        self.yolo_detections = []
+
+    def _detect_stock_objects(self):
+        """Stock DOTA YOLO pass for tanks and pools."""
+        # ── Stock YOLO-OBB pre-step (DOTAv1 static objects) ──────────────
+        # Runs on the same loaded image; the main thread merges the returned
+        # placements and OBB pixel quads in file order.
+        if self.run.stock_yolo_model is not None and self.img is not None:
+            try:
+                _t = time.perf_counter()
+                stock_res = _run_stock_yolo_pass_compat(
+                    self.img,
+                    model=self.run.stock_yolo_model,
+                    img_w=self.img_w, img_h=self.img_h,
+                    lat=self.run.lat, lon=self.run.lon,
+                    lat_n=self.lat_n, lat_s=self.lat_s, lon_w=self.lon_w, lon_e=self.lon_e,
+                    m_per_px=self.m_per_px,
+                    device=("0" if torch.cuda.is_available() else "cpu"),
+                    batch_size=self.run.stock_yolo_batch_size,
+                    asset_map=self.run.stock_yolo_asset_map,
+                    static_classes=self.run.stock_yolo_static_classes,
+                )
+                self._rec('stock_yolo_inference', _t)
+                self.prep['stock_res'] = stock_res
+                _stock_effective_batch, _stock_batch_fell_back = (
+                    _stock_yolo_batch_metadata(stock_res, self.run.stock_yolo_batch_size)
+                )
+                self.prep['effective_stock_yolo_batch_size'] = _stock_effective_batch
+                self.prep['stock_yolo_batch_fell_back'] = _stock_batch_fell_back
+                if _stock_batch_fell_back:
+                    self.file_counts['stock_yolo_batch_fallback'] = 1
+                if stock_res.counts_by_class:
+                    self.file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
+                    if self.run.verbose_log:
+                        _summary = " ".join(
+                            f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
+                            for c, n in sorted(stock_res.counts_by_class.items())
+                        )
+                        print(f"    [Bld stage] {self.fname} stock YOLO: {_summary}", flush=True)
+            except Exception as exc:
+                print(f"    [Bld stage] {self.fname} stock YOLO failed: {exc}", flush=True)
+
+    def _filter_detections(self):
+        """Coverage, evidence-gate, overlap and min-footprint filtering."""
+        # Cross-ZL coverage: everything inside a covered region is detected and
+        # placed at the higher ZL instead, so drop it here (trained YOLO,
+        # stock YOLO, and — via the veg-map wipe — SegFormer zones/gap fill).
+        if self._covered_rects_px:
+            self.yolo_detections, _cov_dropped = filter_detections_by_coverage(
+                self.yolo_detections, self._covered_rects_px
+            )
+            _cov_geo_boxes = geo_boxes_from_covered_px(
+                self._covered_rects_px, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+            )
+            _cov_dropped += filter_stock_results_by_coverage(
+                self.prep.get('stock_res'), self._covered_rects_px, _cov_geo_boxes
+            )
+            if _cov_dropped:
+                self.file_counts['covered_dropped'] = int(_cov_dropped)
+            if self.veg_map is not None and not self.mesh_water_full:
+                # Copy: the array also backs the shared _veg.npy inference
+                # cache, which must stay whole for the vegetation overlay.
+                self.veg_map = self.veg_map.copy()
+                mask_covered_regions(
+                    self.veg_map,
+                    self._covered_rects_px,
+                    value=getattr(SEGFORMER, 'CLASS_BACKGROUND', 0),
+                )
+        raw_yolo_count = len(self.yolo_detections)
+        if self.yolo_detections:
+            # Pixels load lazily (warm runs reach here with img=None), so gate
+            # decisions do not depend on which caches happened to be warm.
+            _evidence_ctx = _build_detection_evidence_context(
+                self.img,
+                lambda: self.run._load_source_image(self.fname, self.run._source_mode, self.run._orthophoto_dir),
+                self.veg_map if not self.mesh_water_full else None,
+                self.m_per_px,
+            )
+            self.yolo_detections, yolo_oversize_reject = (
+                _filter_oversized_direct_yolo_detections(
+                    self.yolo_detections,
+                    evidence_ctx=_evidence_ctx,
+                    file_counts=self.file_counts,
+                )
+            )
+            if yolo_oversize_reject:
+                self.file_counts['yolo_oversize_reject'] = yolo_oversize_reject
+        # Remove overlapping detections so each building area keeps a single
+        # object: smallest-first, drop any detection that overlaps an
+        # already-kept one, with no minimum-overlap area.
+        if self.yolo_detections:
+            _t = time.perf_counter()
+            self.yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
+                self.yolo_detections,
+                coverage_threshold=self.run.yolo_suppress_coverage,
+                min_overlap_m2=self.run.yolo_suppress_min_overlap_m2,
+                m_per_px=self.m_per_px,
+                img_w=self.img_w,
+                img_h=self.img_h,
+                pair_rule=self.run.yolo_pair_overlap_rule,
+                containment_frac=self.run.yolo_suppress_containment_frac,
+                explain_frac=self.run.yolo_suppress_explain_frac,
+            )
+            self._rec('yolo_suppress', _t)
+            self.file_counts['yolo_raw_detections'] = raw_yolo_count
+            self.file_counts['yolo_suppressed_overlap'] = yolo_suppressed
+        # HeightNet no longer runs here: heights are consumed only by object
+        # candidate selection and the facade fallback, both strictly after
+        # the static placement gates, so the placement phase predicts them
+        # lazily for gate-passers only (_TexturePass._predict_heights).
+        # Min-footprint gate — the earliest per-detection filter. Detections
+        # whose footprint is below the configured area are dropped here, before
+        # HeightNet and placement ever see them. It runs after the raw YOLO
+        # cache is written (_detect_buildings), so the cache stays
+        # footprint-complete and tuning this value needs no cache rebuild.
+        if self.yolo_detections and self.run.min_footprint_m2 > 0.0:
+            _pre_footprint_n = len(self.yolo_detections)
+            self.yolo_detections = [
+                _d for _d in self.yolo_detections
+                if float(_d.get('area_m2', 0.0)) >= self.run.min_footprint_m2
+            ]
+            _footprint_dropped = _pre_footprint_n - len(self.yolo_detections)
+            if _footprint_dropped:
+                self.file_counts['yolo_min_footprint_dropped'] = _footprint_dropped
+        self.file_counts['yolo_detections'] = len(self.yolo_detections)
+
+    def _publish(self):
+        """Store the results on the prep record and return it."""
+        self.prep['img'] = self.img
+        self.prep['veg_map'] = self.veg_map
+        self.prep['mesh_water_mask'] = self.mesh_water_mask
+        self.prep['mesh_water_full'] = self.mesh_water_full
+        self.prep['img_h'] = self.img_h
+        self.prep['img_w'] = self.img_w
+        self.prep['m_per_px'] = self.m_per_px
+        self.prep['yolo_detections'] = self.yolo_detections
+        return self.prep
+
+
+class _TexturePass:
+    """Placement of one texture's detections within a _BuildingOverlayRun."""
+
+    def __init__(self, run, fi, fname, m, prep, file_timings, file_counts):
+        self.run = run
+        self.fi = fi
+        self.fname = fname
+        self.m = m
+        self.prep = prep
+        self.file_timings = file_timings
+        self.file_counts = file_counts
+
+    def execute(self):
+        """Run the per-texture placement stages in order."""
+        if self._reuse_cached_placements():
+            return
+        self._unpack_prep()
+        if self._finish_if_empty():
+            return
+        self._build_masks()
+        self._sort_farmland()
+        self._apply_seg_first()
+        self._predict_heights()
+        self._place_detections()
+        self._report_and_cache()
+        self._draw_overview_panels()
+
+    def _reuse_cached_placements(self):
+        """Replay a cached placement result; True when the texture needs no more work."""
+        # Per-texture deterministic stream for randomized facade heights,
+        # so cached and fresh runs reproduce.
+        height_rng_seed = int.from_bytes(
+            hashlib.sha1(f"bld-height:{self.fname}".encode("utf-8")).digest()[:8],
+            "big",
+        )
+        self.height_rng = np.random.default_rng(height_rng_seed)
+        self._bld_cache_file = os.path.join(self.run.cache_dir, self.fname.replace('.dds', '_bld.pkl'))
+        _cached_bld = self.prep['cached_bld']
+        if _cached_bld is not None:
+            self.run.placed_stock_objects.extend(_cached_bld.get('objects', ()))
+            self.run.placed_facades.extend(_cached_bld.get('facades', ()))
+            cached_count = (
+                len(_cached_bld.get('objects', ())) +
+                len(_cached_bld.get('facades', ()))
+            )
+            self.run.direct_yolo_facade_placements += len(_cached_bld.get('facades', ()))
+            print(f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  (bld cached — {cached_count} placements)", flush=True)
+            return True
+        return bool(self.prep['no_image'])
+
+    def _unpack_prep(self):
+        """Unpack the inference results and derive per-texture sizes."""
+        self._start_object_idx = len(self.run.placed_stock_objects)
+        self._start_facade_idx = len(self.run.placed_facades)
+        self.stock_yolo_occupied_polys = []  # OBB quads in image-pixel space for this DDS
+        self.til_y_top  = int(self.m.group(1))
+        self.til_x_left = int(self.m.group(2))
+        zl         = int(self.m.group(4))
+
+        # Geographic bounds
+        self.lat_n, self.lat_s, self.lon_w, self.lon_e = dds_bounds(self.til_y_top, self.til_x_left, zl)
+
+        self.img = self.prep['img']
+        self.veg_map = self.prep['veg_map']
+        self.mesh_water_mask = self.prep['mesh_water_mask']
+        self.mesh_water_full = self.prep['mesh_water_full']
+        self.img_h = self.prep['img_h']
+        self.img_w = self.prep['img_w']
+        self.m_per_px = self.prep['m_per_px']
+        self.yolo_detections = self.prep['yolo_detections']
+        self.roof_color_image = self.img if self.run.roof_color_matching_active else None
+        self.roof_color_load_attempted = (
+            self.img is not None or not self.run.roof_color_matching_active
+        )
+        self._effective_bld_params = self.run._building_cache_params(
+            self.prep['effective_yolo_batch_size'],
+            self.prep['effective_stock_yolo_batch_size'],
+        )
+
+        # Spacing in pixels at this tile's native resolution
+        self.spacing_px_by_class = _class_spacing_px(
+            self.run.spacing_m, self.m_per_px, self.run.class_min_footprint_span_m
+        )
+        self.road_width_px = max(
+            ROAD_WIDTH_PX_MIN,
+            int(round(ROAD_CENTERLINE_WIDTH_M / max(self.m_per_px, 1e-6))),
+        )
+        road_dilate_px = max(
+            ROAD_DILATE_PX_MIN,
+            int(round(ROAD_EXTRA_BUFFER_M / max(self.m_per_px, 1e-6))),
+        )
+        self.k_road = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
+
+        # Stock YOLO pre-step placements are merged in _build_masks, after
+        # the blocker masks exist: they must first be checked against scenery
+        # objects other addons already place (simHeaven / custom overlay
+        # objects, existing building footprints).
+        self.stock_res = self.prep['stock_res']
+        self._stock_has_placements = self.stock_res is not None and bool(
+            self.stock_res.placed_objects or self.stock_res.placed_facades
+            or self.stock_res.placed_draped
+        )
+
+    def _finish_if_empty(self):
+        """Record a texture with nothing to place; True when it had nothing."""
+        # Stock placements force the full path: the blocker filter below
+        # needs the rasterized addon-object masks before they can merge.
+        if not self.yolo_detections and not self._stock_has_placements:
+            self.file_counts['placed'] = 0
+            if self.run.verbose_log:
+                spacing_label = _format_class_spacing(self.spacing_px_by_class, self.m_per_px)
+                class_counts = {cls: 0 for cls in BLD_PLACEMENT_CLASSES}
+                print(
+                    f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  "
+                    f"{_describe_placement_summary(class_counts, spacing_label, self.file_counts)}"
+                )
+            else:
+                print(f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  (0 placements)", flush=True)
+            if not self.run.disable_cache and not self.run.ignore_placement_cache:
+                try:
+                    _t = time.perf_counter()
+                    with open(self._bld_cache_file, 'wb') as _f:
+                        pickle.dump({
+                            'params': self._effective_bld_params,
+                            'covered': self.run._covered_fracs_by_file.get(self.fname),
+                            'source': 'direct_yolo',
+                            'placements': {'objects': (), 'facades': ()},
+                        }, _f)
+                    _record_elapsed(self.run.timings, self.file_timings, 'cache_save', _t)
+                except Exception:
+                    pass
+            return True
+        return False
+
+    def _build_masks(self):
+        """Rasterise the blockers and build the placement masks."""
+        TILE_EDGE_MARGIN_M = 20.0
+        edge_px = max(2, int(TILE_EDGE_MARGIN_M / self.m_per_px))
+
+        _t = time.perf_counter()
+        local_separator_roads = _roads_for_bounds(
+            self.run.separator_roads_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
+        local_rails = _roads_for_bounds(
+            self.run.excl_rails_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
+        local_excl_polys = _polys_for_bounds(
+            self.run.excl_polys_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
+        local_existing_bld_polys = _polys_for_bounds(
+            self.run.existing_bld_polys_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
+        local_sh_bld_objects = _simheaven_objects_for_bounds(
+            self.run.sh_bld_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.002)
+        local_custom_bld_objects = _simheaven_objects_for_bounds(
+            self.run.custom_bld_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.002)
+        _record_elapsed(self.run.timings, self.file_timings, 'lookup', _t)
+
+        _t = time.perf_counter()
+        if local_separator_roads:
+            self.road_mask = _rasterize_roads(
+                local_separator_roads, self.lat_n, self.lat_s, self.lon_w, self.lon_e,
+                self.img_h, self.img_w, road_width_px=self.road_width_px)
+            self.road_mask = cv2.dilate(self.road_mask, self.k_road)
+        else:
+            self.road_mask = np.zeros((self.img_h, self.img_w), dtype=np.uint8)
+
+        if local_rails:
+            self.rail_mask = _rasterize_roads(
+                local_rails, self.lat_n, self.lat_s, self.lon_w, self.lon_e,
+                self.img_h, self.img_w, road_width_px=self.road_width_px)
+            self.rail_mask = cv2.dilate(self.rail_mask, self.k_road)
+        else:
+            self.rail_mask = np.zeros((self.img_h, self.img_w), dtype=np.uint8)
+        _record_elapsed(self.run.timings, self.file_timings, 'road_raster', _t)
+
+        self.poly_mask = None
+        if local_excl_polys:
+            _t = time.perf_counter()
+            self.poly_mask = _rasterize_polygons(
+                local_excl_polys, self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w
+            )
+            _record_elapsed(self.run.timings, self.file_timings, 'road_raster', _t)
+
+        self.existing_bld_mask = None
+        if local_existing_bld_polys:
+            _t = time.perf_counter()
+            self.existing_bld_mask = _rasterize_polygons(
+                local_existing_bld_polys, self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w
+            )
+            _record_elapsed(self.run.timings, self.file_timings, 'existing_bld_excl', _t)
+
+        self.sh_bld_mask = None
+        if local_sh_bld_objects:
+            _t = time.perf_counter()
+            self.sh_bld_mask = _rasterize_simheaven_objects(
+                local_sh_bld_objects, self.lat_n, self.lat_s, self.lon_w, self.lon_e,
+                self.img_h, self.img_w, self.m_per_px
+            )
+            _record_elapsed(self.run.timings, self.file_timings, 'existing_bld_excl', _t)
+
+        self.custom_bld_mask = None
+        if local_custom_bld_objects:
+            _t = time.perf_counter()
+            self.custom_bld_mask = _rasterize_simheaven_objects(
+                local_custom_bld_objects, self.lat_n, self.lat_s, self.lon_w, self.lon_e,
+                self.img_h, self.img_w, self.m_per_px
+            )
+            _record_elapsed(self.run.timings, self.file_timings, 'existing_bld_excl', _t)
+
+        # Merge the stock YOLO pre-step placements in file order, after
+        # dropping detections that overlap scenery objects other addons
+        # already place (simHeaven / custom overlay objects, existing
+        # building footprints).
+        if self.stock_res is not None:
+            _addon_blocker_mask = None
+            for _m in (self.sh_bld_mask, self.custom_bld_mask, self.existing_bld_mask):
+                if _m is not None and _m.any():
+                    _addon_blocker_mask = (
+                        _m.copy() if _addon_blocker_mask is None
+                        else (_addon_blocker_mask | _m)
+                    )
+            if _addon_blocker_mask is not None:
+                _stock_blocked = _filter_stock_results_by_blockers(
+                    self.stock_res, _addon_blocker_mask
+                )
+                if _stock_blocked:
+                    self.file_counts['stock_yolo_blocked'] = int(_stock_blocked)
+            self.run.placed_stock_objects.extend(self.stock_res.placed_objects)
+            self.run.placed_facades.extend(self.stock_res.placed_facades)
+            self.run.placed_draped.extend(self.stock_res.placed_draped)
+            self.stock_yolo_occupied_polys = list(self.stock_res.occupied_px_polys)
+
+        _t = time.perf_counter()
+        # static_occ_mask collects everything even the *loose* trained-YOLO
+        # detection OBB must avoid: water, OSM building footprints, scenery
+        # objects and stock-YOLO placements. Roads/railways are deliberately
+        # NOT in it — they gate only the placed footprint via
+        # placement_occ_mask below, so a detection whose loose OBB clips a
+        # street edge still places (see the road-exclusion comment in
+        # _BuildingOverlayRun._resolve_settings).
+        self.static_occ_mask = np.zeros_like(self.road_mask)
+        if self.run.allow_road_overlap:
+            self.file_counts['road_overlap_allowed'] = 1
+
+        if self.poly_mask is not None and self.poly_mask.any():
+            self.static_occ_mask  = self.static_occ_mask | self.poly_mask
+
+        if self.mesh_water_mask is not None and self.mesh_water_mask.any():
+            self.static_occ_mask = self.static_occ_mask | self.mesh_water_mask
+
+        if self.existing_bld_mask is not None and self.existing_bld_mask.any():
+            self.static_occ_mask = self.static_occ_mask | self.existing_bld_mask
+
+        if self.sh_bld_mask is not None and self.sh_bld_mask.any():
+            self.static_occ_mask = self.static_occ_mask | self.sh_bld_mask
+
+        if self.custom_bld_mask is not None and self.custom_bld_mask.any():
+            self.static_occ_mask = self.static_occ_mask | self.custom_bld_mask
+
+        DEGREE_TOL = 1e-4
+        if self.lat_n >= self.run.lat + 1 - DEGREE_TOL:   self.static_occ_mask[:edge_px,  :]  = 1
+        if self.lat_s <= self.run.lat     + DEGREE_TOL:   self.static_occ_mask[-edge_px:, :]  = 1
+        if self.lon_w <= self.run.lon     + DEGREE_TOL:   self.static_occ_mask[:,  :edge_px]  = 1
+        if self.lon_e >= self.run.lon + 1 - DEGREE_TOL:   self.static_occ_mask[:, -edge_px:]  = 1
+        # Mark stock-YOLO OBBs (storage tanks, swimming pools) into
+        # both static_occ_mask and building_spacing_mask BEFORE the
+        # trained-YOLO facade loop runs, so building facades don't
+        # overlap the static objects we just placed.
+        if self.stock_yolo_occupied_polys:
+            for _quad in self.stock_yolo_occupied_polys:
+                cv2.fillPoly(self.static_occ_mask, [_quad], 1)
+        self.static_occ_integral = (
+            None if self.run.strict_fit else cv2.integral(self.static_occ_mask, sdepth=cv2.CV_32S)
+        )
+        # placement_occ_mask = static blockers + the true-width road/rail
+        # surface. It gates candidate centers and every *placed* footprint
+        # (object assets, shrunk facade templates, gap fill) — the loose
+        # detection OBB keeps checking static_occ_mask only. Narrow lanes
+        # exclude just their own few metres of pavement, so dense blocks
+        # keep their placements while buildings stay off the streets.
+        _t_excl = time.perf_counter()
+        self.route_excl_mask = None
+        if not self.run.allow_road_overlap:
+            self.route_excl_mask = _rasterize_route_exclusion(
+                local_separator_roads, local_rails,
+                self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w, self.m_per_px)
+        _record_elapsed(self.run.timings, self.file_timings, 'road_raster', _t_excl)
+        if self.route_excl_mask is not None and self.route_excl_mask.any():
+            self.placement_occ_mask = self.static_occ_mask | self.route_excl_mask
+            self.placement_occ_integral = (
+                None if self.run.strict_fit
+                else cv2.integral(self.placement_occ_mask, sdepth=cv2.CV_32S)
+            )
+        else:
+            self.route_excl_mask = None
+            self.placement_occ_mask = self.static_occ_mask
+            self.placement_occ_integral = self.static_occ_integral
+        self.building_spacing_mask = np.zeros_like(self.static_occ_mask)
+        if self.stock_yolo_occupied_polys:
+            for _quad in self.stock_yolo_occupied_polys:
+                cv2.fillPoly(self.building_spacing_mask, [_quad], 1)
+        self.placed_yolo_mask = np.zeros_like(self.static_occ_mask)
+        self.fit_scratch = np.zeros_like(self.static_occ_mask)
+        self.pts_this = []
+        self.placed_viz_polys = []
+        self.roof_color_viz_polys = []
+        self.yolo_viz_polys = []
+        _record_elapsed(self.run.timings, self.file_timings, 'mask_apply', _t)
+
+    def _sort_farmland(self):
+        """Drop farmland detections and place greenhouses (O4_Agri_Structures)."""
+        # Farmland sorting (O4_Agri_Structures): drop open-ground
+        # detections, take greenhouses out of the building flow and place
+        # them as greenhouse assets before any building claims the area.
+        if (
+            self.yolo_detections and self.veg_map is not None and not self.mesh_water_full
+            and _agri_mode() != "off"
+        ):
+            _t_gh = time.perf_counter()
+            _agri_img = {'img': self.img, 'tried': self.img is not None}
+
+            def _agri_image():
+                if not _agri_img['tried']:
+                    _agri_img['tried'] = True
+                    _agri_img['img'] = self.run._load_source_image(
+                        self.fname, self.run._source_mode, self.run._orthophoto_dir
+                    )
+                return _agri_img['img']
+
+            def _agri_heights(dets):
+                _himg = _agri_image()
+                if self.run.height_model is None or _himg is None:
+                    return [float('nan')] * len(dets)
+                return HEIGHTMODEL.predict_detection_heights(
+                    self.run.height_model, _himg, dets, self.m_per_px
+                )
+
+            _n_agri_in = len(self.yolo_detections)
+            self.yolo_detections, greenhouse_detections = AGRI.split_detections(
+                self.yolo_detections, self.veg_map, _agri_image, self.m_per_px,
+                counts=self.file_counts, height_fn=_agri_heights,
+            )
+            self.file_counts['agri_greenhouse'] = len(greenhouse_detections)
+            self.file_counts['agri_ground'] = (
+                _n_agri_in - len(self.yolo_detections) - len(greenhouse_detections)
+            )
+            if len(self.yolo_detections) != _n_agri_in:
+                self.file_counts['yolo_detections'] = len(self.yolo_detections)
+            if greenhouse_detections:
+                # A greenhouse block the landcover model reads as roof
+                # must not be traced again as a building (segment-first,
+                # large-roof polygons): its OBB becomes farmland.
+                self.veg_map = self.veg_map.copy()
+                for _gh in greenhouse_detections:
+                    cv2.fillPoly(
+                        self.veg_map,
+                        [np.round(np.asarray(_gh['points'])).astype(np.int32)],
+                        int(AGRI.CLASS_AGRICULTURE),
+                    )
+                if _agri_mode() == "greenhouse":
+                    _place_greenhouses(
+                        greenhouse_detections,
+                        m_per_px=self.m_per_px, img_w=self.img_w, img_h=self.img_h,
+                        lat=self.run.lat, lon=self.run.lon,
+                        bounds=(self.lat_n, self.lat_s, self.lon_w, self.lon_e),
+                        static_occ_mask=self.static_occ_mask,
+                        route_excl_mask=self.route_excl_mask,
+                        building_spacing_mask=self.building_spacing_mask,
+                        fit_scratch=self.fit_scratch,
+                        tunnel_paths=self.run.greenhouse_tunnel_paths,
+                        facade_path=self.run.greenhouse_facade_path,
+                        placed_objects=self.run.placed_stock_objects,
+                        placed_facades=self.run.placed_facades,
+                        file_counts=self.file_counts,
+                    )
+            _agri_img = None
+            _record_elapsed(self.run.timings, self.file_timings, 'greenhouses', _t_gh)
+
+    def _apply_seg_first(self):
+        """Replace detections with landcover-traced footprints (segment-first)."""
+        _seg_mode = _seg_first_mode()
+        if _seg_mode != "off" and self.veg_map is not None:
+            _t = time.perf_counter()
+            _seg_img = self.img
+            if _seg_img is None:
+                _seg_img = self.run._load_source_image(
+                    self.fname, self.run._source_mode, self.run._orthophoto_dir
+                )
+            self.yolo_detections = _seg_first_detections(
+                self.yolo_detections, self.veg_map, _seg_img, self.m_per_px,
+                self.img_w, self.img_h, _seg_mode, self.file_counts,
+                road_mask=(
+                    self.road_mask if self.rail_mask is None
+                    else (self.road_mask | self.rail_mask)
+                ),
+            )
+            _seg_img = None
+            _record_elapsed(self.run.timings, self.file_timings, 'seg_first', _t)
+
+    def _predict_heights(self):
+        """Regional height fallbacks, footprint tracing jobs and lazy HeightNet."""
+        _apply_regional_height_fallbacks(
+            self.yolo_detections, self.run.natural_asset_region
+        )
+
+        # Large-roof polygons need neither heights nor anything placed
+        # below: trace them on a worker while HeightNet runs.
+        self._ring_jobs = None
+        if (
+            self.yolo_detections and self.veg_map is not None and
+            _asset_kind_enabled('facade', self.run.building_asset_mode) and
+            _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True)
+        ):
+            self._ring_jobs = _start_large_footprint_jobs(
+                self.yolo_detections, self.veg_map == SEGFORMER.CLASS_BUILDING,
+                self.m_per_px,
+            )
+
+        if self.yolo_detections and self.run.height_model is not None:
+            # Lazy HeightNet: heights are consumed only inside object
+            # candidate selection and the facade fallback, both of which
+            # run strictly AFTER the static placement gates in
+            # _place_each_detection. Those gates read masks that are fully built
+            # above and never mutated inside the loop, so which
+            # detections reach a height read is decidable here, before
+            # anything places. Predict heights for the gate-passers only
+            # (~13% of suppression survivors on dense textures). This
+            # replica MUST stay in sync with the gate sequence at the top
+            # of the fit loop (valid -> in-bounds -> static center ->
+            # static footprint -> in-tile); a stale replica that passes
+            # extra detections only wastes GPU time, but one that drops a
+            # gate-passer would leave its height_m unset and shift the
+            # facade height RNG stream.
+            _t = time.perf_counter()
+            _height_dets = []
+            for _hdet in self.yolo_detections:
+                _hprep = _prepare_direct_yolo_detection(_hdet, self.img_w, self.img_h)
+                if not _hprep['valid']:
+                    continue
+                _hjx = int(_hprep['jx'])
+                _hjy = int(_hprep['jy'])
+                if not (0 <= _hjx < self.img_w and 0 <= _hjy < self.img_h):
+                    continue
+                if self.placement_occ_mask[_hjy, _hjx]:
+                    continue
+                if not _poly_fits_with_integral(
+                    self.static_occ_mask, _hprep['poly'], self.fit_scratch,
+                    self.static_occ_integral, bbox=_hprep['bbox'],
+                ):
+                    continue
+                _ho_lon, _ho_lat = px_to_latlon(
+                    _hjx, _hjy, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+                )
+                if not (self.run.lon <= _ho_lon < self.run.lon + 1 and self.run.lat <= _ho_lat < self.run.lat + 1):
+                    continue
+                _height_dets.append(_hdet)
+            if _height_dets:
+                _height_img = self.img
+                if _height_img is None:
+                    # Cached-YOLO path (v7+ caches are height-free): load
+                    # the texture just for the height crops, without
+                    # touching `img` so warm-run behaviour elsewhere
+                    # stays unchanged.
+                    _img_t = time.perf_counter()
+                    _height_img = self.run._load_source_image(
+                        self.fname, self.run._source_mode, self.run._orthophoto_dir
+                    )
+                    if _height_img is not None:
+                        _record_elapsed(
+                            self.run.timings, self.file_timings, 'dds_load', _img_t
+                        )
+                if _height_img is not None:
+                    _apply_heightnet_to_detections(
+                        self.run.height_model,
+                        _height_img,
+                        _height_dets,
+                        self.m_per_px,
+                        region=self.run.natural_asset_region,
+                        veg_map=self.veg_map,
+                    )
+                    if (
+                        self.roof_color_image is None and
+                        self.run.enabled_yolo_color_assets_by_family
+                    ):
+                        # Reuse the one warm-cache image load for rooftop
+                        # sampling instead of decoding the DDS again in
+                        # the placement loop.
+                        self.roof_color_image = _height_img
+                        self.roof_color_load_attempted = True
+                _height_img = None
+                self.file_counts['heightnet_dets'] = len(_height_dets)
+            _height_dets = None
+            _record_elapsed(self.run.timings, self.file_timings, 'heightnet', _t)
+
+    def _place_detections(self):
+        """Place large-roof polygons, then every remaining detection."""
+        if not self.yolo_detections:
+            return
+        self._start_placement()
+        self._place_large_footprints()
+        self._place_each_detection()
+        self._finish_placement()
+
+    def _start_placement(self):
+        """Height gates, placement order and the incremental occupancy masks."""
+        _assign_height_gates(self.yolo_detections, self.run.natural_asset_region)
+        self.file_counts['height_context_capped'] = sum(
+            1 for _d in self.yolo_detections
+            if _d.get('height_adjustment') == 'context_cap'
+        )
+        self._t_yolo_place = time.perf_counter()
+        # O4_BLD_PLACE_PROFILE: per-phase wall-time + candidate-scan
+        # accounting for the placement loop. perf_counter is only called
+        # when the flag is on, so the default path is unaffected.
+        self._pf = self.run.place_profile
+        self._pf_prep = self._pf_fits = self._pf_select = self._pf_maskfill = 0.0
+        self._pf_select_acc = {} if self._pf else None
+        self.placed_yolo_integral = cv2.integral(self.placed_yolo_mask, sdepth=cv2.CV_32S)
+        self.recent_yolo_mask = np.zeros_like(self.placed_yolo_mask)
+        self.recent_yolo_marks = 0
+        self.recent_yolo_rebuild_threshold = 256
+        self.building_spacing_integral = cv2.integral(
+            self.building_spacing_mask, sdepth=cv2.CV_32S
+        )
+        self.recent_spacing_mask = np.zeros_like(self.building_spacing_mask)
+        self.recent_spacing_marks = 0
+        self.recent_spacing_rebuild_threshold = 256
+        # Place smallest detections first so the smaller one wins an
+        # overlap conflict (OBB-dedup / object self-spacing).
+        self.yolo_detections = sorted(
+            self.yolo_detections,
+            key=lambda d: (
+                float(d.get('area_m2', 0.0)),
+                -float(d.get('confidence', 0.0)),
+            ),
+        )
+        # O4_BLD_BLOCK_DEBUG=1: record why each detection did not
+        # place (reason, center px, OBB quad) plus the stock-YOLO
+        # occupancy quads, dumped per DDS as <stem>_blockdebug.pkl for
+        # offline blocker overlays. Off by default: zero overhead.
+        self._blkdbg = (
+            [] if _env_flag("O4_BLD_BLOCK_DEBUG", False) else None
+        )
+        # Large irregular roofs first (largest first): a polygon
+        # facade traced from the landcover building class, then the
+        # smaller detections on that roof are skipped below.
+        self.large_roof_mask = None
+        self._poly_refine = _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True)
+
+    def _place_large_footprints(self):
+        """Trace large irregular roofs as polygon facades, largest first."""
+        if (
+            self.veg_map is not None and
+            _asset_kind_enabled('facade', self.run.building_asset_mode) and
+            (self._poly_refine or any(
+                d.get('seg_rings') is not None for d in self.yolo_detections
+            ))
+        ):
+            _t_lf = time.perf_counter()
+            _bld_class_mask = self.veg_map == SEGFORMER.CLASS_BUILDING
+            for detection in sorted(
+                (
+                    d for d in self.yolo_detections
+                    if d.get('seg_rings') is not None or (
+                        self._poly_refine and
+                        d.get('seg_first') is None and
+                        float(d.get('area_m2', 0.0)) >= LARGE_FOOTPRINT_MIN_M2
+                    )
+                ),
+                key=lambda d: (
+                    -float(d.get('area_m2', 0.0)),
+                    -float(d.get('confidence', 0.0)),
+                ),
+            ):
+                prepared_yolo = _prepare_direct_yolo_detection(
+                    detection, self.img_w, self.img_h
+                )
+                if not prepared_yolo['valid']:
+                    continue
+                jx = int(prepared_yolo['jx'])
+                jy = int(prepared_yolo['jy'])
+                if not (0 <= jx < self.img_w and 0 <= jy < self.img_h):
+                    continue
+                _seg_poly = detection.get('seg_rings') is not None
+                # a segmented outline's frame centre may sit in its
+                # own courtyard or a neighbour piece: only its rings
+                # are tested below
+                if not _seg_poly and self.placement_occ_mask[jy, jx]:
+                    continue
+                if (
+                    not _seg_poly and self.large_roof_mask is not None and
+                    self.large_roof_mask[jy, jx]
+                ):
+                    continue
+                o_lon, o_lat = px_to_latlon(
+                    jx, jy, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+                )
+                if not (self.run.lon <= o_lon < self.run.lon + 1 and self.run.lat <= o_lat < self.run.lat + 1):
+                    continue
+                if not _direct_yolo_facade_footprint_allowed(detection):
+                    continue
+                _ring_job = (
+                    self._ring_jobs[0].get(id(detection)) if self._ring_jobs else None
+                )
+                if _seg_poly:
+                    rings = detection['seg_rings']
+                elif _ring_job is not None:
+                    rings = _ring_job.result()
+                else:
+                    rings = _large_footprint_rings(
+                        detection, _bld_class_mask, self.m_per_px
+                    )
+                if not rings:
+                    continue
+                ring_polys = []
+                for ring in rings:
+                    ring_i = np.rint(ring).astype(np.int32)
+                    ring_i[:, 0] = np.clip(ring_i[:, 0], 0, self.img_w - 1)
+                    ring_i[:, 1] = np.clip(ring_i[:, 1], 0, self.img_h - 1)
+                    if not _poly_fits_with_integral(
+                        self.static_occ_mask, ring_i, self.fit_scratch,
+                        self.static_occ_integral,
+                    ):
+                        continue
+                    if (
+                        self.route_excl_mask is not None and
+                        _poly_mask_overlap_frac(
+                            self.route_excl_mask, ring_i, self.fit_scratch
+                        ) > DIRECT_FACADE_ROAD_OVERLAP_FRAC
+                    ):
+                        continue
+                    if _seg_poly:
+                        # split pieces share their cut edge
+                        if _poly_mask_overlap_frac(
+                            self.building_spacing_mask, ring_i, self.fit_scratch
+                        ) > 0.1:
+                            continue
+                    elif not _poly_fits(self.building_spacing_mask, ring_i, self.fit_scratch):
+                        continue
+                    ring_polys.append((ring, ring_i))
+                if not ring_polys:
+                    continue
+                try_cls = int(detection['placement_class'])
+                facade_cls = _yolo_facade_class(try_cls) or (
+                    try_cls if try_cls in BLD_PLACEMENT_CLASSES
+                    else BLD_CLASS_MEDIUM
+                )
+                facade_path = _facade_for_detection(
+                    facade_cls, self.veg_map, jx, jy, self.m_per_px,
+                    lat=float(o_lat), lon=float(o_lon),
+                    include_simheaven_assets=self.run.simheaven_assets_available,
+                )
+                facade_h = _yolo_facade_height_m(
+                    detection, self.height_rng, self.run.height_priors_by_class, facade_cls
+                )
+                if self.large_roof_mask is None:
+                    self.large_roof_mask = np.zeros((self.img_h, self.img_w), dtype=np.uint8)
+                for ring, ring_i in ring_polys:
+                    self.run.placed_facades.append((
+                        _pixel_ring_to_latlon(
+                            ring, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+                        ),
+                        facade_path,
+                        facade_h,
+                    ))
+                    self.placed_viz_polys.append((ring_i.copy(), facade_cls))
+                    _mark_poly(self.building_spacing_mask, ring_i)
+                    _mark_poly(self.large_roof_mask, ring_i)
+                    if self.run._obj_avoid:
+                        cv2.fillPoly(self.recent_spacing_mask, [ring_i], 1)
+                        self.recent_spacing_marks += 1
+                detection['_large_footprint_placed'] = True
+                self.pts_this.append((jx, jy, float(detection['heading']), facade_cls))
+                _fp_key = (
+                    'seg_first_polygon_placed' if _seg_poly
+                    else 'yolo_footprint_polygon_placed'
+                )
+                self.file_counts[_fp_key] = self.file_counts.get(_fp_key, 0) + 1
+                self.file_counts['yolo_placed'] = self.file_counts.get('yolo_placed', 0) + 1
+            _bld_class_mask = None
+            if self.large_roof_mask is not None:
+                self.building_spacing_integral = cv2.integral(
+                    self.building_spacing_mask, sdepth=cv2.CV_32S
+                )
+            if self._ring_jobs is not None:
+                # drop traces for detections the gates skipped
+                self._ring_jobs[1].shutdown(wait=True, cancel_futures=True)
+                self._ring_jobs = None
+            _record_elapsed(self.run.timings, self.file_timings, 'footprint_polygons', _t_lf)
+
+    def _place_each_detection(self):
+        """Place an object or a facade for every remaining detection."""
+        for detection in self.yolo_detections:
+            if detection.get('_large_footprint_placed'):
+                continue
+            if self._pf:
+                _t_pf = time.perf_counter()
+                prepared_yolo = _prepare_direct_yolo_detection(detection, self.img_w, self.img_h)
+                self._pf_prep += time.perf_counter() - _t_pf
+            else:
+                prepared_yolo = _prepare_direct_yolo_detection(detection, self.img_w, self.img_h)
+            yolo_poly = prepared_yolo['poly']
+            yolo_bbox = prepared_yolo['bbox']
+            if not prepared_yolo['valid']:
+                self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                if self._blkdbg is not None:
+                    self._blkdbg.append(
+                        ('invalid', None, None, detection.get('points'))
+                    )
+                continue
+            self.yolo_viz_polys.append((yolo_poly.copy(), False))
+            jx = int(prepared_yolo['jx'])
+            jy = int(prepared_yolo['jy'])
+            if not (0 <= jx < self.img_w and 0 <= jy < self.img_h):
+                self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                if self._blkdbg is not None:
+                    self._blkdbg.append(('outside', jx, jy, yolo_poly))
+                continue
+            if self.placement_occ_mask[jy, jx]:
+                self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                if self._blkdbg is not None:
+                    self._blkdbg.append(('static_center', jx, jy, yolo_poly))
+                continue
+            if self.run._obj_avoid and not _placed_yolo_poly_fits(
+                self.placed_yolo_mask,
+                yolo_poly,
+                self.fit_scratch,
+                placed_yolo_integral=self.placed_yolo_integral,
+                recent_yolo_mask=self.recent_yolo_mask,
+                bbox=yolo_bbox,
+            ):
+                self.file_counts['yolo_overlap_blocked'] = (
+                    self.file_counts.get('yolo_overlap_blocked', 0) + 1
+                )
+                # A loose OBB overlapping an already-placed OBB does NOT
+                # mean the footprints overlap, so don't drop here (that
+                # would remove close-but-separate neighbours); the object
+                # path fills the detection's free area.
+            _t_pf = time.perf_counter() if self._pf else 0.0
+            # Hard-gate only on static scenery; footprint overlap with
+            # other placed buildings is resolved by tile-wide dedup.
+            footprint_clear = _poly_fits_with_integral(
+                self.static_occ_mask, yolo_poly, self.fit_scratch,
+                self.static_occ_integral, bbox=yolo_bbox,
+            )
+            if self._pf:
+                self._pf_fits += time.perf_counter() - _t_pf
+            if not footprint_clear:
+                self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                if self._blkdbg is not None:
+                    self._blkdbg.append(('static_footprint', jx, jy, yolo_poly))
+                continue
+            if (
+                self.large_roof_mask is not None and
+                self.large_roof_mask[jy, jx] and
+                _poly_mask_overlap_frac(
+                    self.large_roof_mask, yolo_poly, self.fit_scratch, bbox=yolo_bbox
+                ) >= LARGE_FOOTPRINT_NESTED_FRAC
+            ):
+                # part of a large roof already placed as one polygon
+                self.file_counts['yolo_inside_large_footprint'] = (
+                    self.file_counts.get('yolo_inside_large_footprint', 0) + 1
+                )
+                if self._blkdbg is not None:
+                    self._blkdbg.append(('large_footprint', jx, jy, yolo_poly))
+                continue
+
+            heading = float(detection['heading'])
+            try_cls = int(detection['placement_class'])
+            facade_cls = _yolo_facade_class(try_cls)
+            if facade_cls is None:
+                # Guarantee a placement class for any detection that
+                # cleared the overlap/static steps: fall back to its own
+                # class (or a medium default) so the object path always
+                # runs.
+                facade_cls = (
+                    try_cls if try_cls in BLD_PLACEMENT_CLASSES
+                    else BLD_CLASS_MEDIUM
+                )
+            # The center-block disc (minimum object spacing) is bypassed:
+            # it would drop close non-overlapping neighbours; tile-wide
+            # dedup handles spacing.
+            o_lon, o_lat = px_to_latlon(jx, jy, self.img_w, self.img_h,
+                                        self.lat_n, self.lat_s, self.lon_w, self.lon_e)
+            if not (self.run.lon <= o_lon < self.run.lon + 1 and self.run.lat <= o_lat < self.run.lat + 1):
+                self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                if self._blkdbg is not None:
+                    self._blkdbg.append(('out_of_tile', jx, jy, yolo_poly))
+                continue
+
+            object_candidate = None
+            object_status = 'objects_disabled'
+            if _asset_kind_enabled('object', self.run.building_asset_mode):
+                roof_color = None
+                if self.run.enabled_yolo_color_assets_by_family:
+                    if (
+                        self.roof_color_image is None and
+                        not self.roof_color_load_attempted
+                    ):
+                        self.roof_color_load_attempted = True
+                        _img_t = time.perf_counter()
+                        self.roof_color_image = self.run._load_source_image(
+                            self.fname, self.run._source_mode, self.run._orthophoto_dir
+                        )
+                        if self.roof_color_image is not None:
+                            _record_elapsed(
+                                self.run.timings, self.file_timings, 'dds_load', _img_t
+                            )
+                    if self.roof_color_image is not None:
+                        roof_color = ROOFCOLOR.sample_rooftop_color(
+                            self.roof_color_image, yolo_poly
+                        )
+                        if roof_color is not None:
+                            detection['roof_color'] = roof_color
+                    if roof_color is None:
+                        self.file_counts['roof_color_unavailable'] = (
+                            self.file_counts.get('roof_color_unavailable', 0) + 1
+                        )
+                _t_pf = time.perf_counter() if self._pf else 0.0
+                object_candidate, object_status = _select_yolo_object_candidate(
+                    self.run.yolo_object_fit_table,
+                    detection,
+                    yolo_poly,
+                    jx,
+                    jy,
+                    heading,
+                    self.m_per_px,
+                    residential_context=True,
+                    min_coverage=self.run.yolo_min_coverage,
+                    enabled_assets_by_path=self.run.enabled_yolo_object_assets_by_path,
+                    static_occ_mask=self.placement_occ_mask,
+                    building_spacing_mask=self.building_spacing_mask,
+                    scratch_mask=self.fit_scratch,
+                    static_occ_integral=self.placement_occ_integral,
+                    spacing_occ_integral=self.building_spacing_integral,
+                    recent_spacing_mask=self.recent_spacing_mask,
+                    skip_occupancy=not self.run._obj_avoid,
+                    profile_out=self._pf_select_acc,
+                    roof_color=roof_color,
+                    color_assets_by_family=self.run.enabled_yolo_color_assets_by_family,
+                )
+                if self._pf:
+                    self._pf_select += time.perf_counter() - _t_pf
+            placed_direct_detection = False
+            if object_candidate is not None:
+                asset = object_candidate['asset']
+                final_h = float(object_candidate['heading'])
+                footprint_poly = object_candidate['footprint_poly']
+                self.run.placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
+                self.placed_viz_polys.append((footprint_poly.copy(), facade_cls))
+                if object_candidate.get('roof_color_match'):
+                    roof_viz_status = "match"
+                elif detection.get('roof_color') is not None:
+                    roof_viz_status = "fallback"
+                else:
+                    roof_viz_status = "unavailable"
+                self.roof_color_viz_polys.append((
+                    footprint_poly.copy(),
+                    roof_viz_status,
+                    _asset_roof_viz_rgb(asset),
+                ))
+                # Spacing marks only feed per-candidate self-avoidance;
+                # skip them when relying on tile-wide dedup.
+                if self.run._obj_avoid:
+                    _t_pf = time.perf_counter() if self._pf else 0.0
+                    _mark_poly(self.building_spacing_mask, footprint_poly)
+                    cv2.fillPoly(self.recent_spacing_mask, [np.int32(footprint_poly)], 1)
+                    if self._pf:
+                        self._pf_maskfill += time.perf_counter() - _t_pf
+                    self.recent_spacing_marks += 1
+                self.pts_this.append((jx, jy, final_h, facade_cls))
+                self.file_counts['yolo_object_placed'] = (
+                    self.file_counts.get('yolo_object_placed', 0) + 1
+                )
+                if object_candidate.get('roof_color_match'):
+                    self.file_counts['roof_color_matched'] = (
+                        self.file_counts.get('roof_color_matched', 0) + 1
+                    )
+                elif detection.get('roof_color') is not None:
+                    self.file_counts['roof_color_fit_fallback'] = (
+                        self.file_counts.get('roof_color_fit_fallback', 0) + 1
+                    )
+                placed_direct_detection = True
+            else:
+                if object_status != 'objects_disabled':
+                    status_key = {
+                        'no_candidates': 'yolo_object_no_candidates',
+                        'size_reject': 'yolo_object_size_reject',
+                        'coverage_reject': 'yolo_object_coverage_reject',
+                        'outline_reject': 'yolo_object_outline_reject',
+                        'context_skipped': 'yolo_object_context_skipped',
+                        'occupancy_reject': 'yolo_object_occupancy_reject',
+                        'height_reject': 'yolo_object_height_reject',
+                        'no_dimensions': 'yolo_object_no_dimensions',
+                        'miss': 'yolo_object_lookup_miss',
+                    }.get(object_status, 'yolo_object_lookup_miss')
+                    self.file_counts[status_key] = self.file_counts.get(status_key, 0) + 1
+                if self._blkdbg is not None:
+                    self._blkdbg.append(
+                        ('sel_' + str(object_status), jx, jy, yolo_poly)
+                    )
+                facade_footprint_ok = _direct_yolo_facade_footprint_allowed(
+                    detection
+                )
+                # The fallback facade extrudes the raw (loose) OBB, so
+                # tolerate a small road overlap instead of rejecting on
+                # first contact; see DIRECT_FACADE_ROAD_OVERLAP_FRAC.
+                facade_road_ok = (
+                    self.route_excl_mask is None or
+                    _poly_mask_overlap_frac(
+                        self.route_excl_mask, yolo_poly, self.fit_scratch,
+                        bbox=yolo_bbox,
+                    ) <= DIRECT_FACADE_ROAD_OVERLAP_FRAC
+                )
+                if (
+                    _asset_kind_enabled('facade', self.run.building_asset_mode) and
+                    facade_footprint_ok and
+                    facade_road_ok and
+                    _poly_fits(self.building_spacing_mask, yolo_poly, self.fit_scratch)
+                ):
+                    facade_path = _facade_for_detection(
+                        facade_cls,
+                        self.veg_map,
+                        jx,
+                        jy,
+                        self.m_per_px,
+                        lat=float(o_lat),
+                        lon=float(o_lon),
+                        include_simheaven_assets=self.run.simheaven_assets_available,
+                    )
+                    self.run.placed_facades.append((
+                        _pixel_ring_to_latlon(
+                            yolo_poly, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+                        ),
+                        facade_path,
+                        _yolo_facade_height_m(
+                            detection, self.height_rng, self.run.height_priors_by_class, facade_cls
+                        ),
+                    ))
+                    self.placed_viz_polys.append((yolo_poly.copy(), facade_cls))
+                    _mark_poly(self.building_spacing_mask, yolo_poly)
+                    if self.run._obj_avoid:
+                        cv2.fillPoly(self.recent_spacing_mask, [np.int32(yolo_poly)], 1)
+                        self.recent_spacing_marks += 1
+                    self.pts_this.append((jx, jy, heading, facade_cls))
+                    self.file_counts['yolo_facade_placed'] = (
+                        self.file_counts.get('yolo_facade_placed', 0) + 1
+                    )
+                    self.run.direct_yolo_facade_placements += 1
+                    placed_direct_detection = True
+                elif _asset_kind_enabled('facade', self.run.building_asset_mode):
+                    if not facade_footprint_ok:
+                        status_key = 'yolo_facade_oversize_reject'
+                    elif not facade_road_ok:
+                        status_key = 'yolo_facade_road_reject'
+                    else:
+                        status_key = 'yolo_facade_spacing_reject'
+                    self.file_counts[status_key] = self.file_counts.get(status_key, 0) + 1
+
+            self.yolo_viz_polys[-1] = (yolo_poly.copy(), placed_direct_detection)
+            # The placed-OBB mask and the incremental occupancy
+            # integrals are only consumed by the overlap-avoidance
+            # paths (OBB dedup + selector occupancy), both skipped
+            # unless per-candidate self-avoidance is on — so don't pay
+            # to maintain them when relying on tile-wide dedup.
+            if self.run._obj_avoid:
+                cv2.fillPoly(self.placed_yolo_mask, [np.int32(yolo_poly)], 1)
+                cv2.fillPoly(self.recent_yolo_mask, [np.int32(yolo_poly)], 1)
+                self.recent_yolo_marks += 1
+                if self.recent_yolo_marks >= self.recent_yolo_rebuild_threshold:
+                    self.placed_yolo_integral = cv2.integral(
+                        self.placed_yolo_mask, sdepth=cv2.CV_32S
+                    )
+                    self.recent_yolo_mask.fill(0)
+                    self.recent_yolo_marks = 0
+                if self.recent_spacing_marks >= self.recent_spacing_rebuild_threshold:
+                    self.building_spacing_integral = cv2.integral(
+                        self.building_spacing_mask, sdepth=cv2.CV_32S
+                    )
+                    self.recent_spacing_mask.fill(0)
+                    self.recent_spacing_marks = 0
+            if placed_direct_detection:
+                self.file_counts['yolo_placed'] = self.file_counts.get('yolo_placed', 0) + 1
+
+    def _finish_placement(self):
+        """Write the block-debug dump and record placement timings."""
+        if self._blkdbg is not None:
+            try:
+                with open(
+                    os.path.join(
+                        self.run.cache_dir,
+                        self.fname.replace('.dds', '_blockdebug.pkl'),
+                    ),
+                    'wb',
+                ) as _f:
+                    pickle.dump(
+                        {
+                            'outcomes': self._blkdbg,
+                            'stock_quads': [
+                                np.asarray(q)
+                                for q in self.stock_yolo_occupied_polys
+                            ],
+                        },
+                        _f,
+                    )
+            except Exception:
+                pass
+        yolo_place_elapsed = time.perf_counter() - self._t_yolo_place
+        self.run.timings['placement'] += yolo_place_elapsed
+        self.file_timings['fit_loop'] = self.file_timings.get('fit_loop', 0.0) + yolo_place_elapsed
+        if self._pf:
+            for _k, _v in (
+                ('place_prep', self._pf_prep),
+                ('place_fits', self._pf_fits),
+                ('place_select', self._pf_select),
+                ('place_maskfill', self._pf_maskfill),
+            ):
+                self.run.timings[_k] += _v
+                self.file_timings[_k] = self.file_timings.get(_k, 0.0) + _v
+            _acc = self._pf_select_acc or {}
+            self.file_counts['place_select_calls'] = (
+                self.file_counts.get('place_select_calls', 0) + int(_acc.get('calls', 0))
+            )
+            self.file_counts['place_cands_scanned'] = (
+                self.file_counts.get('place_cands_scanned', 0) + int(_acc.get('seen', 0))
+            )
+            self.file_counts['place_cands_viable'] = (
+                self.file_counts.get('place_cands_viable', 0) + int(_acc.get('viable', 0))
+            )
+            self.file_counts['place_cands_offered'] = (
+                self.file_counts.get('place_cands_offered', 0) + int(_acc.get('entries', 0))
+            )
+
+    def _report_and_cache(self):
+        """Print the texture summary and save its placement cache."""
+        self.file_counts['placed'] = len(self.pts_this)
+
+        self.col = (self.til_x_left - self.run.x_min) // self.run.x_step
+        self.row = (self.til_y_top  - self.run.y_min) // self.run.y_step
+        # Placed-footprint coverage: fraction of the tile actually covered by
+        # placed building footprints (objects + facades), the packing-density
+        # metric to watch when tuning overlap removal vs. coverage.
+        if self.placed_viz_polys:
+            _placed_mask = np.zeros((self.img_h, self.img_w), dtype=np.uint8)
+            cv2.fillPoly(
+                _placed_mask,
+                [np.int32(np.asarray(_p)) for _p, _cls in self.placed_viz_polys],
+                1,
+            )
+            placed_pct = 100.0 * float(cv2.countNonZero(_placed_mask)) / float(self.img_w * self.img_h)
+        else:
+            placed_pct = 0.0
+        self.file_counts['placed_footprint_pct'] = round(placed_pct, 2)
+        class_counts = {
+            cls: sum(1 for p in self.pts_this if p[3] == cls)
+            for cls in BLD_PLACEMENT_CLASSES
+        }
+        spacing_label = _format_class_spacing(self.spacing_px_by_class, self.m_per_px)
+        if self.run.verbose_log:
+            print(
+                f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  "
+                f"{_describe_placement_summary(class_counts, spacing_label, self.file_counts)}"
+                f"  placed%={placed_pct:.1f}"
+            )
+        else:
+            # Same accounting as the cached-replay line: objects + facades
+            # appended for this texture.
+            _n_tex_placed = (
+                (len(self.run.placed_stock_objects) - self._start_object_idx) +
+                (len(self.run.placed_facades) - self._start_facade_idx)
+            )
+            print(
+                f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  "
+                f"({_n_tex_placed} placements)",
+                flush=True,
+            )
+
+        if not self.run.disable_cache and not self.run.ignore_placement_cache:
+            try:
+                _t = time.perf_counter()
+                with open(self._bld_cache_file, 'wb') as _f:
+                    pickle.dump({
+                        'params': self._effective_bld_params,
+                        'covered': self.run._covered_fracs_by_file.get(self.fname),
+                        'source': 'direct_yolo',
+                        'placements': {
+                            'objects': self.run.placed_stock_objects[self._start_object_idx:],
+                            'facades': self.run.placed_facades[self._start_facade_idx:],
+                        },
+                    }, _f)
+                _record_elapsed(self.run.timings, self.file_timings, 'cache_save', _t)
+            except Exception:
+                pass
+
+    def _draw_overview_panels(self):
+        """Draw this texture's panels of the overview images."""
+        if self.run.make_viz and self.run.composite is not None:
+            _t_viz = time.perf_counter()
+            if self.img is None:
+                _img_t = time.perf_counter()
+                self.img = self.run._load_source_image(self.fname, self.run._source_mode, self.run._orthophoto_dir)
+                if self.img is None:
+                    return
+                _record_elapsed(self.run.timings, self.file_timings, 'dds_load', _img_t)
+            scale = self.run.TILE_VIZ / self.img_w
+            panel = np.array(Image.fromarray(self.img).resize((self.run.TILE_VIZ, self.run.TILE_VIZ), Image.LANCZOS))
+            def _blend_viz_mask(src_mask, colour, alpha):
+                if src_mask is None or not np.any(src_mask):
+                    return
+                viz_mask = np.array(
+                    Image.fromarray((src_mask != 0).astype(np.uint8) * 255)
+                    .resize((self.run.TILE_VIZ, self.run.TILE_VIZ), Image.NEAREST)
+                ) > 127
+                panel[viz_mask] = (
+                    panel[viz_mask] * (1.0 - alpha) +
+                    np.asarray(colour, dtype=np.float32) * alpha
+                ).astype(np.uint8)
+
+            _blend_viz_mask(self.route_excl_mask, (255, 150, 0), 0.70)
+            _blend_viz_mask(self.mesh_water_mask, (0, 60, 255), 0.65)
+            _blend_viz_mask(self.road_mask, (255, 0, 0), 0.75)
+            _blend_viz_mask(self.rail_mask, (255, 0, 255), 0.75)
+            _blend_viz_mask(self.poly_mask, (120, 0, 255), 0.75)
+            _blend_viz_mask(self.existing_bld_mask, (0, 0, 0), 0.70)
+            _blend_viz_mask(self.sh_bld_mask, (255, 255, 255), 0.65)
+            _blend_viz_mask(self.custom_bld_mask, (0, 255, 255), 0.65)
+            pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil, "RGBA")
+            dot_colours = {
+                BLD_CLASS_TINY_RESIDENTIAL: (80, 220, 80),
+                BLD_CLASS_SMALL_RESIDENTIAL: (150, 230, 60),
+                BLD_CLASS_COMPACT_RESIDENTIAL: (245, 220, 70),
+                BLD_CLASS_MEDIUM: (255, 165, 50),
+                BLD_CLASS_SMALL_APARTMENT: (255, 90, 70),
+                BLD_CLASS_APARTMENT_BLOCK: (80, 200, 255),
+                BLD_CLASS_LARGE: (70, 130, 255),
+                BLD_CLASS_EXTRA_LARGE: (135, 90, 255),
+            }
+            footprint_fill = (255, 255, 255)
+            yolo_line_w = max(1, int(round(self.run.TILE_VIZ / 2048)))
+            for poly, placed in self.yolo_viz_polys:
+                pts = [
+                    (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                    for px2, py2 in poly
+                ]
+                if len(pts) >= 3:
+                    fill_alpha = 34 if placed else 18
+                    draw.polygon(pts, fill=(40, 180, 255, fill_alpha), outline=(40, 180, 255, 230))
+                    draw.line(pts + [pts[0]], fill=(255, 245, 80, 235), width=yolo_line_w)
+            for poly, cls2 in self.placed_viz_polys:
+                pts = [
+                    (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                    for px2, py2 in poly
+                ]
+                if len(pts) >= 3:
+                    draw.polygon(pts, outline=dot_colours.get(cls2, (0, 220, 0)))
+                    cx = sum(p[0] for p in pts) / len(pts)
+                    cy = sum(p[1] for p in pts) / len(pts)
+                    inner = [
+                        (
+                            int(round(cx + (p[0] - cx) * 0.88)),
+                            int(round(cy + (p[1] - cy) * 0.88)),
+                        )
+                        for p in pts
+                    ]
+                    draw.polygon(inner, outline=footprint_fill)
+            for poly, roof_status, roof_rgb in self.roof_color_viz_polys:
+                pts = [
+                    (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                    for px2, py2 in poly
+                ]
+                if len(pts) >= 3:
+                    status_color = ROOF_COLOR_VIZ_STYLES[roof_status]
+                    draw.polygon(
+                        pts,
+                        fill=tuple(roof_rgb) + (72,),
+                        outline=status_color + (255,),
+                    )
+                    draw.line(
+                        pts + [pts[0]],
+                        fill=status_color + (255,),
+                        width=max(2, yolo_line_w * 2),
+                    )
+            for px2, py2, _, cls2 in self.pts_this:
+                sx, sy = int(px2*scale), int(py2*scale)
+                draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
+            for poly, placed in self.yolo_viz_polys:
+                pts = [
+                    (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
+                    for px2, py2 in poly
+                ]
+                if len(pts) >= 3:
+                    draw.line(
+                        pts + [pts[0]],
+                        fill=(255, 245, 80, 255 if placed else 190),
+                        width=yolo_line_w,
+                    )
+            _draw_roof_color_viz_legend(draw, self.roof_color_viz_polys, self.run.TILE_VIZ)
+            self.run.composite[self.row*self.run.TILE_VIZ:(self.row+1)*self.run.TILE_VIZ, self.col*self.run.TILE_VIZ:(self.col+1)*self.run.TILE_VIZ] = np.array(pil)
+
+            if self.run.footprint_composite is not None:
+                fp_base = Image.fromarray(
+                    np.array(
+                        Image.fromarray(self.img).resize((self.run.TILE_VIZ, self.run.TILE_VIZ), Image.LANCZOS)
+                    )
+                ).convert('RGBA')
+                fp_layer = Image.new('RGBA', (self.run.TILE_VIZ, self.run.TILE_VIZ), (0, 0, 0, 0))
+                fp_draw = ImageDraw.Draw(fp_layer)
+                yolo_line_w = max(1, int(round(self.run.TILE_VIZ / 2048)))
+                for poly, placed in self.yolo_viz_polys:
+                    if not placed:
+                        continue
+                    pts = [
+                        (
+                            int(round(float(px2) * scale)),
+                            int(round(float(py2) * scale)),
+                        )
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        alpha = 44 if placed else 24
+                        fp_draw.polygon(pts, fill=(40, 180, 255, alpha), outline=(40, 180, 255, 230))
+                        fp_draw.line(pts + [pts[0]], fill=(255, 245, 80, 240), width=yolo_line_w)
+                for poly, cls2 in self.placed_viz_polys:
+                    pts = [
+                        (
+                            int(round(float(px2) * scale)),
+                            int(round(float(py2) * scale)),
+                        )
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        outline = dot_colours.get(cls2, (0, 220, 0))
+                        fp_draw.polygon(pts, fill=(245, 242, 232, 170), outline=outline + (255,))
+                for poly, roof_status, roof_rgb in self.roof_color_viz_polys:
+                    pts = [
+                        (
+                            int(round(float(px2) * scale)),
+                            int(round(float(py2) * scale)),
+                        )
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        status_color = ROOF_COLOR_VIZ_STYLES[roof_status]
+                        fp_draw.polygon(
+                            pts,
+                            fill=tuple(roof_rgb) + (150,),
+                            outline=status_color + (255,),
+                        )
+                        fp_draw.line(
+                            pts + [pts[0]],
+                            fill=status_color + (255,),
+                            width=max(2, yolo_line_w * 2),
+                        )
+                for poly, placed in self.yolo_viz_polys:
+                    if not placed:
+                        continue
+                    pts = [
+                        (
+                            int(round(float(px2) * scale)),
+                            int(round(float(py2) * scale)),
+                        )
+                        for px2, py2 in poly
+                    ]
+                    if len(pts) >= 3:
+                        fp_draw.line(
+                            pts + [pts[0]],
+                            fill=(255, 245, 80, 255 if placed else 190),
+                            width=yolo_line_w,
+                        )
+                _draw_roof_color_viz_legend(
+                    fp_draw, self.roof_color_viz_polys, self.run.TILE_VIZ
+                )
+                fp_img = Image.alpha_composite(fp_base, fp_layer).convert('RGB')
+                self.run.footprint_composite[
+                    self.row*self.run.TILE_VIZ:(self.row+1)*self.run.TILE_VIZ,
+                    self.col*self.run.TILE_VIZ:(self.col+1)*self.run.TILE_VIZ,
+                ] = np.array(fp_img)
+            _record_elapsed(self.run.timings, self.file_timings, 'viz', _t_viz)
+
 def run(
     tex_dir,
     lat,
@@ -7657,6 +10755,13 @@ def run(
     library_cache_dir=None,
     **legacy_kwargs,
 ):
+    """Generate the building overlay DSF for one tile.
+
+    Reads the tile's textures from ``tex_dir``, detects buildings and writes
+    ``out_dsf`` (plus its ``_bld.txt`` source). Returns the number of
+    placements, 0 when no building assets are installed, or None when the
+    tile has no textures. The stages live in ``_BuildingOverlayRun``.
+    """
     # Zone-area filtering was retired in favour of the up-front min-footprint
     # gate: all building zones are now accepted regardless of area. Older
     # (frozen-exe) callers still pass these; accept and ignore them.
@@ -7684,2890 +10789,26 @@ def run(
     if legacy_kwargs:
         bad_keys = ", ".join(sorted(legacy_kwargs))
         raise TypeError(f"run() got unexpected keyword argument(s): {bad_keys}")
-
-    if min_footprint_m2 is None:
-        min_footprint_m2 = 12.0
-    min_footprint_m2 = max(0.0, float(min_footprint_m2))
-
-    import re as _re
-    STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", _re.IGNORECASE)
-    _transient_cache_ctx = None
-    sidecar_cache_dir = cache_dir
-    if disable_cache:
-        import tempfile as _tempfile
-        _transient_cache_ctx = _tempfile.TemporaryDirectory(
-            prefix="bld_nocache_"
-        )
-        sidecar_cache_dir = _transient_cache_ctx.name
-
-    def _collect_source_files():
-        return SEGFORMER.collect_source_texture_files(tex_dir, lat, lon)
-
-    def _orthophoto_path(fname, ortho_dir):
-        m = STD_RE.match(fname)
-        if not m or SEGFORMER.is_mask_texture_name(fname):
-            return None
-        provider = m.group(3)
-        zl = int(m.group(4))
-        stem = os.path.splitext(fname)[0]
-        subdir = os.path.join(ortho_dir, f"{provider}_{zl}")
-        for ext in ('.jpg', '.jpeg', '.png'):
-            p = os.path.join(subdir, stem + ext)
-            if os.path.exists(p) and not SEGFORMER.is_mask_texture_name(os.path.basename(p)):
-                return p
-        return None
-
-    def _source_image_path(fname, source_mode, ortho_dir):
-        if source_mode == 'dds':
-            return os.path.join(tex_dir, fname)
-        return _orthophoto_path(fname, ortho_dir)
-
-    def _load_source_image(fname, source_mode, ortho_dir):
-        p = _source_image_path(fname, source_mode, ortho_dir)
-        if not p:
-            return None
-        if source_mode == 'dds':
-            return SEGFORMER.load_dds_or_none(
-                p,
-                log_prefix='[Bld]',
-                display_name=fname,
-            )
-        try:
-            return np.asarray(Image.open(p).convert('RGB'))
-        except Exception:
-            return None
-
-    def _dds_cache_paths(fname):
-        if not cache_dir:
-            return ()
-        stem = fname.replace('.dds', '')
-        return tuple(
-            os.path.join(cache_dir, stem + suffix)
-            for suffix in (
-                '_veg.npy',
-                '_road.pkl',
-                '_bld.pkl',
-                '_yolo_obb.pkl',
-                '_vegaux.pkl',
-                '_vegpoly.pkl',
-            )
-        )
-
-    def _remove_cache_files(paths):
-        for path in paths:
-            try:
-                if path and os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
-
-    # Pick the textures that actually render, and the part of each one they own.
-    # The tile cfg is the source of truth: it is what Ortho4XP turned into the
-    # per-mesh-cell texture assignment at build time, so replaying it drops
-    # leftovers from earlier builds with a different provider and resolves both
-    # kinds of overlap — a zone boundary splitting one footprint between two
-    # providers, and a higher-ZL texture covering part of a lower-ZL one. The
-    # regions another texture owns are recorded as (x0,y0,x1,y1) fractions of
-    # this texture's footprint and excluded from detection/placement, which was
-    # the dominant source of the duplicate placements the tile-wide dedup pass
-    # had to mop up. Computed from the pre-filter kept set so debug/benchmark
-    # file filters see the same per-texture behaviour as a full production run.
-    _source_files, _source_mode, _orthophoto_dir = _collect_source_files()
-    files, _covered_fracs_by_file, _selection_report = TEXSEL.select_textures(
-        _source_files, tex_dir, lat, lon
-    )
-    if not files:
-        print("No DDS files found."); return
-    for _line in TEXSEL.format_selection_report(_selection_report):
-        print(_line)
-    file_filter = _env_patterns("O4_OVERLAY_FILE_FILTER")
-    if dds_filter:
-        dds_filter = [os.path.basename(str(name)) for name in dds_filter]
-        files = [name for name in files if name in set(dds_filter)]
-        print(f"DDS debug filter: {', '.join(dds_filter)} -> {len(files)} files")
-    if file_filter:
-        files = [
-            name for name in files
-            if any(fnmatch.fnmatchcase(name, pattern) for pattern in file_filter)
-        ]
-        print(f"DDS filter: {', '.join(file_filter)} -> {len(files)} files")
-    if not files:
-        print("No DDS files found."); return
-    _used_zls = sorted(set(int(STD_RE.match(_f).group(4)) for _f in files))
-    _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
-
-    # Grid geometry for visualisation
-    xs = sorted(set(int(f.split('_')[1]) for f in files))
-    ys = sorted(set(int(f.split('_')[0]) for f in files))
-    x_step = xs[1]-xs[0] if len(xs)>1 else 16
-    y_step = ys[1]-ys[0] if len(ys)>1 else 16
-    x_min, y_min = xs[0], ys[0]
-    n_cols = (xs[-1]-xs[0])//x_step + 1
-    n_rows = (ys[-1]-ys[0])//y_step + 1
-
-    print(f"Tile: lat={lat} lon={lon}  DDS: {len(files)} ({_zl_str})  Grid: {n_cols}×{n_rows}")
-    print(
-        f"Params: edge_spacing={spacing_m}m  close={close_k}px  open={open_k}px  "
-        f"min_footprint={min_footprint_m2}m²"
-    )
-
-    # ── Load OSM roads ────────────────────────────────────────────────────────
-    if osm_roads_path is None:
-        # Auto-discover: <tex_dir>/../../.. = Ortho4XP root
-        o4xp_root  = os.path.dirname(os.path.dirname(os.path.dirname(tex_dir)))
-        lat_g = int(math.floor(lat / 10)) * 10
-        lon_g = int(math.floor(lon / 10)) * 10
-        lat_s_str = f"{'+' if lat >= 0 else '-'}{abs(int(lat)):02d}"
-        lon_s_str = f"{'+' if lon >= 0 else '-'}{abs(int(lon)):03d}"
-        lat_g_str = f"{'+' if lat_g >= 0 else '-'}{abs(lat_g):02d}"
-        lon_g_str = f"{'+' if lon_g >= 0 else '-'}{abs(lon_g):03d}"
-        osm_roads_path = os.path.join(
-            o4xp_root, 'OSM_data',
-            f'{lat_g_str}{lon_g_str}',
-            f'{lat_s_str}{lon_s_str}',
-            f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
-    osm_big_roads = _load_osm_roads(osm_roads_path, cache_dir=sidecar_cache_dir)
-    osm_small_roads_path = _osm_tile_peer_path(osm_roads_path, "_small_roads.osm.bz2")
-    osm_small_roads = (
-        _load_osm_roads(osm_small_roads_path, cache_dir=sidecar_cache_dir)
-        if osm_small_roads_path else []
-    )
-    # Ortho4XP's own OSM extracts; the full street grid and the railways come
-    # from the installed simHeaven network below. Nothing is downloaded here.
-    osm_roads = (osm_big_roads or []) + (osm_small_roads or [])
-    print(
-        f"OSM roads: {len(osm_roads)} ways "
-        f"(big={len(osm_big_roads)} small={len(osm_small_roads)})"
-    )
-
-    # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
-    excl_polys = []           # hard exclusions: water / airports
-    existing_bld_polys = []   # occupancy-only blockers: simHeaven facade footprints
-    excl_rails = []           # road-style dicts for railways (simHeaven network)
-    residential_polys = []    # no residential landuse source
-
-    for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
-        p = _osm_tile_peer_path(osm_roads_path, suffix) or osm_roads_path.replace(
-            '_big_roads.osm.bz2', suffix
-        )
-        excl_polys.extend(_load_osm_closed_ways(p, cache_dir=sidecar_cache_dir))
-    print(f"Exclusion polygons (water+airports): {len(excl_polys)}")
-
-    timings = {
-        'simheaven_parse': 0.0,
-        'custom_scenery_parse': 0.0,
-        'cache_load': 0.0,
-        'dds_load': 0.0,
-        'segformer_inference': 0.0,
-        'trained_yolo_inference': 0.0,
-        'yolo_suppress': 0.0,
-        'heightnet': 0.0,
-        'footprint_polygons': 0.0,
-        'seg_first': 0.0,
-        'greenhouses': 0.0,
-        'stock_yolo_inference': 0.0,
-        'lookup': 0.0,
-        'road_raster': 0.0,
-        'mesh_water': 0.0,
-        'existing_bld_excl': 0.0,
-        'mask_apply': 0.0,
-        'fit_loop': 0.0,
-        'cache_save': 0.0,
-        'viz': 0.0,
-        'placement': 0.0,
-        'dsf_text': 0.0,
-        'dsf_compile': 0.0,
-        # O4_BLD_PLACE_PROFILE sub-phase breakdown of the fit_loop.
-        'place_prep': 0.0,
-        'place_fits': 0.0,
-        'place_select': 0.0,
-        'place_maskfill': 0.0,
-    }
-    detail_timing = _env_flag("O4_OVERLAY_TIMING_DETAIL")
-    place_profile = _env_flag("O4_BLD_PLACE_PROFILE")
-    # Slow-texture timing lines are verbose output; an explicitly set
-    # O4_OVERLAY_TIMING_SLOW still enables them regardless of verbose_log.
-    slow_timing_s = _env_float(
-        "O4_OVERLAY_TIMING_SLOW", 3.0 if verbose_log else 0.0
-    )
-    # Only detected footprints are placed: the inferred candidate-grid / gap
-    # fill placement was retired.
-    yolo_cuda_cleanup_every = max(
-        0, int(_env_float("O4_BLD_YOLO_CUDA_CLEANUP_EVERY", 0))
-    )
-    footprint_pad_m = max(0.0, _env_float("O4_BLD_FOOTPRINT_PAD_M", FOOTPRINT_PAD_M))
-    strict_fit = _env_flag("O4_BLD_STRICT_FIT")
-    _t = time.perf_counter()
-
-    if yolo_checkpoint is None:
-        yolo_checkpoint = os.environ.get(
-            "O4_BLD_YOLO_CHECKPOINT",
-            DEFAULT_YOLO_OBB_CHECKPOINT,
-        )
-    yolo_conf = float(
-        DEFAULT_YOLO_OBB_CONF if yolo_conf is None
-        else yolo_conf
-    )
-    yolo_iou = float(
-        DEFAULT_YOLO_OBB_IOU if yolo_iou is None
-        else yolo_iou
-    )
-    yolo_stride = int(
-        DEFAULT_YOLO_OBB_STRIDE if yolo_stride is None
-        else yolo_stride
-    )
-    yolo_max_det = int(
-        DEFAULT_YOLO_OBB_MAX_DET if yolo_max_det is None
-        else yolo_max_det
-    )
-    yolo_imgsz = int(yolo_imgsz or DEFAULT_YOLO_OBB_IMGSZ)
-    # Trained-YOLO inference runs on the native-resolution texture at every
-    # zoom level. The legacy ZL16-analysis downsample (build a target-ZL PNG,
-    # infer on it, scale detections back up) is kept only as an env opt-in for
-    # A/B comparisons: O4_BLD_YOLO_ANALYSIS_ZL=<zl> (0 = native, default).
-    yolo_analysis_target_zl = max(
-        0,
-        _env_int("O4_BLD_YOLO_ANALYSIS_ZL", 0),
-    )
-    # Batch stays 1 by default: the scripts/*_batch_autotune.py harnesses
-    # showed batch>1 changes borderline detections on dense tiles (not
-    # placement-exact), for ~0.3s/DDS saved on an RTX 4080. Opting in via the
-    # env vars is OOM-safe — the inference loops retry at batch=1 on CUDA OOM.
-    yolo_batch_size = max(
-        1,
-        _env_int("O4_BLD_YOLO_BATCH", DEFAULT_YOLO_OBB_BATCH),
-    )
-    stock_yolo_batch_size = max(
-        1,
-        _env_int("O4_STOCK_YOLO_BATCH", _stock_yolo_batch_default()),
-    )
-    yolo_fuse_model = _env_flag("O4_BLD_YOLO_FUSE")
-    # Overlap-free placement is the product behaviour: no two objects may
-    # overlap. Overlaps are removed with NO minimum limit — drop on ANY
-    # overlap, smallest-first — so the behaviour is consistent at every zoom
-    # level (legacy 25 m^2 / 0.35-coverage thresholds let fine higher-ZL
-    # overlaps survive).
-    yolo_suppress_coverage = 0.0
-    yolo_suppress_min_overlap_m2 = 0.0
-    # Per-overlap containment rule for the zero-threshold drop: a bigger
-    # detection survives when the smaller kept detections inside it explain
-    # less than yolo_suppress_explain_frac of its ground area (it then evicts
-    # the contained ones that do not beat its confidence); sliver contacts
-    # keep the smallest-first drop. Chosen from a 9-variant overlay A/B on
-    # +22+113 28512_53472_BI16 (sliver=smaller, evict=conf). Disable with
-    # O4_BLD_PAIR_OVERLAP_RULE=0 to restore the blanket smaller-wins drop.
-    yolo_pair_overlap_rule = _env_flag("O4_BLD_PAIR_OVERLAP_RULE", True)
-    yolo_suppress_containment_frac = _env_float(
-        "O4_BLD_SUPPRESS_CONTAINMENT_FRAC", 0.35
-    )
-    yolo_suppress_explain_frac = _env_float(
-        "O4_BLD_SUPPRESS_EXPLAIN_FRAC", 0.60
-    )
-    # Road/rail exclusion is always on, but metre-accurate and footprint-only:
-    # the paved surface is rasterized at real per-class carriageway widths
-    # (ROAD_EXCLUSION_WIDTH_M) and blocks only the *placed* footprint (objects,
-    # shrunk facade templates, gap fill) plus detection centers. The loose
-    # detection OBB is never gated on roads — the old all-roads >=6px lattice
-    # with an any-pixel OBB gate killed most of a dense city texture (measured
-    # +22+120 57072_109328_Arc17: 8,544 of 10,900 kept detections blocked;
-    # see commit ac28808b). --allow-road-overlap disables it entirely.
-    # Per-candidate object self-avoidance (selector occupancy check + OBB dedup +
-    # spacing-mask marking + incremental integral rebuilds) is redundant now that
-    # inter-object overlaps are removed tile-wide after placement
-    # (_dedupe_overlapping_placements). Skip that per-texture work by default for
-    # speed: static obstacles (roads/water/OSM/scenery) are still enforced by the
-    # detection center gate + footprint containment, and detection suppression
-    # still drops overlapping detections. ``_obj_avoid`` therefore gates only the
-    # inter-object machinery. Restore per-candidate self-avoidance (which can
-    # substitute a smaller fitting object instead of dropping) via the env var.
-    _obj_avoid = _env_flag("O4_BLD_OBJECT_SELF_AVOID", False)
-    # Minimum fraction of a detection polygon an object must cover to be placed.
-    # Lower it to admit smaller objects when no near-detection-size object fits
-    # (the per-class floors in YOLO_OBJECT_MIN_COVERAGE_BY_CLASS still apply).
-    if yolo_min_coverage is None:
-        yolo_min_coverage = YOLO_OBJECT_MIN_COVERAGE
-    yolo_min_coverage = min(1.0, max(1e-6, float(yolo_min_coverage)))
-    if "O4_BLD_YOLO_ENABLED" in os.environ:
-        yolo_enabled = _env_flag("O4_BLD_YOLO_ENABLED", bool(yolo_enabled))
-    else:
-        yolo_enabled = bool(yolo_enabled)
-    yolo_model = None
-    yolo_allow_missing = _env_flag("O4_BLD_YOLO_ALLOW_MISSING")
-    yolo_signature = _checkpoint_signature(yolo_checkpoint) if yolo_enabled else None
-    if yolo_enabled and yolo_signature is None:
-        if yolo_allow_missing:
-            print(f"YOLO OBB placement: checkpoint unavailable ({yolo_checkpoint}); using SegFormer-only fallback")
-            yolo_enabled = False
-        else:
-            raise RuntimeError(
-                f"YOLO OBB checkpoint not found: {yolo_checkpoint}. "
-                "Set bld_yolo_enabled=False (or O4_BLD_YOLO_ENABLED=0) to opt out, "
-                "or set O4_BLD_YOLO_ALLOW_MISSING=1 to fall back to SegFormer-only placement."
-            )
-    elif yolo_enabled:
-        print(
-            f"YOLO OBB placement: enabled checkpoint={yolo_checkpoint} "
-            f"conf={yolo_conf} iou={yolo_iou} stride={yolo_stride} "
-            f"max_det={yolo_max_det} batch={yolo_batch_size} "
-            f"analysis_zl={yolo_analysis_target_zl or 'native'} "
-            f"fuse={yolo_fuse_model}"
-        )
-        print(
-            "YOLO OBB placement: direct detections only "
-            f"(asset pool heights up to {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
-        )
-        print(
-            "YOLO OBB placement: object/facade mode controlled by bld_assets"
-            f" (strict containment, +{YOLO_OBJECT_OUTLINE_MARGIN_M:.2f}m quantisation margin)"
-        )
-        try:
-            yolo_model = _load_yolo_obb_model(
-                yolo_checkpoint,
-                fuse=yolo_fuse_model,
-            )
-        except Exception as exc:
-            if yolo_allow_missing:
-                print(
-                    f"YOLO OBB placement unavailable ({exc}); using SegFormer-only fallback"
-                )
-                yolo_enabled = False
-                yolo_model = None
-            else:
-                raise RuntimeError(
-                    f"YOLO OBB model failed to load from {yolo_checkpoint}: {exc}. "
-                    "Set O4_BLD_YOLO_ALLOW_MISSING=1 to fall back to SegFormer-only placement."
-                ) from exc
-
-    # ── HeightNet second-stage building heights ────────────────────────────
-    # Optional per-detection height regression (64 m window crops around each
-    # YOLO OBB). Missing checkpoint degrades to the class-default heights, so
-    # the stage never blocks a build.
-    height_model = None
-    height_signature = None
-    height_enabled = yolo_enabled and _env_flag("O4_BLD_HEIGHT_ENABLED", True)
-    if height_enabled:
-        # cfg value wins; env var / module default apply when unset (mirrors
-        # the yolo_checkpoint resolution above).
-        if not height_checkpoint:
-            height_checkpoint = HEIGHTMODEL.default_checkpoint_path()
-        height_signature = _checkpoint_signature(height_checkpoint)
-        if height_signature is None:
-            print(
-                f"HeightNet heights: checkpoint unavailable ({height_checkpoint}); "
-                "using class-default building heights"
-            )
-        else:
-            try:
-                height_model = HEIGHTMODEL.load_height_model(
-                    height_checkpoint,
-                    device=("cuda" if torch.cuda.is_available() else "cpu"),
-                )
-                print(
-                    f"HeightNet heights: enabled checkpoint={height_checkpoint} "
-                    f"arch={height_model._o4_heightnet_arch} "
-                    f"crop={height_model._o4_crop_px}px "
-                    f"window={height_model._o4_window_m:.0f}m "
-                    f"floor={HEIGHTMODEL.HEIGHT_MODEL_MIN_M:.1f}m (no ceiling)"
-                )
-            except Exception as exc:
-                print(
-                    f"HeightNet heights unavailable ({exc}); "
-                    "using class-default building heights"
-                )
-                height_model = None
-                height_signature = None
-
-    # ── Stock YOLO-OBB (DOTAv1) for static objects pre-step ───────────────────
-    # Detects storage tanks and swimming pools BEFORE
-    # the trained-YOLO facade pass so their footprints can occupy static_occ_mask.
-    # The loader downloads the checkpoint from ultralytics/assets when it is
-    # absent locally, so first-run installs don't need a manual sync step.
-    stock_yolo_model = None
-    try:
-        stock_yolo_model = STOCKYOLO.load_stock_yolo_model(
-            STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT
-        )
-        print(
-            f"Stock YOLO OBB (DOTAv1): loaded "
-            f"{STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT}; "
-            f"batch={stock_yolo_batch_size}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"Stock YOLO OBB unavailable ({exc}); skipping pre-step", flush=True)
-        stock_yolo_model = None
-
-    # simHeaven network roads provide the local street grid when available.
-    if dsftool_path is None:
-        dsftool_path = SEGFORMER._dsftool
-
-    if dsftool_path and os.path.exists(dsftool_path):
-        sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
-        timings['simheaven_parse'] += time.perf_counter() - _t
-        excl_rails.extend(way for way in sh_network if way['type'] == 'rail')
-        print(
-            f"simHeaven network: {len(sh_network)} road segments "
-            f"({len(excl_rails)} railway)"
-        )
-    else:
-        sh_network = []
-        timings['simheaven_parse'] += time.perf_counter() - _t
-        print("simHeaven network: skipped (DSFTool unavailable)")
-
-    _t = time.perf_counter()
-    if dsftool_path and os.path.exists(dsftool_path):
-        sh_bld_polys, sh_bld_objects = _load_simheaven_building_exclusions(
-            custom_scenery_dir,
-            lat,
-            lon,
-            dsftool_path,
-            sidecar_cache_dir,
-        )
-    else:
-        sh_bld_polys, sh_bld_objects = [], []
-    timings['simheaven_parse'] += time.perf_counter() - _t
-    if sh_bld_polys or sh_bld_objects:
-        existing_bld_polys.extend(sh_bld_polys)
-    sh_bld_index = _prepare_simheaven_objects(sh_bld_objects)
-    sh_bld_sig = (_polys_signature(sh_bld_polys),
-                  _simheaven_objects_signature(sh_bld_objects))
-    print(f"simHeaven buildings: {len(sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
-
-    # Installed libraries rarely change between tiles: read their exports and
-    # OBJ footprints from the shared catalog instead of re-scanning the disk.
-    global _LIBRARY_CATALOG
-    _LIBRARY_CATALOG = LIBCAT.open_catalog(custom_scenery_dir, library_cache_dir)
-
-    _t = time.perf_counter()
-    if avoid_custom_scenery and dsftool_path and os.path.exists(dsftool_path):
-        custom_bld_polys, custom_bld_objects, custom_bld_skipped, custom_bld_layers = (
-            _load_custom_scenery_building_exclusions(
-                custom_scenery_dir,
-                lat,
-                lon,
-                out_dsf,
-                dsftool_path,
-                sidecar_cache_dir,
-            )
-        )
-    else:
-        custom_bld_polys, custom_bld_objects = [], []
-        custom_bld_skipped = 0
-        custom_bld_layers = 0
-    timings['custom_scenery_parse'] += time.perf_counter() - _t
-    if custom_bld_polys or custom_bld_objects:
-        existing_bld_polys.extend(custom_bld_polys)
-    custom_bld_index = _prepare_simheaven_objects(custom_bld_objects)
-    custom_bld_sig = (
-        _polys_signature(custom_bld_polys),
-        _simheaven_objects_signature(custom_bld_objects),
-    )
-    if avoid_custom_scenery:
-        print(
-            "Custom scenery buildings: "
-            f"{len(custom_bld_objects)} objects  "
-            f"{len(custom_bld_polys)} facade polys  "
-            f"layers={custom_bld_layers}  skipped_objects={custom_bld_skipped}"
-        )
-    else:
-        print("Custom scenery buildings: disabled")
-
-    default_assets_available = True
-    sfd_assets_available = _find_library_export(custom_scenery_dir, 'sfd_global/')
-    simheaven_assets_available = (
-        bool(sh_bld_objects) or _find_library_export(custom_scenery_dir, 'simheaven/')
-    )
-    enabled_extra_library_ids = _enabled_extra_library_ids()
-    building_asset_mode = _building_asset_mode()
-    roof_color_matching = _env_flag(
-        "O4_BLD_ROOF_COLOR_MATCHING", bool(roof_color_matching)
-    )
-    roof_color_matching_active = bool(
-        roof_color_matching
-        and yolo_enabled
-        and _asset_kind_enabled("object", building_asset_mode)
-    )
-    # Filter every scanned export down to the ones X-Plane will actually
-    # resolve on this tile: packs like SFD Global ship simHeaven-alias shims
-    # inside REGION blocks (e.g. REGION scandinavia), and referencing those
-    # aliases on other tiles produces "Failed to find resource" at sim load.
-    _tile_natural_region = _natural_asset_region(lat + 0.5, lon + 0.5)
-    runtime_library_exports = _filter_exports_for_tile_region(
-        _scan_runtime_library_exports(
-            custom_scenery_dir,
-            include_sfd=sfd_assets_available,
-            include_simheaven=simheaven_assets_available,
-            extra_library_ids=enabled_extra_library_ids,
-        ),
-        _tile_natural_region,
-    )
-    stock_yolo_library_exports = _filter_exports_for_tile_region(
-        _scan_runtime_library_exports(
-            custom_scenery_dir,
-            include_sfd=sfd_assets_available,
-            include_simheaven=simheaven_assets_available,
-            extra_library_ids=enabled_extra_library_ids,
-            suffixes=(".obj", ".fac"),
-        ),
-        _tile_natural_region,
-    )
-    stock_yolo_exported_paths = _exported_virtual_library_paths(
-        stock_yolo_library_exports,
-        suffixes=(".obj", ".fac"),
-    )
-    # Greenhouse assets: the O4SFR greenhouse library's tunnel arrays when
-    # installed, else one greenhouse facade over the detection, else nothing.
-    greenhouse_tunnel_paths = frozenset(
-        p for p in stock_yolo_exported_paths
-        if p.startswith(AGRI.GREENHOUSE_LIBRARY_PREFIX)
-    )
-    greenhouse_facade_path = next(
-        (p for p in GREENHOUSE_FACADE_PATHS if p in stock_yolo_exported_paths),
-        None,
-    )
-    greenhouse_asset_signature = (
-        len(greenhouse_tunnel_paths),
-        hashlib.sha1(
-            "|".join(sorted(greenhouse_tunnel_paths)).encode("utf-8")
-        ).hexdigest()[:12],
-        greenhouse_facade_path,
-        GREENHOUSE_HEIGHT_M,
-    )
-    if _agri_mode() == "greenhouse":
-        print(
-            "Greenhouses: "
-            + (
-                f"{len(greenhouse_tunnel_paths)} O4SFR tunnel-array objects"
-                if greenhouse_tunnel_paths else
-                f"facade {greenhouse_facade_path}" if greenhouse_facade_path
-                else "no greenhouse assets installed; greenhouse detections are dropped"
-            ),
-            flush=True,
-        )
-    stock_yolo_asset_map, dropped_stock_paths, dropped_stock_classes = (
-        _filter_stock_yolo_asset_map(
-            STOCKYOLO.STOCK_YOLO_ASSET_MAP,
-            stock_yolo_exported_paths,
-        )
-    )
-    stock_yolo_static_classes = tuple(
-        cls for cls in STOCKYOLO.STATIC_DOTA_CLASSES
-        if cls in stock_yolo_asset_map
-    )
-    if stock_yolo_model is not None:
-        if stock_yolo_static_classes:
-            print(
-                "Stock YOLO OBB (DOTAv1): "
-                f"keeping classes {stock_yolo_static_classes}",
-                flush=True,
-            )
-        else:
-            print(
-                "Stock YOLO OBB (DOTAv1): no resolvable stock assets; "
-                "skipping pre-step",
-                flush=True,
-            )
-            stock_yolo_model = None
-        if dropped_stock_paths:
-            sample = ", ".join(dropped_stock_paths[:5])
-            print(
-                "Stock YOLO OBB (DOTAv1): disabled unavailable asset refs "
-                f"{len(dropped_stock_paths)}"
-                + (f" ({sample})" if sample else ""),
-                flush=True,
-            )
-        if dropped_stock_classes:
-            labels = ", ".join(
-                f"{cls}:{STOCKYOLO.DOTA_CLASS_NAMES.get(cls, cls)}"
-                for cls in dropped_stock_classes
-            )
-            print(
-                "Stock YOLO OBB (DOTAv1): disabled classes with no assets "
-                f"({labels})",
-                flush=True,
-            )
-    exported_simheaven_object_paths = _exported_simheaven_object_paths(
-        runtime_library_exports
-    )
-    asset_lat = lat + 0.5
-    asset_lon = lon + 0.5
-    natural_asset_region = _natural_asset_region(asset_lat, asset_lon)
-    simheaven_package_region, simheaven_package_folder = (
-        find_simheaven_package_region_for_tile(custom_scenery_dir, lat, lon)
-    )
-    effective_asset_region = _asset_region(
-        asset_lat, asset_lon, simheaven_package_region
-    )
-    if simheaven_package_region:
-        print(
-            "Asset region: "
-            f"natural={natural_asset_region}  "
-            f"simHeaven={simheaven_package_region} "
-            f"({simheaven_package_folder})  "
-            f"effective={effective_asset_region}"
-        )
-    else:
-        print(
-            "Asset region: "
-            f"natural={natural_asset_region}  "
-            f"simHeaven=none  effective={effective_asset_region}"
-        )
-
-    enabled_asset_pools = [
-        _build_default_asset_pools(asset_lat, asset_lon, effective_asset_region)
-    ]
-    if sfd_assets_available:
-        enabled_asset_pools.append(
-            _build_sfd_asset_pools(
-                asset_lat,
-                asset_lon,
-                effective_asset_region,
-                library_exports=runtime_library_exports,
-                cache_dir=sidecar_cache_dir,
-            )
-        )
-    if simheaven_assets_available:
-        enabled_asset_pools.append(_build_simheaven_asset_pools(
-            sh_bld_objects,
-            asset_lat,
-            asset_lon,
-            effective_asset_region,
-            library_exports=runtime_library_exports,
-        ))
-    extra_asset_pools = _build_optional_library_asset_pools(
+    return _BuildingOverlayRun(
+        tex_dir=tex_dir, lat=lat, lon=lon, out_dsf=out_dsf,
+        spacing_m=spacing_m, close_k=close_k, open_k=open_k,
+        min_footprint_m2=min_footprint_m2, make_viz=make_viz,
+        cache_dir=cache_dir, disable_cache=disable_cache,
+        verbose_log=verbose_log, grid_n=grid_n,
+        osm_roads_path=osm_roads_path, dsftool_path=dsftool_path,
         custom_scenery_dir=custom_scenery_dir,
-        library_exports=runtime_library_exports,
-        enabled_library_ids=enabled_extra_library_ids,
-        cache_dir=sidecar_cache_dir,
-        asset_region=effective_asset_region,
-    )
-    if any(extra_asset_pools.values()):
-        enabled_asset_pools.append(extra_asset_pools)
-    asset_pools = _merge_asset_pools(*enabled_asset_pools)
-    asset_pools = _filter_asset_pools_for_mode(asset_pools, building_asset_mode)
-    # Auto-reject library aliases whose resolved mesh is far larger/taller than the
-    # footprint their virtual-path name declares (third-party library_txt mistakes,
-    # e.g. a small simHeaven residential exported to a tall SFD apartment). This
-    # generalises the hand-maintained EXCLUDED_BUILDING_ASSETS list.
-    if not _env_flag("O4_BLD_ALLOW_OVERSIZED_ALIASES", False):
-        asset_pools, _alias_dropped, _alias_paths = _drop_oversized_aliased_assets(
-            asset_pools, runtime_library_exports, sidecar_cache_dir
-        )
-        if _alias_dropped:
-            print(
-                f"[Bld] Dropped {_alias_dropped} oversized library alias(es) "
-                f"(resolved mesh >> declared footprint): "
-                + ", ".join(_alias_paths[:8])
-                + (" ..." if len(_alias_paths) > 8 else "")
-            )
-    smallest_asset_only = _env_flag("O4_BLD_SMALLEST_ASSET_ONLY")
-    if smallest_asset_only:
-        _keep_smallest_asset_per_class(asset_pools)
-    roof_color_counts = _prepare_asset_roof_colors(
-        roof_color_matching_active,
-        custom_scenery_dir,
-        asset_pools,
-        runtime_library_exports,
-        sidecar_cache_dir,
-    )
-    if _LIBRARY_CATALOG is not None:
-        _LIBRARY_CATALOG.save_if_dirty()
-    asset_sources_label = _describe_asset_sources(
-        default_assets_available,
-        sfd_assets_available,
-        simheaven_assets_available,
-        sorted({
-            asset.get('source', '')
-            for pool in extra_asset_pools.values()
-            for asset in pool
-            if asset.get('source')
-        }),
-    )
-    if smallest_asset_only:
-        asset_sources_label += " (smallest asset per class)"
-    print(f"Building assets: {asset_sources_label}")
-    print(f"Building asset mode: {building_asset_mode}")
-    print(
-        "Optional building libraries: "
-        + _describe_optional_library_diagnostics(
-            runtime_library_exports,
-            enabled_extra_library_ids,
-            effective_asset_region,
-            extra_asset_pools,
-        )
-    )
-    asset_pool_counts = _describe_asset_pool_counts(asset_pools)
-    if asset_pool_counts:
-        print(f"Building asset pool counts: {asset_pool_counts}")
-    if roof_color_counts is None:
-        print("Roof-colour object matching: disabled (fit-only selection)")
-    else:
-        print(
-            "Roof-colour object aliases: "
-            f"match-safe={roof_color_counts['safe']}  "
-            f"inconsistent={roof_color_counts['inconsistent']}  "
-            f"unavailable={roof_color_counts['unavailable']}"
-        )
-    if not any(asset_pools.values()):
-        print("Building assets: none available for placement")
-        return 0
-    _sort_asset_pools_for_retry(asset_pools)
-    class_min_footprint_span_m = _class_min_footprint_span_m(asset_pools)
-    mark_pad_m = _mark_pad_for_edge_spacing_m(spacing_m, footprint_pad_m)
-    for pool in asset_pools.values():
-        for asset in pool:
-            asset['requires_residential_context'] = _asset_requires_residential_context(asset)
-            bounds_m = asset.get('bounds_m')
-            if bounds_m is None:
-                continue
-            asset['fit_bounds_m'] = _expand_bounds(bounds_m, footprint_pad_m)
-            asset['mark_bounds_m'] = _expand_bounds(
-                bounds_m, mark_pad_m
-            )
-            asset['fit_cache_key'] = (
-                tuple(float(v) for v in bounds_m),
-                tuple(float(v) for v in asset['fit_bounds_m']),
-                tuple(float(v) for v in asset['mark_bounds_m']),
-            )
-    yolo_object_fit_table = _build_yolo_object_candidate_index(asset_pools)
-    asset_catalog_signature = _asset_pools_signature(
-        asset_pools, include_roof_color=roof_color_matching_active
-    )
-    height_priors_by_class = _height_priors_by_class(asset_pools)
-    height_priors_signature = _height_priors_signature(height_priors_by_class)
-    enabled_yolo_object_assets_by_path = {
-        asset['path']: asset
-        for pool in asset_pools.values()
-        for asset in pool
-        if asset.get('kind') == 'object' and asset.get('path')
-    }
-    enabled_yolo_color_assets_by_family = (
-        ROOFCOLOR.color_assets_by_family(asset_pools)
-        if roof_color_matching_active
-        else {}
-    )
-
-    osm_roads = _prepare_roads(osm_roads)
-    excl_rails = _prepare_roads(excl_rails)
-    excl_rails_index = BBOX.build_bounds_index(excl_rails)
-    sh_network = _prepare_roads(sh_network)
-    excl_polys = _prepare_polygons(excl_polys)
-    excl_polys_index = BBOX.build_bounds_index(excl_polys)
-    existing_bld_polys = _prepare_polygons(existing_bld_polys)
-    existing_bld_polys_index = BBOX.build_bounds_index(existing_bld_polys)
-    residential_polys = _prepare_polygons(residential_polys)
-    _t = time.perf_counter()
-    mesh_water_path = _mesh_file_for_tile(tex_dir, lat, lon)
-    mesh_water_sig = _mesh_water_signature(mesh_water_path)
-    mesh_water_index = _load_mesh_water_index(mesh_water_path, sidecar_cache_dir)
-    timings['mesh_water'] += time.perf_counter() - _t
-    if mesh_water_index:
-        print(
-            f"Mesh water: {len(mesh_water_index['tris'])} water triangles from "
-            f"{mesh_water_path}"
-        )
-    else:
-        print(f"Mesh water: unavailable from {mesh_water_path}")
-
-    # Split zones with every road source we have: cached OSM all-highway ways
-    # (or Ortho4XP big+small extracts) plus simHeaven network roads.
-    separator_roads = (osm_roads or []) + (sh_network or [])
-    # For heading, prefer simHeaven because it is the local street grid. If it
-    # is unavailable, fall back to the all-road OSM source instead of leaving
-    # the road heading grid empty.
-    all_roads = sh_network if sh_network else osm_roads
-    separator_roads_index = BBOX.build_bounds_index(separator_roads)
-    separator_sig = _roads_signature(separator_roads)
-    rail_sig = _roads_signature(excl_rails)
-    heading_sig = _roads_signature(all_roads)
-    excl_poly_sig = _polys_signature(excl_polys)
-    existing_bld_poly_sig = _polys_signature(existing_bld_polys)
-    residential_poly_sig = _polys_signature(residential_polys)
-
-    # Load model lazily only when a DDS has no shared vegetation class-map cache.
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = proc = None
-
-    TILE_VIZ = max(256, int(_env_float("O4_BLD_VIZ_SIZE", 512)))
-    composite = np.zeros((n_rows*TILE_VIZ, n_cols*TILE_VIZ, 3), dtype=np.uint8) if make_viz else None
-    footprint_composite = np.zeros_like(composite) if composite is not None else None
-
-    placed_stock_objects = []   # list of (lon, lat, heading, obj_path) — from stock YOLO
-    placed_facades = []   # list of (lonlat_ring, facade_path, height_m)
-    placed_draped = []    # list of (lonlat_ring, pol_path) — stock YOLO ground polys (.pol)
-    direct_yolo_facade_placements = 0
-
-    def _building_cache_params(effective_yolo_batch, effective_stock_yolo_batch):
-        return (
-            (
-                BLD_PLACEMENT_CACHE_VERSION
-                if strict_fit else BLD_PLACEMENT_FAST_CACHE_VERSION
-            ),
-            spacing_m, close_k, open_k, min_footprint_m2,
-            # The entries marked "retired" belonged to the removed
-            # candidate-grid placement. They keep the values they always had
-            # so existing *_bld.pkl caches stay valid; drop them with the next
-            # BLD_PLACEMENT_*CACHE_VERSION bump.
-            max(0, int(BLD_MAX_CANDIDATES_PER_DDS)),          # retired
-            PLACE_UNKNOWN_OBJECTS,
-            footprint_pad_m,
-            mark_pad_m,
-            smallest_asset_only,
-            False,                                            # retired
-            max(0, int(BLD_MAX_CANDIDATES_PER_DDS)),          # retired
-            24,                                               # retired
-            max(0.0, spacing_m),                              # retired
-            max(1, int(YOLO_TEMPLATE_MAX_CANDIDATES_PER_ZONE)),  # retired
-            max(0.0, YOLO_TEMPLATE_HEADING_TOL_DEG),          # retired
-            max(0.0, YOLO_TEMPLATE_SHAPE_REL_TOL),            # retired
-            max(0.0, YOLO_TEMPLATE_SHAPE_ABS_TOL_PX),         # retired
-            tuple(sorted(class_min_footprint_span_m.items())),
-            ROAD_CENTERLINE_WIDTH_M, ROAD_EXTRA_BUFFER_M,
-            ROAD_WIDTH_PX_MIN, ROAD_DILATE_PX_MIN,
-            bool(allow_road_overlap),
-            separator_sig, heading_sig,
-            excl_poly_sig, existing_bld_poly_sig, rail_sig, sh_bld_sig,
-            custom_bld_sig, bool(avoid_custom_scenery),
-            mesh_water_sig,
-            residential_poly_sig,
-            default_assets_available, sfd_assets_available, simheaven_assets_available,
-            tuple(enabled_extra_library_ids),
-            building_asset_mode,
-            roof_color_matching_active,
-            asset_catalog_signature,
-            height_priors_signature,
-            HEIGHTPRIORS.POLICY_VERSION,
-            HEIGHTPRIORS.P95_EXCESS_RETAIN,
-            LARGE_FOOTPRINT_HEIGHT_CAP_M,
-            (
-                _env_flag("O4_BLD_HEIGHT_GATE", True),
-                _env_flag("O4_BLD_HEIGHT_CONTEXT", True),
-                _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True),
-                _seg_first_mode(),
-                _agri_mode(), greenhouse_asset_signature,
-                SEG_FIRST_MIN_M2, SEG_FIRST_GUARD_MIN_M2,
-                SEG_FIRST_GUARD_MAX_SMALL, SEG_FIRST_GUARD_MAX_EDGE,
-                FOOTPRINTS.SPLIT_MIN_DE, FOOTPRINTS.SPLIT_MIN_LINE,
-                FOOTPRINTS.SPLIT_MIN_GAP_L, FOOTPRINTS.RECT_MIN_FILL,
-                FOOTPRINTS.MAX_IRREGULARITY,
-                _env_flag("O4_BLD_SEG_FIRST_GROUND", True),
-                FOOTPRINTS.GROUND_MAX_DE, FOOTPRINTS.GROUND_MAX_EDGE,
-            ),
-            natural_asset_region,
-            simheaven_package_region,
-            effective_asset_region,
-            bool(yolo_enabled), yolo_signature,
-            yolo_imgsz, yolo_stride, round(float(yolo_conf), 6),
-            round(float(yolo_iou), 6), yolo_max_det,
-            int(yolo_analysis_target_zl),
-            int(effective_yolo_batch), int(effective_stock_yolo_batch),
-            bool(yolo_fuse_model),
-            round(float(YOLO_OBJECT_OUTLINE_MARGIN_M), 6),
-            round(float(yolo_min_coverage), 6),
-            float(MAX_GENERATED_BUILDING_HEIGHT_M),
-            # Bump on schema-breaking changes to per-DDS cache contents.
-            # v14: invalidate v13 caches with native-ZL/RGB-interpreted YOLO detections.
-            # v15: coverage-preserving overlap removal knobs (keep_mode/freearea/facade_clip).
-            # v16: no_overlap_removal default on (roads/rail/self-overlap not avoided).
-            # v17: bounded-margin containment + configurable yolo_min_coverage.
-            # v18: metre-based outline margin + facade-fallback default off (objects only).
-            # v19: overlap removal default on (drop, smallest-first, no min-overlap area).
-            # v20: blacklist update + tile-wide cross-texture object dedup.
-            # v21: auto-drop library aliases whose resolved mesh >> declared footprint.
-            # v22: per-overlap containment rule (big survives when contained
-            #      smalls explain < explain_frac; conf-gated eviction).
-            bool(yolo_pair_overlap_rule),
-            round(float(yolo_suppress_containment_frac), 6),
-            round(float(yolo_suppress_explain_frac), 6),
-            # v23: roads/railways no longer in static_occ_mask by default.
-            # v24: native-ZL YOLO inference (no ZL16 analysis downsample) +
-            #      cross-ZL covered regions excluded from detection/placement.
-            # v25: retired feature knobs removed (smart gap fill, marginal
-            #      keep mode, suppress thresholds, freearea downsize, facade
-            #      clip/fallback, no_overlap_removal); behaviour fixed to the
-            #      zero-threshold drop with detection free-area clipping.
-            # v26: stock-YOLO asset pool widened to curated extra libraries,
-            #      OBB heading for directional classes, and placements now
-            #      filtered against addon scenery-object masks; the effective
-            #      (availability-filtered) asset map keys the cache so
-            #      library installs/removals invalidate stale placements.
-            tuple(sorted(
-                (
-                    int(cls), str(ptype), tuple(paths),
-                    None if height_m is None else round(float(height_m), 3),
-                )
-                for cls, (ptype, paths, height_m) in stock_yolo_asset_map.items()
-            )),
-            # v27: metre-accurate per-class road/rail exclusion of placed
-            #      building footprints (loose detection OBBs unaffected);
-            #      replaces the retired all-or-nothing
-            #      O4_BLD_ROAD_AVOIDANCE lattice blocking.
-            tuple(sorted(
-                (str(k), round(float(v), 3))
-                for k, v in ROAD_EXCLUSION_WIDTH_M.items()
-            )),
-            round(float(RAIL_EXCLUSION_WIDTH_M), 3),
-            round(float(DIRECT_FACADE_ROAD_OVERLAP_FRAC), 6),
-            # v28: HeightNet moved after overlap suppression; heights are no
-            #      longer stored in the YOLO OBB cache, so the height
-            #      checkpoint must key the placement cache directly (before,
-            #      a checkpoint swap invalidated placements only via the
-            #      heights baked into the YOLO cache).
-            height_signature,
-            # v30: rooftop colour selection is opt-in and keys placement
-            #      caches separately. Raw YOLO geometry remains unchanged.
-            # v31: sports classes (baseball diamond / ground track field /
-            #      soccer ball field) place size-matched OBJECTS instead of a
-            #      stadium facade ring, take the OBB heading, and skip
-            #      entirely when no asset matches the detected footprint.
-            # v32: every sports class dropped from the stock-YOLO pass —
-            #      pitches, diamonds, tracks and courts place nothing at all,
-            #      and their OBBs no longer occupy the building masks.
-            "schema=v32-no-sports-classes",
-        )
-
-    _requested_bld_params = _building_cache_params(
-        yolo_batch_size, stock_yolo_batch_size
-    )
-
-    def _prepare_dds_inference(fi, fname, m):
-        """Inference phase for one DDS: veg class map, trained YOLO, stock YOLO.
-
-        Runs one DDS ahead on the prefetch worker thread so GPU inference
-        overlaps the CPU placement stages of the previous DDS. Only touches
-        this DDS's own cache files and thread-local accumulators; all global
-        state merges happen on the main thread in file order, so the output
-        is identical to the sequential path.
-        """
-        nonlocal model, proc, device
-        import pickle as _pickle
-        local_timings = {}
-        file_timings = {}
-        file_counts = {}
-
-        def _rec(key, start):
-            elapsed = time.perf_counter() - start
-            local_timings[key] = local_timings.get(key, 0.0) + elapsed
-            file_timings[key] = file_timings.get(key, 0.0) + elapsed
-
-        prep = {
-            'fi': fi,
-            'fname': fname,
-            'cached_bld': None,
-            'no_image': False,
-            'img': None,
-            'veg_map': None,
-            'mesh_water_mask': None,
-            'mesh_water_full': False,
-            'img_h': 0,
-            'img_w': 0,
-            'm_per_px': 1.0,
-            'yolo_detections': [],
-            'effective_yolo_batch_size': yolo_batch_size,
-            'yolo_batch_fell_back': False,
-            'effective_stock_yolo_batch_size': stock_yolo_batch_size,
-            'stock_yolo_batch_fell_back': False,
-            'stock_res': None,
-            'file_timings': file_timings,
-            'file_counts': file_counts,
-            'local_timings': local_timings,
-        }
-        if disable_cache:
-            # Drop any stale per-DDS cache before starting this DDS.
-            _remove_cache_files(_dds_cache_paths(fname))
-
-        # ── Building placement cache ──────────────────────────────────────
-        # Cache is keyed by DDS filename (encodes tile position+ZL) + params.
-        _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
-        if (
-            not ignore_placement_cache and
-            not disable_cache and
-            os.path.exists(_bld_cache_file)
-        ):
-            try:
-                with open(_bld_cache_file, 'rb') as _f:
-                    _cd = _pickle.load(_f)
-                if (
-                    _cd.get('params') == _requested_bld_params and
-                    _cd.get('covered') == _covered_fracs_by_file.get(fname)
-                ):
-                    if _cd.get('source') == 'direct_yolo':
-                        _placements = _cd.get('placements') or {}
-                        _bad_simheaven = _count_unexported_simheaven_object_placements(
-                            _placements.get('objects', ()),
-                            exported_simheaven_object_paths,
-                        )
-                        if _bad_simheaven:
-                            file_counts['stale_bld_cache_unexported_simheaven'] = (
-                                int(_bad_simheaven)
-                            )
-                            try:
-                                os.remove(_bld_cache_file)
-                            except OSError:
-                                pass
-                            print(
-                                f"  [{fi:3d}/{n_files}] {fname}  "
-                                "stale bld cache ignored: "
-                                f"{_bad_simheaven} unexported simHeaven object refs",
-                                flush=True,
-                            )
-                        else:
-                            prep['cached_bld'] = _placements
-                            return prep
-            except Exception:
-                pass
-
-        til_y_top  = int(m.group(1))
-        til_x_left = int(m.group(2))
-        zl         = int(m.group(4))
-
-        # Geographic bounds
-        lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
-
-        # Inference (cached per DDS filename — filename encodes tile coords + ZL)
-        cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
-        img = None
-        veg_map = None
-        mesh_water_mask = None
-        mesh_water_full = False
-        img_h = img_w = 0
-        if not disable_cache and os.path.exists(cache_path):
-            _t = time.perf_counter()
-            veg_map = np.load(cache_path)
-            _rec('cache_load', _t)
-            img_h, img_w = veg_map.shape[:2]
-            _t = time.perf_counter()
-            mesh_water_mask = _rasterize_mesh_water_mask(
-                mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-            )
-            _rec('mesh_water', _t)
-            mesh_water_px = int(np.count_nonzero(mesh_water_mask)) if mesh_water_mask is not None else 0
-            mesh_water_full = mesh_water_px == int(img_h * img_w)
-            if (
-                not mesh_water_full and
-                bool(np.all(veg_map == SEGFORMER.CLASS_WATER))
-            ):
-                # Earlier mesh-water shortcut builds could write a synthetic
-                # all-water map into the shared inference cache.  Treat that
-                # shape as stale when the fixed mesh reader says this DDS is
-                # not fully water.
-                veg_map = None
-                try:
-                    os.remove(cache_path)
-                except OSError:
-                    pass
-                if detail_timing:
-                    print(
-                        f"    [Bld stage] {fname} stale all-water class-map ignored",
-                        flush=True,
-                    )
-            if detail_timing:
-                if veg_map is not None:
-                    print(f"    [Bld stage] {fname} class-map cached", flush=True)
-        if veg_map is None:
-            _t = time.perf_counter()
-            img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-            if img is None:
-                prep['no_image'] = True
-                return prep
-            img_h, img_w = img.shape[:2]
-            _rec('dds_load', _t)
-            _t = time.perf_counter()
-            mesh_water_mask = _rasterize_mesh_water_mask(
-                mesh_water_index, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-            )
-            _rec('mesh_water', _t)
-            mesh_water_full = (
-                mesh_water_mask is not None and
-                int(np.count_nonzero(mesh_water_mask)) == int(img_h * img_w)
-            )
-            if mesh_water_full:
-                veg_map = np.full(
-                    (img_h, img_w), SEGFORMER.CLASS_WATER, dtype=np.int8
-                )
-                if detail_timing:
-                    print(
-                        f"    [Bld stage] {fname} mesh water full; inference skipped",
-                        flush=True,
-                    )
-            else:
-                if model is None:
-                    model, proc, device = SEGFORMER.load_vegetation_model(device)
-                _t = time.perf_counter()
-                veg_map = SEGFORMER.run_inference(model, device, img, proc)
-                _rec('segformer_inference', _t)
-            if not disable_cache and not mesh_water_full:
-                _t = time.perf_counter()
-                np.save(cache_path, veg_map)
-                _rec('cache_save', _t)
-            if detail_timing:
-                if not mesh_water_full:
-                    print(f"    [Bld stage] {fname} inference complete", flush=True)
-        if mesh_water_mask is not None:
-            mesh_water_px = int(np.count_nonzero(mesh_water_mask))
-            file_counts['mesh_water_px'] = mesh_water_px
-            mesh_water_full = mesh_water_px == int(img_h * img_w)
-
-        # Pixel size in metres (approximate, using mid-latitude)
-        mid_lat_rad = math.radians((lat_n + lat_s) / 2)
-        lon_span_m  = (lon_e - lon_w) * 111320 * math.cos(mid_lat_rad)
-        lat_span_m  = (lat_n - lat_s) * 110540
-        m_per_px_x = lon_span_m / img_w
-        m_per_px_y = lat_span_m / img_h
-        m_per_px   = (m_per_px_x + m_per_px_y) / 2
-
-        yolo_detections = []
-        # Regions of this texture covered by kept higher-ZL textures: those are
-        # detected/placed at the higher ZL, so exclude them here entirely.
-        _covered_rects_px = covered_rects_to_px(
-            _covered_fracs_by_file.get(fname), img_w, img_h
-        )
-        if _covered_rects_px:
-            file_counts['covered_rects'] = len(_covered_rects_px)
-        if yolo_enabled:
-            _source_path = _source_image_path(fname, _source_mode, _orthophoto_dir)
-            # Native-ZL inference is the default; the ZL16-analysis downsample
-            # survives only behind O4_BLD_YOLO_ANALYSIS_ZL for A/B runs.
-            _use_analysis = (
-                yolo_analysis_target_zl > 0 and zl > yolo_analysis_target_zl
-            )
-            _analysis_signature = (
-                _yolo_analysis_signature(
-                    fname, _source_path, img_w, img_h, zl, yolo_analysis_target_zl
-                )
-                if _use_analysis else None
-            )
-            _yolo_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_yolo_obb.pkl'))
-            _yolo_key = _yolo_obb_cache_key(
-                fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
-                yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
-                batch_size=yolo_batch_size,
-                fused=yolo_fuse_model,
-                analysis_signature=_analysis_signature,
-                analysis_target_zl=(
-                    yolo_analysis_target_zl if _use_analysis else None
-                ),
-                # Fully covered crops are skipped at inference time on the
-                # native path, so the raw detection set depends on coverage.
-                covered_rects=(
-                    None if _use_analysis else (_covered_rects_px or None)
-                ),
-            )
-            if not disable_cache:
-                _t = time.perf_counter()
-                cached_yolo = _load_yolo_obb_cache(_yolo_cache_file, _yolo_key)
-                _rec('cache_load', _t)
-            else:
-                cached_yolo = None
-            if cached_yolo is not None:
-                yolo_detections = cached_yolo
-            else:
-                if img is None:
-                    _img_t = time.perf_counter()
-                    img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-                    if img is not None:
-                        _rec('dds_load', _img_t)
-                if img is not None:
-                    try:
-                        if detail_timing:
-                            _cuda_counts = _cuda_memory_counts_mb()
-                            if _cuda_counts is not None:
-                                (
-                                    file_counts['yolo_cuda_alloc_before_mb'],
-                                    file_counts['yolo_cuda_reserved_before_mb'],
-                                ) = _cuda_counts
-                        _t = time.perf_counter()
-                        if _use_analysis:
-                            yolo_analysis = _load_yolo_analysis_image(
-                                tex_dir,
-                                fname,
-                                til_y_top,
-                                til_x_left,
-                                m.group(3),
-                                zl,
-                                yolo_analysis_target_zl,
-                                sidecar_cache_dir,
-                                img,
-                                _source_path,
-                                (lat_n, lat_s, lon_w, lon_e),
-                            )
-                            analysis_scale_x = float(yolo_analysis['scale_x'])
-                            analysis_scale_y = float(yolo_analysis['scale_y'])
-                            analysis_m_per_px = (
-                                float(m_per_px) * (analysis_scale_x + analysis_scale_y) / 2.0
-                            )
-                            file_counts['yolo_analysis_zl'] = int(yolo_analysis_target_zl)
-                            file_counts['yolo_analysis_scale_x1000'] = int(
-                                round(((analysis_scale_x + analysis_scale_y) / 2.0) * 1000)
-                            )
-                            yolo_result = _run_yolo_obb_inference(
-                                yolo_model,
-                                yolo_analysis['image'],
-                                imgsz=yolo_imgsz,
-                                stride=yolo_stride,
-                                conf=yolo_conf,
-                                iou=yolo_iou,
-                                max_det=yolo_max_det,
-                                device=("0" if torch.cuda.is_available() else "cpu"),
-                                m_per_px=analysis_m_per_px,
-                                batch_size=yolo_batch_size,
-                                return_metadata=True,
-                            )
-                            yolo_detections = _scale_yolo_detections_to_image(
-                                yolo_result['detections'],
-                                analysis_scale_x,
-                                analysis_scale_y,
-                                img_w,
-                                img_h,
-                            )
-                        else:
-                            yolo_result = _run_yolo_obb_inference(
-                                yolo_model,
-                                img,
-                                imgsz=yolo_imgsz,
-                                stride=yolo_stride,
-                                conf=yolo_conf,
-                                iou=yolo_iou,
-                                max_det=yolo_max_det,
-                                device=("0" if torch.cuda.is_available() else "cpu"),
-                                m_per_px=m_per_px,
-                                batch_size=yolo_batch_size,
-                                return_metadata=True,
-                                skip_rects_px=_covered_rects_px,
-                            )
-                            yolo_detections = yolo_result['detections']
-                        prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
-                        prep['yolo_batch_fell_back'] = yolo_result['fell_back']
-                        if yolo_result['fell_back']:
-                            file_counts['yolo_batch_fallback'] = 1
-                        _rec('trained_yolo_inference', _t)
-                        if detail_timing:
-                            _cuda_counts = _cuda_memory_counts_mb()
-                            if _cuda_counts is not None:
-                                (
-                                    file_counts['yolo_cuda_alloc_after_mb'],
-                                    file_counts['yolo_cuda_reserved_after_mb'],
-                                ) = _cuda_counts
-                        if not disable_cache:
-                            _save_yolo_obb_cache(
-                                _yolo_cache_file,
-                                _yolo_obb_cache_key(
-                                    fname, img_w, img_h, yolo_checkpoint, yolo_imgsz,
-                                    yolo_stride, yolo_conf, yolo_iou, yolo_max_det,
-                                    batch_size=yolo_result['effective_batch'],
-                                    fused=yolo_fuse_model,
-                                    analysis_signature=_analysis_signature,
-                                    analysis_target_zl=(
-                                        yolo_analysis_target_zl if _use_analysis else None
-                                    ),
-                                    covered_rects=(
-                                        None if _use_analysis
-                                        else (_covered_rects_px or None)
-                                    ),
-                                ),
-                                yolo_detections,
-                            )
-                    except Exception as exc:
-                        print(f"    [Bld stage] {fname} YOLO OBB failed: {exc}")
-                        yolo_detections = []
-        # ── Stock YOLO-OBB pre-step (DOTAv1 static objects) ──────────────
-        # Runs on the same loaded image; the main thread merges the returned
-        # placements and OBB pixel quads in file order.
-        if stock_yolo_model is not None and img is not None:
-            try:
-                _t = time.perf_counter()
-                stock_res = _run_stock_yolo_pass_compat(
-                    img,
-                    model=stock_yolo_model,
-                    img_w=img_w, img_h=img_h,
-                    lat=lat, lon=lon,
-                    lat_n=lat_n, lat_s=lat_s, lon_w=lon_w, lon_e=lon_e,
-                    m_per_px=m_per_px,
-                    device=("0" if torch.cuda.is_available() else "cpu"),
-                    batch_size=stock_yolo_batch_size,
-                    asset_map=stock_yolo_asset_map,
-                    static_classes=stock_yolo_static_classes,
-                )
-                _rec('stock_yolo_inference', _t)
-                prep['stock_res'] = stock_res
-                _stock_effective_batch, _stock_batch_fell_back = (
-                    _stock_yolo_batch_metadata(stock_res, stock_yolo_batch_size)
-                )
-                prep['effective_stock_yolo_batch_size'] = _stock_effective_batch
-                prep['stock_yolo_batch_fell_back'] = _stock_batch_fell_back
-                if _stock_batch_fell_back:
-                    file_counts['stock_yolo_batch_fallback'] = 1
-                if stock_res.counts_by_class:
-                    file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
-                    if verbose_log:
-                        _summary = " ".join(
-                            f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
-                            for c, n in sorted(stock_res.counts_by_class.items())
-                        )
-                        print(f"    [Bld stage] {fname} stock YOLO: {_summary}", flush=True)
-            except Exception as exc:
-                print(f"    [Bld stage] {fname} stock YOLO failed: {exc}", flush=True)
-        # Cross-ZL coverage: everything inside a covered region is detected and
-        # placed at the higher ZL instead, so drop it here (trained YOLO,
-        # stock YOLO, and — via the veg-map wipe — SegFormer zones/gap fill).
-        if _covered_rects_px:
-            yolo_detections, _cov_dropped = filter_detections_by_coverage(
-                yolo_detections, _covered_rects_px
-            )
-            _cov_geo_boxes = geo_boxes_from_covered_px(
-                _covered_rects_px, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-            )
-            _cov_dropped += filter_stock_results_by_coverage(
-                prep.get('stock_res'), _covered_rects_px, _cov_geo_boxes
-            )
-            if _cov_dropped:
-                file_counts['covered_dropped'] = int(_cov_dropped)
-            if veg_map is not None and not mesh_water_full:
-                # Copy: the array also backs the shared _veg.npy inference
-                # cache, which must stay whole for the vegetation overlay.
-                veg_map = veg_map.copy()
-                mask_covered_regions(
-                    veg_map,
-                    _covered_rects_px,
-                    value=getattr(SEGFORMER, 'CLASS_BACKGROUND', 0),
-                )
-        raw_yolo_count = len(yolo_detections)
-        if yolo_detections:
-            # Pixels load lazily (warm runs reach here with img=None), so gate
-            # decisions do not depend on which caches happened to be warm.
-            _evidence_ctx = _build_detection_evidence_context(
-                img,
-                lambda: _load_source_image(fname, _source_mode, _orthophoto_dir),
-                veg_map if not mesh_water_full else None,
-                m_per_px,
-            )
-            yolo_detections, yolo_oversize_reject = (
-                _filter_oversized_direct_yolo_detections(
-                    yolo_detections,
-                    evidence_ctx=_evidence_ctx,
-                    file_counts=file_counts,
-                )
-            )
-            if yolo_oversize_reject:
-                file_counts['yolo_oversize_reject'] = yolo_oversize_reject
-        # Remove overlapping detections so each building area keeps a single
-        # object: smallest-first, drop any detection that overlaps an
-        # already-kept one, with no minimum-overlap area.
-        if yolo_detections:
-            _t = time.perf_counter()
-            yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
-                yolo_detections,
-                coverage_threshold=yolo_suppress_coverage,
-                min_overlap_m2=yolo_suppress_min_overlap_m2,
-                m_per_px=m_per_px,
-                img_w=img_w,
-                img_h=img_h,
-                pair_rule=yolo_pair_overlap_rule,
-                containment_frac=yolo_suppress_containment_frac,
-                explain_frac=yolo_suppress_explain_frac,
-            )
-            _rec('yolo_suppress', _t)
-            file_counts['yolo_raw_detections'] = raw_yolo_count
-            file_counts['yolo_suppressed_overlap'] = yolo_suppressed
-        # HeightNet no longer runs here: heights are consumed only by object
-        # candidate selection and the facade fallback, both strictly after
-        # the static placement gates, so the placement phase predicts them
-        # lazily for gate-passers only (see the pre-pass above the fit loop).
-        # Min-footprint gate — the earliest per-detection filter. Detections
-        # whose footprint is below the configured area are dropped here, before
-        # HeightNet and placement ever see them. It
-        # runs after the raw YOLO cache is written (line above), so the cache
-        # stays footprint-complete and tuning this value needs no cache rebuild.
-        if yolo_detections and min_footprint_m2 > 0.0:
-            _pre_footprint_n = len(yolo_detections)
-            yolo_detections = [
-                _d for _d in yolo_detections
-                if float(_d.get('area_m2', 0.0)) >= min_footprint_m2
-            ]
-            _footprint_dropped = _pre_footprint_n - len(yolo_detections)
-            if _footprint_dropped:
-                file_counts['yolo_min_footprint_dropped'] = _footprint_dropped
-        file_counts['yolo_detections'] = len(yolo_detections)
-
-        prep['img'] = img
-        prep['veg_map'] = veg_map
-        prep['mesh_water_mask'] = mesh_water_mask
-        prep['mesh_water_full'] = mesh_water_full
-        prep['img_h'] = img_h
-        prep['img_w'] = img_w
-        prep['m_per_px'] = m_per_px
-        prep['yolo_detections'] = yolo_detections
-        return prep
-
-    # One-ahead inference prefetch: a single worker thread keeps the GPU busy
-    # with the next DDS while the main thread runs the CPU placement stages.
-    # Disable with O4_BLD_PREFETCH=0 to get the fully sequential path.
-    prefetch_enabled = os.environ.get("O4_BLD_PREFETCH", "1").strip() != "0"
-    n_files = len(files)
-    prefetch_executor = None
-    _prefetch_futures = {}
-    if prefetch_enabled and n_files > 1:
-        from concurrent.futures import ThreadPoolExecutor
-        prefetch_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="bld-prefetch"
-        )
-
-    def _submit_prefetch(start_idx):
-        if prefetch_executor is None or _prefetch_futures:
-            return
-        for nfi in range(start_idx, n_files + 1):
-            nfname = files[nfi - 1]
-            nm = STD_RE.match(nfname)
-            if not nm:
-                continue
-            _prefetch_futures[nfi] = prefetch_executor.submit(
-                _prepare_dds_inference, nfi, nfname, nm
-            )
-            return
-
-    t_start = time.time()
-    for fi, fname in enumerate(files, 1):
-        m = STD_RE.match(fname)
-        if not m: continue
-        _dds_cache_files = _dds_cache_paths(fname)
-        file_timings = {}
-        file_counts = {}
-        file_t0 = time.perf_counter()
-
-        try:
-            if verbose_log:
-                print(f"  [{fi:3d}/{n_files}] {fname}  (starting)", flush=True)
-            _prep_future = _prefetch_futures.pop(fi, None)
-            if _prep_future is None and prefetch_executor is not None:
-                # Not prefetched yet (first DDS): still run it on the worker
-                # thread so ALL inference happens on one thread — cuDNN
-                # handles are per-thread and re-warm on a new thread.
-                _prep_future = prefetch_executor.submit(
-                    _prepare_dds_inference, fi, fname, m
-                )
-            if _prep_future is not None:
-                _prep = _prep_future.result()
-            else:
-                _prep = _prepare_dds_inference(fi, fname, m)
-            _submit_prefetch(fi + 1)
-            file_timings = _prep['file_timings']
-            file_counts = _prep['file_counts']
-            for _tk, _tv in _prep['local_timings'].items():
-                timings[_tk] = timings.get(_tk, 0.0) + _tv
-
-            import pickle as _pickle
-            # Per-texture deterministic stream for randomized facade heights,
-            # so cached and fresh runs reproduce.
-            height_rng_seed = int.from_bytes(
-                hashlib.sha1(f"bld-height:{fname}".encode("utf-8")).digest()[:8],
-                "big",
-            )
-            height_rng = np.random.default_rng(height_rng_seed)
-            _bld_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_bld.pkl'))
-            _cached_bld = _prep['cached_bld']
-            if _cached_bld is not None:
-                placed_stock_objects.extend(_cached_bld.get('objects', ()))
-                placed_facades.extend(_cached_bld.get('facades', ()))
-                cached_count = (
-                    len(_cached_bld.get('objects', ())) +
-                    len(_cached_bld.get('facades', ()))
-                )
-                direct_yolo_facade_placements += len(_cached_bld.get('facades', ()))
-                print(f"  [{fi:3d}/{n_files}] {fname}  (bld cached — {cached_count} placements)", flush=True)
-                continue
-            if _prep['no_image']:
-                continue
-            _start_object_idx = len(placed_stock_objects)
-            _start_facade_idx = len(placed_facades)
-            _start_draped_idx = len(placed_draped)
-            stock_yolo_occupied_polys = []  # OBB quads in image-pixel space for this DDS
-            til_y_top  = int(m.group(1))
-            til_x_left = int(m.group(2))
-            zl         = int(m.group(4))
-
-            # Geographic bounds
-            lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
-
-            img = _prep['img']
-            veg_map = _prep['veg_map']
-            mesh_water_mask = _prep['mesh_water_mask']
-            mesh_water_full = _prep['mesh_water_full']
-            img_h = _prep['img_h']
-            img_w = _prep['img_w']
-            m_per_px = _prep['m_per_px']
-            yolo_detections = _prep['yolo_detections']
-            roof_color_image = img if roof_color_matching_active else None
-            roof_color_load_attempted = (
-                img is not None or not roof_color_matching_active
-            )
-            _effective_bld_params = _building_cache_params(
-                _prep['effective_yolo_batch_size'],
-                _prep['effective_stock_yolo_batch_size'],
-            )
-
-            # Spacing in pixels at this tile's native resolution
-            spacing_px_by_class = _class_spacing_px(
-                spacing_m, m_per_px, class_min_footprint_span_m
-            )
-            road_width_px = max(
-                ROAD_WIDTH_PX_MIN,
-                int(round(ROAD_CENTERLINE_WIDTH_M / max(m_per_px, 1e-6))),
-            )
-            road_dilate_px = max(
-                ROAD_DILATE_PX_MIN,
-                int(round(ROAD_EXTRA_BUFFER_M / max(m_per_px, 1e-6))),
-            )
-            k_road = cv2.getStructuringElement(
-                cv2.MORPH_RECT, (road_dilate_px * 2 + 1, road_dilate_px * 2 + 1))
-
-            # Stock YOLO pre-step placements are merged AFTER the road/mask
-            # section below: they must first be checked against scenery
-            # objects other addons already place (simHeaven / custom overlay
-            # objects, existing building footprints).
-            stock_res = _prep['stock_res']
-            _stock_has_placements = stock_res is not None and bool(
-                stock_res.placed_objects or stock_res.placed_facades
-                or stock_res.placed_draped
-            )
-
-            # Stock placements force the full path: the blocker filter below
-            # needs the rasterized addon-object masks before they can merge.
-            if not yolo_detections and not _stock_has_placements:
-                file_counts['placed'] = 0
-                if verbose_log:
-                    spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
-                    class_counts = {cls: 0 for cls in BLD_PLACEMENT_CLASSES}
-                    print(
-                        f"  [{fi:3d}/{n_files}] {fname}  "
-                        f"{_describe_placement_summary(class_counts, spacing_label, file_counts)}"
-                    )
-                else:
-                    print(f"  [{fi:3d}/{n_files}] {fname}  (0 placements)", flush=True)
-                if not disable_cache and not ignore_placement_cache:
-                    try:
-                        _t = time.perf_counter()
-                        with open(_bld_cache_file, 'wb') as _f:
-                            _pickle.dump({
-                                'params': _effective_bld_params,
-                                'covered': _covered_fracs_by_file.get(fname),
-                                'source': 'direct_yolo',
-                                'placements': {'objects': (), 'facades': ()},
-                            }, _f)
-                        _record_elapsed(timings, file_timings, 'cache_save', _t)
-                    except Exception:
-                        pass
-                continue
-
-            TILE_EDGE_MARGIN_M = 20.0
-            edge_px = max(2, int(TILE_EDGE_MARGIN_M / m_per_px))
-
-            _t = time.perf_counter()
-            local_separator_roads = _roads_for_bounds(
-                separator_roads_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-            local_rails = _roads_for_bounds(
-                excl_rails_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-            local_excl_polys = _polys_for_bounds(
-                excl_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-            local_existing_bld_polys = _polys_for_bounds(
-                existing_bld_polys_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.001)
-            local_sh_bld_objects = _simheaven_objects_for_bounds(
-                sh_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
-            local_custom_bld_objects = _simheaven_objects_for_bounds(
-                custom_bld_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.002)
-            _record_elapsed(timings, file_timings, 'lookup', _t)
-
-            _t = time.perf_counter()
-            if local_separator_roads:
-                road_mask = _rasterize_roads(
-                    local_separator_roads, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, road_width_px=road_width_px)
-                road_mask = cv2.dilate(road_mask, k_road)
-            else:
-                road_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-
-            if local_rails:
-                rail_mask = _rasterize_roads(
-                    local_rails, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, road_width_px=road_width_px)
-                rail_mask = cv2.dilate(rail_mask, k_road)
-            else:
-                rail_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-            _record_elapsed(timings, file_timings, 'road_raster', _t)
-
-            poly_mask = None
-            if local_excl_polys:
-                _t = time.perf_counter()
-                poly_mask = _rasterize_polygons(
-                    local_excl_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                )
-                _record_elapsed(timings, file_timings, 'road_raster', _t)
-
-            existing_bld_mask = None
-            if local_existing_bld_polys:
-                _t = time.perf_counter()
-                existing_bld_mask = _rasterize_polygons(
-                    local_existing_bld_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-                )
-                _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
-
-            sh_bld_mask = None
-            if local_sh_bld_objects:
-                _t = time.perf_counter()
-                sh_bld_mask = _rasterize_simheaven_objects(
-                    local_sh_bld_objects, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, m_per_px
-                )
-                _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
-
-            custom_bld_mask = None
-            if local_custom_bld_objects:
-                _t = time.perf_counter()
-                custom_bld_mask = _rasterize_simheaven_objects(
-                    local_custom_bld_objects, lat_n, lat_s, lon_w, lon_e,
-                    img_h, img_w, m_per_px
-                )
-                _record_elapsed(timings, file_timings, 'existing_bld_excl', _t)
-
-            # Merge the stock YOLO pre-step placements in file order, after
-            # dropping detections that overlap scenery objects other addons
-            # already place (simHeaven / custom overlay objects, existing
-            # building footprints).
-            if stock_res is not None:
-                _addon_blocker_mask = None
-                for _m in (sh_bld_mask, custom_bld_mask, existing_bld_mask):
-                    if _m is not None and _m.any():
-                        _addon_blocker_mask = (
-                            _m.copy() if _addon_blocker_mask is None
-                            else (_addon_blocker_mask | _m)
-                        )
-                if _addon_blocker_mask is not None:
-                    _stock_blocked = _filter_stock_results_by_blockers(
-                        stock_res, _addon_blocker_mask
-                    )
-                    if _stock_blocked:
-                        file_counts['stock_yolo_blocked'] = int(_stock_blocked)
-                placed_stock_objects.extend(stock_res.placed_objects)
-                placed_facades.extend(stock_res.placed_facades)
-                placed_draped.extend(stock_res.placed_draped)
-                stock_yolo_occupied_polys = list(stock_res.occupied_px_polys)
-
-            _t = time.perf_counter()
-            # static_occ_mask collects everything even the *loose* trained-YOLO
-            # detection OBB must avoid: water, OSM building footprints, scenery
-            # objects and stock-YOLO placements. Roads/railways are deliberately
-            # NOT in it — they gate only the placed footprint via
-            # placement_occ_mask below, so a detection whose loose OBB clips a
-            # street edge still places (see the road-exclusion comment in run()).
-            static_occ_mask = np.zeros_like(road_mask)
-            if allow_road_overlap:
-                file_counts['road_overlap_allowed'] = 1
-
-            if poly_mask is not None and poly_mask.any():
-                static_occ_mask  = static_occ_mask | poly_mask
-
-            if mesh_water_mask is not None and mesh_water_mask.any():
-                static_occ_mask = static_occ_mask | mesh_water_mask
-
-            if existing_bld_mask is not None and existing_bld_mask.any():
-                static_occ_mask = static_occ_mask | existing_bld_mask
-
-            if sh_bld_mask is not None and sh_bld_mask.any():
-                static_occ_mask = static_occ_mask | sh_bld_mask
-
-            if custom_bld_mask is not None and custom_bld_mask.any():
-                static_occ_mask = static_occ_mask | custom_bld_mask
-
-            DEGREE_TOL = 1e-4
-            if lat_n >= lat + 1 - DEGREE_TOL:   static_occ_mask[:edge_px,  :]  = 1
-            if lat_s <= lat     + DEGREE_TOL:   static_occ_mask[-edge_px:, :]  = 1
-            if lon_w <= lon     + DEGREE_TOL:   static_occ_mask[:,  :edge_px]  = 1
-            if lon_e >= lon + 1 - DEGREE_TOL:   static_occ_mask[:, -edge_px:]  = 1
-            # Mark stock-YOLO OBBs (storage tanks, swimming pools) into
-            # both static_occ_mask and building_spacing_mask BEFORE the
-            # trained-YOLO facade loop runs, so building facades don't
-            # overlap the static objects we just placed.
-            if stock_yolo_occupied_polys:
-                for _quad in stock_yolo_occupied_polys:
-                    cv2.fillPoly(static_occ_mask, [_quad], 1)
-            static_occ_integral = (
-                None if strict_fit else cv2.integral(static_occ_mask, sdepth=cv2.CV_32S)
-            )
-            # placement_occ_mask = static blockers + the true-width road/rail
-            # surface. It gates candidate centers and every *placed* footprint
-            # (object assets, shrunk facade templates, gap fill) — the loose
-            # detection OBB keeps checking static_occ_mask only. Narrow lanes
-            # exclude just their own few metres of pavement, so dense blocks
-            # keep their placements while buildings stay off the streets.
-            _t_excl = time.perf_counter()
-            route_excl_mask = None
-            if not allow_road_overlap:
-                route_excl_mask = _rasterize_route_exclusion(
-                    local_separator_roads, local_rails,
-                    lat_n, lat_s, lon_w, lon_e, img_h, img_w, m_per_px)
-            _record_elapsed(timings, file_timings, 'road_raster', _t_excl)
-            if route_excl_mask is not None and route_excl_mask.any():
-                placement_occ_mask = static_occ_mask | route_excl_mask
-                placement_occ_integral = (
-                    None if strict_fit
-                    else cv2.integral(placement_occ_mask, sdepth=cv2.CV_32S)
-                )
-            else:
-                route_excl_mask = None
-                placement_occ_mask = static_occ_mask
-                placement_occ_integral = static_occ_integral
-            building_spacing_mask = np.zeros_like(static_occ_mask)
-            if stock_yolo_occupied_polys:
-                for _quad in stock_yolo_occupied_polys:
-                    cv2.fillPoly(building_spacing_mask, [_quad], 1)
-            placed_yolo_mask = np.zeros_like(static_occ_mask)
-            fit_scratch = np.zeros_like(static_occ_mask)
-            pts_this = []
-            placed_viz_polys = []
-            roof_color_viz_polys = []
-            yolo_viz_polys = []
-            _record_elapsed(timings, file_timings, 'mask_apply', _t)
-
-            # Farmland sorting (O4_Agri_Structures): drop open-ground
-            # detections, take greenhouses out of the building flow and place
-            # them as greenhouse assets before any building claims the area.
-            if (
-                yolo_detections and veg_map is not None and not mesh_water_full
-                and _agri_mode() != "off"
-            ):
-                _t_gh = time.perf_counter()
-                _agri_img = {'img': img, 'tried': img is not None}
-
-                def _agri_image():
-                    if not _agri_img['tried']:
-                        _agri_img['tried'] = True
-                        _agri_img['img'] = _load_source_image(
-                            fname, _source_mode, _orthophoto_dir
-                        )
-                    return _agri_img['img']
-
-                def _agri_heights(dets):
-                    _himg = _agri_image()
-                    if height_model is None or _himg is None:
-                        return [float('nan')] * len(dets)
-                    return HEIGHTMODEL.predict_detection_heights(
-                        height_model, _himg, dets, m_per_px
-                    )
-
-                _n_agri_in = len(yolo_detections)
-                yolo_detections, greenhouse_detections = AGRI.split_detections(
-                    yolo_detections, veg_map, _agri_image, m_per_px,
-                    counts=file_counts, height_fn=_agri_heights,
-                )
-                file_counts['agri_greenhouse'] = len(greenhouse_detections)
-                file_counts['agri_ground'] = (
-                    _n_agri_in - len(yolo_detections) - len(greenhouse_detections)
-                )
-                if len(yolo_detections) != _n_agri_in:
-                    file_counts['yolo_detections'] = len(yolo_detections)
-                if greenhouse_detections:
-                    # A greenhouse block the landcover model reads as roof
-                    # must not be traced again as a building (segment-first,
-                    # large-roof polygons): its OBB becomes farmland.
-                    veg_map = veg_map.copy()
-                    for _gh in greenhouse_detections:
-                        cv2.fillPoly(
-                            veg_map,
-                            [np.round(np.asarray(_gh['points'])).astype(np.int32)],
-                            int(AGRI.CLASS_AGRICULTURE),
-                        )
-                    if _agri_mode() == "greenhouse":
-                        _place_greenhouses(
-                            greenhouse_detections,
-                            m_per_px=m_per_px, img_w=img_w, img_h=img_h,
-                            lat=lat, lon=lon,
-                            bounds=(lat_n, lat_s, lon_w, lon_e),
-                            static_occ_mask=static_occ_mask,
-                            route_excl_mask=route_excl_mask,
-                            building_spacing_mask=building_spacing_mask,
-                            fit_scratch=fit_scratch,
-                            tunnel_paths=greenhouse_tunnel_paths,
-                            facade_path=greenhouse_facade_path,
-                            placed_objects=placed_stock_objects,
-                            placed_facades=placed_facades,
-                            file_counts=file_counts,
-                        )
-                _agri_img = None
-                _record_elapsed(timings, file_timings, 'greenhouses', _t_gh)
-
-            _seg_mode = _seg_first_mode()
-            if _seg_mode != "off" and veg_map is not None:
-                _t = time.perf_counter()
-                _seg_img = img
-                if _seg_img is None:
-                    _seg_img = _load_source_image(
-                        fname, _source_mode, _orthophoto_dir
-                    )
-                yolo_detections = _seg_first_detections(
-                    yolo_detections, veg_map, _seg_img, m_per_px,
-                    img_w, img_h, _seg_mode, file_counts,
-                    road_mask=(
-                        road_mask if rail_mask is None
-                        else (road_mask | rail_mask)
-                    ),
-                )
-                _seg_img = None
-                _record_elapsed(timings, file_timings, 'seg_first', _t)
-
-            _apply_regional_height_fallbacks(
-                yolo_detections, natural_asset_region
-            )
-
-            # Large-roof polygons need neither heights nor anything placed
-            # below: trace them on a worker while HeightNet runs.
-            _ring_jobs = None
-            if (
-                yolo_detections and veg_map is not None and
-                _asset_kind_enabled('facade', building_asset_mode) and
-                _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True)
-            ):
-                _ring_jobs = _start_large_footprint_jobs(
-                    yolo_detections, veg_map == SEGFORMER.CLASS_BUILDING,
-                    m_per_px,
-                )
-
-            if yolo_detections and height_model is not None:
-                # Lazy HeightNet: heights are consumed only inside object
-                # candidate selection and the facade fallback, both of which
-                # run strictly AFTER the static placement gates in the fit
-                # loop below. Those gates read masks that are fully built
-                # above and never mutated inside the loop, so which
-                # detections reach a height read is decidable here, before
-                # anything places. Predict heights for the gate-passers only
-                # (~13% of suppression survivors on dense textures). This
-                # replica MUST stay in sync with the gate sequence at the top
-                # of the fit loop (valid -> in-bounds -> static center ->
-                # static footprint -> in-tile); a stale replica that passes
-                # extra detections only wastes GPU time, but one that drops a
-                # gate-passer would leave its height_m unset and shift the
-                # facade height RNG stream.
-                _t = time.perf_counter()
-                _height_dets = []
-                for _hdet in yolo_detections:
-                    _hprep = _prepare_direct_yolo_detection(_hdet, img_w, img_h)
-                    if not _hprep['valid']:
-                        continue
-                    _hjx = int(_hprep['jx'])
-                    _hjy = int(_hprep['jy'])
-                    if not (0 <= _hjx < img_w and 0 <= _hjy < img_h):
-                        continue
-                    if placement_occ_mask[_hjy, _hjx]:
-                        continue
-                    if not _poly_fits_with_integral(
-                        static_occ_mask, _hprep['poly'], fit_scratch,
-                        static_occ_integral, bbox=_hprep['bbox'],
-                    ):
-                        continue
-                    _ho_lon, _ho_lat = px_to_latlon(
-                        _hjx, _hjy, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-                    )
-                    if not (lon <= _ho_lon < lon + 1 and lat <= _ho_lat < lat + 1):
-                        continue
-                    _height_dets.append(_hdet)
-                if _height_dets:
-                    _height_img = img
-                    if _height_img is None:
-                        # Cached-YOLO path (v7+ caches are height-free): load
-                        # the texture just for the height crops, without
-                        # touching `img` so warm-run behaviour elsewhere
-                        # stays unchanged.
-                        _img_t = time.perf_counter()
-                        _height_img = _load_source_image(
-                            fname, _source_mode, _orthophoto_dir
-                        )
-                        if _height_img is not None:
-                            _record_elapsed(
-                                timings, file_timings, 'dds_load', _img_t
-                            )
-                    if _height_img is not None:
-                        _apply_heightnet_to_detections(
-                            height_model,
-                            _height_img,
-                            _height_dets,
-                            m_per_px,
-                            region=natural_asset_region,
-                            veg_map=veg_map,
-                        )
-                        if (
-                            roof_color_image is None and
-                            enabled_yolo_color_assets_by_family
-                        ):
-                            # Reuse the one warm-cache image load for rooftop
-                            # sampling instead of decoding the DDS again in
-                            # the placement loop.
-                            roof_color_image = _height_img
-                            roof_color_load_attempted = True
-                    _height_img = None
-                    file_counts['heightnet_dets'] = len(_height_dets)
-                _height_dets = None
-                _record_elapsed(timings, file_timings, 'heightnet', _t)
-
-            if yolo_detections:
-                _assign_height_gates(yolo_detections, natural_asset_region)
-                file_counts['height_context_capped'] = sum(
-                    1 for _d in yolo_detections
-                    if _d.get('height_adjustment') == 'context_cap'
-                )
-                _t_yolo_place = time.perf_counter()
-                # O4_BLD_PLACE_PROFILE: per-phase wall-time + candidate-scan
-                # accounting for the placement loop. perf_counter is only called
-                # when the flag is on, so the default path is unaffected.
-                _pf = place_profile
-                _pf_prep = _pf_fits = _pf_select = _pf_maskfill = 0.0
-                _pf_select_acc = {} if _pf else None
-                placed_yolo_integral = cv2.integral(placed_yolo_mask, sdepth=cv2.CV_32S)
-                recent_yolo_mask = np.zeros_like(placed_yolo_mask)
-                recent_yolo_marks = 0
-                recent_yolo_rebuild_threshold = 256
-                building_spacing_integral = cv2.integral(
-                    building_spacing_mask, sdepth=cv2.CV_32S
-                )
-                recent_spacing_mask = np.zeros_like(building_spacing_mask)
-                recent_spacing_marks = 0
-                recent_spacing_rebuild_threshold = 256
-                # Place smallest detections first so the smaller one wins an
-                # overlap conflict (OBB-dedup / object self-spacing).
-                yolo_detections = sorted(
-                    yolo_detections,
-                    key=lambda d: (
-                        float(d.get('area_m2', 0.0)),
-                        -float(d.get('confidence', 0.0)),
-                    ),
-                )
-                # O4_BLD_BLOCK_DEBUG=1: record why each detection did not
-                # place (reason, center px, OBB quad) plus the stock-YOLO
-                # occupancy quads, dumped per DDS as <stem>_blockdebug.pkl for
-                # offline blocker overlays. Off by default: zero overhead.
-                _blkdbg = (
-                    [] if _env_flag("O4_BLD_BLOCK_DEBUG", False) else None
-                )
-                # Large irregular roofs first (largest first): a polygon
-                # facade traced from the landcover building class, then the
-                # smaller detections on that roof are skipped below.
-                large_roof_mask = None
-                _poly_refine = _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True)
-                if (
-                    veg_map is not None and
-                    _asset_kind_enabled('facade', building_asset_mode) and
-                    (_poly_refine or any(
-                        d.get('seg_rings') is not None for d in yolo_detections
-                    ))
-                ):
-                    _t_lf = time.perf_counter()
-                    _bld_class_mask = veg_map == SEGFORMER.CLASS_BUILDING
-                    for detection in sorted(
-                        (
-                            d for d in yolo_detections
-                            if d.get('seg_rings') is not None or (
-                                _poly_refine and
-                                d.get('seg_first') is None and
-                                float(d.get('area_m2', 0.0)) >= LARGE_FOOTPRINT_MIN_M2
-                            )
-                        ),
-                        key=lambda d: (
-                            -float(d.get('area_m2', 0.0)),
-                            -float(d.get('confidence', 0.0)),
-                        ),
-                    ):
-                        prepared_yolo = _prepare_direct_yolo_detection(
-                            detection, img_w, img_h
-                        )
-                        if not prepared_yolo['valid']:
-                            continue
-                        jx = int(prepared_yolo['jx'])
-                        jy = int(prepared_yolo['jy'])
-                        if not (0 <= jx < img_w and 0 <= jy < img_h):
-                            continue
-                        _seg_poly = detection.get('seg_rings') is not None
-                        # a segmented outline's frame centre may sit in its
-                        # own courtyard or a neighbour piece: only its rings
-                        # are tested below
-                        if not _seg_poly and placement_occ_mask[jy, jx]:
-                            continue
-                        if (
-                            not _seg_poly and large_roof_mask is not None and
-                            large_roof_mask[jy, jx]
-                        ):
-                            continue
-                        o_lon, o_lat = px_to_latlon(
-                            jx, jy, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-                        )
-                        if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
-                            continue
-                        if not _direct_yolo_facade_footprint_allowed(detection):
-                            continue
-                        _ring_job = (
-                            _ring_jobs[0].get(id(detection)) if _ring_jobs else None
-                        )
-                        if _seg_poly:
-                            rings = detection['seg_rings']
-                        elif _ring_job is not None:
-                            rings = _ring_job.result()
-                        else:
-                            rings = _large_footprint_rings(
-                                detection, _bld_class_mask, m_per_px
-                            )
-                        if not rings:
-                            continue
-                        ring_polys = []
-                        for ring in rings:
-                            ring_i = np.rint(ring).astype(np.int32)
-                            ring_i[:, 0] = np.clip(ring_i[:, 0], 0, img_w - 1)
-                            ring_i[:, 1] = np.clip(ring_i[:, 1], 0, img_h - 1)
-                            if not _poly_fits_with_integral(
-                                static_occ_mask, ring_i, fit_scratch,
-                                static_occ_integral,
-                            ):
-                                continue
-                            if (
-                                route_excl_mask is not None and
-                                _poly_mask_overlap_frac(
-                                    route_excl_mask, ring_i, fit_scratch
-                                ) > DIRECT_FACADE_ROAD_OVERLAP_FRAC
-                            ):
-                                continue
-                            if _seg_poly:
-                                # split pieces share their cut edge
-                                if _poly_mask_overlap_frac(
-                                    building_spacing_mask, ring_i, fit_scratch
-                                ) > 0.1:
-                                    continue
-                            elif not _poly_fits(building_spacing_mask, ring_i, fit_scratch):
-                                continue
-                            ring_polys.append((ring, ring_i))
-                        if not ring_polys:
-                            continue
-                        try_cls = int(detection['placement_class'])
-                        facade_cls = _yolo_facade_class(try_cls) or (
-                            try_cls if try_cls in BLD_PLACEMENT_CLASSES
-                            else BLD_CLASS_MEDIUM
-                        )
-                        facade_path = _facade_for_detection(
-                            facade_cls, veg_map, jx, jy, m_per_px,
-                            lat=float(o_lat), lon=float(o_lon),
-                            include_simheaven_assets=simheaven_assets_available,
-                        )
-                        facade_h = _yolo_facade_height_m(
-                            detection, height_rng, height_priors_by_class, facade_cls
-                        )
-                        if large_roof_mask is None:
-                            large_roof_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-                        for ring, ring_i in ring_polys:
-                            placed_facades.append((
-                                _pixel_ring_to_latlon(
-                                    ring, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-                                ),
-                                facade_path,
-                                facade_h,
-                            ))
-                            placed_viz_polys.append((ring_i.copy(), facade_cls))
-                            _mark_poly(building_spacing_mask, ring_i)
-                            _mark_poly(large_roof_mask, ring_i)
-                            if _obj_avoid:
-                                cv2.fillPoly(recent_spacing_mask, [ring_i], 1)
-                                recent_spacing_marks += 1
-                        detection['_large_footprint_placed'] = True
-                        pts_this.append((jx, jy, float(detection['heading']), facade_cls))
-                        _fp_key = (
-                            'seg_first_polygon_placed' if _seg_poly
-                            else 'yolo_footprint_polygon_placed'
-                        )
-                        file_counts[_fp_key] = file_counts.get(_fp_key, 0) + 1
-                        file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
-                    _bld_class_mask = None
-                    if large_roof_mask is not None:
-                        building_spacing_integral = cv2.integral(
-                            building_spacing_mask, sdepth=cv2.CV_32S
-                        )
-                    if _ring_jobs is not None:
-                        # drop traces for detections the gates skipped
-                        _ring_jobs[1].shutdown(wait=True, cancel_futures=True)
-                        _ring_jobs = None
-                    _record_elapsed(timings, file_timings, 'footprint_polygons', _t_lf)
-                for detection in yolo_detections:
-                    if detection.get('_large_footprint_placed'):
-                        continue
-                    if _pf:
-                        _t_pf = time.perf_counter()
-                        prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
-                        _pf_prep += time.perf_counter() - _t_pf
-                    else:
-                        prepared_yolo = _prepare_direct_yolo_detection(detection, img_w, img_h)
-                    yolo_poly = prepared_yolo['poly']
-                    yolo_bbox = prepared_yolo['bbox']
-                    if not prepared_yolo['valid']:
-                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
-                        if _blkdbg is not None:
-                            _blkdbg.append(
-                                ('invalid', None, None, detection.get('points'))
-                            )
-                        continue
-                    yolo_viz_polys.append((yolo_poly.copy(), False))
-                    jx = int(prepared_yolo['jx'])
-                    jy = int(prepared_yolo['jy'])
-                    if not (0 <= jx < img_w and 0 <= jy < img_h):
-                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
-                        if _blkdbg is not None:
-                            _blkdbg.append(('outside', jx, jy, yolo_poly))
-                        continue
-                    if placement_occ_mask[jy, jx]:
-                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
-                        if _blkdbg is not None:
-                            _blkdbg.append(('static_center', jx, jy, yolo_poly))
-                        continue
-                    if _obj_avoid and not _placed_yolo_poly_fits(
-                        placed_yolo_mask,
-                        yolo_poly,
-                        fit_scratch,
-                        placed_yolo_integral=placed_yolo_integral,
-                        recent_yolo_mask=recent_yolo_mask,
-                        bbox=yolo_bbox,
-                    ):
-                        file_counts['yolo_overlap_blocked'] = (
-                            file_counts.get('yolo_overlap_blocked', 0) + 1
-                        )
-                        # A loose OBB overlapping an already-placed OBB does NOT
-                        # mean the footprints overlap, so don't drop here (that
-                        # would remove close-but-separate neighbours); the object
-                        # path fills the detection's free area.
-                    _t_pf = time.perf_counter() if _pf else 0.0
-                    # Hard-gate only on static scenery; footprint overlap with
-                    # other placed buildings is resolved by tile-wide dedup.
-                    footprint_clear = _poly_fits_with_integral(
-                        static_occ_mask, yolo_poly, fit_scratch,
-                        static_occ_integral, bbox=yolo_bbox,
-                    )
-                    if _pf:
-                        _pf_fits += time.perf_counter() - _t_pf
-                    if not footprint_clear:
-                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
-                        if _blkdbg is not None:
-                            _blkdbg.append(('static_footprint', jx, jy, yolo_poly))
-                        continue
-                    if (
-                        large_roof_mask is not None and
-                        large_roof_mask[jy, jx] and
-                        _poly_mask_overlap_frac(
-                            large_roof_mask, yolo_poly, fit_scratch, bbox=yolo_bbox
-                        ) >= LARGE_FOOTPRINT_NESTED_FRAC
-                    ):
-                        # part of a large roof already placed as one polygon
-                        file_counts['yolo_inside_large_footprint'] = (
-                            file_counts.get('yolo_inside_large_footprint', 0) + 1
-                        )
-                        if _blkdbg is not None:
-                            _blkdbg.append(('large_footprint', jx, jy, yolo_poly))
-                        continue
-
-                    heading = float(detection['heading'])
-                    try_cls = int(detection['placement_class'])
-                    facade_cls = _yolo_facade_class(try_cls)
-                    if facade_cls is None:
-                        # Guarantee a placement class for any detection that
-                        # cleared the overlap/static steps: fall back to its own
-                        # class (or a medium default) so the object path always
-                        # runs.
-                        facade_cls = (
-                            try_cls if try_cls in BLD_PLACEMENT_CLASSES
-                            else BLD_CLASS_MEDIUM
-                        )
-                    # The center-block disc (minimum object spacing) is bypassed:
-                    # it would drop close non-overlapping neighbours; tile-wide
-                    # dedup handles spacing.
-                    o_lon, o_lat = px_to_latlon(jx, jy, img_w, img_h,
-                                                lat_n, lat_s, lon_w, lon_e)
-                    if not (lon <= o_lon < lon + 1 and lat <= o_lat < lat + 1):
-                        file_counts['yolo_blocked'] = file_counts.get('yolo_blocked', 0) + 1
-                        if _blkdbg is not None:
-                            _blkdbg.append(('out_of_tile', jx, jy, yolo_poly))
-                        continue
-
-                    object_candidate = None
-                    object_status = 'objects_disabled'
-                    if _asset_kind_enabled('object', building_asset_mode):
-                        roof_color = None
-                        if enabled_yolo_color_assets_by_family:
-                            if (
-                                roof_color_image is None and
-                                not roof_color_load_attempted
-                            ):
-                                roof_color_load_attempted = True
-                                _img_t = time.perf_counter()
-                                roof_color_image = _load_source_image(
-                                    fname, _source_mode, _orthophoto_dir
-                                )
-                                if roof_color_image is not None:
-                                    _record_elapsed(
-                                        timings, file_timings, 'dds_load', _img_t
-                                    )
-                            if roof_color_image is not None:
-                                roof_color = ROOFCOLOR.sample_rooftop_color(
-                                    roof_color_image, yolo_poly
-                                )
-                                if roof_color is not None:
-                                    detection['roof_color'] = roof_color
-                            if roof_color is None:
-                                file_counts['roof_color_unavailable'] = (
-                                    file_counts.get('roof_color_unavailable', 0) + 1
-                                )
-                        _t_pf = time.perf_counter() if _pf else 0.0
-                        object_candidate, object_status = _select_yolo_object_candidate(
-                            yolo_object_fit_table,
-                            detection,
-                            yolo_poly,
-                            jx,
-                            jy,
-                            heading,
-                            m_per_px,
-                            residential_context=True,
-                            min_coverage=yolo_min_coverage,
-                            enabled_assets_by_path=enabled_yolo_object_assets_by_path,
-                            static_occ_mask=placement_occ_mask,
-                            building_spacing_mask=building_spacing_mask,
-                            scratch_mask=fit_scratch,
-                            static_occ_integral=placement_occ_integral,
-                            spacing_occ_integral=building_spacing_integral,
-                            recent_spacing_mask=recent_spacing_mask,
-                            skip_occupancy=not _obj_avoid,
-                            profile_out=_pf_select_acc,
-                            roof_color=roof_color,
-                            color_assets_by_family=enabled_yolo_color_assets_by_family,
-                        )
-                        if _pf:
-                            _pf_select += time.perf_counter() - _t_pf
-                    placed_direct_detection = False
-                    if object_candidate is not None:
-                        asset = object_candidate['asset']
-                        final_h = float(object_candidate['heading'])
-                        footprint_poly = object_candidate['footprint_poly']
-                        placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
-                        placed_viz_polys.append((footprint_poly.copy(), facade_cls))
-                        if object_candidate.get('roof_color_match'):
-                            roof_viz_status = "match"
-                        elif detection.get('roof_color') is not None:
-                            roof_viz_status = "fallback"
-                        else:
-                            roof_viz_status = "unavailable"
-                        roof_color_viz_polys.append((
-                            footprint_poly.copy(),
-                            roof_viz_status,
-                            _asset_roof_viz_rgb(asset),
-                        ))
-                        # Spacing marks only feed per-candidate self-avoidance;
-                        # skip them when relying on tile-wide dedup.
-                        if _obj_avoid:
-                            _t_pf = time.perf_counter() if _pf else 0.0
-                            _mark_poly(building_spacing_mask, footprint_poly)
-                            cv2.fillPoly(recent_spacing_mask, [np.int32(footprint_poly)], 1)
-                            if _pf:
-                                _pf_maskfill += time.perf_counter() - _t_pf
-                            recent_spacing_marks += 1
-                        pts_this.append((jx, jy, final_h, facade_cls))
-                        file_counts['yolo_object_placed'] = (
-                            file_counts.get('yolo_object_placed', 0) + 1
-                        )
-                        if object_candidate.get('roof_color_match'):
-                            file_counts['roof_color_matched'] = (
-                                file_counts.get('roof_color_matched', 0) + 1
-                            )
-                        elif detection.get('roof_color') is not None:
-                            file_counts['roof_color_fit_fallback'] = (
-                                file_counts.get('roof_color_fit_fallback', 0) + 1
-                            )
-                        placed_direct_detection = True
-                    else:
-                        if object_status != 'objects_disabled':
-                            status_key = {
-                                'no_candidates': 'yolo_object_no_candidates',
-                                'size_reject': 'yolo_object_size_reject',
-                                'coverage_reject': 'yolo_object_coverage_reject',
-                                'outline_reject': 'yolo_object_outline_reject',
-                                'context_skipped': 'yolo_object_context_skipped',
-                                'occupancy_reject': 'yolo_object_occupancy_reject',
-                                'height_reject': 'yolo_object_height_reject',
-                                'no_dimensions': 'yolo_object_no_dimensions',
-                                'miss': 'yolo_object_lookup_miss',
-                            }.get(object_status, 'yolo_object_lookup_miss')
-                            file_counts[status_key] = file_counts.get(status_key, 0) + 1
-                        if _blkdbg is not None:
-                            _blkdbg.append(
-                                ('sel_' + str(object_status), jx, jy, yolo_poly)
-                            )
-                        facade_footprint_ok = _direct_yolo_facade_footprint_allowed(
-                            detection
-                        )
-                        # The fallback facade extrudes the raw (loose) OBB, so
-                        # tolerate a small road overlap instead of rejecting on
-                        # first contact; see DIRECT_FACADE_ROAD_OVERLAP_FRAC.
-                        facade_road_ok = (
-                            route_excl_mask is None or
-                            _poly_mask_overlap_frac(
-                                route_excl_mask, yolo_poly, fit_scratch,
-                                bbox=yolo_bbox,
-                            ) <= DIRECT_FACADE_ROAD_OVERLAP_FRAC
-                        )
-                        if (
-                            _asset_kind_enabled('facade', building_asset_mode) and
-                            facade_footprint_ok and
-                            facade_road_ok and
-                            _poly_fits(building_spacing_mask, yolo_poly, fit_scratch)
-                        ):
-                            facade_path = _facade_for_detection(
-                                facade_cls,
-                                veg_map,
-                                jx,
-                                jy,
-                                m_per_px,
-                                lat=float(o_lat),
-                                lon=float(o_lon),
-                                include_simheaven_assets=simheaven_assets_available,
-                            )
-                            placed_facades.append((
-                                _pixel_ring_to_latlon(
-                                    yolo_poly, img_w, img_h, lat_n, lat_s, lon_w, lon_e
-                                ),
-                                facade_path,
-                                _yolo_facade_height_m(
-                                    detection, height_rng, height_priors_by_class, facade_cls
-                                ),
-                            ))
-                            placed_viz_polys.append((yolo_poly.copy(), facade_cls))
-                            _mark_poly(building_spacing_mask, yolo_poly)
-                            if _obj_avoid:
-                                cv2.fillPoly(recent_spacing_mask, [np.int32(yolo_poly)], 1)
-                                recent_spacing_marks += 1
-                            pts_this.append((jx, jy, heading, facade_cls))
-                            file_counts['yolo_facade_placed'] = (
-                                file_counts.get('yolo_facade_placed', 0) + 1
-                            )
-                            direct_yolo_facade_placements += 1
-                            placed_direct_detection = True
-                        elif _asset_kind_enabled('facade', building_asset_mode):
-                            if not facade_footprint_ok:
-                                status_key = 'yolo_facade_oversize_reject'
-                            elif not facade_road_ok:
-                                status_key = 'yolo_facade_road_reject'
-                            else:
-                                status_key = 'yolo_facade_spacing_reject'
-                            file_counts[status_key] = file_counts.get(status_key, 0) + 1
-
-                    yolo_viz_polys[-1] = (yolo_poly.copy(), placed_direct_detection)
-                    # The placed-OBB mask and the incremental occupancy
-                    # integrals are only consumed by the overlap-avoidance
-                    # paths (OBB dedup + selector occupancy), both skipped
-                    # unless per-candidate self-avoidance is on — so don't pay
-                    # to maintain them when relying on tile-wide dedup.
-                    if _obj_avoid:
-                        cv2.fillPoly(placed_yolo_mask, [np.int32(yolo_poly)], 1)
-                        cv2.fillPoly(recent_yolo_mask, [np.int32(yolo_poly)], 1)
-                        recent_yolo_marks += 1
-                        if recent_yolo_marks >= recent_yolo_rebuild_threshold:
-                            placed_yolo_integral = cv2.integral(
-                                placed_yolo_mask, sdepth=cv2.CV_32S
-                            )
-                            recent_yolo_mask.fill(0)
-                            recent_yolo_marks = 0
-                        if recent_spacing_marks >= recent_spacing_rebuild_threshold:
-                            building_spacing_integral = cv2.integral(
-                                building_spacing_mask, sdepth=cv2.CV_32S
-                            )
-                            recent_spacing_mask.fill(0)
-                            recent_spacing_marks = 0
-                    if placed_direct_detection:
-                        file_counts['yolo_placed'] = file_counts.get('yolo_placed', 0) + 1
-                if _blkdbg is not None:
-                    try:
-                        import pickle as _blk_pickle
-                        with open(
-                            os.path.join(
-                                cache_dir,
-                                fname.replace('.dds', '_blockdebug.pkl'),
-                            ),
-                            'wb',
-                        ) as _f:
-                            _blk_pickle.dump(
-                                {
-                                    'outcomes': _blkdbg,
-                                    'stock_quads': [
-                                        np.asarray(q)
-                                        for q in stock_yolo_occupied_polys
-                                    ],
-                                },
-                                _f,
-                            )
-                    except Exception:
-                        pass
-                yolo_place_elapsed = time.perf_counter() - _t_yolo_place
-                timings['placement'] += yolo_place_elapsed
-                file_timings['fit_loop'] = file_timings.get('fit_loop', 0.0) + yolo_place_elapsed
-                if _pf:
-                    for _k, _v in (
-                        ('place_prep', _pf_prep),
-                        ('place_fits', _pf_fits),
-                        ('place_select', _pf_select),
-                        ('place_maskfill', _pf_maskfill),
-                    ):
-                        timings[_k] += _v
-                        file_timings[_k] = file_timings.get(_k, 0.0) + _v
-                    _acc = _pf_select_acc or {}
-                    file_counts['place_select_calls'] = (
-                        file_counts.get('place_select_calls', 0) + int(_acc.get('calls', 0))
-                    )
-                    file_counts['place_cands_scanned'] = (
-                        file_counts.get('place_cands_scanned', 0) + int(_acc.get('seen', 0))
-                    )
-                    file_counts['place_cands_viable'] = (
-                        file_counts.get('place_cands_viable', 0) + int(_acc.get('viable', 0))
-                    )
-                    file_counts['place_cands_offered'] = (
-                        file_counts.get('place_cands_offered', 0) + int(_acc.get('entries', 0))
-                    )
-
-            file_counts['placed'] = len(pts_this)
-
-            col = (til_x_left - x_min) // x_step
-            row = (til_y_top  - y_min) // y_step
-            # Placed-footprint coverage: fraction of the tile actually covered by
-            # placed building footprints (objects + facades), the packing-density
-            # metric to watch when tuning overlap removal vs. coverage.
-            if placed_viz_polys:
-                _placed_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-                cv2.fillPoly(
-                    _placed_mask,
-                    [np.int32(np.asarray(_p)) for _p, _cls in placed_viz_polys],
-                    1,
-                )
-                placed_pct = 100.0 * float(cv2.countNonZero(_placed_mask)) / float(img_w * img_h)
-            else:
-                placed_pct = 0.0
-            file_counts['placed_footprint_pct'] = round(placed_pct, 2)
-            class_counts = {
-                cls: sum(1 for p in pts_this if p[3] == cls)
-                for cls in BLD_PLACEMENT_CLASSES
-            }
-            spacing_label = _format_class_spacing(spacing_px_by_class, m_per_px)
-            if verbose_log:
-                print(
-                    f"  [{fi:3d}/{n_files}] {fname}  "
-                    f"{_describe_placement_summary(class_counts, spacing_label, file_counts)}"
-                    f"  placed%={placed_pct:.1f}"
-                )
-            else:
-                # Same accounting as the cached-replay line: objects + facades
-                # appended for this texture.
-                _n_tex_placed = (
-                    (len(placed_stock_objects) - _start_object_idx) +
-                    (len(placed_facades) - _start_facade_idx)
-                )
-                print(
-                    f"  [{fi:3d}/{n_files}] {fname}  "
-                    f"({_n_tex_placed} placements)",
-                    flush=True,
-                )
-
-            if not disable_cache and not ignore_placement_cache:
-                try:
-                    _t = time.perf_counter()
-                    with open(_bld_cache_file, 'wb') as _f:
-                        _pickle.dump({
-                            'params': _effective_bld_params,
-                            'covered': _covered_fracs_by_file.get(fname),
-                            'source': 'direct_yolo',
-                            'placements': {
-                                'objects': placed_stock_objects[_start_object_idx:],
-                                'facades': placed_facades[_start_facade_idx:],
-                            },
-                        }, _f)
-                    _record_elapsed(timings, file_timings, 'cache_save', _t)
-                except Exception:
-                    pass
-
-            if make_viz and composite is not None:
-                _t_viz = time.perf_counter()
-                if img is None:
-                    _img_t = time.perf_counter()
-                    img = _load_source_image(fname, _source_mode, _orthophoto_dir)
-                    if img is None:
-                        continue
-                    _record_elapsed(timings, file_timings, 'dds_load', _img_t)
-                scale = TILE_VIZ / img_w
-                panel = np.array(Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS))
-                def _blend_viz_mask(src_mask, colour, alpha):
-                    if src_mask is None or not np.any(src_mask):
-                        return
-                    viz_mask = np.array(
-                        Image.fromarray((src_mask != 0).astype(np.uint8) * 255)
-                        .resize((TILE_VIZ, TILE_VIZ), Image.NEAREST)
-                    ) > 127
-                    panel[viz_mask] = (
-                        panel[viz_mask] * (1.0 - alpha) +
-                        np.asarray(colour, dtype=np.float32) * alpha
-                    ).astype(np.uint8)
-
-                _blend_viz_mask(route_excl_mask, (255, 150, 0), 0.70)
-                _blend_viz_mask(mesh_water_mask, (0, 60, 255), 0.65)
-                _blend_viz_mask(road_mask, (255, 0, 0), 0.75)
-                _blend_viz_mask(rail_mask, (255, 0, 255), 0.75)
-                _blend_viz_mask(poly_mask, (120, 0, 255), 0.75)
-                _blend_viz_mask(existing_bld_mask, (0, 0, 0), 0.70)
-                _blend_viz_mask(sh_bld_mask, (255, 255, 255), 0.65)
-                _blend_viz_mask(custom_bld_mask, (0, 255, 255), 0.65)
-                pil = Image.fromarray(panel); draw = ImageDraw.Draw(pil, "RGBA")
-                dot_colours = {
-                    BLD_CLASS_TINY_RESIDENTIAL: (80, 220, 80),
-                    BLD_CLASS_SMALL_RESIDENTIAL: (150, 230, 60),
-                    BLD_CLASS_COMPACT_RESIDENTIAL: (245, 220, 70),
-                    BLD_CLASS_MEDIUM: (255, 165, 50),
-                    BLD_CLASS_SMALL_APARTMENT: (255, 90, 70),
-                    BLD_CLASS_APARTMENT_BLOCK: (80, 200, 255),
-                    BLD_CLASS_LARGE: (70, 130, 255),
-                    BLD_CLASS_EXTRA_LARGE: (135, 90, 255),
-                }
-                footprint_fill = (255, 255, 255)
-                yolo_line_w = max(1, int(round(TILE_VIZ / 2048)))
-                for poly, placed in yolo_viz_polys:
-                    pts = [
-                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
-                        for px2, py2 in poly
-                    ]
-                    if len(pts) >= 3:
-                        fill_alpha = 34 if placed else 18
-                        draw.polygon(pts, fill=(40, 180, 255, fill_alpha), outline=(40, 180, 255, 230))
-                        draw.line(pts + [pts[0]], fill=(255, 245, 80, 235), width=yolo_line_w)
-                for poly, cls2 in placed_viz_polys:
-                    pts = [
-                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
-                        for px2, py2 in poly
-                    ]
-                    if len(pts) >= 3:
-                        draw.polygon(pts, outline=dot_colours.get(cls2, (0, 220, 0)))
-                        cx = sum(p[0] for p in pts) / len(pts)
-                        cy = sum(p[1] for p in pts) / len(pts)
-                        inner = [
-                            (
-                                int(round(cx + (p[0] - cx) * 0.88)),
-                                int(round(cy + (p[1] - cy) * 0.88)),
-                            )
-                            for p in pts
-                        ]
-                        draw.polygon(inner, outline=footprint_fill)
-                for poly, roof_status, roof_rgb in roof_color_viz_polys:
-                    pts = [
-                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
-                        for px2, py2 in poly
-                    ]
-                    if len(pts) >= 3:
-                        status_color = ROOF_COLOR_VIZ_STYLES[roof_status]
-                        draw.polygon(
-                            pts,
-                            fill=tuple(roof_rgb) + (72,),
-                            outline=status_color + (255,),
-                        )
-                        draw.line(
-                            pts + [pts[0]],
-                            fill=status_color + (255,),
-                            width=max(2, yolo_line_w * 2),
-                        )
-                for px2, py2, _, cls2 in pts_this:
-                    sx, sy = int(px2*scale), int(py2*scale)
-                    draw.ellipse([sx-1,sy-1,sx+1,sy+1], fill=dot_colours.get(cls2, (0,220,0)))
-                for poly, placed in yolo_viz_polys:
-                    pts = [
-                        (int(round(float(px2) * scale)), int(round(float(py2) * scale)))
-                        for px2, py2 in poly
-                    ]
-                    if len(pts) >= 3:
-                        draw.line(
-                            pts + [pts[0]],
-                            fill=(255, 245, 80, 255 if placed else 190),
-                            width=yolo_line_w,
-                        )
-                _draw_roof_color_viz_legend(draw, roof_color_viz_polys, TILE_VIZ)
-                composite[row*TILE_VIZ:(row+1)*TILE_VIZ, col*TILE_VIZ:(col+1)*TILE_VIZ] = np.array(pil)
-
-                if footprint_composite is not None:
-                    fp_base = Image.fromarray(
-                        np.array(
-                            Image.fromarray(img).resize((TILE_VIZ, TILE_VIZ), Image.LANCZOS)
-                        )
-                    ).convert('RGBA')
-                    fp_layer = Image.new('RGBA', (TILE_VIZ, TILE_VIZ), (0, 0, 0, 0))
-                    fp_draw = ImageDraw.Draw(fp_layer)
-                    yolo_line_w = max(1, int(round(TILE_VIZ / 2048)))
-                    for poly, placed in yolo_viz_polys:
-                        if not placed:
-                            continue
-                        pts = [
-                            (
-                                int(round(float(px2) * scale)),
-                                int(round(float(py2) * scale)),
-                            )
-                            for px2, py2 in poly
-                        ]
-                        if len(pts) >= 3:
-                            alpha = 44 if placed else 24
-                            fp_draw.polygon(pts, fill=(40, 180, 255, alpha), outline=(40, 180, 255, 230))
-                            fp_draw.line(pts + [pts[0]], fill=(255, 245, 80, 240), width=yolo_line_w)
-                    for poly, cls2 in placed_viz_polys:
-                        pts = [
-                            (
-                                int(round(float(px2) * scale)),
-                                int(round(float(py2) * scale)),
-                            )
-                            for px2, py2 in poly
-                        ]
-                        if len(pts) >= 3:
-                            outline = dot_colours.get(cls2, (0, 220, 0))
-                            fp_draw.polygon(pts, fill=(245, 242, 232, 170), outline=outline + (255,))
-                    for poly, roof_status, roof_rgb in roof_color_viz_polys:
-                        pts = [
-                            (
-                                int(round(float(px2) * scale)),
-                                int(round(float(py2) * scale)),
-                            )
-                            for px2, py2 in poly
-                        ]
-                        if len(pts) >= 3:
-                            status_color = ROOF_COLOR_VIZ_STYLES[roof_status]
-                            fp_draw.polygon(
-                                pts,
-                                fill=tuple(roof_rgb) + (150,),
-                                outline=status_color + (255,),
-                            )
-                            fp_draw.line(
-                                pts + [pts[0]],
-                                fill=status_color + (255,),
-                                width=max(2, yolo_line_w * 2),
-                            )
-                    for poly, placed in yolo_viz_polys:
-                        if not placed:
-                            continue
-                        pts = [
-                            (
-                                int(round(float(px2) * scale)),
-                                int(round(float(py2) * scale)),
-                            )
-                            for px2, py2 in poly
-                        ]
-                        if len(pts) >= 3:
-                            fp_draw.line(
-                                pts + [pts[0]],
-                                fill=(255, 245, 80, 255 if placed else 190),
-                                width=yolo_line_w,
-                            )
-                    _draw_roof_color_viz_legend(
-                        fp_draw, roof_color_viz_polys, TILE_VIZ
-                    )
-                    fp_img = Image.alpha_composite(fp_base, fp_layer).convert('RGB')
-                    footprint_composite[
-                        row*TILE_VIZ:(row+1)*TILE_VIZ,
-                        col*TILE_VIZ:(col+1)*TILE_VIZ,
-                    ] = np.array(fp_img)
-                _record_elapsed(timings, file_timings, 'viz', _t_viz)
-        except BaseException:
-            if prefetch_executor is not None:
-                prefetch_executor.shutdown(wait=True, cancel_futures=True)
-                prefetch_executor = None
-            raise
-        finally:
-            file_elapsed = time.perf_counter() - file_t0
-            if detail_timing or (slow_timing_s > 0 and file_elapsed >= slow_timing_s):
-                _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
-            img = roof_color_image = veg_map = mesh_water_mask = None
-            road_mask = rail_mask = poly_mask = existing_bld_mask = sh_bld_mask = custom_bld_mask = None
-            static_occ_mask = static_occ_integral = building_spacing_mask = None
-            route_excl_mask = placement_occ_mask = placement_occ_integral = None
-            placed_yolo_mask = fit_scratch = None
-            yolo_detections = yolo_viz_polys = placed_viz_polys = None
-            roof_color_viz_polys = None
-            local_separator_roads = local_rails = local_excl_polys = None
-            local_existing_bld_polys = local_sh_bld_objects = local_custom_bld_objects = None
-            if (
-                yolo_cuda_cleanup_every > 0 and
-                fi % yolo_cuda_cleanup_every == 0 and
-                torch.cuda.is_available()
-            ):
-                try:
-                    import gc
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-            if disable_cache:
-                _remove_cache_files(_dds_cache_files)
-
-    if prefetch_executor is not None:
-        prefetch_executor.shutdown(wait=True, cancel_futures=True)
-
-    # Tile-wide cross-texture / cross-pass object dedup — DEPRECATED as a
-    # required stage: cross-ZL double coverage (its dominant feed) is now
-    # removed at the source, so this pass only mops up rare coverage-boundary
-    # straddlers and stock-vs-trained coincidences. Kept as a cheap safety net;
-    # disable with O4_BLD_TILE_DEDUP=0.
-    if (
-        placed_stock_objects and
-        _env_flag("O4_BLD_TILE_DEDUP", True)
-    ):
-        _t = time.perf_counter()
-        _before = len(placed_stock_objects)
-        placed_stock_objects, _seam_dropped = _dedupe_overlapping_placements(
-            placed_stock_objects, lat, lon,
-            debug_path=(
-                os.path.join(cache_dir, 'tile_dedup_debug.pkl')
-                if _env_flag("O4_BLD_BLOCK_DEBUG", False) else None
-            ),
-            # Graze tolerance: keep adjacent distinct buildings whose
-            # footprints clip by less than this fraction of the smaller one;
-            # seam duplicates/stacks overlap near-100% and still drop.
-            overlap_frac=_env_float("O4_BLD_DEDUP_OVERLAP_FRAC", 0.20),
-        )
-        timings['global_dedup'] = timings.get('global_dedup', 0.0) + (
-            time.perf_counter() - _t
-        )
-        if _seam_dropped:
-            print(
-                f"[Bld] Cross-texture object dedup: dropped {_seam_dropped:,} "
-                f"overlapping objects ({_before:,} -> {len(placed_stock_objects):,})"
-            )
-
-    total_time = time.time() - t_start
-    total_placements = (
-        len(placed_stock_objects) + len(placed_facades) + len(placed_draped)
-    )
-    # NOTE: legacy direct-YOLO total-count assertion removed — the trained-YOLO
-    # facade pass and the stock-YOLO pre-step now both contribute placements,
-    # and the building-overlay tracks only the trained-YOLO subtotals
-    # (direct_yolo_facade_placements). Stock-YOLO counts live in
-    # file_counts['stock_yolo_detections'] per DDS file.
-    print(
-        f"\nTotal: {total_placements:,} placements  "
-        f"({len(placed_stock_objects):,} stock-yolo objects, "
-        f"{len(placed_facades):,} facades, "
-        f"{len(placed_draped):,} draped polys)  "
-        f"trained_yolo_facades={direct_yolo_facade_placements:,}  "
-        f"({total_time/60:.1f}min)"
-    )
-
-    if debug_image_only:
-        if make_viz and composite is not None:
-            os.makedirs(os.path.dirname(os.path.abspath(out_dsf)), exist_ok=True)
-            viz_path = out_dsf.replace('.dsf', '_overview.png')
-            Image.fromarray(composite).save(viz_path)
-            print(f"Overview  → {viz_path}  ({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)")
-            if footprint_composite is not None:
-                footprint_viz_path = out_dsf.replace('.dsf', '_footprints.png')
-                Image.fromarray(footprint_composite).save(footprint_viz_path)
-                print(
-                    f"Footprints → {footprint_viz_path}  "
-                    f"({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)"
-                )
-        print("[Bld] Debug image-only mode: skipped DSF text write and compile.")
-        return total_placements
-
-    # ── Write DSF text ────────────────────────────────────────────────────────
-    os.makedirs(os.path.dirname(os.path.abspath(out_dsf)), exist_ok=True)
-    txt_path = out_dsf.replace('.dsf', '_bld.txt')
-    _assert_no_unexported_simheaven_object_placements(
-        placed_stock_objects,
-        exported_simheaven_object_paths,
-    )
-
-    obj_paths = sorted(set(obj_path for _, _, _, obj_path in placed_stock_objects))
-    obj_idx = {path: i for i, path in enumerate(obj_paths)}
-    # POLYGON_DEFs are shared between facade (.fac, extruded) and draped (.pol, ground)
-    # entries — both use BEGIN_POLYGON, distinguished only by param semantics at sim load.
-    facade_paths_set = set(facade_path for _, facade_path, _ in placed_facades)
-    draped_paths_set = set(pol_path for _, pol_path in placed_draped)
-    poly_paths = sorted(facade_paths_set | draped_paths_set)
-    poly_idx = {path: i for i, path in enumerate(poly_paths)}
-    _t = time.perf_counter()
-    with open(txt_path, 'w') as f:
-        f.write("PROPERTY sim/planet earth\n")
-        f.write("PROPERTY sim/overlay 1\n")
-        f.write(f"PROPERTY sim/west  {int(lon)}\n")
-        f.write(f"PROPERTY sim/east  {int(lon)+1}\n")
-        f.write(f"PROPERTY sim/south {int(lat)}\n")
-        f.write(f"PROPERTY sim/north {int(lat)+1}\n")
-        f.write("\n")
-        for p in poly_paths:
-            f.write(f"POLYGON_DEF {p}\n")
-        for p in obj_paths:
-            f.write(f"OBJECT_DEF {p}\n")
-        f.write("\n")
-        for lonlat_ring, facade_path, height_m in placed_facades:
-            idx = poly_idx[facade_path]
-            f.write(f"BEGIN_POLYGON {idx} {int(round(height_m))} 2\n")
-            _write_polygon_winding(f, _ccw_lonlat_ring(lonlat_ring))
-            f.write("END_POLYGON\n")
-        for lonlat_ring, pol_path in placed_draped:
-            idx = poly_idx[pol_path]
-            # Draped polygons (.pol) use param=0 — sim treats geometry as ground-pinned.
-            f.write(f"BEGIN_POLYGON {idx} 0 2\n")
-            _write_polygon_winding(f, lonlat_ring)
-            f.write("END_POLYGON\n")
-        for o_lon, o_lat, heading, obj_path in placed_stock_objects:
-            idx = obj_idx[obj_path]
-            f.write(f"OBJECT {idx} {o_lon:.7f} {o_lat:.7f} {heading:.1f}\n")
-    timings['dsf_text'] += time.perf_counter() - _t
-
-    print(f"DSF text → {txt_path}")
-
-    # Compile
-    _t = time.perf_counter()
-    ok = SEGFORMER.compile_dsf(txt_path, out_dsf)
-    timings['dsf_compile'] += time.perf_counter() - _t
-    if ok:
-        print(f"DSF compiled → {out_dsf}")
-        print(f"[debug] DSF text preserved at {txt_path}")
-        # try: os.remove(txt_path)
-        # except: pass
-    else:
-        print(f"DSFTool failed — text file kept at {txt_path}")
-
-    # ── Save overview image ───────────────────────────────────────────────────
-    if make_viz and composite is not None:
-        viz_path = out_dsf.replace('.dsf', '_overview.png')
-        Image.fromarray(composite).save(viz_path)
-        print(f"Overview  → {viz_path}  ({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)")
-        if footprint_composite is not None:
-            footprint_viz_path = out_dsf.replace('.dsf', '_footprints.png')
-            Image.fromarray(footprint_composite).save(footprint_viz_path)
-            print(
-                f"Footprints → {footprint_viz_path}  "
-                f"({n_cols*TILE_VIZ}×{n_rows*TILE_VIZ}px)"
-            )
-
-    print(
-        "[Bld timing] "
-        f"simHeaven={timings['simheaven_parse']:.1f}s  "
-        f"customScenery={timings['custom_scenery_parse']:.1f}s  "
-        f"cache_load={timings['cache_load']:.1f}s  "
-        f"dds_load={timings['dds_load']:.1f}s  "
-        f"segformer={timings['segformer_inference']:.1f}s  "
-        f"trained_yolo={timings['trained_yolo_inference']:.1f}s  "
-        f"stock_yolo={timings['stock_yolo_inference']:.1f}s  "
-        f"road_raster={timings['road_raster']:.1f}s  "
-        f"mesh_water={timings['mesh_water']:.1f}s  "
-        f"existing_bld_excl={timings['existing_bld_excl']:.1f}s  "
-        f"placement={timings['placement']:.1f}s  "
-        f"dsf_text={timings['dsf_text']:.1f}s  "
-        f"dsf_compile={timings['dsf_compile']:.1f}s"
-    )
-    if detail_timing:
-        print(
-            "[Bld timing detail] "
-            f"lookup={timings['lookup']:.1f}s  "
-            f"mask={timings['mask_apply']:.1f}s  "
-            f"place={timings['fit_loop']:.1f}s  "
-            f"cache_save={timings['cache_save']:.1f}s  "
-            f"viz={timings['viz']:.1f}s"
-        )
-
-    return total_placements
+        avoid_custom_scenery=avoid_custom_scenery,
+        debug_image_only=debug_image_only,
+        allow_road_overlap=allow_road_overlap, dds_filter=dds_filter,
+        ignore_placement_cache=ignore_placement_cache,
+        yolo_enabled=yolo_enabled, yolo_checkpoint=yolo_checkpoint,
+        yolo_conf=yolo_conf, yolo_iou=yolo_iou, yolo_stride=yolo_stride,
+        yolo_max_det=yolo_max_det, yolo_imgsz=yolo_imgsz,
+        yolo_min_coverage=yolo_min_coverage,
+        height_checkpoint=height_checkpoint,
+        roof_color_matching=roof_color_matching,
+        library_cache_dir=library_cache_dir,
+    ).execute()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -127,6 +127,11 @@ folders, which installed libraries and generated DSFs refer to.
 - `Ortho4XP.spec` lists the loose overlay modules once (`OVERLAY_MODULES`)
   and derives both the data files and the hidden imports from it.
 - The `training/` code is now part of the repository.
+- `O4_Building_Overlay.run()` (3,500 lines) is split into the stages of
+  `_BuildingOverlayRun` and the per-texture stages of `_TexturePass`.
+  `scripts/building_overlay_parity_harness.py` runs the real overlay on a
+  synthetic tile with stand-in models and compares the outputs of two source
+  trees byte for byte; the restructuring was verified with it.
 
 ### Added
 

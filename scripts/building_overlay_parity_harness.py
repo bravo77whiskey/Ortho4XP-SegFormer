@@ -74,6 +74,11 @@ SCENARIOS = {
              "O4_BLD_FOOTPRINT_POLYGONS": "0"}, False),
     "roof_color": ({"roof_color_matching": True, "make_viz": True, "dds_filter": "ZL16"},
                    {}, False),
+    "roof_color_warm": ({"roof_color_matching": True, "ignore_placement_cache": True,
+                         "dds_filter": "ZL16"}, {}, True),
+    "smallest_assets": (
+        {}, {"O4_BLD_SMALLEST_ASSET_ONLY": "1", "O4_BLD_ALLOW_OVERSIZED_ALIASES": "1",
+             "O4_BLD_EXTRA_LIBRARIES": "off"}, False),
     "no_cache_sequential": (
         {"disable_cache": True},
         {"O4_BLD_PREFETCH": "0", "O4_OVERLAY_TIMING_DETAIL": "1",
@@ -175,8 +180,11 @@ def _paint_texture(name, zl):
     ring = cv2.ellipse2Poly(pond, (120, 80), 20, 0, 360, 15)
     water.append([(int(x), int(y)) for x, y in ring])
 
+    buildings = []   # (cx, cy, length_px) of every painted building
+
     def building(cx, cy, length, width, heading, colour):
         cv2.fillPoly(img, [_rect(cx, cy, length, width, heading)], colour)
+        buildings.append((cx, cy, length))
 
     markers = list(BUILDING_MARKERS)
     # Residential neighbourhoods: a road grid with houses in the blocks.
@@ -221,7 +229,7 @@ def _paint_texture(name, zl):
         building(gx + 22 * i * scale, gy, 15 * scale, 50 * scale, 0.0, GREENHOUSE_MARKER)
     roads.append(("track", [(gx - 30, gy - 60), (gx + 150, gy - 60)]))
     cv2.line(img, (gx - 30, gy - 60), (gx + 150, gy - 60), COLOURS["road"], 3)
-    return img, roads, water
+    return img, roads, water, buildings
 
 
 def _osm_file(path, ways, closed):
@@ -305,7 +313,95 @@ def _procgen_library(pkg):
     assert rc == 0, "build_procgen_library failed"
 
 
-def build_fixture(work):
+def _compile_dsf(dsftool, text, dsf_path):
+    dsf_path.parent.mkdir(parents=True, exist_ok=True)
+    txt = dsf_path.with_suffix(".txt")
+    header = "\n".join([
+        "PROPERTY sim/planet earth", "PROPERTY sim/overlay 1",
+        f"PROPERTY sim/west {LON}", f"PROPERTY sim/east {LON + 1}",
+        f"PROPERTY sim/south {LAT}", f"PROPERTY sim/north {LAT + 1}", "", "",
+    ])
+    txt.write_text(header + text, encoding="utf-8")
+    subprocess.run([dsftool, "-text2dsf", str(txt), str(dsf_path)], check=True,
+                   capture_output=True)
+    txt.unlink()
+
+
+def _scenery_dsfs(custom, textures, dsftool):
+    """simHeaven scenery/network packs and a third-party overlay over the tile."""
+    tile = f"{LAT:+03d}{LON:+04d}"
+    grid = f"{LAT // 10 * 10:+03d}{LON // 10 * 10:+04d}"
+    rel = Path("Earth nav data") / grid / f"{tile}.dsf"
+    name, _zl, bounds, buildings = textures[1]
+    rng = _rng("scenery", name)
+    picks = [buildings[int(i)] for i in rng.choice(len(buildings), 40, replace=False)]
+    lines = ["POLYGON_DEF simheaven/facades/residential.fac"]
+    lines += [f"OBJECT_DEF simheaven/houses/europe/house_{i}.obj" for i in range(3)]
+    lines.append("")
+    for cx, cy, length in picks[30:34]:
+        lines += ["BEGIN_POLYGON 0 8 2", "BEGIN_WINDING"]
+        for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+            lat, lon = _px_to_latlon(cx + dx * length, cy + dy * length, bounds)
+            lines.append(f"POLYGON_POINT {lon:.7f} {lat:.7f}")
+        lines += ["END_WINDING", "END_POLYGON"]
+    for k, (cx, cy, _length) in enumerate(picks[:30]):
+        lat, lon = _px_to_latlon(cx, cy, bounds)
+        lines.append(f"OBJECT {k % 3} {lon:.7f} {lat:.7f} {(k * 37) % 360}.0")
+    _compile_dsf(dsftool, "\n".join(lines) + "\n",
+                 custom / "simHeaven_X-World_Europe-6-scenery" / rel)
+
+    # A railway and a road across the second texture.
+    (la0, lo0), (la1, lo1) = _px_to_latlon(300, 2000, bounds), _px_to_latlon(3800, 2100, bounds)
+    (la2, lo2), (la3, lo3) = _px_to_latlon(2000, 300, bounds), _px_to_latlon(2050, 3800, bounds)
+    network = "\n".join([
+        "NETWORK_DEF lib/g10/roads.net", "",
+        f"BEGIN_SEGMENT 0 151 1 {lo0:.7f} {la0:.7f} 0",
+        f"END_SEGMENT 2 {lo1:.7f} {la1:.7f} 0",
+        f"BEGIN_SEGMENT 0 50 3 {lo2:.7f} {la2:.7f} 0",
+        f"SHAPE_POINT {(lo2 + lo3) / 2:.7f} {(la2 + la3) / 2 + 0.002:.7f} 0",
+        f"END_SEGMENT 4 {lo3:.7f} {la3:.7f} 0", "",
+    ])
+    _compile_dsf(dsftool, network, custom / "simHeaven_X-World_Europe-4-network" / rel)
+
+    # A third-party overlay with its own objects (custom-scenery avoidance).
+    _name3, _zl3, bounds3, buildings3 = textures[2]
+    overlay = custom / "Custom_Test_Overlay"
+    _obj8(overlay / "objects" / "hangar.obj", 30, 20, 9)
+    rows = ["OBJECT_DEF objects/hangar.obj", ""]
+    for cx, cy, _length in buildings3[5:25]:
+        lat, lon = _px_to_latlon(cx, cy, bounds3)
+        rows.append(f"OBJECT 0 {lon:.7f} {lat:.7f} 0.0")
+    _compile_dsf(dsftool, "\n".join(rows) + "\n", overlay / rel)
+
+    packs = sorted(p.name for p in custom.iterdir() if p.is_dir())
+    ini = ["I", "1000 Version", "SCENERY", ""]
+    ini += [f"SCENERY_PACK Custom Scenery/{p}/" for p in packs]
+    (custom / "scenery_packs.ini").write_text("\n".join(ini) + "\n", encoding="utf-8")
+
+
+def _mesh_with_water(path, textures):
+    """An Ortho4XP mesh whose water covers the first texture and a lake in the third."""
+    nodes, tris = [], []
+
+    def quad(lat_n, lat_s, lon_w, lon_e):
+        base = len(nodes)
+        nodes.extend([(lon_w, lat_n), (lon_e, lat_n), (lon_e, lat_s), (lon_w, lat_s)])
+        tris.extend([(base + 1, base + 2, base + 3), (base + 1, base + 3, base + 4)])
+
+    lat_n, lat_s, lon_w, lon_e = textures[0][2]
+    quad(lat_n + 0.001, lat_s - 0.001, lon_w - 0.001, lon_e + 0.001)
+    lat_n, lat_s, lon_w, lon_e = textures[2][2]
+    quad(lat_n - (lat_n - lat_s) * 0.10, lat_n - (lat_n - lat_s) * 0.25,
+         lon_w + (lon_e - lon_w) * 0.60, lon_w + (lon_e - lon_w) * 0.80)
+    out = ["MeshVersionFormatted 1.3", "Dimension 3", "", "Vertices", str(len(nodes))]
+    out += [f"{lon:.7f} {lat:.7f} 0 0" for lon, lat in nodes]
+    out += ["", "", "Normals"] + ["0 0" for _ in nodes]
+    out += ["", "Triangles", str(len(tris))]
+    out += [f"{a} {b} {c} 1" for a, b, c in tris]
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def build_fixture(work, dsftool):
     from PIL import Image
     if work.exists():
         shutil.rmtree(work)
@@ -313,17 +409,18 @@ def build_fixture(work):
     grid = f"{LAT // 10 * 10:+03d}{LON // 10 * 10:+04d}"
     tex_dir = work / "Tiles" / f"zOrtho4XP_{tile}" / "textures"
     tex_dir.mkdir(parents=True)
-    all_roads, all_water = [], []
+    all_roads, all_water, textures = [], [], []
     for zl, (plat, plon) in TEXTURES:
         til_x, til_y = _orthogrid(plat, plon, zl)
         name = f"{til_y}_{til_x}_BI{zl}.dds"
-        img, roads, water = _paint_texture(name, zl)
+        img, roads, water, buildings = _paint_texture(name, zl)
         Image.fromarray(img).save(tex_dir / name)
         bounds = _texture_bounds(til_x, til_y, zl)
         for kind, pts in roads:
             all_roads.append(({"highway": kind}, [_px_to_latlon(x, y, bounds) for x, y in pts]))
         for ring in water:
             all_water.append(({"natural": "water"}, [_px_to_latlon(x, y, bounds) for x, y in ring]))
+        textures.append((name, zl, bounds, buildings))
     osm = work / "OSM_data" / grid / tile
     big = [w for w in all_roads if w[0]["highway"] == "primary"]
     small = [w for w in all_roads if w[0]["highway"] != "primary"]
@@ -354,6 +451,9 @@ def build_fixture(work):
         for length in range(10, 155, 5):
             gh_exports.append(f"EXPORT o4sfr/agri/tunnels_{bays * 8}x{length}.obj tunnel.obj")
     (gh / "library.txt").write_text("\n".join(gh_exports) + "\n", encoding="utf-8")
+
+    _scenery_dsfs(custom, textures, dsftool)
+    _mesh_with_water(tex_dir.parent / f"Data{tile}.mesh", textures)
 
     models = work / "models"
     models.mkdir()
@@ -498,9 +598,9 @@ _VOLATILE = (
 )
 
 
-def _normalise_log(text, work):
+def _normalise_log(text, work, repo):
     out = []
-    for line in text.replace(str(work), "<WORK>").splitlines():
+    for line in text.replace(str(work), "<WORK>").replace(str(repo), "<REPO>").splitlines():
         if line.startswith(("[Bld timing", "    [Bld DDS timing")) or "<frozen" in line:
             continue
         for rx in _VOLATILE:
@@ -528,7 +628,7 @@ def _collect(work, dest):
 def run_all(args):
     work, out = Path(args.work).resolve(), Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    build_fixture(work)
+    build_fixture(work, args.dsftool)
     names = args.scenarios.split(",") if args.scenarios else list(SCENARIOS)
     manifest = {}
     for name in names:
@@ -548,7 +648,8 @@ def run_all(args):
         proc = subprocess.run(cmd, env=child_env, capture_output=True, text=True)
         log = proc.stdout + proc.stderr
         (out / f"{name}.log").write_text(log, encoding="utf-8")
-        (out / f"{name}.normalised.log").write_text(_normalise_log(log, work), encoding="utf-8")
+        (out / f"{name}.normalised.log").write_text(
+            _normalise_log(log, work, Path(args.src).resolve().parent), encoding="utf-8")
         files = _collect(work, out / name)
         manifest[name] = {"returncode": proc.returncode, "files": files}
         placed = re.search(r"Total: ([\d,]+) placements", log)
