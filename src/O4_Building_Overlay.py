@@ -2595,39 +2595,6 @@ EXCLUDED_BUILDING_ASSETS = {
     # Unresolved by current simHeaven/X-Plane library setups; do not emit a DSF
     # OBJECT_DEF that leaves X-Plane with a missing scenery resource.
     "simheaven/houses/house_05x05x1.obj",
-    # The user's "SFD Global Autogen" library.txt aliases many small simHeaven
-    # house/residential virtual paths to tall SFD Asia apartment meshes
-    # (Asia/Apartment_*.obj) — a library-author mistake. The overlay places these
-    # simHeaven OBJ paths, so X-Plane renders an oversized apartment dwarfing its
-    # spot. Blacklist every simHeaven virtual that resolves to an Asia apartment.
-    # (The 137 lib/g10/autogen/*.ags|.agb aliases to Asia/Apartments*.ags are
-    # native autogen strings the overlay never places, so they are not listed.)
-    "simheaven/houses/house_06x15x2.obj",
-    "simheaven/houses/house_12x30x2.obj",
-    "simheaven/houses/house_12x30x3.obj",
-    "simheaven/houses/house_15x20x3.obj",
-    "simheaven/houses/house_15x30x2.obj",
-    "simheaven/houses/house_15x30x3.obj",
-    "simheaven/houses/house_15x35x2.obj",
-    "simheaven/houses/house_15x35x3.obj",
-    "simheaven/residential/residential_10x20x4.obj",
-    "simheaven/residential/residential_10x20x5.obj",
-    "simheaven/residential/residential_10x20x6.obj",
-    "simheaven/residential/residential_12x30x2.obj",
-    "simheaven/residential/residential_12x30x3.obj",
-    "simheaven/residential/residential_15x20x3.obj",
-    "simheaven/residential/residential_15x20x5.obj",
-    "simheaven/residential/residential_15x20x6.obj",
-    "simheaven/residential/residential_15x30x3.obj",
-    "simheaven/residential/residential_15x30x5.obj",
-    "simheaven/residential/residential_15x30x6.obj",
-    "simheaven/residential/residential_15x50x5.obj",
-    "simheaven/residential/residential_16x12x4.obj",
-    "simheaven/residential/residential_18x12x3.obj",
-    "simheaven/residential/residential_20x12x3.obj",
-    "simheaven/residential/residential_20x20x3.obj",
-    "simheaven/residential/residential_20x20x5.obj",
-    "simheaven/residential/residential_20x50x5.obj",
 }
 
 SIMHEAVEN_REPEATABLE_ASSET_DIRS = (
