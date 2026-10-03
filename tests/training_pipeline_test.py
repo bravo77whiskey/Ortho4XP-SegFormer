@@ -12,11 +12,13 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAINING = ROOT / "training"
+if not (TRAINING / "building_training_lib.py").is_file():
+    pytest.skip("the training/ workspace is not part of this checkout", allow_module_level=True)
 if str(TRAINING) not in sys.path:
     sys.path.insert(0, str(TRAINING))
 
-import building_training_lib as lib
-import build_yolo_obb_dataset as yolo_build
+import building_training_lib as lib  # noqa: E402
+import build_yolo_obb_dataset as yolo_build  # noqa: E402
 
 
 def test_orthogrid_round_trip_bounds_contains_point():

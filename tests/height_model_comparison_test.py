@@ -1,3 +1,4 @@
+import importlib.util
 import math
 import csv
 import json
@@ -16,6 +17,9 @@ if str(SRC) not in sys.path:
 
 from scripts import compare_sfr_height_models as COMPARE
 from scripts import merge_sfr_height_comparisons as MERGE
+
+
+HAS_PANDAS = importlib.util.find_spec("pandas") is not None
 
 
 class HeightModelComparisonTests(unittest.TestCase):
@@ -80,6 +84,7 @@ class HeightModelComparisonTests(unittest.TestCase):
 
         self.assertEqual([path.name for path in selected], ["b.dds", "c.dds"])
 
+    @unittest.skipUnless(HAS_PANDAS, "merging shards needs pandas")
     def test_merge_summary_accepts_disjoint_shards_and_rejects_overlap(self):
         def write_shard(path, source, delta):
             row = {field: 0 for field in COMPARE.CSV_FIELDS}
@@ -115,6 +120,7 @@ class HeightModelComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "overlap"):
                 MERGE._summarize_shards([first, first])
 
+    @unittest.skipUnless(HAS_PANDAS, "merging shards needs pandas")
     def test_merge_main_preserves_measured_shard_throughput(self):
         def write_shard(path, source):
             row = {field: 0 for field in COMPARE.CSV_FIELDS}

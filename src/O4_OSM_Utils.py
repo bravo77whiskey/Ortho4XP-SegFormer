@@ -995,62 +995,6 @@ def _parse_simulator_water_dsf(dsf_path, ovl_module, lat, lon):
         return geometry.MultiPolygon()
 
 
-def _on_tile_boundary(point, lat, lon, eps=1e-7):
-    x, y = point
-    return (
-        abs(x - lon) <= eps
-        or abs(x - (lon + 1)) <= eps
-        or abs(y - lat) <= eps
-        or abs(y - (lat + 1)) <= eps
-    )
-
-
-def _tile_boundary_segment(p1, p2, lat, lon, eps=1e-7):
-    return (
-        (abs(p1[0] - p2[0]) <= eps and (abs(p1[0] - lon) <= eps or abs(p1[0] - (lon + 1)) <= eps))
-        or (abs(p1[1] - p2[1]) <= eps and (abs(p1[1] - lat) <= eps or abs(p1[1] - (lat + 1)) <= eps))
-    )
-
-
-def _coastline_segments_from_water_polygon(polygon, lat, lon):
-    if not polygon.boundary.intersects(geometry.box(lon, lat, lon + 1, lat + 1).boundary):
-        return []
-
-    def exterior_segments(coords):
-        coords = list(coords)[::-1]
-        segment_count = len(coords) - 1
-        if segment_count <= 0:
-            return []
-        start = 0
-        for idx in range(segment_count):
-            if _tile_boundary_segment(coords[idx], coords[idx + 1], lat, lon):
-                start = (idx + 1) % segment_count
-                break
-        ordered = coords[start:segment_count] + coords[: start + 1]
-        lines = []
-        current = []
-        for p1, p2 in zip(ordered, ordered[1:]):
-            if _tile_boundary_segment(p1, p2, lat, lon):
-                if len(current) >= 2:
-                    lines.append(current)
-                current = []
-                continue
-            if not current:
-                current = [p1]
-            current.append(p2)
-        if len(current) >= 2:
-            lines.append(current)
-        return lines
-
-    segments = exterior_segments(polygon.exterior.coords)
-    for interior in polygon.interiors:
-        ring = list(interior.coords)
-        if not geometry.LinearRing(ring).is_ccw:
-            ring = ring[::-1]
-        segments.append(ring)
-    return segments
-
-
 def _simulator_water_fallback(osm_layer, lat, lon, cached_suffix):
     if cached_suffix not in ("water", "coastline"):
         return 0

@@ -240,11 +240,13 @@ class AirportPackOnlyTests(unittest.TestCase):
 
 
 def _repo_dsftool():
-    for rel in ("Utils/win/DSFTool.exe", "Utils/lin/DSFTool", "Utils/mac/DSFTool"):
-        candidate = ROOT / rel
-        if candidate.is_file():
-            return candidate
-    return None
+    if sys.platform.startswith("win"):
+        candidate = ROOT / "Utils" / "win" / "DSFTool.exe"
+    elif sys.platform == "darwin":
+        candidate = ROOT / "Utils" / "mac" / "DSFTool"
+    else:
+        candidate = ROOT / "Utils" / "lin" / "DSFTool"
+    return candidate if candidate.is_file() else None
 
 
 class RealDsfRoundTripTests(unittest.TestCase):

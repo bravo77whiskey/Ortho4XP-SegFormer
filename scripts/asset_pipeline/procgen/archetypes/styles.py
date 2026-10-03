@@ -14,9 +14,8 @@ import json
 import os
 
 from .combo_styles import (
-    GROUP_FAMILIES, GROUP_SHADES, GROUP_STRIPS,
+    GROUP_FAMILIES, GROUP_STRIPS,
     combo_family_weights, combo_massing, combo_roof_weights,
-    group_for_archetype,
 )
 
 # (choice, weight) pairs; families must have wall_/ground_/plain_ strips.

@@ -1,4 +1,5 @@
 import json
+import os
 import pickle
 import sys
 import tempfile
@@ -29,7 +30,7 @@ class SfrDebugImagesTests(unittest.TestCase):
 
     def test_parse_texture_metadata_from_fixture_style_path(self):
         meta = DBG.parse_texture_metadata(
-            r"H:\XP12 Addons\Applications\Ortho4XP\Tiles\zOrtho4XP_+36+117\textures\25680_54080_BI16.dds"
+            os.path.join("Tiles", "zOrtho4XP_+36+117", "textures", "25680_54080_BI16.dds")
         )
 
         self.assertEqual(meta.tile_lat, 36)

@@ -33,7 +33,7 @@ Example:
         --cache-dir "cache_zl16_36_101"
 """
 
-import sys, os, argparse, warnings, time, math
+import os, argparse, warnings, time, math
 warnings.filterwarnings('ignore')
 
 import hashlib
@@ -417,23 +417,6 @@ def _polys_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
         p_s, p_n, p_w, p_e = poly.get('_bounds') or _poly_bounds(poly.get('pts', ()))
         if p_n >= s and p_s <= n and p_e >= w and p_w <= e:
             result.append(poly.get('pts', poly))
-    return result
-
-
-def _poly_records_for_bounds(polys, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
-    if not polys:
-        return []
-    s = lat_s - pad_deg
-    n = lat_n + pad_deg
-    w = lon_w - pad_deg
-    e = lon_e + pad_deg
-    if isinstance(polys, dict) and {'items', 'south', 'north', 'west', 'east'} <= set(polys):
-        return BBOX.query_bounds(polys, s, n, w, e)
-    result = []
-    for poly in polys:
-        p_s, p_n, p_w, p_e = poly.get('_bounds') or _poly_bounds(poly.get('pts', ()))
-        if p_n >= s and p_s <= n and p_e >= w and p_w <= e:
-            result.append(poly)
     return result
 
 

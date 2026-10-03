@@ -13,7 +13,7 @@ from __future__ import annotations
 import copy
 
 from kits import (brick, concrete, paint, plaster, roof_mat, siding, tiles)
-from strips import CLS_ROOF, CLS_SHUTTER, CLS_TRIM, mat
+from strips import CLS_ROOF, CLS_SHUTTER
 
 # ------------------------------------------------------------- windows
 

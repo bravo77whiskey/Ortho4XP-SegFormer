@@ -1,0 +1,27 @@
+# Tool configuration only: Ortho4XP-SegFormer is an application, not an
+# installable package. Runtime dependencies are listed in requirements.txt and
+# the packaged build is produced by build.py from Ortho4XP.spec.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["*_test.py"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [
+    "Providers",  # provider definitions are exec'd by O4_Imagery_Utils
+]
+
+[tool.ruff.lint]
+# Correctness checks only (syntax errors and pyflakes). Most of the upstream
+# code predates any formatter, so style rules are deliberately not enabled.
+select = ["E9", "F"]
+ignore = [
+    "F841",  # unused local variable: many are intentional debugging handles
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Optional torch/shapely imports double as availability checks.
+"training/**" = ["F401"]

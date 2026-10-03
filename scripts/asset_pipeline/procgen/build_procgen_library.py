@@ -15,7 +15,9 @@ import argparse
 import datetime as _dt
 import json
 import os
-HERE = os.path.dirname(os.path.abspath(__file__))
+import sys
+
+HERE =os.path.dirname(os.path.abspath(__file__))
 
 HEADER = """A
 800

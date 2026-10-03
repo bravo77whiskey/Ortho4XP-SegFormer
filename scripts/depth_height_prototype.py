@@ -58,7 +58,6 @@ def load_image(path: str) -> np.ndarray:
 def load_depth_model(variant: str = "small", device: str = "cuda"):
     """Load Depth Anything V2 via transformers."""
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
-    import torch
 
     repo = {
         "small": "depth-anything/Depth-Anything-V2-Small-hf",

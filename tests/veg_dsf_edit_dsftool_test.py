@@ -27,13 +27,15 @@ import O4_SFR_Veg_Cleanup as CLEANUP
 
 
 def _dsftool():
-    name = "DSFTool.exe" if sys.platform.startswith("win") else "DSFTool"
-    for folder in ("win", "mac", "lin"):
-        candidate = ROOT / "Utils" / folder / name
-        if candidate.is_file():
-            return str(candidate)
-    found = shutil.which("DSFTool")
-    return found
+    if sys.platform.startswith("win"):
+        candidate = ROOT / "Utils" / "win" / "DSFTool.exe"
+    elif sys.platform == "darwin":
+        candidate = ROOT / "Utils" / "mac" / "DSFTool"
+    else:
+        candidate = ROOT / "Utils" / "lin" / "DSFTool"
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which("DSFTool")
 
 
 DSFTOOL = _dsftool()

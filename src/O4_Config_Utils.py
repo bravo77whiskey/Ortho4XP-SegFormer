@@ -9,18 +9,20 @@ import tkinter as tk
 import tkinter.ttk as ttk
 from tkinter import E, N, S, W, filedialog, messagebox
 
-import O4_Cfg_Vars as CFG
 import O4_DEM_Utils as DEM
 import O4_File_Names as FNAMES
-import O4_Imagery_Utils as IMG
-import O4_OSM_Utils as OSM
-import O4_Overlay_Utils as OVL
-import O4_PBF_Utils as PBF
-import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME
-import O4_Vector_Map as VMAP
 import O4_Zone_Utils as ZONE
+
+# Config variables with a "module" key in O4_Cfg_Vars live in another module
+# and are read and written through eval("<ALIAS>.<var>") strings below, so
+# these aliases must stay importable under exactly these names.
+import O4_Imagery_Utils as IMG  # noqa: F401
+import O4_OSM_Utils as OSM  # noqa: F401
+import O4_Overlay_Utils as OVL  # noqa: F401
+import O4_PBF_Utils as PBF  # noqa: F401
+import O4_Tile_Utils as TILE  # noqa: F401
 from O4_Cfg_Vars import (
     cfg_app_vars,
     cfg_global_tile_vars,
@@ -1466,7 +1468,7 @@ class Ortho4XP_Config(tk.Toplevel):
                     self.v_[var].set(value)
                 # Apply changes to update global variables
                 self.apply_changes("tile")
-                UI.vprint(0, f"Backup configuration loaded for global tile settings.")
+                UI.vprint(0, "Backup configuration loaded for global tile settings.")
         except FileNotFoundError:
             messagebox.showinfo("Not found", "No backup global configuration found.")
             return
@@ -1529,7 +1531,7 @@ class Ortho4XP_Config(tk.Toplevel):
                     self.v_[var].set(value)
                 # Apply changes to update global variables
                 self.apply_changes("tile")
-                UI.vprint(0, f"Backup configuration loaded for application settings.")
+                UI.vprint(0, "Backup configuration loaded for application settings.")
         except FileNotFoundError:
             messagebox.showinfo("Not found", "No backup application configuration found.")
             return
@@ -1818,7 +1820,7 @@ class Ortho4XP_Config(tk.Toplevel):
                 message = f"{', '.join(keys[:-1])} and {keys[-1]} Config tabs have unsaved changes.\n"
             elif count == 3:
                 message = (
-                    f"Tile, Global, and Application Config tabs have unsaved changes.\n"
+                    "Tile, Global, and Application Config tabs have unsaved changes.\n"
                 )
             # Appears to be an issue with macOS and using "Cancel" as sometimes it will present
             # the messagebox twice. Also happens rarely with "Yes/No".

@@ -54,7 +54,7 @@ if HERE not in sys.path:
 import yaml  # noqa: E402
 
 from archetypes.combo_styles import (  # noqa: E402
-    CLEAN_FLAVORS, FLAVORS, GROUPS, GROUP_STRIPS, combo_dims, combo_key,
+    FLAVORS, GROUPS, GROUP_STRIPS, combo_dims, combo_key,
     combo_palette_overrides, combo_pattern_overrides, enforce_clean_flavor,
 )
 

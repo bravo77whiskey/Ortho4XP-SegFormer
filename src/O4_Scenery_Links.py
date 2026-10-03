@@ -77,13 +77,6 @@ def is_link(path):
     return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
-def link_target(path):
-    """Absolute target of a link, or None when path is not a link."""
-    if not is_link(path):
-        return None
-    return os.path.realpath(path)
-
-
 def is_broken_link(path):
     return is_link(path) and not os.path.exists(os.path.realpath(path))
 

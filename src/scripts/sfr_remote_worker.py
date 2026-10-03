@@ -43,7 +43,7 @@ from O4_SFR_Remote import pack_array, unpack_array, send_msg, recv_msg  # noqa: 
 _CKPT_DIR = os.path.expanduser("~/.ortho4xp_sfr/checkpoints")
 
 _yolo_models = {}          # sha256 -> ultralytics.YOLO
-_segformer_ready = set()   # kinds already loaded ('veg' / 'bld')
+_segformer_ready = set()   # model kinds already loaded
 
 
 def log(msg):
@@ -82,10 +82,7 @@ def _handle_segformer(request):
     import O4_SFR_Inference as SEG
     _apply_segformer_settings(request.get("settings") or {})
     kind = request["kind"]
-    if kind == "bld":
-        model, processor, device = SEG.load_building_model(None)
-    else:
-        model, processor, device = SEG.load_vegetation_model(None)
+    model, processor, device = SEG.load_vegetation_model(None)
     if kind not in _segformer_ready:
         _segformer_ready.add(kind)
         log(f"SegFormer '{kind}' model ready on {device}")

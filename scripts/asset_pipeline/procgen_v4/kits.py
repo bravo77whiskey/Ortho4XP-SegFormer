@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import copy
 
-from strips import (CLS_GLASS, CLS_METAL, CLS_OBJECT, CLS_PLINTH, CLS_ROOF,
+from strips import (CLS_GLASS, CLS_METAL, CLS_OBJECT, CLS_ROOF,
                     CLS_SHUTTER, CLS_SIGN, CLS_SILL, CLS_TRIM, CLS_WALL, mat)
 
 # ------------------------------------------------------------ materials

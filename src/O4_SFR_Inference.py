@@ -1,33 +1,19 @@
-"""
-O4_SFR_Inference.py — Shared SFR SegFormer inference helpers for Ortho4XP.
+"""Shared SegFormer inference helpers for the vegetation and building overlays.
 
-Uses the nave1616/SegFormer-landcover-FT model to segment orthophoto DDS textures into:
-  - Vegetation (tree, rangeland) → X-Plane .for forest overlays
-  - Buildings                   → X-Plane .fac facade overlays
-
-Output is a compiled binary DSF overlay placed in the configured SFR overlay folder.
-
-Usage (standalone):
-    python src/scripts/generate_sfr_overlay.py --lat 45 --lon 7
-    python src/scripts/generate_sfr_overlay.py --lat 45 --lon 7 --build-dir /path/to/tile
+Loads the landcover SegFormer (and the optional dedicated building model),
+runs tiled inference over orthophoto DDS textures, and compiles overlay DSF
+text with DSFTool. Model forward passes can be offloaded to a remote GPU host
+through ``remote_client`` (see O4_SFR_Remote).
 """
 
 import os
-import random
 import re
 import sys
 import subprocess
 
 _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 import numpy as np
-import cv2
-from math import atan, exp, log, pi, tan, cos, floor, sqrt
-from shapely import geometry
-from shapely.ops import unary_union
-from shapely.validation import make_valid
-
-import O4_Forest_Assets as FOREST_ASSETS
-from O4_SFR_Region_Boundaries import asset_region_for_latlon
+from math import atan, exp, pi, floor
 
 # ── Ortho4XP imports ─────────────────────────────────────────────────────────
 # Allow running from repo root or from src/
@@ -52,11 +38,6 @@ except ImportError:
 # ── Model repositories ───────────────────────────────────────────────────────
 # Inference model: 9-class landcover SegFormer (tree/rangeland/agriculture/buildings/…)
 _MODEL_VEG_REPO = "nave1616/SegFormer-landcover-FT"
-# Building model: binary SegFormer-B0 (0=background, 1=building)
-# Set segformer_building_model="landcover" to use CLASS_BUILDING from the veg model instead.
-_MODEL_BLD_REPO = "tomascanivari/segformer-b0-finetuned-buildings"
-# Keep legacy alias so any external code referencing _MODEL_REPO still works
-_MODEL_REPO = _MODEL_VEG_REPO
 
 # Class indices in model argmax output (0-indexed)
 # 0=background, 1=bareland, 2=rangeland, 3=developed, 4=road,
@@ -71,85 +52,15 @@ CLASS_WATER       = 6
 CLASS_AGRICULTURE = 7
 CLASS_BUILDING    = 8
 
-VEG_CLASSES = (CLASS_TREE, CLASS_RANGELAND, CLASS_AGRICULTURE)
-
 # ── X-Plane asset paths ───────────────────────────────────────────────────────
-# Forest .for — XP12 lib paths confirmed from 1200 forests/library.txt.
-# Climate variants: cold (<15°N or >55°N), temperate (15–55°N), warm/hot (tropics).
-# We pick one per class at DSF-write time based on tile latitude.
-
-def _for_path(class_idx, lat):
-    """Return the XP12 lib .for path for a vegetation class at the given latitude."""
-    return FOREST_ASSETS.default_short_tree_for_lat(lat)
-
-
-# Per-class DSF density (0–255).  Lower = sparser placement within the .for area.
-# Tree:        200 — dense canopy but not wall-to-wall packed
-# Rangeland:    80 — sparse shrubs / scrubland
-# Agriculture:  30 — very low ground-cover / hedgerow scatter
-_FOR_DENSITY_BY_CLASS = {
-    CLASS_TREE:        200,
-    CLASS_RANGELAND:    80,
-    CLASS_AGRICULTURE:  30,
-}
-_FOR_DENSITY = 200  # fallback for any class not in the dict above
-
 # Facade .fac — XP12 lib paths confirmed from 1000 autogen/library.txt.
 # Using generic lib/buildings/facades paths that work globally.
-# Only used for large-footprint buildings (≥ segformer_bld_obj_threshold_m2).
 _FAC_DEFS = {
     "medium": "lib/buildings/facades/generic/mid_classic_01.fac",
     "large":  "lib/buildings/facades/industrial/warehouse_01_45x45.fac",
 }
 
-# SFD Global Autogen suburban object pools by coarse region.
-# Virtual library paths used in DSF OBJECT_DEF — resolved by X-Plane at runtime.
-_SFD_OBJ_POOLS = {
-    # Northern Europe / Scandinavia
-    "scandinavia": [f"SFD_Global/Scandinavia/Residential/Suburban_{i}.obj" for i in range(1, 9)],
-    # Mediterranean Europe
-    "med":         [f"SFD_Global/Med/Residential/Suburban_{i}.obj"         for i in range(1, 9)],
-    # North America — eastern / central
-    "namerica_e":  [f"SFD_Global/New_England/Residential/Suburban_{i}.obj" for i in range(1, 9)],
-    # North America — western
-    "namerica_w":  [f"SFD_Global/US_West_Coast/Suburban_{i}.obj"           for i in range(1, 9)],
-    # South America
-    "samerica":    [f"SFD_Global/South_America/Suburban_{i}.obj"           for i in range(1, 11)],
-    # Africa
-    "africa":      [f"SFD_Global/Africa/Residential/Suburban_{i}.obj"      for i in range(1, 9)],
-    # East / South-East Asia
-    "asia":        [f"SFD_Global/Asia/Suburban_{i}.obj"                    for i in range(1, 9)],
-    # South Asia (tropical belt)
-    "asia_south":  [f"SFD_Global/Asia/Suburban_South_{i}.obj"              for i in range(1, 9)],
-}
-
-
-def _sfd_obj_pool(lat, lon):
-    """Return the SFD Global suburban object path list most appropriate for (lat, lon)."""
-    region = asset_region_for_latlon(lat, lon)
-    if region == "scandinavia":
-        return _SFD_OBJ_POOLS["scandinavia"]
-    if region in ("europe", "mediterranean"):
-        return _SFD_OBJ_POOLS["med"]
-    if region == "north_america_west":
-        return _SFD_OBJ_POOLS["namerica_w"]
-    if region in ("north_america", "north_america_ne"):
-        return _SFD_OBJ_POOLS["namerica_e"]
-    if region == "south_america":
-        return _SFD_OBJ_POOLS["samerica"]
-    if region == "africa":
-        return _SFD_OBJ_POOLS["africa"]
-    if region == "se_asia":
-        return _SFD_OBJ_POOLS["asia_south"]
-    if region in ("asia", "australia_oceania"):
-        return _SFD_OBJ_POOLS["asia"]
-    return _SFD_OBJ_POOLS["namerica_e"]        # generic fallback
-
 # ── Module-level tunables (overridable from tile config / O4_Cfg_Vars) ────────
-sfr_overlay_enabled  = False   # master enable — set True in tile config to run
-segformer_do_vegetation    = True    # include vegetation classes in output
-segformer_do_buildings     = True    # include buildings class in output
-segformer_canvas_px        = 16384   # stitch resolution (0 = legacy per-DDS mode)
 segformer_patch_size       = 512     # pixels fed to the model per forward pass
 segformer_overlap          = 64      # pixel overlap between adjacent patches (blending)
 segformer_max_vram_gb      = 0.0     # 0 = uncapped; otherwise cap auto mode to this many GB
@@ -161,18 +72,7 @@ segformer_batch_size       = 0       # 0 = recommended default batch size
 segformer_default_cuda_batch_size = 8
 segformer_use_amp          = os.environ.get("O4_SFR_USE_AMP", "").strip() == "1"
 segformer_channels_last    = os.environ.get("O4_SFR_CHANNELS_LAST", "").strip() == "1"
-segformer_compile_mode     = ""      # torch.compile is too costly for this workflow.
 segformer_confidence_threshold   = 0.5     # minimum softmax probability for a pixel to be assigned
-segformer_min_veg_area_px        = 200   # minimum vegetation blob area in pixels
-segformer_min_bld_area_px        = 15    # minimum building blob area in pixels
-segformer_bld_obj_threshold_m2   = 200   # footprint below this → SFD object; above → .fac facade
-segformer_building_model         = "dedicated"  # "dedicated" | "landcover"
-                                  # dedicated → separate binary building model (_MODEL_BLD_REPO)
-                                  # landcover → reuse CLASS_BUILDING from the veg model pass
-_SIMPLIFY_TOL       = 1e-4    # Douglas-Peucker tolerance (degrees, ~11 m at mid-lat)
-
-_MAX_RING_PTS       = 16000   # hard vertex cap per DSF winding (DSFTool limit ~65535 intervals)
-_MAX_HOLES          = 100     # max interior rings kept per polygon
 
 # ── Remote inference offload (optional, session-scoped) ──────────────────────
 # Set by O4_SFR_Remote.activate() when the user opted to run model inference
@@ -194,12 +94,6 @@ class RemoteModelHandle:
 # ── Lazy model handles ────────────────────────────────────────────────────────
 _model_veg     = None
 _processor_veg = None
-_model_bld     = None
-_processor_bld = None
-# Legacy alias kept for any callers that still reference _model / _processor
-_model     = None
-_processor = None
-_batch_benchmark_cache = {}
 _applied_vram_limit_bytes = None
 
 
@@ -217,131 +111,9 @@ def _gtile_to_wgs84(til_x, til_y, zl):
     return lat, lon
 
 
-def _pix_to_wgs84(pix_x, pix_y, zl):
-    """WGS84 (lat, lon) of global pixel (pix_x, pix_y) at zoom level zl."""
-    rat_x = pix_x / (2 ** (zl + 7)) - 1
-    rat_y = 1 - pix_y / (2 ** (zl + 7))
-    lon = rat_x * 180
-    lat = 360 / pi * atan(exp(pi * rat_y)) - 90
-    return lat, lon
-
-
-def _pixel_to_latlon(px, py, img_w, img_h, til_x_left, til_y_top, zl):
-    """
-    Convert image pixel (px, py) — origin top-left — to (lat, lon).
-    Each Ortho4XP DDS texture covers a 16×16 Google-tile block (4096 global px
-    at ZL16, scaled to whatever DDS resolution was chosen).
-    """
-    block_px = 16 * 256  # 16 tiles × 256 px/tile in global pixel space
-    global_px = til_x_left * 256 + px * block_px / img_w
-    global_py = til_y_top  * 256 + py * block_px / img_h
-    return _pix_to_wgs84(global_px, global_py, zl)
-
-
-def _latlon_extent(til_x_left, til_y_top, zl):
-    """Return (lat_max, lon_min, lat_min, lon_max) for the texture block."""
-    lat_max, lon_min = _gtile_to_wgs84(til_x_left,      til_y_top,      zl)
-    lat_min, lon_max = _gtile_to_wgs84(til_x_left + 16, til_y_top + 16, zl)
-    return lat_max, lon_min, lat_min, lon_max
-
-
-def _approx_m2_per_px(til_y_top, img_h, zl):
-    """Rough ground area (m²) per image pixel — used for minimum-area filtering."""
-    # Use the vertical centre of the texture
-    lat_top, _  = _pix_to_wgs84(0, til_y_top * 256,       zl)
-    lat_bot, _  = _pix_to_wgs84(0, (til_y_top + 16) * 256, zl)
-    lat_c = (lat_top + lat_bot) / 2
-    metres_per_deg_lat = 111_320
-    metres_per_deg_lon = metres_per_deg_lat * cos(lat_c * pi / 180)
-    # lat span covered by one pixel
-    lat_span = abs(lat_top - lat_bot) / img_h
-    lon_span = lat_span  # roughly square pixels
-    return lat_span * metres_per_deg_lat * lon_span * metres_per_deg_lon
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # DDS loading
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _stitch_dds_canvas(tex_dir, lat, lon, canvas_size):
-    """
-    Stitch all DDS textures in tex_dir into a single (H, W, 3) uint8 RGB array
-    covering the 1°×1° tile at (lat, lon).  Same coordinate logic as
-    the stitched DDS texture canvas.
-    Returns numpy array or None if no files could be placed.
-    """
-    import re as _re
-    from PIL import Image as _Image
-    _STD_RE   = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", _re.IGNORECASE)
-    _G2XPL_RE = _re.compile(r"^(\d{2})_(\d+)_(\d+)\.dds$", _re.IGNORECASE)
-
-    tile_s, tile_n = float(lat), float(lat + 1)
-    tile_w, tile_e = float(lon), float(lon + 1)
-    tile_dlon = tile_e - tile_w
-    tile_dlat = tile_n - tile_s
-
-    canvas = _Image.new("RGB", (canvas_size, canvas_size), (128, 128, 128))
-    pasted = 0
-
-    for fname in sorted(os.listdir(tex_dir)):
-        if not fname.lower().endswith(".dds"):
-            continue
-        m = _STD_RE.match(fname)
-        if m:
-            til_y_top  = int(m.group(1))
-            til_x_left = int(m.group(2))
-            zl         = int(m.group(4))
-        else:
-            m = _G2XPL_RE.match(fname)
-            if m:
-                zl         = int(m.group(1))
-                til_x_left = int(m.group(2))
-                inverted_y = int(m.group(3))
-                til_y_top  = 2 ** zl - 16 - inverted_y
-            else:
-                continue
-
-        img_lat_n, img_lon_w = _gtile_to_wgs84(til_x_left,      til_y_top,      zl)
-        img_lat_s, img_lon_e = _gtile_to_wgs84(til_x_left + 16, til_y_top + 16, zl)
-
-        if img_lat_n < tile_s or img_lat_s > tile_n:
-            continue
-        if img_lon_e < tile_w or img_lon_w > tile_e:
-            continue
-
-        try:
-            piece = _Image.open(os.path.join(tex_dir, fname)).convert("RGB")
-        except Exception:
-            continue
-
-        col_l = int((img_lon_w - tile_w) / tile_dlon * canvas_size)
-        col_r = int((img_lon_e - tile_w) / tile_dlon * canvas_size)
-        row_t = int((tile_n - img_lat_n) / tile_dlat * canvas_size)
-        row_b = int((tile_n - img_lat_s) / tile_dlat * canvas_size)
-
-        dest_w = max(1, col_r - col_l)
-        dest_h = max(1, row_b - row_t)
-        src_col = max(0, -col_l)
-        src_row = max(0, -row_t)
-        paste_col = max(0, col_l)
-        paste_row = max(0, row_t)
-
-        if paste_col >= canvas_size or paste_row >= canvas_size:
-            continue
-
-        piece_r = piece.resize((dest_w, dest_h), _Image.LANCZOS)
-        crop_w = min(canvas_size - paste_col, dest_w - src_col)
-        crop_h = min(canvas_size - paste_row, dest_h - src_row)
-        if crop_w <= 0 or crop_h <= 0:
-            continue
-        canvas.paste(piece_r.crop((src_col, src_row, src_col + crop_w, src_row + crop_h)),
-                     (paste_col, paste_row))
-        pasted += 1
-
-    if pasted == 0:
-        return None
-    print(f"[SegFormer] Stitched {pasted} DDS textures into {canvas_size}×{canvas_size} canvas")
-    return np.array(canvas, dtype=np.uint8)
 
 
 def _load_dds(path):
@@ -376,12 +148,8 @@ def load_dds_or_none(path, log_prefix="[SegFormer]", display_name=None):
 
 # Standard format:  {til_y_top}_{til_x_left}_{provider_code}{zoomlevel}.dds
 #   e.g. 112256_218048_BI18.dds
-# g2xpl_16 format: {zoomlevel}_{til_x_left}_{inverted_y}.dds   (all digits, zl first)
-#   e.g. 18_218048_131856.dds
-#   where inverted_y = 2**zl - 16 - til_y_top  →  til_y_top = 2**zl - 16 - inverted_y
 _DDS_STD_RE    = re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
                              re.IGNORECASE)
-_DDS_G2XPL_RE  = re.compile(r"^(\d{2})_(\d+)_(\d+)\.dds$", re.IGNORECASE)
 _MASK_TEXTURE_RE = re.compile(r"^\d+_\d+_ZL\d{2}(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE)
 
 
@@ -454,32 +222,6 @@ def collect_source_texture_files(tex_dir, lat, lon):
     )
 
 
-def parse_dds_filename(fname):
-    """
-    Parse an Ortho4XP DDS texture filename.
-
-    Returns (til_y_top, til_x_left, provider_code, zoomlevel) or None.
-    provider_code is 'g2xpl_16' for the g2xpl_16 variant.
-    """
-    base = os.path.basename(fname)
-
-    # Standard provider format
-    m = _DDS_STD_RE.match(base)
-    if m:
-        return int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4))
-
-    # g2xpl_16 format: zoomlevel_til_x_left_inverted_y.dds
-    m = _DDS_G2XPL_RE.match(base)
-    if m:
-        zl         = int(m.group(1))
-        til_x_left = int(m.group(2))
-        inverted_y = int(m.group(3))
-        til_y_top  = 2 ** zl - 16 - inverted_y
-        return til_y_top, til_x_left, "g2xpl_16", zl
-
-    return None
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Model loading
 # ─────────────────────────────────────────────────────────────────────────────
@@ -535,23 +277,6 @@ def _apply_vram_limit(device):
         _applied_vram_limit_bytes = limit_bytes
 
 
-def _vram_budget_bytes(device):
-    """Return the VRAM budget available to auto-sized CUDA inference."""
-    import torch
-
-    if not (hasattr(device, 'type') and device.type == 'cuda'):
-        return None
-    try:
-        free_bytes = torch.cuda.mem_get_info(device)[0]
-    except Exception:
-        return None
-
-    limit_bytes = _configured_vram_limit_bytes()
-    if limit_bytes is None:
-        return free_bytes
-    return max(1, min(int(free_bytes), int(limit_bytes)))
-
-
 def _should_use_cuda_amp(device):
     """Return True when CUDA autocast should wrap model inference."""
     return (
@@ -599,7 +324,7 @@ def load_vegetation_model(device=None):
     Load (once) the shared 9-class SegFormer-landcover inference model.
     Returns (model, processor, device).
     """
-    global _model_veg, _processor_veg, _model, _processor
+    global _model_veg, _processor_veg
     if remote_client is not None:
         return RemoteModelHandle('veg'), None, device
     from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
@@ -620,42 +345,8 @@ def load_vegetation_model(device=None):
     if device.type == 'cuda':
         _model_veg = _model_veg.half()
     _model_veg = _optimize_model_for_inference(_model_veg, device)
-    # Keep legacy aliases in sync
-    _model     = _model_veg
-    _processor = _processor_veg
     print("[SegFormer] Inference model ready.")
     return _model_veg, _processor_veg, device
-
-
-def load_building_model(device=None):
-    """
-    Load (once) the binary SegFormer building segmentation model.
-    Classes: 0 = background, 1 = building.
-    Returns (model, processor, device).
-    """
-    global _model_bld, _processor_bld
-    if remote_client is not None:
-        return RemoteModelHandle('bld'), None, device
-    from transformers import SegformerForSemanticSegmentation, AutoImageProcessor
-
-    device = _get_device(device)
-    if _model_bld is not None:
-        return _model_bld, _processor_bld, device
-
-    print(f"[SegFormer] Loading building model ({_MODEL_BLD_REPO}) onto {device} …")
-    _processor_bld = AutoImageProcessor.from_pretrained(_MODEL_BLD_REPO)
-    _model_bld = SegformerForSemanticSegmentation.from_pretrained(_MODEL_BLD_REPO)
-    if device.type == 'cuda':
-        _model_bld = _model_bld.half()
-    _model_bld = _optimize_model_for_inference(_model_bld, device)
-    print("[SegFormer] Building model ready.")
-    return _model_bld, _processor_bld, device
-
-
-def load_model(device=None):
-    """Legacy entry point — loads shared inference model. Returns (model, device)."""
-    model, _, device = load_vegetation_model(device)
-    return model, device
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -899,307 +590,12 @@ def run_inference(model, device, img_rgb, processor=None):
     avg    = accum / wt_sum                          # (C, H, W) float16 — sufficient for argmax
     max_prob = avg.max(axis=0)                       # (H, W)
     # Pixels whose best-class probability is below the threshold are left
-    # unclassified (-1) and will be skipped by mask_to_polygons.
+    # unclassified (-1).
     return np.where(
         max_prob >= segformer_confidence_threshold,
         avg.argmax(axis=0),
         -1,
     ).astype(np.int8)   # int8 sufficient for classes -1..8; 4× smaller cache files
-
-
-PATCH_SIZE = 512  # backwards-compat stub
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Mask → polygon vectorisation
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _contours_to_shapely(contour_list, hierarchy, latlon_fn, min_area_px):
-    """
-    Convert OpenCV contours + hierarchy to a list of Shapely Polygons in
-    WGS84 lat/lon coordinates.
-
-    latlon_fn(px, py) -> (lat, lon)
-    """
-    def px_ring_to_latlon(cnt):
-        pts = cnt.reshape(-1, 2)
-        ring = []
-        for px, py in pts:
-            lat, lon = latlon_fn(float(px), float(py))
-            ring.append((lon, lat))  # Shapely uses (x=lon, y=lat)
-        if ring[0] != ring[-1]:
-            ring.append(ring[0])
-        return ring
-
-    polys = []
-    if hierarchy is None:
-        return polys
-
-    hier = hierarchy[0]  # shape (N, 4): next, prev, first_child, parent
-    N = len(contour_list)
-
-    for i in range(N):
-        if hier[i][3] != -1:
-            continue  # inner contour; handled as hole of its parent
-        if cv2.contourArea(contour_list[i]) < min_area_px:
-            continue
-
-        exterior = px_ring_to_latlon(contour_list[i])
-        if len(exterior) < 4:
-            continue
-
-        holes = []
-        child = hier[i][2]
-        while child != -1:
-            hole_cnt = contour_list[child]
-            if cv2.contourArea(hole_cnt) >= min_area_px:
-                hole = px_ring_to_latlon(hole_cnt)
-                if len(hole) >= 4:
-                    holes.append(hole)
-            child = hier[child][0]
-
-        try:
-            poly = geometry.Polygon(exterior, holes)
-            poly = make_valid(poly)
-            if poly.is_empty or poly.area == 0:
-                continue
-            # Expand MultiPolygons from make_valid back into individual entries
-            if poly.geom_type == "MultiPolygon":
-                polys.extend(poly.geoms)
-            else:
-                polys.append(poly)
-        except Exception:
-            continue
-
-    return polys
-
-
-def mask_to_polygons(class_map, target_classes, latlon_fn, min_area_px):
-    """
-    Extract polygons for each class in target_classes from a (H, W) class map.
-
-    latlon_fn(px, py) -> (lat, lon)
-    Returns dict  {class_idx: [Shapely Polygon, …]}
-    """
-    result = {}
-    for cls in target_classes:
-        binary = np.where(class_map == cls, 255, 0).astype(np.uint8)
-
-        # Light morphological clean-up: remove isolated specks, close small gaps
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  kernel, iterations=1)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-        contours, hierarchy = cv2.findContours(
-            binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1
-        )
-        polys = _contours_to_shapely(contours, hierarchy, latlon_fn, min_area_px)
-
-        # Simplify each polygon (Douglas-Peucker)
-        simplified = []
-        for p in polys:
-            s = p.simplify(_SIMPLIFY_TOL, preserve_topology=True)
-            if not s.is_empty and s.area > 0:
-                simplified.append(s)
-
-        if simplified:
-            result[cls] = simplified
-
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Region / asset helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _region_from_latlon(lat, lon):
-    """Coarse continent-level region string (kept for future per-region .for tuning)."""
-    if 35 <= lat <= 72 and -25 <= lon <= 45:
-        return "europe"
-    if 15 <= lat <= 72 and -170 <= lon <= -50:
-        return "namerica"
-    return "default"
-
-
-def _size_bucket(area_m2):
-    """Facade size bucket for buildings at or above the object threshold."""
-    if area_m2 < 500:
-        return "medium"
-    return "large"
-
-
-def _building_height(area_m2):
-    """Heuristic building height (metres) from footprint area."""
-    if area_m2 < 50:
-        return 3.0
-    if area_m2 < 200:
-        return 7.0
-    if area_m2 < 1000:
-        return 12.0
-    return 20.0
-
-
-def _area_m2(poly, lat):
-    """Approximate polygon area in m² given its WGS84 geometry."""
-    mpd_lat = 111_320.0
-    mpd_lon = mpd_lat * cos(lat * pi / 180)
-    return poly.area * mpd_lat * mpd_lon
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DSF writing
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _write_ring(f, ring_coords):
-    pts = list(ring_coords)
-    # Safety cap: if still over the limit after Shapely simplification, thin linearly
-    if len(pts) > _MAX_RING_PTS:
-        step = max(1, len(pts) // _MAX_RING_PTS)
-        pts = pts[::step]
-        if pts[0] != pts[-1]:
-            pts.append(pts[0])
-    f.write("BEGIN_WINDING\n")
-    for lon, lat in pts:
-        f.write(f"POLYGON_POINT {lon:.7f} {lat:.7f}\n")
-    f.write("END_WINDING\n")
-
-
-def write_text_dsf(lat, lon, txt_path, veg_polys_by_class, bld_polys):
-    """
-    Write a text DSF overlay file.
-
-    veg_polys_by_class : {class_idx: [Shapely Polygon, …]}
-    bld_polys          : [Shapely Polygon, …]
-
-    Small-footprint buildings (< segformer_bld_obj_threshold_m2) are placed as
-    SFD Global Autogen OBJECT entries at the polygon centroid with a
-    randomly-assigned heading.  Larger buildings use BEGIN_POLYGON facades.
-    """
-    os.makedirs(os.path.dirname(txt_path), exist_ok=True)
-
-    tile_lat = lat + 0.5   # centre of the 1° tile
-    tile_lon = lon + 0.5
-    obj_pool = _sfd_obj_pool(tile_lat, tile_lon)
-
-    # ── Geometry helper ───────────────────────────────────────────────────────
-    def _iter_polygons(geom):
-        if geom.geom_type == "Polygon":
-            yield geom
-        elif geom.geom_type in ("MultiPolygon", "GeometryCollection"):
-            for g in geom.geoms:
-                yield from _iter_polygons(g)
-
-    # ── Pre-classify building polygons ────────────────────────────────────────
-    # small_objs  : list of (poly, obj_path, heading_deg)  → OBJECT
-    # large_facs  : list of (poly, bucket_str)             → BEGIN_POLYGON
-    small_objs = []
-    large_facs = []
-
-    for raw in bld_polys:
-        for poly in _iter_polygons(raw):
-            poly = geometry.polygon.orient(poly, sign=1.0)
-            if len(poly.exterior.coords) < 4:
-                continue
-            lat_c = poly.centroid.y
-            area  = _area_m2(poly, lat_c)
-
-            if area < segformer_bld_obj_threshold_m2:
-                # Deterministic random: seed on centroid so reruns are stable
-                random.seed(int(poly.centroid.x * 1e6) ^ int(poly.centroid.y * 1e6))
-                obj_path = random.choice(obj_pool)
-                heading  = random.uniform(0.0, 360.0)
-                small_objs.append((poly, obj_path, heading))
-            else:
-                large_facs.append((poly, _size_bucket(area)))
-
-    # ── Build separate polygon-def and object-def index tables ────────────────
-    poly_defs  = []   # POLYGON_DEF paths (forests + large facades)
-    poly_index = {}
-
-    def _ensure_poly_def(path):
-        if path not in poly_index:
-            poly_index[path] = len(poly_defs)
-            poly_defs.append(path)
-        return poly_index[path]
-
-    obj_defs  = []    # OBJECT_DEF paths (SFD suburban objects)
-    obj_index = {}
-
-    def _ensure_obj_def(path):
-        if path not in obj_index:
-            obj_index[path] = len(obj_defs)
-            obj_defs.append(path)
-        return obj_index[path]
-
-    # Forest defs — one path per class, climate-selected by tile lat
-    for cls in sorted(veg_polys_by_class.keys()):
-        _ensure_poly_def(_for_path(cls, tile_lat))
-
-    # Large facade defs
-    for _, bucket in large_facs:
-        _ensure_poly_def(_FAC_DEFS[bucket])
-
-    # Small object defs (only paths actually used)
-    for _, obj_path, _ in small_objs:
-        _ensure_obj_def(obj_path)
-
-    # ── Write file ────────────────────────────────────────────────────────────
-    with open(txt_path, "w") as f:
-        # Header (DSFTool adds A/800/DSF2 on compile)
-        f.write("PROPERTY sim/planet earth\n")
-        f.write("PROPERTY sim/overlay 1\n")
-        f.write(f"PROPERTY sim/west  {lon}\n")
-        f.write(f"PROPERTY sim/east  {lon + 1}\n")
-        f.write(f"PROPERTY sim/south {lat}\n")
-        f.write(f"PROPERTY sim/north {lat + 1}\n")
-
-        for path in poly_defs:
-            f.write(f"POLYGON_DEF {path}\n")
-        for path in obj_defs:
-            f.write(f"OBJECT_DEF {path}\n")
-
-        # ── Forest polygons ───────────────────────────────────────────────────
-        for cls, polys in veg_polys_by_class.items():
-            fpath   = _for_path(cls, tile_lat)
-            def_idx = poly_index[fpath]
-            for raw in polys:
-                for poly in _iter_polygons(raw):
-                    poly = geometry.polygon.orient(poly, sign=1.0)
-                    if len(poly.exterior.coords) < 4:
-                        continue
-                    density = _FOR_DENSITY_BY_CLASS.get(cls, _FOR_DENSITY)
-                    f.write(f"BEGIN_POLYGON {def_idx} {density} 2\n")
-                    _write_ring(f, poly.exterior.coords)
-                    holes = sorted(poly.interiors,
-                                   key=lambda r: abs(geometry.LinearRing(r.coords).length),
-                                   reverse=True)
-                    for interior in holes[:_MAX_HOLES]:
-                        _write_ring(f, interior.coords)
-                    f.write("END_POLYGON\n")
-
-        # ── Large building facades ────────────────────────────────────────────
-        for poly, bucket in large_facs:
-            lat_c   = poly.centroid.y
-            height  = _building_height(_area_m2(poly, lat_c))
-            def_idx = poly_index[_FAC_DEFS[bucket]]
-            f.write(f"BEGIN_POLYGON {def_idx} {int(round(height))} 2\n")
-            _write_ring(f, poly.exterior.coords)
-            holes = sorted(poly.interiors,
-                           key=lambda r: abs(geometry.LinearRing(r.coords).length),
-                           reverse=True)
-            for interior in holes[:_MAX_HOLES]:
-                _write_ring(f, interior.coords)
-            f.write("END_POLYGON\n")
-
-        # ── Small building objects ────────────────────────────────────────────
-        # DSF OBJECT format: OBJECT <def_idx> <lon> <lat> <heading_deg>
-        for poly, obj_path, heading in small_objs:
-            def_idx = obj_index[obj_path]
-            clon    = poly.centroid.x
-            clat    = poly.centroid.y
-            f.write(f"OBJECT {def_idx} {clon:.7f} {clat:.7f} {heading:.1f}\n")
-
-    return txt_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1220,184 +616,4 @@ def compile_dsf(txt_path, dsf_path):
         return False
     return True
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main tile pipeline
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _run_inference_on_canvas(img_rgb, model, processor, device):
-    """Run overlapping patch inference on img_rgb. Returns (H,W) int32 class map."""
-    print(f"[SegFormer] Running inference on {img_rgb.shape[1]}×{img_rgb.shape[0]} canvas …")
-    return run_inference(model, device, img_rgb, processor)
-
-
-def process_sfr_tile(lat, lon, build_dir=None, device=None,
-                 do_vegetation=None, do_buildings=None):
-    """
-    Full pipeline for one Ortho4XP tile (lat, lon).
-
-    When segformer_building_model == "dedicated":
-      - Vegetation pass: SegFormer-landcover (_MODEL_VEG_REPO) → VEG_CLASSES
-      - Building pass:   binary SegFormer    (_MODEL_BLD_REPO)  → class 1 = building
-    When segformer_building_model == "landcover":
-      - Single pass with SegFormer-landcover → VEG_CLASSES + CLASS_BUILDING
-
-    Returns path to the output .dsf file, or None on failure.
-    """
-    # Fall back to module-level defaults when caller does not override
-    if do_vegetation is None:
-        do_vegetation = segformer_do_vegetation
-    if do_buildings is None:
-        do_buildings = segformer_do_buildings
-
-    use_dedicated_bld = (do_buildings and segformer_building_model == "dedicated")
-    use_landcover_bld = (do_buildings and segformer_building_model != "dedicated")
-
-    if build_dir is None:
-        build_dir = FNAMES.build_dir(lat, lon, "")
-
-    tex_dir = os.path.join(build_dir, "textures")
-    if not os.path.isdir(tex_dir):
-        print(f"[SegFormer] No textures directory found: {tex_dir}")
-        return None
-
-    dds_files = [f for f in os.listdir(tex_dir) if f.lower().endswith(".dds")]
-    if not dds_files:
-        print(f"[SegFormer] No DDS files in {tex_dir}")
-        return None
-
-    device = _get_device(device)
-    all_veg_by_class = {}
-    all_bld_polys    = []
-    canvas_size      = segformer_canvas_px  # 0 = legacy per-DDS mode
-
-    # ── Load required models ──────────────────────────────────────────────────
-    if do_vegetation or use_landcover_bld:
-        model_veg, proc_veg, device = load_vegetation_model(device)
-    if use_dedicated_bld:
-        model_bld, proc_bld, device = load_building_model(device)
-
-    if canvas_size > 0:
-        # ── Stitched-canvas mode ──────────────────────────────────────────────
-        img_rgb = _stitch_dds_canvas(tex_dir, lat, lon, canvas_size)
-        if img_rgb is None:
-            print("[SegFormer] Could not stitch DDS textures.")
-            return None
-
-        img_h, img_w = img_rgb.shape[:2]
-        lat_c     = lat + 0.5
-        m2_per_px = (111_320 / img_h) * (111_320 * cos(lat_c * pi / 180) / img_w)
-
-        def latlon_fn(px, py):
-            return (lat + 1 - py / img_h, lon + px / img_w)
-
-        # ── Vegetation pass ───────────────────────────────────────────────────
-        if do_vegetation or use_landcover_bld:
-            print("[SegFormer] Vegetation pass …")
-            veg_map = _run_inference_on_canvas(img_rgb, model_veg, proc_veg, device)
-
-            if do_vegetation:
-                veg = mask_to_polygons(
-                    veg_map, VEG_CLASSES, latlon_fn,
-                    min_area_px=max(segformer_min_veg_area_px, int(100 / m2_per_px))
-                )
-                for cls, polys in veg.items():
-                    all_veg_by_class.setdefault(cls, []).extend(polys)
-
-            if use_landcover_bld:
-                bld = mask_to_polygons(
-                    veg_map, (CLASS_BUILDING,), latlon_fn,
-                    min_area_px=max(segformer_min_bld_area_px, int(10 / m2_per_px))
-                )
-                for polys in bld.values():
-                    all_bld_polys.extend(polys)
-
-        # ── Dedicated building pass ───────────────────────────────────────────
-        if use_dedicated_bld:
-            print("[SegFormer] Building pass …")
-            bld_map = _run_inference_on_canvas(img_rgb, model_bld, proc_bld, device)
-            bld = mask_to_polygons(
-                bld_map, (1,), latlon_fn,   # class 1 = building in binary model
-                min_area_px=max(segformer_min_bld_area_px, int(10 / m2_per_px))
-            )
-            for polys in bld.values():
-                all_bld_polys.extend(polys)
-
-    else:
-        # ── Legacy per-DDS mode ───────────────────────────────────────────────
-        for fname in sorted(dds_files):
-            parsed = parse_dds_filename(fname)
-            if parsed is None:
-                continue
-            til_y_top, til_x_left, provider, zl = parsed
-
-            fpath = os.path.join(tex_dir, fname)
-            print(f"[SegFormer]   Processing {fname} …")
-            img_rgb = load_dds_or_none(fpath, display_name=fname)
-            if img_rgb is None:
-                continue
-
-            img_h, img_w = img_rgb.shape[:2]
-            m2_per_px    = _approx_m2_per_px(til_y_top, img_h, zl)
-
-            def _latlon_fn(px, py, _w=img_w, _h=img_h, _xl=til_x_left, _yt=til_y_top, _zl=zl):
-                return _pixel_to_latlon(px, py, _w, _h, _xl, _yt, _zl)
-
-            if do_vegetation or use_landcover_bld:
-                veg_map = run_inference(model_veg, device, img_rgb, proc_veg)
-
-                if do_vegetation:
-                    veg = mask_to_polygons(
-                        veg_map, VEG_CLASSES, _latlon_fn,
-                        min_area_px=max(segformer_min_veg_area_px, int(100 / m2_per_px))
-                    )
-                    for cls, polys in veg.items():
-                        all_veg_by_class.setdefault(cls, []).extend(polys)
-
-                if use_landcover_bld:
-                    bld = mask_to_polygons(
-                        veg_map, (CLASS_BUILDING,), _latlon_fn,
-                        min_area_px=max(segformer_min_bld_area_px, int(10 / m2_per_px))
-                    )
-                    for polys in bld.values():
-                        all_bld_polys.extend(polys)
-
-            if use_dedicated_bld:
-                bld_map = run_inference(model_bld, device, img_rgb, proc_bld)
-                bld = mask_to_polygons(
-                    bld_map, (1,), _latlon_fn,
-                    min_area_px=max(segformer_min_bld_area_px, int(10 / m2_per_px))
-                )
-                for polys in bld.values():
-                    all_bld_polys.extend(polys)
-
-    if not all_veg_by_class and not all_bld_polys:
-        print("[SegFormer] No features detected — no DSF written.")
-        return None
-
-    # ── Output paths ──────────────────────────────────────────────────────────
-    dest_dir = os.path.join(
-        FNAMES.SFR_Bld_Overlay_dir,
-        "Earth nav data",
-        FNAMES.round_latlon(lat, lon),
-    )
-    short    = FNAMES.short_latlon(lat, lon)
-    txt_path = os.path.join(dest_dir, short + "_ai.txt")
-    dsf_path = os.path.join(dest_dir, short + ".dsf")
-
-    print(f"[SegFormer] Writing DSF text to {txt_path} …")
-    write_text_dsf(lat, lon, txt_path, all_veg_by_class, all_bld_polys)
-
-    print(f"[SegFormer] Compiling DSF → {dsf_path} …")
-    ok = compile_dsf(txt_path, dsf_path)
-    if not ok:
-        return None
-
-    try:
-        os.remove(txt_path)
-    except OSError:
-        pass
-
-    print(f"[SegFormer] Done. Overlay at:\n  {dsf_path}")
-    return dsf_path
 

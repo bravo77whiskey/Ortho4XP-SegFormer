@@ -25,14 +25,14 @@ Example:
         "H:/XP12/Custom Scenery/yOrtho4XP_Bld_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
-import sys, os, json, argparse, warnings, time, math, re, hashlib, fnmatch
+import os, json, argparse, warnings, time, math, re, hashlib, fnmatch
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
 import numpy as np
 import cv2
 import torch
-from math import pi, atan, exp, log, tan
+from math import pi, atan, exp
 from PIL import Image, ImageDraw, ImageFont
 Image.MAX_IMAGE_PIXELS = None
 
@@ -48,7 +48,6 @@ import O4_SFR_Height_Priors as HEIGHTPRIORS
 import O4_SFR_Footprint_Polygons as FOOTPRINTS
 import O4_SFR_Agri_Structures as AGRI
 import O4_SFR_Texture_Selection as TEXSEL
-from O4_SFR_Texture_Selection import compute_covered_fractions
 from O4_SFR_DSF_Utils import (
     active_scenery_pack_dirs,
     ensure_cached_dsf_text,
@@ -643,21 +642,6 @@ def _prepare_segment_arrays(roads):
     }
 
 
-def _segments_for_bounds(seg_index, lat_n, lat_s, lon_w, lon_e, pad_deg=0.0):
-    """Return a lightweight view of flattened segments inside DDS bounds."""
-    if not seg_index:
-        return None
-    keep = (
-        (seg_index['lat'] >= lat_s - pad_deg) &
-        (seg_index['lat'] <= lat_n + pad_deg) &
-        (seg_index['lon'] >= lon_w - pad_deg) &
-        (seg_index['lon'] <= lon_e + pad_deg)
-    )
-    if not bool(np.any(keep)):
-        return None
-    return {k: v[keep] for k, v in seg_index.items()}
-
-
 def _roads_signature(roads):
     """Small deterministic signature for cache invalidation."""
     n_roads = 0
@@ -741,30 +725,6 @@ def _load_dds_road_cache(cache_path, key):
     except Exception:
         return None
     return None
-
-
-def _save_dds_road_cache(cache_path, key, road_mask, rail_mask, hgrid, n_osm_cells,
-                         residential_area_mask, residential_area_source,
-                         poly_mask, existing_bld_mask, sh_bld_mask,
-                         custom_bld_mask=None):
-    import pickle as _pickle
-    try:
-        with open(cache_path, 'wb') as f:
-            _pickle.dump({
-                'key': key,
-                'road_mask': road_mask,
-                'rail_mask': rail_mask,
-                'hgrid': hgrid,
-                'n_osm_cells': int(n_osm_cells),
-                'residential_area_mask': residential_area_mask,
-                'residential_area_source': residential_area_source,
-                'poly_mask': poly_mask,
-                'existing_bld_mask': existing_bld_mask,
-                'sh_bld_mask': sh_bld_mask,
-                'custom_bld_mask': custom_bld_mask,
-            }, f, protocol=_pickle.HIGHEST_PROTOCOL)
-    except Exception:
-        pass
 
 
 def _cell_edge_hist(patch, bin_deg=5.0, resize_to=128):
@@ -1098,91 +1058,6 @@ def _simheaven_building_zone_headings(objects, labels, valid_labels,
     return headings, counts
 
 
-def _road_heading_grid(roads, lat_n, lat_s, lon_w, lon_e,
-                       img_h, img_w, grid_n, img=None, segments=None):
-    """Compute dominant road bearing per grid cell.
-
-    Three-stage approach:
-      1. Mod-90° histogram — parallel AND perpendicular roads reinforce the
-         same bin, so the dominant block orientation wins over outlier roads.
-      2. Imagery tie-break — use Sobel edge histogram on the DDS patch to
-         pick which of the two perpendicular options matches actual building
-         edges visible in the imagery.
-      3. Mod-180° road fallback — if imagery is unavailable or featureless,
-         fall back to whichever perpendicular option has more road length.
-
-    Returns an (grid_n, grid_n) float array of X-Plane compass headings
-    in [0, 360°), with NaN where no road segments fall in that cell.
-    """
-    cell_h = img_h / grid_n
-    cell_w = img_w / grid_n
-
-    BIN_DEG  = 5.0
-    N_BINS90 = int(90  / BIN_DEG)   # 18 bins covering [0°,  90°)
-    N_BINS180= int(180 / BIN_DEG)   # 36 bins covering [0°, 180°)
-
-    votes90  = np.zeros((grid_n, grid_n, N_BINS90))
-    votes180 = np.zeros((grid_n, grid_n, N_BINS180))
-
-    if segments is None:
-        segments = _prepare_segment_arrays(roads)
-
-    if segments:
-        px = (segments['lon'] - lon_w) / (lon_e - lon_w) * img_w
-        py = (lat_n - segments['lat']) / (lat_n - lat_s) * img_h
-        gi = (py // cell_h).astype(np.int32)
-        gj = (px // cell_w).astype(np.int32)
-        valid = (gi >= 0) & (gi < grid_n) & (gj >= 0) & (gj < grid_n)
-        if bool(np.any(valid)):
-            b90 = ((segments['raw_deg'][valid] % 90.0) / BIN_DEG).astype(np.int32) % N_BINS90
-            b180 = ((segments['raw_deg'][valid] % 180.0) / BIN_DEG).astype(np.int32) % N_BINS180
-            np.add.at(votes90, (gi[valid], gj[valid], b90), segments['len'][valid])
-            np.add.at(votes180, (gi[valid], gj[valid], b180), segments['len'][valid])
-
-    hgrid = np.full((grid_n, grid_n), np.nan)
-    for gi in range(grid_n):
-        for gj in range(grid_n):
-            if np.sum(votes90[gi, gj]) == 0:
-                continue
-
-            # Stage 1: dominant grid orientation from mod-90° peak
-            v90  = votes90[gi, gj]
-            v90s = (np.roll(v90, 1) + v90 + np.roll(v90, -1)) / 3.0
-            peak_bin  = int(np.argmax(v90s))
-            dom_mod90 = peak_bin * BIN_DEG + BIN_DEG / 2.0
-
-            opt1 = dom_mod90          # one perpendicular option
-            opt2 = dom_mod90 + 90.0  # the other
-
-            # Stage 2: imagery tie-break — score each option against the full
-            # edge histogram.  Avoids collapsing the histogram to a single peak,
-            # which would break when a cell contains blocks at different orientations.
-            dom_angle = None
-            if img is not None:
-                y0 = int(gi * cell_h);  y1 = min(img_h, int((gi + 1) * cell_h))
-                x0 = int(gj * cell_w);  x1 = min(img_w, int((gj + 1) * cell_w))
-                eh = _cell_edge_hist(img[y0:y1, x0:x1], bin_deg=BIN_DEG)
-                if eh is not None:
-                    def _img_score(angle):
-                        b = int(angle / BIN_DEG) % N_BINS180
-                        return (eh[(b - 1) % N_BINS180] +
-                                eh[ b                 ] +
-                                eh[(b + 1) % N_BINS180])
-                    dom_angle = opt1 if _img_score(opt1) >= _img_score(opt2) else opt2
-
-            # Stage 3: mod-180° road fallback
-            if dom_angle is None:
-                def _score(angle):
-                    b = int(angle / BIN_DEG) % N_BINS180
-                    return (votes180[gi, gj, (b - 1) % N_BINS180] +
-                            votes180[gi, gj,  b                  ] +
-                            votes180[gi, gj, (b + 1) % N_BINS180])
-                dom_angle = opt1 if _score(opt1) >= _score(opt2) else opt2
-
-            hgrid[gi, gj] = (90.0 - dom_angle) % 360.0
-    return hgrid
-
-
 def _building_zone_cell_mask(bld_zone, img_h, img_w, grid_n):
     """Return grid cells that contain building-zone pixels."""
     cell_mask = np.zeros((grid_n, grid_n), dtype=bool)
@@ -1195,31 +1070,6 @@ def _building_zone_cell_mask(bld_zone, img_h, img_w, grid_n):
     gj = np.minimum(grid_n - 1, (xs / cell_w).astype(np.int32))
     cell_mask[gi, gj] = True
     return cell_mask
-
-
-def _fill_heading_grid_nearest(hgrid, segments, lat_n, lat_s, lon_w, lon_e,
-                               img_h, img_w, grid_n, cell_mask=None):
-    """Fill NaN heading cells from the nearest precomputed segment midpoint."""
-    if not segments or not np.any(np.isnan(hgrid)):
-        return hgrid
-
-    px = (segments['lon'] - lon_w) / (lon_e - lon_w) * img_w
-    py = (lat_n - segments['lat']) / (lat_n - lat_s) * img_h
-    if len(px) == 0:
-        return hgrid
-
-    cell_h = img_h / grid_n
-    cell_w = img_w / grid_n
-    missing_mask = np.isnan(hgrid)
-    if cell_mask is not None:
-        missing_mask &= cell_mask
-    missing = np.argwhere(missing_mask)
-    for gi, gj in missing:
-        cy = (gi + 0.5) * cell_h
-        cx = (gj + 0.5) * cell_w
-        d2 = (py - cy) ** 2 + (px - cx) ** 2
-        hgrid[gi, gj] = float(segments['heading'][int(np.argmin(d2))])
-    return hgrid
 
 
 def _image_heading_grid(img, img_h, img_w, grid_n, cell_mask=None):
@@ -2231,65 +2081,6 @@ def _rasterize_simheaven_objects(objects, lat_n, lat_s, lon_w, lon_e,
                 pts[:, 1].max() >= 0 and pts[:, 1].min() < img_h):
             cv2.fillPoly(mask, [pts], 1)
     return mask
-
-
-def _zone_heading(img, bx, by, bw, bh, pad=80):
-    """Detect dominant road/block heading for a single zone.
-
-    Runs Canny + HoughLinesP on a padded subregion of the full DDS image
-    centred on the zone's bounding box.  Padding captures nearby roads that
-    bound the zone but lie outside it.
-
-    Uses a 1° histogram with a weighted-mean peak — no bin snapping, so the
-    result is continuous (e.g. 291.4° stays 291°, not 300° or 275°).
-
-    Returns a heading in [0, 360°), or None if too few lines are detected.
-    """
-    h_img, w_img = img.shape[:2]
-    x0 = max(0, bx - pad);  y0 = max(0, by - pad)
-    x1 = min(w_img, bx + bw + pad);  y1 = min(h_img, by + bh + pad)
-    region = img[y0:y1, x0:x1]
-
-    rh, rw = region.shape[:2]
-    if rh < 32 or rw < 32:
-        return None
-
-    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY) if region.ndim == 3 else region
-
-    # Downsample only when the patch is large
-    max_dim = max(gray.shape)
-    if max_dim > HOUGH_PREVIEW_PX:
-        sc = HOUGH_PREVIEW_PX / max_dim
-        gray = cv2.resize(gray, (max(1, int(rw * sc)), max(1, int(rh * sc))))
-
-    edges = cv2.Canny(gray, 40, 120, apertureSize=3)
-    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180,
-                             threshold=20, minLineLength=10, maxLineGap=6)
-
-    if lines is None or len(lines) < HOUGH_MIN_LINES:
-        return None
-
-    # Length-weighted angle histogram — 1° bins for continuous output
-    angles  = np.empty(len(lines))
-    weights = np.empty(len(lines))
-    for i, seg in enumerate(lines):
-        x1l, y1l, x2l, y2l = seg[0]
-        angles[i]  = math.degrees(math.atan2(y2l - y1l, x2l - x1l)) % 180.0
-        weights[i] = math.hypot(x2l - x1l, y2l - y1l)
-
-    hist, edges_h = np.histogram(angles, bins=180, range=(0.0, 180.0),
-                                 weights=weights)
-    hist = np.convolve(hist, [0.2, 0.6, 0.2], mode='same')
-
-    peak = int(np.argmax(hist))
-    # Weighted mean over ±6 bins around peak → sub-degree precision, no snapping
-    lo = max(0, peak - 6);  hi = min(180, peak + 7)
-    bin_centres = (edges_h[:-1] + edges_h[1:]) / 2.0
-    dominant_img_angle = float(np.average(bin_centres[lo:hi],
-                                          weights=hist[lo:hi]))
-
-    # Image-math angle → X-Plane compass heading (0 = N, CW)
-    return (90.0 - dominant_img_angle) % 360.0
 
 
 # ── Building object/facade pools by footprint size ────────────────────────────
@@ -5875,11 +5666,6 @@ def _build_default_asset_pools(tile_lat=45.0, tile_lon=7.0, asset_region=None):
     return asset_pools
 
 
-def _simheaven_zone_class(width_m, depth_m):
-    """Classify a simHeaven object into footprint placement buckets."""
-    return _class_for_footprint(_bounds_from_dimensions(width_m, depth_m))
-
-
 def _build_simheaven_asset_pools(
     simheaven_objects=None,
     tile_lat=45.0,
@@ -5994,39 +5780,6 @@ def _residential_roads(roads):
         road for road in (roads or [])
         if road.get('type') in RESIDENTIAL_HIGHWAY_TYPES
     ]
-
-
-def _build_residential_area_mask(residential_polys, residential_roads,
-                                 lat_n, lat_s, lon_w, lon_e,
-                                 img_h, img_w, m_per_px):
-    """Build a DDS-local mask that marks where small houses may be placed.
-
-    Returns ``(mask, source_label)`` where ``mask`` is a uint8 array or ``None``
-    when no residential guidance is available for this DDS.
-    """
-    if residential_polys:
-        return (
-            _rasterize_polygons(
-                residential_polys, lat_n, lat_s, lon_w, lon_e, img_h, img_w
-            ),
-            'OSM residential landuse',
-        )
-
-    if residential_roads:
-        road_mask = _rasterize_roads(
-            residential_roads, lat_n, lat_s, lon_w, lon_e, img_h, img_w,
-            road_width_px=1,
-        )
-        road_buffer_px = max(
-            RESIDENTIAL_FALLBACK_BUFFER_PX_MIN,
-            int(round(RESIDENTIAL_FALLBACK_BUFFER_M / max(m_per_px, 1e-6))),
-        )
-        dist = cv2.distanceTransform(
-            (1 - road_mask).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
-        )
-        return (dist <= road_buffer_px).astype(np.uint8), 'OSM neighborhood roads'
-
-    return None, 'unavailable'
 
 
 def _zone_class_from_area_m2(area_m2):
@@ -8017,23 +7770,6 @@ def _class_spacing_px(edge_spacing_m, m_per_px, class_min_footprint_span_m=None)
     }
 
 
-def _gap_fill_class_sequence(zone_class):
-    """Return the only placement class allowed for this gap-fill center."""
-    zc = int(zone_class)
-    return (zc,) if zc in BLD_PLACEMENT_CLASSES else ()
-
-
-def _yolo_direct_class_sequence(zone_class):
-    """Try YOLO's inferred class first, then smaller compatible classes."""
-    zc = int(zone_class)
-    if zc not in BLD_PLACEMENT_CLASSES:
-        return ()
-    return tuple(
-        cls for cls in reversed(BLD_PLACEMENT_CLASSES)
-        if cls <= zc
-    )
-
-
 def _residential_infill_class(zone_class):
     """Return a smaller house-like class for residential subareas in coarse zones."""
     zone_class = int(zone_class)
@@ -8712,82 +8448,6 @@ def _bundle_enabled_view(bundle, enabled_assets_by_path, zone_class):
 _GLOBAL_YOLO_OBJECT_FIT_TABLE = None
 
 
-def _all_known_yolo_object_asset_pools():
-    """Return object pools for every static asset catalog entry we know about."""
-    asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
-    seen_paths = set()
-
-    default_paths = set(DEFAULT_OBJECT_CATALOG_OLD_WORLD) | set(DEFAULT_OBJECT_CATALOG_NORTH_AMERICA)
-    for obj_path in sorted(default_paths):
-        if obj_path in seen_paths:
-            continue
-        seen_paths.add(obj_path)
-        dims = _default_object_dims(obj_path)
-        if dims is None:
-            continue
-        _append_object_asset(
-            asset_pools,
-            obj_path,
-            _bounds_from_dimensions(dims[0], dims[1]),
-            'Default X-Plane',
-        )
-
-    asset_regions = (
-        'generic',
-        'europe',
-        'scandinavia',
-        'mediterranean',
-        'north_america',
-        'north_america_ne',
-        'north_america_west',
-        'south_america',
-        'asia',
-        'se_asia',
-        'africa',
-        'australia_oceania',
-    )
-    for region in asset_regions:
-        for obj_path in _sfd_catalog_paths(0.0, 0.0, region):
-            if obj_path in seen_paths:
-                continue
-            seen_paths.add(obj_path)
-            bounds_m = _bounds_for_object_path(obj_path)
-            if bounds_m is None:
-                continue
-            _append_object_asset(asset_pools, obj_path, bounds_m, 'SFD Global')
-
-    simheaven_paths = (
-        SIMHEAVEN_SMALL_BUILDING_CATALOG +
-        SIMHEAVEN_RESIDENTIAL_CATALOG +
-        SIMHEAVEN_COMMERCIAL_CATALOG +
-        SIMHEAVEN_INDUSTRIAL_CATALOG
-    )
-    for obj_path in simheaven_paths:
-        if obj_path in seen_paths:
-            continue
-        if not _is_repeatable_simheaven_asset(obj_path):
-            continue
-        seen_paths.add(obj_path)
-        dims = _simheaven_object_dims(obj_path)
-        _append_object_asset(
-            asset_pools,
-            obj_path,
-            _bounds_from_dimensions(dims[0], dims[1]),
-            'simHeaven',
-        )
-    return asset_pools
-
-
-def _global_yolo_object_fit_table():
-    """Return the static object-dimension lookup, building it once per process."""
-    global _GLOBAL_YOLO_OBJECT_FIT_TABLE
-    if _GLOBAL_YOLO_OBJECT_FIT_TABLE is None:
-        _GLOBAL_YOLO_OBJECT_FIT_TABLE = _build_yolo_object_fit_table(
-            _all_known_yolo_object_asset_pools()
-        )
-    return _GLOBAL_YOLO_OBJECT_FIT_TABLE
-
-
 def _select_yolo_object_candidate_once(
     fit_table,
     detection,
@@ -9198,17 +8858,6 @@ def _select_yolo_object_candidate(
     if selected is not None and roof_color is not None:
         selected["roof_color_match"] = False
     return selected, status
-
-
-
-def _yolo_poly_bbox(points):
-    pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
-    return (
-        int(math.floor(float(pts[:, 0].min()))),
-        int(math.floor(float(pts[:, 1].min()))),
-        int(math.ceil(float(pts[:, 0].max()))),
-        int(math.ceil(float(pts[:, 1].max()))),
-    )
 
 
 def _bbox_grid_cells(bbox, cell_size_px):
@@ -9966,33 +9615,6 @@ def _ccw_lonlat_ring(lonlat_ring):
     for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1]):
         twice_area += x0 * y1 - x1 * y0
     return ring[::-1] if twice_area < 0.0 else ring
-
-
-def _merge_exclusion_rects(rects, eps=1e-6):
-    """Merge overlapping/touching exclusion rectangles.
-
-    Rects are (west, south, east, north).
-    """
-    rects = [tuple(map(float, r)) for r in rects if r[0] < r[2] and r[1] < r[3]]
-    merged = []
-    for rect in rects:
-        w, s, e, n = rect
-        changed = True
-        while changed:
-            changed = False
-            new_merged = []
-            for mw, ms, me, mn in merged:
-                if not (e < mw - eps or me < w - eps or n < ms - eps or mn < s - eps):
-                    w = min(w, mw)
-                    s = min(s, ms)
-                    e = max(e, me)
-                    n = max(n, mn)
-                    changed = True
-                else:
-                    new_merged.append((mw, ms, me, mn))
-            merged = new_merged
-        merged.append((w, s, e, n))
-    return merged
 
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
@@ -12823,33 +12445,6 @@ def run(
                     ),
                 )
 
-            def _dominant_zone_yolo_template(zone_label):
-                zone_templates = yolo_templates_by_zone.get(int(zone_label), ())
-                if not zone_templates:
-                    return None
-                return _consensus_yolo_template(
-                    zone_templates,
-                    heading_tol_deg=yolo_template_heading_tol_deg,
-                    shape_rel_tol=yolo_template_shape_rel_tol,
-                    shape_abs_tol_px=yolo_template_shape_abs_tol_px,
-                )
-
-            def _zone_road_heading(zone_label):
-                zone_label = int(zone_label)
-                if (
-                    0 <= zone_label < zone_heading.shape[0] and
-                    not np.isnan(zone_heading[zone_label])
-                ):
-                    return float(zone_heading[zone_label])
-                if 0 <= zone_label < cc_centroids.shape[0]:
-                    cx = int(np.clip(round(float(cc_centroids[zone_label, 0])), 0, img_w - 1))
-                    cy = int(np.clip(round(float(cc_centroids[zone_label, 1])), 0, img_h - 1))
-                    return float(hgrid[
-                        min(grid_n - 1, cy // cell_h),
-                        min(grid_n - 1, cx // cell_w),
-                    ])
-                return 0.0
-
             _neighbor_tpl_cache: dict = {}
 
             def _dominant_neighbor_yolo_template(zone_label):
@@ -12999,194 +12594,6 @@ def run(
                     actual_count_key = 'neighbor_yolo_template_placed'
                 file_counts[actual_count_key] = file_counts.get(actual_count_key, 0) + 1
                 return True
-
-            def _tile_same_zone_yolo_templates():
-                if not yolo_templates_by_zone:
-                    return set()
-                tiled_labels = set()
-                gap_px = int(round(yolo_template_gap_m / max(m_per_px, 1e-6)))
-                gap_px = max(0, gap_px)
-                for zone_label in sorted(int(label) for label in yolo_templates_by_zone):
-                    if zone_label <= 0 or zone_label >= cc_stats.shape[0]:
-                        continue
-                    template = _dominant_zone_yolo_template(zone_label)
-                    if template is None:
-                        continue
-                    pts = np.asarray(template['points'], dtype=np.float32)
-                    if pts.shape != (4, 2):
-                        continue
-                    metrics = _yolo_template_metrics(template)
-                    if metrics is None:
-                        continue
-                    long_len = float(metrics['long_len'])
-                    short_len = float(metrics['short_len'])
-                    img_angle = math.radians(float(template['heading']) - 90.0)
-                    u_axis = np.asarray(
-                        [math.cos(img_angle), math.sin(img_angle)], dtype=np.float32
-                    )
-                    v_axis = np.asarray([-u_axis[1], u_axis[0]], dtype=np.float32)
-                    step_u = max(3.0, long_len + float(gap_px))
-                    step_v = max(3.0, short_len + float(gap_px))
-                    x0 = int(cc_stats[zone_label, cv2.CC_STAT_LEFT])
-                    y0 = int(cc_stats[zone_label, cv2.CC_STAT_TOP])
-                    zone_w = int(cc_stats[zone_label, cv2.CC_STAT_WIDTH])
-                    zone_h = int(cc_stats[zone_label, cv2.CC_STAT_HEIGHT])
-                    if zone_w <= 0 or zone_h <= 0:
-                        continue
-                    x1 = min(img_w, x0 + zone_w)
-                    y1 = min(img_h, y0 + zone_h)
-                    anchor = np.asarray(template['center'], dtype=np.float32)
-                    bbox_corners = np.asarray(
-                        ((x0, y0), (x1 - 1, y0), (x1 - 1, y1 - 1), (x0, y1 - 1)),
-                        dtype=np.float32,
-                    )
-                    rel_corners = bbox_corners - anchor
-                    proj_u = rel_corners @ u_axis
-                    proj_v = rel_corners @ v_axis
-                    iu0 = int(math.floor(float(proj_u.min()) / step_u)) - 1
-                    iu1 = int(math.ceil(float(proj_u.max()) / step_u)) + 1
-                    iv0 = int(math.floor(float(proj_v.min()) / step_v)) - 1
-                    iv1 = int(math.ceil(float(proj_v.max()) / step_v)) + 1
-
-                    attempted = 0
-                    placed = 0
-                    stop_zone = False
-                    for iv in range(iv0, iv1 + 1):
-                        if stop_zone:
-                            break
-                        for iu in range(iu0, iu1 + 1):
-                            if attempted >= yolo_template_max_candidates_per_zone:
-                                stop_zone = True
-                                break
-                            center = anchor + u_axis * (iu * step_u) + v_axis * (iv * step_v)
-                            jx_t = int(round(float(center[0])))
-                            jy_t = int(round(float(center[1])))
-                            if not (0 <= jx_t < img_w and 0 <= jy_t < img_h):
-                                continue
-                            if cc_labels[jy_t, jx_t] != zone_label:
-                                continue
-                            if fallback_zone[jy_t, jx_t] == 0:
-                                continue
-                            attempted += 1
-                            if _try_place_yolo_template(
-                                int(jx_t),
-                                int(jy_t),
-                                zone_label,
-                                'same_zone_yolo_template_placed',
-                                template=template,
-                                use_center_blockers=False,
-                            ):
-                                placed += 1
-                    if attempted:
-                        file_counts['same_zone_yolo_template_candidates'] = (
-                            file_counts.get('same_zone_yolo_template_candidates', 0) + attempted
-                        )
-                        file_counts['same_zone_yolo_heading_votes'] = (
-                            file_counts.get('same_zone_yolo_heading_votes', 0) +
-                            int(template.get('consensus_heading_votes', 1))
-                        )
-                        file_counts['same_zone_yolo_shape_votes'] = (
-                            file_counts.get('same_zone_yolo_shape_votes', 0) +
-                            int(template.get('consensus_shape_votes', 1))
-                        )
-                    if placed:
-                        tiled_labels.add(zone_label)
-                return tiled_labels
-
-            def _tile_neighbor_zone_yolo_templates():
-                if not neighbor_yolo_templates_by_zone:
-                    return set()
-                tiled_labels = set()
-                gap_px = int(round(yolo_template_gap_m / max(m_per_px, 1e-6)))
-                gap_px = max(0, gap_px)
-                for zone_label in sorted(int(label) for label in neighbor_yolo_templates_by_zone):
-                    if zone_label <= 0 or zone_label >= cc_stats.shape[0]:
-                        continue
-                    if zone_label in yolo_templates_by_zone:
-                        continue
-                    template = _dominant_neighbor_yolo_template(zone_label)
-                    if template is None:
-                        continue
-                    pts = np.asarray(template['points'], dtype=np.float32)
-                    if pts.shape != (4, 2):
-                        continue
-                    metrics = _yolo_template_metrics(template)
-                    if metrics is None:
-                        continue
-                    long_len = float(metrics['long_len'])
-                    short_len = float(metrics['short_len'])
-                    img_angle = math.radians(float(template['heading']) - 90.0)
-                    u_axis = np.asarray(
-                        [math.cos(img_angle), math.sin(img_angle)], dtype=np.float32
-                    )
-                    v_axis = np.asarray([-u_axis[1], u_axis[0]], dtype=np.float32)
-                    step_u = max(3.0, long_len + float(gap_px))
-                    step_v = max(3.0, short_len + float(gap_px))
-                    x0 = int(cc_stats[zone_label, cv2.CC_STAT_LEFT])
-                    y0 = int(cc_stats[zone_label, cv2.CC_STAT_TOP])
-                    zone_w = int(cc_stats[zone_label, cv2.CC_STAT_WIDTH])
-                    zone_h = int(cc_stats[zone_label, cv2.CC_STAT_HEIGHT])
-                    if zone_w <= 0 or zone_h <= 0:
-                        continue
-                    x1 = min(img_w, x0 + zone_w)
-                    y1 = min(img_h, y0 + zone_h)
-                    anchor = np.asarray(template['center'], dtype=np.float32)
-                    bbox_corners = np.asarray(
-                        ((x0, y0), (x1 - 1, y0), (x1 - 1, y1 - 1), (x0, y1 - 1)),
-                        dtype=np.float32,
-                    )
-                    rel_corners = bbox_corners - anchor
-                    proj_u = rel_corners @ u_axis
-                    proj_v = rel_corners @ v_axis
-                    iu0 = int(math.floor(float(proj_u.min()) / step_u)) - 1
-                    iu1 = int(math.ceil(float(proj_u.max()) / step_u)) + 1
-                    iv0 = int(math.floor(float(proj_v.min()) / step_v)) - 1
-                    iv1 = int(math.ceil(float(proj_v.max()) / step_v)) + 1
-
-                    attempted = 0
-                    placed = 0
-                    stop_zone = False
-                    for iv in range(iv0, iv1 + 1):
-                        if stop_zone:
-                            break
-                        for iu in range(iu0, iu1 + 1):
-                            if attempted >= yolo_template_max_candidates_per_zone:
-                                stop_zone = True
-                                break
-                            center = anchor + u_axis * (iu * step_u) + v_axis * (iv * step_v)
-                            jx_t = int(round(float(center[0])))
-                            jy_t = int(round(float(center[1])))
-                            if not (0 <= jx_t < img_w and 0 <= jy_t < img_h):
-                                continue
-                            if cc_labels[jy_t, jx_t] != zone_label:
-                                continue
-                            if fallback_zone[jy_t, jx_t] == 0:
-                                continue
-                            attempted += 1
-                            if _try_place_yolo_template(
-                                int(jx_t),
-                                int(jy_t),
-                                zone_label,
-                                'neighbor_zone_yolo_template_placed',
-                                template=template,
-                                use_center_blockers=False,
-                            ):
-                                placed += 1
-                    if attempted:
-                        file_counts['neighbor_yolo_template_candidates'] = (
-                            file_counts.get('neighbor_yolo_template_candidates', 0) + attempted
-                        )
-                        file_counts['neighbor_yolo_heading_votes'] = (
-                            file_counts.get('neighbor_yolo_heading_votes', 0) +
-                            int(template.get('consensus_heading_votes', 1))
-                        )
-                        file_counts['neighbor_yolo_shape_votes'] = (
-                            file_counts.get('neighbor_yolo_shape_votes', 0) +
-                            int(template.get('consensus_shape_votes', 1))
-                        )
-                    if placed:
-                        tiled_labels.add(zone_label)
-                return tiled_labels
 
             # Direct-YOLO mode: template tiling of gap-fill zones is retired
             # (cand_x/cand_y/cand_cls are always empty, so this loop is inert).

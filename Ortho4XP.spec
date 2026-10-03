@@ -42,17 +42,14 @@ added_datas = [
     # Keep a repo-like layout inside sfr_scripts/src so imports work the same
     # in source and packaged runs.
     (os.path.join(SPEC_DIR, "src", "scripts", "__init__.py"),            "sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "generate_overlay.py"),    "sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_veg_overlay.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "veg_tile_replacement.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "install_gfv2_simheaven_redirects.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "generate_bld_overlay.py"),"sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "scripts", "generate_sfr_overlay.py"),"sfr_scripts/src/scripts"),
     (os.path.join(SPEC_DIR, "src", "scripts", "audit_sfr_building_assets.py"),"sfr_scripts/src/scripts"),
     # Remote-GPU offload: worker ships as a loose file because the packaged
     # app tar-syncs sfr_scripts/src to the remote host, which then runs it.
     (os.path.join(SPEC_DIR, "src", "scripts", "sfr_remote_worker.py"),   "sfr_scripts/src/scripts"),
-    (os.path.join(SPEC_DIR, "src", "O4_AI_Overlay.py"),                  "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_Forest_Assets.py"),               "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Asset_Inventory.py"),         "sfr_scripts/src"),
     (os.path.join(SPEC_DIR, "src", "O4_SFR_Library_Catalog.py"),        "sfr_scripts/src"),
@@ -123,9 +120,6 @@ hidden = [
     "O4_Cfg_Vars",
     "O4_DSF_Utils",
     "O4_Overlay_Utils",
-    "O4_Veg_Overlay",
-    "O4_Building_Overlay",
-    "O4_AI_Overlay",
     "O4_Forest_Assets",
     "O4_SFR_Asset_Inventory",
     "O4_SFR_Library_Catalog",

@@ -2,7 +2,6 @@ import os
 import sys
 from math import floor
 
-import O4_UI_Utils as UI
 
 g2xpl_16_prefix = ""
 g2xpl_16_suffix = ""
@@ -155,22 +154,6 @@ def input_poly_file(tile):
         )
 
 
-def input_ele_file(tile):
-    if tile.iterate:
-        return os.path.join(
-            tile.build_dir,
-            "Data"
-            + short_latlon(tile.lat, tile.lon)
-            + "."
-            + str(tile.iterate)
-            + ".ele",
-        )
-    else:
-        return os.path.join(
-            tile.build_dir, "Data" + short_latlon(tile.lat, tile.lon) + ".ele"
-        )
-
-
 def output_node_file(tile):
     return os.path.join(
         tile.build_dir,
@@ -179,17 +162,6 @@ def output_node_file(tile):
         + "."
         + str(tile.iterate + 1)
         + ".node",
-    )
-
-
-def output_poly_file(tile):
-    return os.path.join(
-        tile.build_dir,
-        "Data"
-        + short_latlon(tile.lat, tile.lon)
-        + "."
-        + str(tile.iterate + 1)
-        + ".poly",
     )
 
 
@@ -365,10 +337,6 @@ def viewfinderpanorama(lat, lon):
 
 
 ##############################################################################
-
-##############################################################################
-def SRTM_1sec(lat, lon):
-    return base_file_name(lat, lon) + "_SRTM_1sec.hgt"
 
 
 ##############################################################################

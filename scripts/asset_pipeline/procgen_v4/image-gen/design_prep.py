@@ -37,7 +37,6 @@ import os
 import random
 import sys
 
-import numpy as np
 from PIL import Image, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -7,7 +7,6 @@ Covers:
 - License gate refuses non-CC0 / non-CC-BY entries
 """
 
-import os
 import shutil
 import sys
 import tempfile

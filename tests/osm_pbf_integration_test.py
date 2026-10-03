@@ -1,5 +1,4 @@
 import bz2
-import os
 from pathlib import Path
 import sys
 from unittest import mock

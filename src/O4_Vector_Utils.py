@@ -812,39 +812,6 @@ def ensure_MultiLineString(input_geometry):
 
 
 ################################################################################
-def ensure_ccw(input_geometry):
-    if input_geometry.is_empty:
-        return geometry.MultiLineString()
-    geometries = []
-    for line in (
-        input_geometry.geoms
-        if "Multi" in input_geometry.geom_type
-        else [input_geometry]
-    ):
-        if line.is_ring and not geometry.LinearRing(line).is_ccw:
-            line.coords = list(line.coords)[::-1]
-        geometries.append(line)
-    return geometry.MultiLineString(geometries)
-
-
-################################################################################
-def indexed_difference(idx_pol1, dico_pol1, idx_pol2, dico_pol2):
-    idx_out = index.Index()
-    dico_out = {}
-    idnew = 0
-    for polid1, pol1 in dico_pol1.items():
-        for polid2 in idx_pol2.intersection(pol1.bounds):
-            if pol1.intersects(dico_pol2[polid2]):
-                pol1 = pol1.difference(dico_pol2[polid2])
-        if pol1.area:
-            for pol in pol1 if "Multi" in pol1.geom_type else [pol1]:
-                idx_out.insert(idnew, pol.bounds)
-                dico_out[idnew] = pol
-                idnew += 1
-    return idx_out, dico_out
-
-
-################################################################################
 def coastline_to_MultiPolygon(coastline, lat, lon, custom_source=False):
     def encode_to_next(coord, new_way, remove_coords):
         UI.vprint(3, "Computing next  coord for", coord)
@@ -1140,45 +1107,6 @@ def refine_way(way, max_length):  # max_length assumed in meter
 
 
 ################################################################################
-def projcoords(way, A, B):
-    return numpy.sum(
-        (way - A) * (B - A) * numpy.array([scalx ** 2, 1]), axis=1
-    ) / numpy.sum((B - A) * (B - A) * numpy.array([scalx ** 2, 1]))
-
-
-################################################################################
-def point_to_segment_distance(way, A, B):
-    # distance of each point of way to the segment joining A and B
-    # tmp = numpy.maximum(numpy.minimum(0,projcoords(way,A,B)),1)
-    # tmp = way - (A+numpy.outer(tmp,(B-A))
-    # tmp = numpy.sum(tmp**2*numpy.array([scalx**2,1]),axis=1)
-    # return numpy.sqrt(tmp)*GEO.lat_to_m
-    # In short :
-    return (
-        numpy.sqrt(
-            numpy.sum(
-                (
-                    way
-                    - (
-                        A
-                        + numpy.outer(
-                            numpy.maximum(
-                                numpy.minimum(1, projcoords(way, A, B)), 0
-                            ),
-                            (B - A),
-                        )
-                    )
-                )
-                ** 2
-                * numpy.array([scalx ** 2, 1]),
-                axis=1,
-            )
-        )
-        * GEO.lat_to_m
-    )
-
-
-################################################################################
 def least_square_fit_altitude_along_way(way, steps, dem, weights=False):
     linestring = affinity.affine_transform(
         geometry.LineString(way), [scalx, 0, 0, 1, 0, 0]
@@ -1274,18 +1202,6 @@ def weighted_alt(node, alt_idx, alt_dico, dem):
         return alpha * alti / weights + (1 - alpha) * dem.alt(node)
     else:
         return alti / weights
-
-
-################################################################################
-def convolve_periodic(way, kernel):
-    # way is expected to be closed, and way[0]==way[-1], the convolution is
-    # meant with respect to periodic variables
-    k = len(kernel) // 2
-    return numpy.convolve(
-        numpy.concatenate((way[-k - 1 : -1], way, way[1 : k + 1])),
-        kernel,
-        "valid",
-    )
 
 
 ################################################################################

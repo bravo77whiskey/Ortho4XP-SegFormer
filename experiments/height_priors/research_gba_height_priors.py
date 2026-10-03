@@ -17,7 +17,6 @@ import csv
 import json
 import math
 import re
-import statistics
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass

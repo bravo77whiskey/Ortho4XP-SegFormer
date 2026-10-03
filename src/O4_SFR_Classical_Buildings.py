@@ -1132,7 +1132,7 @@ def run_classical_building_inference(
         # Upper bound on confidence (f_rect <= 1): lossless early reject.
         bound_v = (base_v + weights['rect']) * veg_mult_v
 
-        # Roof-colour veto, adapted from O4_Building_Overlay._is_roof_color:
+        # Roof-colour veto (excess-green / blue-water rejection):
         # blue-dominant only counts as water when dark (blue metal roofs are
         # bright), see ClassicalParams.water_max_v.
         exg_v = 2 * mean_g_v - mean_r_v - mean_b_v

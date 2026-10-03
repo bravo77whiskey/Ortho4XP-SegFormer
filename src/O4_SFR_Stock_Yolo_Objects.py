@@ -79,7 +79,7 @@ STORAGE_TANK_CIRCLE_SEGMENTS = 24
 
 
 def _is_cuda_oom(exc):
-    # Local copy (module is deliberately self-contained; see O4_AI_Overlay).
+    # Local copy: this module deliberately imports no other O4_* module.
     text = str(exc).lower()
     return "out of memory" in text or "cuda error: out of memory" in text
 

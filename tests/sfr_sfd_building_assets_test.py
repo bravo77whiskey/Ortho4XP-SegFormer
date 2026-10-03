@@ -19,6 +19,7 @@ if str(SRC) not in sys.path:
 import O4_SFR_Building_Overlay as BLD
 import O4_SFR_Asset_Inventory as ASSETINV
 import O4_SFR_DSF_Utils as DSF
+import O4_SFR_Texture_Selection as TEXSEL
 
 
 def _max_corner_deviation_deg(points):
@@ -161,7 +162,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
             (56656, 109056, 17, "56656_109056_BI17.dds"),
             (56656, 109072, 17, "56656_109072_BI17.dds"),
         ]
-        covered = BLD.compute_covered_fractions(entries)
+        covered = TEXSEL.compute_covered_fractions(entries)
         rects = covered["28320_54528_Arc16.dds"]
         self.assertEqual(len(rects), 4)
         self.assertEqual(
@@ -182,7 +183,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
             (28320, 54528, 16, "28320_54528_Arc16.dds"),
             (113280, 218112, 18, "113280_218112_BI18.dds"),
         ]
-        covered = BLD.compute_covered_fractions(entries)
+        covered = TEXSEL.compute_covered_fractions(entries)
         rects = covered["28320_54528_Arc16.dds"]
         self.assertEqual(rects, ((0.0, 0.0, 0.25, 0.25),))
 
@@ -649,18 +650,19 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertFalse(BLD._footprint_inside_detection(big_inner, big_outer))
 
     def test_osm_tile_peer_path_handles_all_road_sources(self):
-        base = r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_big_roads.osm.bz2"
+        folder = os.path.abspath(os.path.join("O4XP", "OSM_data", "+30+110", "+36+117"))
+        base = os.path.join(folder, "+36+117_big_roads.osm.bz2")
 
         self.assertEqual(
             BLD._osm_tile_peer_path(base, "_all_roads.osm.bz2"),
-            r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_all_roads.osm.bz2",
+            os.path.join(folder, "+36+117_all_roads.osm.bz2"),
         )
         self.assertEqual(
             BLD._osm_tile_peer_path(
-                r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_all_roads.osm.bz2",
+                os.path.join(folder, "+36+117_all_roads.osm.bz2"),
                 "_small_roads.osm.bz2",
             ),
-            r"C:\O4XP\OSM_data\+30+110\+36+117\+36+117_small_roads.osm.bz2",
+            os.path.join(folder, "+36+117_small_roads.osm.bz2"),
         )
 
     def test_load_osm_roads_parses_generic_highway_extract(self):

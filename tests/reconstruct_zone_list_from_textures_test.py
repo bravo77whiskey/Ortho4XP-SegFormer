@@ -13,6 +13,8 @@ RECON = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = RECON
 SPEC.loader.exec_module(RECON)
 
+import O4_Zone_Utils as ZONE  # noqa: E402  (the script put src/ on sys.path)
+
 
 class ReconstructZoneListFromTexturesTests(unittest.TestCase):
     def test_discover_tile_dirs_accepts_gui_string_path(self):
@@ -216,8 +218,8 @@ class ReconstructZoneListFromTexturesTests(unittest.TestCase):
             "GO2",
         ]
 
-        self.assertFalse(RECON.zone_intersects_tile(east_tile_zone, 36, 117))
-        self.assertTrue(RECON.zone_intersects_tile(east_tile_zone, 36, 118))
+        self.assertFalse(ZONE.zone_intersects_tile(east_tile_zone, 36, 117))
+        self.assertTrue(ZONE.zone_intersects_tile(east_tile_zone, 36, 118))
 
 
 if __name__ == "__main__":

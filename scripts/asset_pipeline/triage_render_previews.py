@@ -306,7 +306,7 @@ def main(argv=None):
                     check=False, timeout=240,
                 )
             except subprocess.TimeoutExpired:
-                print(f"  ! timeout")
+                print("  ! timeout")
                 failed += 1
                 continue
             except FileNotFoundError:

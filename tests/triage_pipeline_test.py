@@ -1,7 +1,6 @@
 """Tests for the triage pipeline (extract -> probe -> manifest assembly)."""
 
 import csv
-import os
 import shutil
 import sys
 import tempfile

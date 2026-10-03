@@ -13,23 +13,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from O4_Zone_Utils import (  # noqa: E402
-    DDS_RE,
-    MASK_RE,
-    TILE_RE,
-    TextureRecord,
-    TileConfig,
     discover_tile_dirs,
-    gtile_to_wgs84,
-    parse_cfg,
-    parse_mask,
-    parse_texture,
     reconstruct_zone_list,
-    short_latlon,
-    texture_to_zone,
-    tile_coordinates,
-    winning_textures,
     write_zone_list,
-    zone_intersects_tile,
 )
 
 

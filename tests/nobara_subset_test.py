@@ -2,13 +2,17 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE = ROOT / "training" / "remote"
+if not (REMOTE / "build_nobara_subset.py").is_file():
+    pytest.skip("the training/ workspace is not part of this checkout", allow_module_level=True)
 if str(REMOTE) not in sys.path:
     sys.path.insert(0, str(REMOTE))
 
-import build_nobara_subset as subset
+import build_nobara_subset as subset  # noqa: E402
 
 
 def _write(path: Path, size: int) -> Path:

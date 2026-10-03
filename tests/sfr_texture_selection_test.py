@@ -240,12 +240,5 @@ class NoConfigFallbackTest(unittest.TestCase):
         self.assertTrue(report["notes"])
 
 
-class SharedHelperTest(unittest.TestCase):
-    def test_building_overlay_still_exports_compute_covered_fractions(self):
-        import O4_SFR_Building_Overlay as BLD
-
-        self.assertIs(BLD.compute_covered_fractions, TEXSEL.compute_covered_fractions)
-
-
 if __name__ == "__main__":
     unittest.main()
