@@ -147,7 +147,7 @@ python scripts/asset_pipeline/build_custom_library.py \
 python src/scripts/audit_building_assets.py --lat <lat> --lon <lon>
 
 # Smoke / regression tests
-pytest tests/sfr_optional_library_regions_test.py \
+pytest tests/optional_library_regions_test.py \
        tests/custom_library_manifest_test.py \
        tests/triage_pipeline_test.py
 ```

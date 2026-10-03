@@ -1,5 +1,10 @@
 """
-O4_Building_Overlay.py — SegFormer-assisted building overlay generation.
+O4_Building_Overlay.py — Building overlay generation.
+
+Detects buildings in a tile's orthophoto textures (trained YOLO OBB detector,
+stock DOTA YOLO for tanks/pools/courts/cranes, landcover SegFormer for context
+and large-footprint polygons, HeightNet for heights) and places matching
+X-Plane objects and facades from the installed scenery libraries.
 
 Usage:
     python src/scripts/generate_bld_overlay.py <tex_dir> <lat> <lon> <out_dsf> [options]

@@ -1,4 +1,4 @@
-""""Ortho4XP configuration variables."""
+"""Ortho4XP configuration variables."""
 
 import O4_OSM_Utils as OSM
 

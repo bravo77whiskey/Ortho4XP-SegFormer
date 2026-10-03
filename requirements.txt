@@ -1,3 +1,14 @@
+# Python dependencies for Ortho4XP-SegFormer (Python 3.12).
+#
+# Install PyTorch first, in the build that matches your GPU, for example
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# otherwise ultralytics pulls in the CPU-only build. The first overlay run
+# also installs it into .venv automatically when it is missing.
+#
+# GDAL is optional (GeoTIFF elevation sources). On Windows install it from a
+# pre-built wheel, e.g. the one in Utils/win; source builds fail without the
+# GDAL C headers.
+
 numpy==1.26.4
 pillow==12.0.0
 opencv-python==4.10.0.84
@@ -8,19 +19,8 @@ psutil>=5.9.0
 Rtree==1.4.1
 shapely==2.1.2
 scikit-fmm==2025.6.23
-# GDAL must be installed as a pre-built binary wheel (no source compile):
-#   pip install gdal --only-binary :all:
-# The build.py script handles this automatically.  Do not install via this file
-# directly — source builds will fail on Windows without the GDAL C headers.
-# gdal  ← installed by build.py / manually with --only-binary :all:
 
-# AI overlay dependencies (src/O4_AI_Overlay.py / src/scripts/generate_overlay.py / src/scripts/generate_veg_overlay.py)
-# Install PyTorch separately with the appropriate CUDA version:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-torch>=2.0.0
-torchvision>=0.15.0
+# Overlay models (they run in the .venv python, never inside the packaged exe)
 transformers>=4.30.0
-segmentation-models-pytorch>=0.3.0
 huggingface-hub>=1.0.0
 ultralytics>=8.0.0
-Wand>=0.6.0

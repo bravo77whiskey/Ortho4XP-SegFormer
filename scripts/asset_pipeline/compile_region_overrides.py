@@ -105,7 +105,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--output", required=True,
-        help="Output JSON file the SFR overlay will load.",
+        help="Output JSON file the building overlay will load.",
     )
     return parser.parse_args(argv)
 

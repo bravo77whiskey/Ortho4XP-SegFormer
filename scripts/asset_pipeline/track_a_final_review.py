@@ -10,7 +10,7 @@ region, what footprint sizes are available, and where gaps remain.
 Uses the same scan + filter + measurement helpers as the placement pipeline
 itself (``_scan_runtime_library_exports``, ``_measured_bounds_for_exports``,
 ``_optional_library_asset_regions``, ``_class_for_object_asset``) so the
-numbers reflect what the SFR overlay will actually consider at runtime.
+numbers reflect what the building overlay will actually consider at runtime.
 """
 
 from __future__ import annotations
@@ -225,7 +225,7 @@ def main(argv=None):
     else:
         for pkg, pkg_exports in sorted(sh_by_pack.items()):
             region = DSF.simheaven_package_region_from_name(pkg) or "<unknown>"
-            # Count repeatable candidate assets the SFR overlay would accept.
+            # Count repeatable candidate assets the building overlay would accept.
             count = sum(
                 1 for e in pkg_exports
                 if BLD._is_repeatable_simheaven_asset(e.virtual_path)

@@ -789,13 +789,6 @@ class Ortho4XP_GUI(tk.Tk):
         )
         self.working_thread.start()
 
-    def setup_overlay_models(self):
-        """Download SegFormer model weights and check/install dependencies."""
-        self.working_thread = threading.Thread(
-            target=PIPELINE.setup_overlay_models, daemon=True
-        )
-        self.working_thread.start()
-
     def toggle_remote_gpu(self):
         """Session-only remote-GPU choice for SegFormer/YOLO inference.
 

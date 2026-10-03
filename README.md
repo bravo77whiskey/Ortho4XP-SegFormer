@@ -1,83 +1,166 @@
-# Ortho4XP
-![example](https://github.com/shred86/Ortho4XP/assets/32663154/f06ebfe5-ba1d-4f05-9439-8e569bd99ef5)
+# Ortho4XP-SegFormer
 
-Ortho4XP is a scenery generation tool for [X-Plane](https://www.x-plane.com). It creates the scenery base mesh and texture layer using external data and orthophoto sources.
+Ortho4XP-SegFormer is a fork of [Ortho4XP](https://github.com/oscarpilote/Ortho4XP),
+the X-Plane scenery generator that builds the base mesh and photo texture layer
+from orthophotos. On top of everything Ortho4XP does, it reads the tile's own
+orthophotos with machine-learning models and generates two extra overlays:
 
-This is a forked version of [Ortho4XP](https://github.com/oscarpilote/Ortho4XP) developed by [@oscarpilote](https://github.com/oscarpilote) which includes some updates, fixes and documentation. The official version is infrequently updated which is the reason I created this forked version to provide quicker updates and documentation.
+- **Building overlay** (`yOrtho4XP_Bld_Overlays`): buildings detected in the
+  imagery are placed as X-Plane objects and facades from the scenery libraries
+  you have installed, matched by region, footprint size, shape and roof colour,
+  with heights predicted from the image.
+- **Vegetation overlay** (`yOrtho4XP_Veg_Overlays`): forest and scrub mapped
+  from the imagery become X-Plane 12 forests, picked by climate and by
+  broadleaf/conifer leaf-type maps, kept clear of existing buildings and
+  (optionally) replacing the forests of lower-priority scenery.
 
-The specific changes in this forked version:
+The project started as a SegFormer experiment, hence the name. The overlays now
+combine several models:
 
-#### General
-* Tile configurations are automatically loaded when the active tile is changed using the Tiles Collection and Management window. If a tile configuration doesn't exist, the global tile configuration settings are used. The tile configuration is not loaded if you manually type in coordinates to change the active tile.
-* Code changes to enable using [PyInstaller](https://pyinstaller.org/en/stable/) to bundle Ortho4XP and its dependencies into a single package.
-* A "Pause" button sits next to Stop in the main window. It freezes the build at the next step boundary - Python workers park, and the external workers (Triangle4XP, DSFTool, the SegFormer venv python) have their process trees suspended - and the button turns into "Resume". Stop and closing the window both lift a pause before aborting.
+| Model | Role | Source |
+| --- | --- | --- |
+| SegFormer landcover (`nave1616/SegFormer-landcover-FT`) | vegetation mask, landcover context for buildings | Hugging Face, downloaded on first use |
+| Trained YOLO OBB building detector | primary building detections | your own checkpoint (see [Models](#models)) |
+| Stock YOLO OBB (`yolo26x-obb.pt`, DOTAv1) | storage tanks, pools, courts, cranes | Ultralytics, downloaded on first use |
+| HeightNet | building heights | your own checkpoint |
 
-#### Tiles Collection and Management
-* Batch building process modified in regards to configuration files. If a tile configuration exists, it will be used. If a tile configuration does not exist, the global configuration will be used.
-* "Read per tile cfg" removed and a "Override tile cfg" option added. This override setting allows you to force using the global configuration setting on all tiles, overriding any existing tile configurations.
-* Erased cached data feature works like batch building tiles now, meaning Shift-Click (red rectangle) to select tiles, choose deletion options, and click "Batch Delete". The batch delete has no effect on the active tile selection (yellow rectangle).
-* Display asterisk next to each tile zoom level number in the Tiles and configuration window if custom zoom levels have been specified.
-* Added ability to create a symlink to the yOrtho4XP_Overlays folder by pressing the "O" key in the Tiles Collection and Management window.
-* Batch builds are journalled step by step under `build_state/`, so a batch that was interrupted - the app closed or crashed mid-build, paused or not - can carry on instead of starting over. Pressing Stop ends the batch for good: it is not offered for resume. "Batch Build" offers to resume when the same selection is still unfinished; "Resume Build" reloads an interrupted batch - tiles, steps and base folder - even after a restart, and lets you pick when several are waiting, or discard the ones you no longer want. "Clear Unfinished" abandons every unfinished batch at once. Only steps that actually succeeded are recorded, so a failed tile is retried.
-* Several copies of Ortho4XP can be run side by side on different tiles. Each run owns its own journal, and a journal whose instance is still running is never offered for resume, so a second instance cannot start rebuilding the tiles the first one is part-way through. Selecting tiles another instance still owes asks for confirmation first.
+## Requirements
 
-#### Config
-* Ortho4XP Config window is now separated into three tabs: Tile Config, Global Config, and Application Config. 
-* When a tile configuration doesn't exist, the Tile Tab fields will become read-only. Clicking "Save Tile Cfg" in this case will make the fields become editable again since a tile configuration now exists.
-* Text added at the top of the Tile Tab window which provides information on whether a tile configuration was loaded, or global defaults are being used.
-* "Apply" buttons removed since this occurs automatically when a tile is changed, and the configuration is loaded. It also occurs when you click "Save".
-* A "Reset to Global" button was added to the Tile Config tab which will reset the tile settings to the global tile config settings. If custom zones exist, a prompt asserts asking to save the zones. You still must select "Save Tile Config" if you want to save the changes. 
-* A "Reset to Defaults" button was added as a part of the Global Config and Application Config tabs which will reset the tile and application settings to the application defaults. You still must select "Save Tile Config" if you want to save the changes. These buttons are independent of each other so if you're on the Global Config tab, it will reset just the tile settings in your global config and if you're on the Application Config tab, it will reset just the application settings in your global config.
-* "Load Backup Cfg" buttons added to the Tile, Global, and Application Config tabs which loads settings from a backup config file (if available).
-* Added ability to set an alternate `custom_overlay_src` directory to resolve an issue for some users. The default X-Plane scenery files are split up between `/X-Plane 12/Global Scenery/X-Plane Global Scenery` and `/X-Plane 12/Global Scenery/X-Plane Demo Areas`. So if you set `custom_overlay_src` to the first directory and try to batch build a bunch of tiles, you might get an error that the .dsf file can't be found if it's a location where the .dsf files are located in the second directory.
-* The `custom_dem` and `fill_nodata` settings are now saved to the global configuration.
-* Prompt user if attempting to close the application or config window with unsaved changes.
-* Prompt user if attempting to change the active tile with unsaved changes on the Tile Tab in the config window.
-* Prompt user if attempting to build tiles with unsaved changes in the config window.
-* Backup of the tile configuration is created when using the "Save Tile Config" button (previously was only during a tile build process).
-* Default `imprint_mask_to_dds` to `False` to prevent issues with `water_tech=XP12`.
-* Added a new setting `max_download_slots` to support a new feature allowing users to specify number of parallel threads for imagery download. @tlinkin
-* Setting `max_convert_slots` can now be manually specified by the user.
+- Windows 10 or 11. The overlay pipeline is developed and tested on Windows;
+  the upstream Ortho4XP tools also ship macOS and Linux binaries.
+- Python 3.12 when running from source.
+- An NVIDIA GPU is strongly recommended for the overlays. They run on the CPU
+  too, much more slowly, or on another machine's GPU (see
+  [Remote GPU](#remote-gpu)).
+- X-Plane 12. The overlays reference assets from X-Plane's own library and
+  from the simHeaven X-World libraries, so install those for the placed
+  objects to show up.
 
-#### Miscellaneous
-* Automatically saves the same data (active tile, default provider, default zoom level and base folder) that the power button icon does when you close the application using the operating system close button.
-* Additional console messages addeded to provide more feedback. These are categorized with a verbosity setting of 1 (default).
-* Attempt to redownload images (only once) that were not properly downloaded (white squares) if using "All in one" or batch build.
-* "Part of image could not be obtained" error will now show a summary message at the end of a batch build or "All in one" if redownload was unsuccessful.
-* Minor visual tweaks which included moving the "Refresh" and "Exit" buttons to the bottom of the left side in the Tiles collection and management window to better illustrate the "Refresh" button is not tied to Batch Build only.
-* Includes Windows Python dependency wheel files for gdal and scikit-fmm.
-* Updated Python and pin requirements to latest working versions.
-* Adds a bash script to automate the setup process for those that prefer not to use the packaged version.
-* Removed Maxar and Mapbox image providers which are no longer publically available.
-* Removed unavailable OSM FR, updated/added RU and JP overpass servers.
-* Include 7-zip executable for Mac.
-* Update EOX url template and deleted the broken EOX2.lay file. @A346fan
-* Updated Windows & Linux nvcompress to latest version. @tlinkin
-* Use DDSTool instead of nvcompress for Mac.
-* Update DFSTool to latest version 24-5.
-* Removed unused tools.
+## Running from source
 
-#### Bug Fixes
-* If one-click symlink feature is used, added removal of symlink when "Erase cached data" "Tile (whole)" option is used.
-* Fixed zones being saved to tile configuration that were outside of the tile location.
-* Fixed a bug where symlinks weren't automatically deleted if you used the Erased cached data - Tile (whole) option.
-* Fixed a bug if you created zones on a tile then clicked "Apply" (which no longer exists as a button) before saving the tile config, it would delete your zones.
-* Fixed Viewfinderpanorama elevation source for certain regions of the world.
-* Fixed Here (https://wego.here.com/) image provider API key.
-* Fixed issue in certain coastal regions where .dds files were being deleted with cleaning_level set to 2 or higher.
-* Corrected a few typos in setting descriptions.
-* Default `imprint_mask_to_dds` to `False` to prevent issues when using `water_tech=XP12`.
-* Fixed a bug with random OSM server selection not working correctly.
-* Include recompiled version of Triangle4XP.exe with MinGW-GCC for Windows users to resolve an [issue](https://github.com/oscarpilote/Ortho4XP/issues/282).
-* Fixed a bug when using manually installed dem files were not being used on certain tiles.
-* Fixed a bug and improved handling of complex meshes (e.g., +30-085) that would cause the build process to get stuck.
-* Fixed and improved automatically trying a lower `min_angle` value when the current value fails.
-* Reverted to previous triangle.exe to fix issues with creation of extent masks and certain providers.
+`install_windows.bat` does the following steps; to do them by hand, create
+the virtual environment in `.venv` (the overlay steps look for it there):
 
-## Installation
+```bash
+python -m venv .venv
+```
 
-For installation instructions, refer to the [Installation page](https://github.com/shred86/Ortho4XP/wiki/Installation) in the [Wiki](https://github.com/shred86/Ortho4XP/wiki).
+Install PyTorch in the build that matches your GPU before the other
+requirements, otherwise `ultralytics` pulls in the CPU-only build:
 
-## Support
+```bash
+.venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
 
-Troubleshooting steps for some issues are provided in the [Wiki FAQ](https://github.com/shred86/Ortho4XP/wiki/FAQ). For additional support or questions, refer to the [Ortho4XP forum](https://forums.x-plane.org/index.php?/forums/forum/322-ortho4xp/) at [X-Plane.org](https://forums.x-plane.org).
+```bash
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+Then start the GUI (or run `start_windows.bat`):
+
+```bash
+.venv\Scripts\python Ortho4XP.py
+```
+
+If PyTorch is missing when you first run an overlay, Ortho4XP installs it into
+`.venv` itself, picking the CUDA build that matches your NVIDIA driver, and
+downloads the SegFormer weights.
+
+GDAL is optional; it is only needed for GeoTIFF elevation sources. On Windows
+install it from a pre-built wheel (`Utils/win` has one for Python 3.13).
+
+## Using the overlays
+
+1. Build a tile as usual (Assemble vector data, Triangulate, Draw masks,
+   Build Imagery/DSF). The overlays read that tile's textures.
+2. Click **Building Overlay** and/or **Vegetation Overlay**. In the Tiles
+   Collection window the same two steps can be ticked for batch builds, and
+   interrupted batches can be resumed.
+3. Tune the overlays in the configuration window: settings starting with
+   `bld_` drive the building overlay, `veg_` the vegetation overlay and
+   `segformer_` the landcover inference shared by both.
+
+Inference results are cached per texture under `Overlay_cache/`, so changing
+placement settings and regenerating is fast. Installs that already have an
+`SFR_cache` folder keep using it.
+
+The **Libraries** button rescans the installed scenery libraries the building
+overlay chooses assets from; run it after installing or removing libraries.
+
+Optional features with their own documentation:
+
+- [Tile vegetation replacement](docs/tile_vegetation_replacement.md): remove
+  the trees other scenery draws over a tile so only the generated forests
+  remain, with verified backups and restore.
+
+### Models
+
+The trained building detector and HeightNet are not distributed with the
+code. Point the `bld_yolo_checkpoint` and `bld_height_checkpoint` settings
+(Global config tab) at your checkpoint files. The code that trains them is in
+[`training/`](training/README.md).
+
+### Remote GPU
+
+The **Remote GPU** checkbox sends the model forward passes (SegFormer and
+YOLO) to another machine over SSH for the current session; everything else
+stays local. The picker lists the hosts in `~/.ssh/config`. The first
+connection sets up a Python environment under `~/.ortho4xp_remote` on the
+remote machine. If the host goes offline, the build carries on locally.
+
+## Project layout
+
+| Path | Contents |
+| --- | --- |
+| `Ortho4XP.py` | Entry point (GUI, or a command-line build for one tile) |
+| `src/O4_*.py` | The application. Upstream Ortho4XP modules plus the overlay modules; see [docs/architecture.md](docs/architecture.md) |
+| `src/scripts/` | Entry points the app runs in its `.venv` subprocess and ships with the build |
+| `scripts/` | Developer tools: benchmarks, parity harnesses, the asset-library pipeline |
+| `training/` | Training and dataset code for the building detector and HeightNet |
+| `tests/` | Automated tests (pytest) |
+| `docs/` | Design notes and references |
+| `Providers/`, `Extents/`, `Filters/`, `Utils/`, `Previews/`, `Patches/` | Upstream Ortho4XP data and bundled tools |
+
+## Development
+
+Run the tests and the linter:
+
+```bash
+.venv\Scripts\python -m pytest
+```
+
+```bash
+ruff check .
+```
+
+Test and lint settings live in `pyproject.toml`. Tests that need files outside
+the repository (the generated asset manifest, pandas, a DSFTool binary for the
+current platform) skip themselves when those are missing.
+
+Build the Windows package (PyInstaller, configured in `Ortho4XP.spec`):
+
+```bash
+python build.py
+```
+
+The overlay modules run in the `.venv` python rather than inside the frozen
+exe, so they are shipped as loose files. A new module imported by an overlay
+module must be added to `OVERLAY_MODULES` in `Ortho4XP.spec`;
+`tests/spec_bundles_modules_test.py` fails when one is missing.
+
+More references:
+
+- [docs/architecture.md](docs/architecture.md): how the pieces fit together.
+- [docs/environment_variables.md](docs/environment_variables.md): developer
+  switches read from the environment.
+- [CHANGELOG.md](CHANGELOG.md): notable changes, including renamed settings.
+
+## Credits and licence
+
+Ortho4XP is © Oscar Pilote and contributors, licensed under the GNU GPL v3
+(see `Licence/`); this fork is distributed under the same licence. It builds
+on [shred86/Ortho4XP](https://github.com/shred86/Ortho4XP), whose changes are
+listed in [docs/upstream_fork_changes.md](docs/upstream_fork_changes.md).
+
+Bundled data: Köppen-Geiger climate classes from Beck et al. (2018), CC BY 4.0;
+administrative boundaries derived from Natural Earth (public domain).

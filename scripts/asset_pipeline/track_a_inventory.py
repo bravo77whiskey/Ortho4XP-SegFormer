@@ -1,7 +1,7 @@
 """Inventory residential-adjacent building objects in installed Track A
 X-Plane libraries (OpenSceneryX, R2_Library, world-models, etc.).
 
-For every EXPORT line in each library.txt we apply the same filtering the SFR
+For every EXPORT line in each library.txt we apply the same filtering the
 overlay uses (OPTIONAL_LIBRARY_INCLUDE_TOKENS, GENERIC_BUILDING_EXCLUDE_TOKENS,
 OPTIONAL_LIBRARY_SPECIAL_LANDMARK_TOKENS) so the inventory matches what the
 overlay would actually consider as a placement candidate.
@@ -25,7 +25,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# Reuse the SFR overlay's filter constants so the inventory tracks reality.
+# Reuse the building overlay's filter constants so the inventory tracks reality.
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -75,7 +75,7 @@ def parse_library_txt(library_txt: Path) -> list[tuple[str, str]]:
 
 
 def is_building_candidate(virtual_path: str) -> bool:
-    """Apply the same filter as the SFR overlay."""
+    """Apply the same filter as the building overlay."""
     if not BLD._is_optional_library_building_candidate(virtual_path):
         return False
     p = virtual_path.replace("\\", "/").lower()

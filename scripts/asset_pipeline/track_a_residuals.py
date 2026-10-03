@@ -1,4 +1,4 @@
-"""Surface Track A families that are still unclassified by the SFR overlay.
+"""Surface Track A families that are still unclassified by the building overlay.
 
 Reads ``track_a_triage/inventory.csv`` and runs each family's representative
 path through ``_optional_library_asset_regions``.  Families that come back

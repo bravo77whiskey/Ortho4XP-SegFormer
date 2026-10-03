@@ -24,10 +24,10 @@ echo " "
 brew install python python-tk spatialindex p7zip proj gdal
 
 # Create a Python virtual environment
-python3 -m venv venv
+python3 -m venv .venv
 
 # Activate the Python virtual environment
-source venv/bin/activate
+source .venv/bin/activate
 
 # Install Python dependencies
 pip install -r requirements.txt

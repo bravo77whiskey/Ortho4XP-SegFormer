@@ -550,10 +550,9 @@ def _auto_setup():
     """Run full model setup automatically if torch is not yet available.
 
     Called at the start of process_veg_tile() / process_bld_tile() so that
-    the first generation run installs everything without requiring a separate
-    Setup SegFormer step.
+    the first generation run installs everything without a separate setup step.
     """
-    print("[Overlay] Checking SegFormer environment …", flush=True)
+    print("[Overlay] Checking the overlay environment …", flush=True)
     if _deps_ready():
         print("[Overlay] Environment ready.", flush=True)
         return True
@@ -727,8 +726,8 @@ def process_veg_tile(lat, lon, build_dir):
 
     if not _auto_setup():
         raise RuntimeError(
-            "SegFormer setup failed — torch could not be installed into .venv. "
-            "Click 'Setup SegFormer' and check the log for errors."
+            "Overlay setup failed — torch could not be installed into .venv. "
+            "Check the log for errors; setup is retried on the next overlay run."
         )
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -841,8 +840,8 @@ def process_bld_tile(lat, lon, build_dir):
 
     if not _auto_setup():
         raise RuntimeError(
-            "SegFormer setup failed — torch could not be installed into .venv. "
-            "Click 'Setup SegFormer' and check the log for errors."
+            "Overlay setup failed — torch could not be installed into .venv. "
+            "Check the log for errors; setup is retried on the next overlay run."
         )
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -950,8 +949,8 @@ def rescan_building_libraries():
         return False
     if not _auto_setup():
         raise RuntimeError(
-            "SegFormer setup failed — torch could not be installed into .venv. "
-            "Click 'Setup SegFormer' and check the log for errors."
+            "Overlay setup failed — torch could not be installed into .venv. "
+            "Check the log for errors; setup is retried on the next overlay run."
         )
     code = (
         "import O4_Building_Overlay as bld_overlay\n"
@@ -1019,7 +1018,7 @@ def _ensure_venv():
     py_cmd = _find_system_python()
     if py_cmd is None:
         print("[Overlay Setup] ERROR: Could not find a Python 3 installation on this machine.\n"
-              "  Install Python 3.10+ from https://python.org and re-run Setup SegFormer.")
+              "  Install Python 3.10+ from https://python.org and run the overlay again.")
         return False
 
     try:
@@ -1096,8 +1095,7 @@ def _detect_torch_index_url():
 def setup_overlay_models():
     """Install AI dependencies into .venv and pre-download SegFormer models.
 
-    Intended to be called once via the "Setup SegFormer" GUI button before
-    running any tile so that the first tile run never stalls on a large download.
+    Called by _auto_setup() on the first overlay run when torch is missing.
     The .venv is created automatically if it does not yet exist.
 
     Steps:

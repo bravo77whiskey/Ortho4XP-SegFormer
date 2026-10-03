@@ -2,24 +2,20 @@
 echo Setting up Ortho4XP...
 echo:
 
-echo Setting up a Python virtual environment
-python -m venv venv
+echo Creating the Python virtual environment (.venv)
+python -m venv .venv
 echo:
 
 echo Activating the Python virtual environment
-call venv\Scripts\activate.bat
+call .venv\Scripts\activate.bat
 echo:
 
-echo Installing Python dependency: gdal
-pip install Utils\win\gdal-3.11.1-cp313-cp313-win_amd64.whl
-echo:
-
-echo Installing Python dependency: scikit-fmm
-pip install Utils\win\scikit_fmm-2025.6.23-cp313-cp313-win_amd64.whl
-echo:
-
-echo Installing remaining Python dependencies
+echo Installing Python dependencies
 pip install -r requirements.txt
+echo:
+
+echo Installing the optional GDAL wheel (it only installs on the Python version in its file name)
+for %%f in (Utils\win\gdal-*.whl) do pip install "%%f"
 echo:
 
 echo Ortho4XP setup complete!
