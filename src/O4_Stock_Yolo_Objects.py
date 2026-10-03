@@ -64,14 +64,23 @@ import numpy as np
 
 
 # ── Stock YOLO checkpoint location ───────────────────────────────────────────
-# Repository root contains yolo26x-obb.pt (DOTAv1-trained Ultralytics OBB).
+# yolo26x-obb.pt (DOTAv1-trained Ultralytics OBB) lives in the repository root,
+# or in a packaged build in _internal/Ortho4XP_Data: overlay_scripts/ is
+# replaced on every update, which would throw the downloaded file away.
 # Override via environment if needed.
+STOCK_YOLO_CHECKPOINT_NAME = "yolo26x-obb.pt"
+_MODULE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _default_stock_yolo_checkpoint(module_root=_MODULE_ROOT):
+    data_dir = os.path.join(os.path.dirname(module_root), "Ortho4XP_Data")
+    if os.path.basename(module_root) == "overlay_scripts" and os.path.isdir(data_dir):
+        return os.path.join(data_dir, STOCK_YOLO_CHECKPOINT_NAME)
+    return os.path.join(module_root, STOCK_YOLO_CHECKPOINT_NAME)
+
+
 DEFAULT_STOCK_YOLO_CHECKPOINT = os.environ.get(
-    "O4_STOCK_YOLO_CHECKPOINT",
-    os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "yolo26x-obb.pt",
-    ),
+    "O4_STOCK_YOLO_CHECKPOINT", _default_stock_yolo_checkpoint()
 )
 DEFAULT_STOCK_YOLO_BATCH = 1
 STORAGE_TANK_DOTA_CLASS = 2
@@ -211,6 +220,14 @@ def ensure_stock_yolo_checkpoint(checkpoint: str = DEFAULT_STOCK_YOLO_CHECKPOINT
     if os.path.exists(target):
         return target
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    # Packaged builds before the move kept the download in overlay_scripts/.
+    legacy = os.path.join(_MODULE_ROOT, os.path.basename(target))
+    if (os.path.basename(_MODULE_ROOT) == "overlay_scripts"
+            and os.path.abspath(legacy) != target and os.path.exists(legacy)):
+        import shutil
+        shutil.move(legacy, target)
+        print(f"[stock-yolo] moved checkpoint {legacy} -> {target}", flush=True)
+        return target
     # `attempt_download_asset` resolves the name against `ultralytics/assets`
     # GitHub releases and downloads next to the requested path when missing.
     from ultralytics.utils.downloads import attempt_download_asset

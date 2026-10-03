@@ -233,6 +233,41 @@ class EnsureStockYoloCheckpointTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     STOCK.ensure_stock_yolo_checkpoint(str(target))
 
+    def test_packaged_build_keeps_checkpoint_with_user_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            internal = Path(tmp) / "_internal"
+            (internal / "overlay_scripts").mkdir(parents=True)
+            (internal / "Ortho4XP_Data").mkdir()
+            self.assertEqual(
+                Path(STOCK._default_stock_yolo_checkpoint(str(internal / "overlay_scripts"))),
+                internal / "Ortho4XP_Data" / "yolo26x-obb.pt",
+            )
+
+    def test_source_checkout_keeps_checkpoint_in_repository_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Ortho4XP_Data").mkdir()
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            self.assertEqual(
+                Path(STOCK._default_stock_yolo_checkpoint(str(repo))),
+                repo / "yolo26x-obb.pt",
+            )
+
+    def test_moves_checkpoint_left_in_overlay_scripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts = Path(tmp) / "overlay_scripts"
+            scripts.mkdir()
+            (scripts / "yolo26x-obb.pt").write_bytes(b"old")
+            target = Path(tmp) / "Ortho4XP_Data" / "yolo26x-obb.pt"
+            with mock.patch.object(STOCK, "_MODULE_ROOT", str(scripts)), mock.patch(
+                "ultralytics.utils.downloads.attempt_download_asset"
+            ) as dl:
+                result = STOCK.ensure_stock_yolo_checkpoint(str(target))
+            dl.assert_not_called()
+            self.assertEqual(Path(result), target)
+            self.assertEqual(target.read_bytes(), b"old")
+            self.assertFalse((scripts / "yolo26x-obb.pt").exists())
+
 
 @unittest.skipIf(torch is None, "torch is not installed")
 class StockYoloFacadeGeometryTests(unittest.TestCase):

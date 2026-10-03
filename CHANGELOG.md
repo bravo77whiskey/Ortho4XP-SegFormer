@@ -132,6 +132,10 @@ folders, which installed libraries and generated DSFs refer to.
 - `Ortho4XP.spec` lists the loose overlay modules once (`OVERLAY_MODULES`)
   and derives both the data files and the hidden imports from it.
 - The `training/` code is now part of the repository.
+- The packaged build keeps the downloaded stock YOLO model
+  (`yolo26x-obb.pt`) in `_internal/Ortho4XP_Data` instead of next to the
+  overlay modules, which every update replaces; a copy left there is moved
+  on the next run instead of being downloaded again.
 - `O4_Building_Overlay.run()` (3,500 lines) is split into the stages of
   `_BuildingOverlayRun` and the per-texture stages of `_TexturePass`.
   `scripts/building_overlay_parity_harness.py` runs the real overlay on a

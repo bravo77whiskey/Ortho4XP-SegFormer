@@ -23,7 +23,7 @@ Until the cleanup in [CHANGELOG.md](../CHANGELOG.md) these were all named
 | --- | --- | --- |
 | `O4_BLD_YOLO_CHECKPOINT` | built-in path | Building detector checkpoint when the `bld_yolo_checkpoint` setting is not passed |
 | `O4_BLD_HEIGHT_CHECKPOINT` | built-in path | HeightNet checkpoint when the `bld_height_checkpoint` setting is not passed |
-| `O4_STOCK_YOLO_CHECKPOINT` | `yolo26x-obb.pt` in the repository root | Stock DOTA YOLO checkpoint (downloaded there when missing) |
+| `O4_STOCK_YOLO_CHECKPOINT` | `yolo26x-obb.pt` in the repository root (packaged build: `_internal/Ortho4XP_Data`) | Stock DOTA YOLO checkpoint (downloaded there when missing) |
 | `O4_BLD_YOLO_ENABLED` | setting | Overrides `bld_yolo_enabled` |
 | `O4_BLD_YOLO_ALLOW_MISSING` | off | Carry on without the building detector when its checkpoint is missing |
 | `O4_BLD_HEIGHT_ENABLED` | on | `0` skips HeightNet and uses class-default heights |
