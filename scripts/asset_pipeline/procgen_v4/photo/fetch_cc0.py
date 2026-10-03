@@ -25,7 +25,7 @@ sys.path.insert(0, HERE)
 from photo_kits import ASSETS, DEFAULT_TEX_DIR  # noqa: E402
 
 API = "https://api.polyhaven.com"
-UA = {"User-Agent": "O4SFR-procgen-photo/1.0"}
+UA = {"User-Agent": "O4XP-procgen-photo/1.0"}
 MAPS = {"diff": ("Diffuse", "jpg"), "disp": ("Displacement", "png"),
         "ao": ("AO", "jpg")}
 

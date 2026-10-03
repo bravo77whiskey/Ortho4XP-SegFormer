@@ -165,7 +165,7 @@ def _host_main() -> int:
     parser.add_argument("--out-dir", default=os.path.join(HERE, "previews"))
     parser.add_argument("--per-archetype", type=int, default=6)
     parser.add_argument("--blender",
-                        default=os.environ.get("O4SFR_BLENDER", "blender"))
+                        default=os.environ.get("O4XP_BLENDER", "blender"))
     args = parser.parse_args()
 
     with open(args.manifest, "r", encoding="utf-8") as fh:
@@ -200,7 +200,7 @@ def _host_main() -> int:
                 "flavor": asset["flavor"],
             })
 
-    render_dir = tempfile.mkdtemp(prefix="o4sfr_previews_")
+    render_dir = tempfile.mkdtemp(prefix="o4xp_previews_")
     plan_path = os.path.join(render_dir, "plan.json")
     with open(plan_path, "w", encoding="utf-8") as fh:
         json.dump({"assets": plan_rows}, fh)

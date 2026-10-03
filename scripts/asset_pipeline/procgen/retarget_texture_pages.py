@@ -7,7 +7,7 @@ from its seed (same rule as generate_procedural_buildings.py) and rewrites
 the OBJ8 TEXTURE line in place.  Run it after atlas.py whenever pages are
 added or the page mapping changes; running it twice is a no-op.
 
-Run:  python retarget_texture_pages.py --output <Custom Scenery>/O4SFR_ProcGen_Library
+Run:  python retarget_texture_pages.py --output <Custom Scenery>/O4XP_ProcGen_Library
 """
 
 from __future__ import annotations

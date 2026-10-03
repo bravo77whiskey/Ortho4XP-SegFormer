@@ -196,7 +196,7 @@ def parse_args(argv=None):
                         help="Triage workspace (contains inventory.csv).")
     parser.add_argument("--sources", required=True,
                         help="Sources root; model_path in inventory is relative to this.")
-    parser.add_argument("--blender", default=os.environ.get("O4SFR_BLENDER"),
+    parser.add_argument("--blender", default=os.environ.get("O4XP_BLENDER"),
                         help="Blender executable. If omitted, only .obj rows are probed.")
     parser.add_argument("--only", default=None,
                         help="Optional substring filter on slug.")
@@ -221,7 +221,7 @@ def main(argv=None):
     snippet_dir = None
     snippet_path = None
     if args.blender:
-        snippet_dir = Path(tempfile.mkdtemp(prefix="o4sfr_probe_"))
+        snippet_dir = Path(tempfile.mkdtemp(prefix="o4xp_probe_"))
         snippet_path = snippet_dir / "probe.py"
         snippet_path.write_text(_blender_probe_snippet(), encoding="utf-8")
 

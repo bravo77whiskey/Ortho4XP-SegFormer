@@ -1,7 +1,7 @@
-# O4SFR_Library asset triage runbook
+# O4XP_Library asset triage runbook
 
 Canonical workflow for sorting downloaded 3D model archives into the shipped
-`o4sfr` X-Plane library. Designed for resumability — every stage's state lives
+`o4xp` X-Plane library. Designed for resumability — every stage's state lives
 on disk so you can stop mid-triage and resume tomorrow without losing
 progress.
 
@@ -16,14 +16,14 @@ progress.
 | `scripts/asset_pipeline/triage/probe.csv` | `triage_probe.py` | Bounding-box dimensions, tri count |
 | `scripts/asset_pipeline/triage/decisions.yaml` | Assistant | Region + bucket per slug |
 | `scripts/asset_pipeline/sources.yaml` | `manifest_from_triage.py` | Final manifest the converter consumes |
-| `D:\SteamLibrary\steamapps\common\X-Plane 12\Custom Scenery\O4SFR_Library\` | Build output | Loadable X-Plane library |
+| `D:\SteamLibrary\steamapps\common\X-Plane 12\Custom Scenery\O4XP_Library\` | Build output | Loadable X-Plane library |
 
 The assistant skill `.agents/skills/xplane-asset-triage/SKILL.md` references
 this runbook.
 
 ## Region taxonomy
 
-Match the keys in `_O4SFR_PATH_REGION_TOKENS` (see
+Match the keys in `_O4XP_PATH_REGION_TOKENS` (see
 [src/O4_Building_Overlay.py](../../src/O4_Building_Overlay.py)):
 
 `europe`, `scandinavia`, `mediterranean`,
@@ -128,12 +128,12 @@ license gaps for a test build.
 python scripts/asset_pipeline/convert_to_xplane_obj.py \
     --manifest    scripts/asset_pipeline/sources.yaml \
     --source-root scripts/asset_pipeline/sources/sketchfab \
-    --output      "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Scenery/O4SFR_Library" \
+    --output      "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Scenery/O4XP_Library" \
     --blender     "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
 
 python scripts/asset_pipeline/build_custom_library.py \
     --manifest scripts/asset_pipeline/sources.yaml \
-    --output   "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Scenery/O4SFR_Library"
+    --output   "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Scenery/O4XP_Library"
 ```
 
 `convert_to_xplane_obj.py` auto-decimates models above `decimate_target`
@@ -152,7 +152,7 @@ pytest tests/optional_library_regions_test.py \
        tests/triage_pipeline_test.py
 ```
 
-Then load a tile in X-Plane 12 (or open WED) and confirm the `o4sfr/` library
+Then load a tile in X-Plane 12 (or open WED) and confirm the `o4xp/` library
 tree resolves and previews render.
 
 ## Resume protocol

@@ -80,7 +80,7 @@ def candidates():
         hy = asset["width_m"] / 2.0
         if overlay._append_object_asset(
             pools, asset["virtual_path"], (-hx, hx, -hy, hy),
-            "O4SFR_Library", region_priority=1,
+            "O4XP_Library", region_priority=1,
         ):
             added += 1
     assert added > 0

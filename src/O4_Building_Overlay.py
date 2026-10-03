@@ -1826,7 +1826,7 @@ SEG_FIRST_YOLO_MATCH_IOU = 0.6
 SEG_FIRST_CLAIM_FRAC = 0.5
 # Farmland sorting (O4_Agri_Structures, O4_BLD_AGRI): greenhouse
 # detections become greenhouse assets; this facade is the fallback when the
-# O4SFR greenhouse library is not installed.  Facade wall height.
+# O4XP greenhouse library is not installed.  Facade wall height.
 GREENHOUSE_FACADE_PATHS = ("facades/agricultural/greenhouse_1.fac",)
 GREENHOUSE_HEIGHT_M = 4.0
 # Settings of the retired candidate-grid placement. Only the placement-cache
@@ -1915,10 +1915,12 @@ CURATED_EXTRA_BUILDING_LIBRARIES = {
         # Niche Cold-War / vintage thematic — primarily European bases.
         "regions": ("europe",),
     },
-    "o4sfr": {
-        "label": "O4SFR_Library",
-        "package_patterns": ("o4sfr_library", "o4sfr"),
-        "virtual_prefixes": ("o4sfr/",),
+    "o4xp": {
+        "label": "O4XP_ProcGen_Library",
+        "package_patterns": ("o4xp",),
+        # Only the current prefix: the installed libraries also export the old
+        # o4sfr/ paths as aliases for tiles built before the rename.
+        "virtual_prefixes": ("o4xp/",),
         # Our shipped library — per-asset region encoded in path token /<region>/.
     },
 }
@@ -3848,13 +3850,7 @@ def _building_asset_mode(mode=None):
     """Return which building asset kinds are enabled for generated placement."""
     raw = (
         mode if mode is not None
-        else os.environ.get(
-            "O4_BLD_ASSET_MODE",
-            os.environ.get(
-                "O4_BLD_O4SFR_LIBRARY_ASSETS",
-                os.environ.get("O4_BLD_EXTRA_LIBRARY_ASSETS", "both"),
-            ),
-        )
+        else os.environ.get("O4_BLD_ASSET_MODE", "both")
     )
     value = str(raw or "both").strip().lower()
     aliases = {
@@ -4495,7 +4491,7 @@ def _optional_asset_region_match(asset_regions, asset_region):
     """Return True when a classified optional asset is valid for a tile region.
 
     The token ``"generic"`` on an asset acts as a wildcard so global libraries
-    (OB_Library, MisterX residual residential subset, the o4sfr generic bucket)
+    (OB_Library, MisterX residual residential subset, the o4xp generic bucket)
     can serve tiles in any natural-earth region.
     """
     if not asset_regions:
@@ -4507,7 +4503,7 @@ def _optional_asset_region_match(asset_regions, asset_region):
     return bool(set(asset_regions).intersection(allowed))
 
 
-_O4SFR_PATH_REGION_TOKENS = {
+_O4XP_PATH_REGION_TOKENS = {
     "/north_america/": ("north_america",),
     "/north-america/": ("north_america",),
     "/america/": ("north_america", "south_america"),
@@ -4573,7 +4569,7 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
     Resolution order, first match wins:
 
     1. ``O4_Region_Overrides.json`` (visual-triage decisions).
-    2. Per-library hand-coded path rules (world-models, cdb-library, o4sfr).
+    2. Per-library hand-coded path rules (world-models, cdb-library, o4xp).
     3. The library's static ``regions`` registration in
        ``CURATED_EXTRA_BUILDING_LIBRARIES``.
     """
@@ -4627,9 +4623,9 @@ def _optional_library_asset_regions(obj_path, lib_id=None):
         ):
             return ("australia_oceania",)
 
-    # Our shipped library carries the region in a path token: o4sfr/<region>/...
-    if lib_id == "o4sfr" or p.startswith("o4sfr/"):
-        for token, regions in _O4SFR_PATH_REGION_TOKENS.items():
+    # Our shipped library carries the region in a path token: o4xp/<region>/...
+    if lib_id == "o4xp" or p.startswith("o4xp/"):
+        for token, regions in _O4XP_PATH_REGION_TOKENS.items():
             if token in p:
                 return regions
         return ("generic",)
@@ -7514,7 +7510,7 @@ def _place_greenhouses(
     """Place greenhouse detections as tunnel-array objects or a facade.
 
     Tunnel arrays (O4_Agri_Structures.greenhouse_pieces) are used when
-    the O4SFR greenhouse library exports every piece a detection needs;
+    the O4XP greenhouse library exports every piece a detection needs;
     otherwise the greenhouse facade wraps the detection OBB at
     GREENHOUSE_HEIGHT_M; with neither installed nothing is placed.  Pieces
     avoid static scenery and roads like building footprints do, and are
@@ -8281,7 +8277,7 @@ class _BuildingOverlayRun:
             stock_yolo_library_exports,
             suffixes=(".obj", ".fac"),
         )
-        # Greenhouse assets: the O4SFR greenhouse library's tunnel arrays when
+        # Greenhouse assets: the O4XP greenhouse library's tunnel arrays when
         # installed, else one greenhouse facade over the detection, else nothing.
         self.greenhouse_tunnel_paths = frozenset(
             p for p in stock_yolo_exported_paths
@@ -8303,7 +8299,7 @@ class _BuildingOverlayRun:
             print(
                 "Greenhouses: "
                 + (
-                    f"{len(self.greenhouse_tunnel_paths)} O4SFR tunnel-array objects"
+                    f"{len(self.greenhouse_tunnel_paths)} O4XP tunnel-array objects"
                     if self.greenhouse_tunnel_paths else
                     f"facade {self.greenhouse_facade_path}" if self.greenhouse_facade_path
                     else "no greenhouse assets installed; greenhouse detections are dropped"

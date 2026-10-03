@@ -106,7 +106,7 @@ def _blender_render_snippet() -> str:
         bpy.context.scene.collection.objects.link(obj)
 
         # Neutral material -- we never need PBR for triage.
-        mat = bpy.data.materials.new(name="O4SFR_Triage_Neutral")
+        mat = bpy.data.materials.new(name="O4XP_Triage_Neutral")
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
@@ -206,7 +206,7 @@ def parse_args(argv=None):
     parser.add_argument("--inventory", required=True)
     parser.add_argument("--triage", required=True)
     parser.add_argument("--blender",
-                        default=os.environ.get("O4SFR_BLENDER", "blender"))
+                        default=os.environ.get("O4XP_BLENDER", "blender"))
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--only-lib", default=None,
                         help="Restrict to one lib_id.")
@@ -224,7 +224,7 @@ def main(argv=None):
         rows = list(csv.DictReader(fh))
     if args.only_lib:
         rows = [r for r in rows if r["lib_id"] == args.only_lib]
-    snippet_dir = Path(tempfile.mkdtemp(prefix="o4sfr_tra_"))
+    snippet_dir = Path(tempfile.mkdtemp(prefix="o4xp_tra_"))
     snippet_path = snippet_dir / "render.py"
     snippet_path.write_text(_blender_render_snippet(), encoding="utf-8")
     ok = failed = skipped = 0

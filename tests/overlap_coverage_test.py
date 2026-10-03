@@ -85,7 +85,7 @@ class DropModeTests(unittest.TestCase):
 class CrossTextureDedupTests(unittest.TestCase):
     """Tile-wide vector dedup removes overlaps that per-texture removal misses."""
 
-    def _obj(self, dlon, dlat, path="o4sfr/x/b.obj", heading=0.0):
+    def _obj(self, dlon, dlat, path="o4xp/x/b.obj", heading=0.0):
         # placements are (lon, lat, heading, path); tile origin (24,118).
         return (118.0 + dlon, 24.0 + dlat, heading, path)
 

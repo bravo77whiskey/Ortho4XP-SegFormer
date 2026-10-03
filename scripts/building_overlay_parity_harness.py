@@ -1,7 +1,7 @@
 """End-to-end parity harness for the building overlay, without GPU or real data.
 
 Runs the real ``O4_Building_Overlay.run()`` on a synthetic tile: generated
-DDS textures, OSM roads and water, a generated O4SFR ProcGen library and a
+DDS textures, OSM roads and water, a generated O4XP ProcGen library and a
 simHeaven-style library in a throwaway Custom Scenery folder. The models are
 replaced by deterministic fakes that "see" marker colours painted into the
 textures, so the real crop iteration, suppression, placement and DSF writing
@@ -295,7 +295,7 @@ def _procgen_library(pkg):
         lines += [f"VT {x:.6f} {z:.6f} {-y:.6f} 0 0 1 0 0" for x, y, z in spec.vertices]
         target.write_text("\n".join(lines) + "\n", encoding="utf-8")
         assets.append({
-            "id": asset_id, "virtual_path": f"o4sfr/{asset_id}.obj", "archetype": archetype,
+            "id": asset_id, "virtual_path": f"o4xp/{asset_id}.obj", "archetype": archetype,
             "length_m": length, "width_m": width, "floors": floors,
             "height_m": floors * 3.2, "region": region, "bucket": bucket, "band": "test",
             "flavor": "generic", "enabled": True,
@@ -431,7 +431,7 @@ def build_fixture(work, dsftool):
     _osm_file(osm / f"{tile}_airports.osm.bz2", [], closed=True)
 
     custom = work / "X-Plane 12" / "Custom Scenery"
-    _procgen_library(custom / "o4sfr_procgen_library")
+    _procgen_library(custom / "o4xp_procgen_library")
     sh = custom / "simHeaven_X-World_Europe-5-footprints"
     exports = ["A", "800", "LIBRARY", ""]
     (sh / "facades").mkdir(parents=True)
@@ -444,13 +444,13 @@ def build_fixture(work, dsftool):
     (sh / "facades" / "greenhouse_1.fac").write_text("A\n800\nFACADE\n", encoding="utf-8")
     exports.append("EXPORT facades/agricultural/greenhouse_1.fac facades/greenhouse_1.fac")
     (sh / "library.txt").write_text("\n".join(exports) + "\n", encoding="utf-8")
-    # O4SFR greenhouse tunnel arrays: every width/length the splitter can ask for.
-    gh = custom / "o4sfr_greenhouse_library"
+    # O4XP greenhouse tunnel arrays: every width/length the splitter can ask for.
+    gh = custom / "o4xp_greenhouse_library"
     _obj8(gh / "tunnel.obj", 8, 10, 4)
     gh_exports = ["A", "800", "LIBRARY", ""]
     for bays in range(1, 13):
         for length in range(10, 155, 5):
-            gh_exports.append(f"EXPORT o4sfr/agri/tunnels_{bays * 8}x{length}.obj tunnel.obj")
+            gh_exports.append(f"EXPORT o4xp/agri/tunnels_{bays * 8}x{length}.obj tunnel.obj")
     (gh / "library.txt").write_text("\n".join(gh_exports) + "\n", encoding="utf-8")
 
     _scenery_dsfs(custom, textures, dsftool)

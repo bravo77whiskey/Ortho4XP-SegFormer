@@ -2478,7 +2478,7 @@ class SfdBuildingAssetTests(unittest.TestCase):
         placements = [
             (120.1, 22.1, 0.0, "simheaven/houses/house_04x06x1.obj"),
             (120.2, 22.2, 0.0, "simheaven/houses/house_05x06x1.obj"),
-            (120.3, 22.3, 0.0, "o4sfr/asia/residential/house_4.3x3.5x1.obj"),
+            (120.3, 22.3, 0.0, "o4xp/asia/residential/house_4.3x3.5x1.obj"),
         ]
 
         filtered, dropped = BLD._filter_unexported_simheaven_object_placements(
@@ -2491,14 +2491,14 @@ class SfdBuildingAssetTests(unittest.TestCase):
             [placement[3] for placement in filtered],
             [
                 "simheaven/houses/house_04x06x1.obj",
-                "o4sfr/asia/residential/house_4.3x3.5x1.obj",
+                "o4xp/asia/residential/house_4.3x3.5x1.obj",
             ],
         )
 
     def test_unexported_simheaven_object_placements_fail_loudly(self):
         placements = [
             (120.1, 22.1, 0.0, "simheaven/houses/house_05x06x1.obj"),
-            (120.2, 22.2, 0.0, "o4sfr/asia/residential/house_4.3x3.5x1.obj"),
+            (120.2, 22.2, 0.0, "o4xp/asia/residential/house_4.3x3.5x1.obj"),
         ]
 
         with self.assertRaisesRegex(RuntimeError, "house_05x06x1.obj"):

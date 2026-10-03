@@ -118,14 +118,17 @@ else (caching, placement, DSF writing) stays local.
 
 In the packaged build these live under `_internal/Ortho4XP_Data/`.
 
-## Names that must not change
+## Old names still in use
 
-Some identifiers are written into files outside this repository and are kept
-as they are even though they predate the current naming:
+Some identifiers are written into files outside this repository, so the old
+names are still understood:
 
-- `o4sfr/...` virtual paths, the `O4SFR_Library` / `O4SFR_ProcGen_Library`
-  scenery folders and the `o4sfr` library key: they are referenced from
-  installed libraries and from every generated building DSF.
+- The ProcGen and greenhouse libraries (`O4XP_ProcGen_Library`,
+  `O4XP_Greenhouse_Library`) export their objects under `o4xp/...` and, as
+  aliases, under the pre-rename `o4sfr/...` paths that building DSFs built
+  before the rename refer to. The overlay only places `o4xp/...` objects; the
+  aliases can be dropped (`LEGACY_PREFIX` in `procgen_v4/build_library.py`
+  and `greenhouses/build_greenhouses.py`) once every tile has been rebuilt.
 - The `sfr_*` setting names, the `sfr_bld` / `sfr_veg` journal steps, the
   `SFR_cache` folder and the remote `~/.ortho4xp_sfr` folder are still read so
   older configs, unfinished batches, caches and remote setups keep working

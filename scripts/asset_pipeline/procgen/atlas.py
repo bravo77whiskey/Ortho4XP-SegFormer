@@ -33,7 +33,7 @@ Outputs:
   atlas_layout.json (next to this script) -- v2 schema: one layout per
   combo under "combos", consumed by the archetypes and the LOD sheller.
 
-Run:  python atlas.py --output <Custom Scenery>/O4SFR_ProcGen_Library
+Run:  python atlas.py --output <Custom Scenery>/O4XP_ProcGen_Library
 """
 
 from __future__ import annotations

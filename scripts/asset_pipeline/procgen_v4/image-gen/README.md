@@ -83,7 +83,7 @@ scaled per floor): all openings found; residual 0.1–0.4 px median,
 
 Every region plus the industrial page now uses level 2. The installed
 library holds these pages. The previous Cycles-bake pages are kept in
-`O4SFR_ProcGen_Library/textures_backup_cycles_bake`.
+`O4XP_ProcGen_Library/textures_backup_cycles_bake`.
 
 * Briefs for all 8 regions and industrial are in `design_briefs.py`. Wear
   wording per region is in `WEAR`, and roof wear is in `ROOF_WEAR`

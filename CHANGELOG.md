@@ -76,8 +76,21 @@ tools moved from `src/scripts/` to `scripts/` (`compare_height_models.py`,
 `scripts/building_pipeline_benchmark.py`). Test files lost their `sfr_`
 prefix.
 
-Unchanged on purpose: the `o4sfr/...` virtual paths and the `O4SFR_*` library
-folders, which installed libraries and generated DSFs refer to.
+Scenery libraries:
+
+| Before | After |
+| --- | --- |
+| `O4SFR_ProcGen_Library`, `o4sfr/<region>/...` | `O4XP_ProcGen_Library`, `o4xp/<region>/...` |
+| `O4SFR_Greenhouse_Library`, `o4sfr/agri/...` | `O4XP_Greenhouse_Library`, `o4xp/agri/...` |
+| `O4SFR_Library` (asset pipeline) | `O4XP_Library` |
+| curated library id `o4sfr` | `o4xp` |
+
+New building overlays use the `o4xp/` paths. The libraries also export every
+object under its old `o4sfr/` path, so tiles built before keep their
+buildings and greenhouses until they are rebuilt. The environment variables
+`O4_BLD_O4SFR_LIBRARY_ASSETS` and `O4_BLD_EXTRA_LIBRARY_ASSETS` (old
+spellings of `O4_BLD_ASSET_MODE`) and `O4SFR_BLENDER` (now `O4XP_BLENDER`)
+are no longer read.
 
 ### Removed
 

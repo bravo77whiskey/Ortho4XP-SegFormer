@@ -38,7 +38,7 @@ sys.path.insert(0, HERE)
 
 from photo_kits import DEFAULT_TEX_DIR  # noqa: E402
 
-UA = {"User-Agent": "O4SFR-procgen-photo/1.0 "
+UA = {"User-Agent": "O4XP-procgen-photo/1.0 "
       "(https://github.com/bravo77whiskey/Ortho4XP-SegFormer)"}
 API = "https://commons.wikimedia.org/w/api.php"
 WIDTH = 1920

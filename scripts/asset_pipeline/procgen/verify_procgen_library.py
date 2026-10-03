@@ -102,7 +102,7 @@ def main(argv=None) -> int:
             )
         if overlay._is_very_tall_building_asset(virtual, height):
             path_problems.append("rejected as very tall")
-        regions = overlay._optional_library_asset_regions(virtual, "o4sfr")
+        regions = overlay._optional_library_asset_regions(virtual, "o4xp")
         if not regions:
             path_problems.append("unclassified region")
         elif asset["region"] == "generic" and "generic" not in regions:

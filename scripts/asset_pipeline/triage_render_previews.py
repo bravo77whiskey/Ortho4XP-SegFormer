@@ -178,7 +178,7 @@ def _blender_render_snippet() -> str:
         # texture references during import, leaving meshes pink. Clear all
         # materials and assign a single neutral one so the geometry is what
         # the assistant sees, not a missing-texture magenta.
-        neutral = bpy.data.materials.new(name="O4SFR_Triage_Neutral")
+        neutral = bpy.data.materials.new(name="O4XP_Triage_Neutral")
         neutral.use_nodes = True
         principled = neutral.node_tree.nodes.get("Principled BSDF")
         if principled:
@@ -226,7 +226,7 @@ def parse_args(argv=None):
     parser.add_argument("--triage", required=True)
     parser.add_argument("--sources", required=True)
     parser.add_argument("--blender",
-                        default=os.environ.get("O4SFR_BLENDER", "blender"))
+                        default=os.environ.get("O4XP_BLENDER", "blender"))
     parser.add_argument("--size", type=int, default=512,
                         help="Square render resolution.")
     parser.add_argument("--only", default=None,
@@ -255,7 +255,7 @@ def main(argv=None):
         rows = [r for r in rows if needle in r["slug"].lower()]
     skip_fmts = {f.lower().lstrip(".") for f in args.skip_format}
 
-    snippet_dir = Path(tempfile.mkdtemp(prefix="o4sfr_render_"))
+    snippet_dir = Path(tempfile.mkdtemp(prefix="o4xp_render_"))
     snippet_path = snippet_dir / "render.py"
     snippet_path.write_text(_blender_render_snippet(), encoding="utf-8")
 

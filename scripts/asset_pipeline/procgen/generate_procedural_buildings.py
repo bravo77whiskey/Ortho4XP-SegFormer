@@ -160,7 +160,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", required=True,
                         help="Library package folder (Custom Scenery).")
     parser.add_argument("--blender",
-                        default=os.environ.get("O4SFR_BLENDER", "blender"),
+                        default=os.environ.get("O4XP_BLENDER", "blender"),
                         help="Path to the Blender executable.")
     parser.add_argument("--jobs", type=int, default=1,
                         help="Parallel Blender processes on disjoint chunks.")
@@ -222,7 +222,7 @@ def main(argv=None) -> int:
     if not pending:
         return 0
 
-    chunk_dir = tempfile.mkdtemp(prefix="o4sfr_procgen_")
+    chunk_dir = tempfile.mkdtemp(prefix="o4xp_procgen_")
     failures: list[str] = []
     try:
         chunks = [

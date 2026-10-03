@@ -1,4 +1,4 @@
-# O4SFR ProcGen library build configuration.
+# O4XP ProcGen library build configuration.
 #
 # Everything that shapes the generated library lives here so a rebuild from a
 # clean checkout is reproducible: dimension ladders, the class->archetype
@@ -13,7 +13,7 @@ version: 2
 # Blender rebuild anyway.
 lib_version: 2
 global_seed: 20260612
-output_package_name: O4SFR_ProcGen_Library
+output_package_name: O4XP_ProcGen_Library
 
 atlas:
   # Per-COMBO atlases: 8 region flavors x 4 class groups (res/apt/com/ind,
@@ -73,7 +73,7 @@ limits:
 # per-combo variety in dense same-footprint fabric.
 # floors token F gives the pool height F*3.2 m via the _LxWxF filename token
 # (must stay <= 12: MAX_GENERATED_BUILDING_HEIGHT_M = 40.0).
-# "regions" become o4sfr/<region>/ path tokens; "generic" is the wildcard.
+# "regions" become o4xp/<region>/ path tokens; "generic" is the wildcard.
 # bucket must keep the include-token contract: residential|apartments|
 # commercial|industrial.
 bands:

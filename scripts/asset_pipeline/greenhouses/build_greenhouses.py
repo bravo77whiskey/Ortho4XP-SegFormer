@@ -1,4 +1,4 @@
-"""Build the O4SFR greenhouse library.
+"""Build the O4XP greenhouse library.
 
     python build_greenhouses.py --out <pkg> --pages <dir>
 
@@ -14,8 +14,10 @@ Writes ``<pkg>/library.txt`` and ``<pkg>/objects/``:
   greenhouses, L along the ridge (OBJ x), W deep (OBJ z), earth wall on
   -z; ``_b`` has its anteroom at the other end.
 
-Virtual paths are ``o4sfr/agri/<name>`` (O4_Agri_Structures).  Bounds
-are centred and within the declared footprint.  Geometry: ``geometry.py``.
+Virtual paths are ``o4xp/agri/<name>`` (O4_Agri_Structures), each also
+exported under its pre-rename ``o4sfr/agri/<name>`` so tiles built before
+the rename keep their greenhouses.  Bounds are centred and within the
+declared footprint.  Geometry: ``geometry.py``.
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "src"))
 import O4_Agri_Structures as AGRI  # noqa: E402
 import geometry as G  # noqa: E402
 import layout as L  # noqa: E402
+
+PREFIX = "o4xp/"
+# Tiles built before the library was renamed refer to o4xp/agri/...
+LEGACY_PREFIX = "o4sfr/"
 
 PAGES = ("tunnels.png", "tunnels_nml.png", "solar.png", "solar_nml.png")
 NVCOMPRESS = os.path.join(HERE, "..", "..", "..", "Utils", "win", "nvcompress", "nvcompress.exe")
@@ -134,6 +140,7 @@ def main():
     def emit(virtual, bands, tex, half_x, half_z):
         name = os.path.basename(virtual)
         lines.append(f"EXPORT {virtual} objects/{name}")
+        lines.append(f"EXPORT {LEGACY_PREFIX}{virtual[len(PREFIX):]} objects/{name}")
         if only is not None and name not in only:
             return
         for mesh, _n, _f in bands:
@@ -161,7 +168,7 @@ def main():
     for tex, tris in stats.items():
         print(f"{tex}: {len(tris)} objects, tris (all LODs) "
               f"median {int(np.median(tris))} max {max(tris)}")
-    print(f"{len(lines) - 4} exports -> {args.out}")
+    print(f"{len(lines) - 4} exports (half of them o4sfr/ aliases) -> {args.out}")
 
 
 if __name__ == "__main__":

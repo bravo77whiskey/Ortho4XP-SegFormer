@@ -181,7 +181,7 @@ def build_manifest(config: dict) -> dict:
                         ]
                         assets.append({
                             "id": asset_id,
-                            "virtual_path": f"o4sfr/{asset_id}.obj",
+                            "virtual_path": f"o4xp/{asset_id}.obj",
                             "archetypes": region_archetypes,
                             "length_m": length,
                             "width_m": width,

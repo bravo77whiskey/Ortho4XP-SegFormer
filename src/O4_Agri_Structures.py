@@ -281,8 +281,8 @@ def classify_detection(detection, veg_map, image_fn, m_per_px, height_fn=None):
 
 
 # ── Greenhouse placement ────────────────────────────────────────────────────
-# Greenhouses are placed from the O4SFR greenhouse library (virtual prefix
-# o4sfr/agri/), two families:
+# Greenhouses are placed from the O4XP greenhouse library (virtual prefix
+# o4xp/agri/), two families:
 #
 # * tunnels_<W>x<L>.obj -- arrays of arched film tunnels, W = bays x
 #   TUNNEL_PITCH_M across (OBJ x), L along the tunnels (OBJ z).  South China
@@ -302,7 +302,7 @@ SOLAR_MAX_EW_DEG = 35.0
 # Solar greenhouses come in two variants (anteroom at either end); a
 # piece's variant follows from its position, so reruns place the same one.
 SOLAR_VARIANTS = ("a", "b")
-GREENHOUSE_LIBRARY_PREFIX = "o4sfr/agri/"
+GREENHOUSE_LIBRARY_PREFIX = "o4xp/agri/"
 
 
 def tunnel_asset_path(bays, length_m):

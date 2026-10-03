@@ -1,6 +1,6 @@
 # ProcGen v4: regional building library, baked from 3-D detail
 
-A drop-in replacement for the old `O4SFR_ProcGen_Library`. It keeps the same
+A drop-in replacement for the old `O4XP_ProcGen_Library`. It keeps the same
 virtual paths, footprints, floors, regions, seeds and physical paths as the
 old manifest, so the overlay and existing DSFs need no change.
 

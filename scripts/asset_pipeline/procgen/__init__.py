@@ -1,4 +1,4 @@
-"""Procedural X-Plane building-asset generation (O4SFR ProcGen Library).
+"""Procedural X-Plane building-asset generation (O4XP ProcGen Library).
 
 Modules:
   grid       -- enumerate the dimension grid into procgen_manifest.json

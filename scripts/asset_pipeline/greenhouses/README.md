@@ -1,11 +1,11 @@
-# O4SFR greenhouse library
+# O4XP greenhouse library
 
 Objects the building overlay places on greenhouse detections
 (`src/O4_Agri_Structures.py`, `O4_BLD_AGRI`):
 
-* `o4sfr/agri/tunnels_<W>x<L>.obj` -- south-China arrays of arched film
+* `o4xp/agri/tunnels_<W>x<L>.obj` -- south-China arrays of arched film
   tunnels, 8 m pitch, 1-12 bays, 10-150 m long;
-* `o4sfr/agri/solar_<L>x<W>[_b].obj` -- north-China solar greenhouses, 8-20 m
+* `o4xp/agri/solar_<L>x<W>[_b].obj` -- north-China solar greenhouses, 8-20 m
   deep, brick (a) or cement-render (b) back wall and gables, entry room at
   either end.
 

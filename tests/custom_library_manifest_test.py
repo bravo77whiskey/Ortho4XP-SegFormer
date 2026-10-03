@@ -1,8 +1,8 @@
-"""Tests for the O4SFR_Library asset pipeline.
+"""Tests for the O4XP_Library asset pipeline.
 
 Covers:
 - Manifest schema round-trips through build_custom_library.load_manifest()
-- Generated library.txt uses the o4sfr/<region>/<bucket>/<id>.obj scheme
+- Generated library.txt uses the o4xp/<region>/<bucket>/<id>.obj scheme
 - Every supported region remains in the overlay region taxonomy
 - License gate refuses non-CC0 / non-CC-BY entries
 """
@@ -139,12 +139,12 @@ class BuildOutputTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         library_txt = (out / "library.txt").read_text(encoding="utf-8")
         self.assertIn(
-            "EXPORT o4sfr/europe/residential/townhouse_eu_01.obj "
+            "EXPORT o4xp/europe/residential/townhouse_eu_01.obj "
             "europe/residential/townhouse_eu_01.obj",
             library_txt,
         )
         self.assertIn(
-            "EXPORT o4sfr/north_america/residential/ranch_na_01.obj "
+            "EXPORT o4xp/north_america/residential/ranch_na_01.obj "
             "north_america/residential/ranch_na_01.obj",
             library_txt,
         )
@@ -161,7 +161,7 @@ class BuildOutputTest(unittest.TestCase):
         self.assertIn("CC-BY-4.0", attributions)
         self.assertIn("CC0", attributions)
         self.assertIn(
-            "o4sfr/europe/residential/townhouse_eu_01.obj", attributions
+            "o4xp/europe/residential/townhouse_eu_01.obj", attributions
         )
         license_file = (out / "LICENSE").read_text(encoding="utf-8")
         self.assertIn("ATTRIBUTIONS.md", license_file)

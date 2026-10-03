@@ -173,7 +173,7 @@ def _blender_convert_snippet() -> str:
             if tri_count <= decimate_target:
                 continue
             ratio = decimate_target / float(tri_count)
-            modifier = o.modifiers.new(name="O4SFR_Decimate", type="DECIMATE")
+            modifier = o.modifiers.new(name="O4XP_Decimate", type="DECIMATE")
             modifier.decimate_type = "COLLAPSE"
             modifier.ratio = max(0.01, min(1.0, ratio))
             modifier.use_collapse_triangulate = True
@@ -226,13 +226,13 @@ def _blender_convert_snippet() -> str:
                 print(f"[warn] texture save failed: {exc}")
 
         # Configure xplane2blender to treat a dedicated collection as a
-        # Scenery OBJ8 exportable root.  Create a fresh "O4SFR_Export"
+        # Scenery OBJ8 exportable root.  Create a fresh "O4XP_Export"
         # collection, move every mesh into it, mark it exportable, and set
         # the layer name + export type.  Doing it on a brand-new collection
         # avoids xplane2blender quirks with the Master ("Scene") collection
         # or with FBX-importer-created sub-collections that the addon's
         # property hooks may not have decorated yet.
-        export_coll = bpy.data.collections.new(name="O4SFR_Export")
+        export_coll = bpy.data.collections.new(name="O4XP_Export")
         bpy.context.scene.collection.children.link(export_coll)
         # Move every mesh from wherever it lives into the export collection.
         for o in [obj for obj in bpy.data.objects if obj.type == "MESH"]:
@@ -256,7 +256,7 @@ def _blender_convert_snippet() -> str:
             xp.layer.export_type = "scenery"
         except Exception:
             pass
-        print(f"[ok] marked O4SFR_Export as exportable, "
+        print(f"[ok] marked O4XP_Export as exportable, "
               f"{len(export_coll.all_objects)} objects, "
               f"layer.name={output_stem!r}")
 
@@ -442,7 +442,7 @@ def convert(args):
     if not assets:
         raise SystemExit("Manifest contains no assets.")
     os.makedirs(args.output, exist_ok=True)
-    snippet_dir = tempfile.mkdtemp(prefix="o4sfr_blender_")
+    snippet_dir = tempfile.mkdtemp(prefix="o4xp_blender_")
     snippet_path = os.path.join(snippet_dir, "convert.py")
     try:
         with open(snippet_path, "w", encoding="utf-8") as fh:
@@ -480,7 +480,7 @@ def parse_args(argv=None):
     parser.add_argument("--source-root", default=".",
                         help="Directory the manifest's source_file paths are relative to.")
     parser.add_argument("--blender",
-                        default=os.environ.get("O4SFR_BLENDER", "blender"),
+                        default=os.environ.get("O4XP_BLENDER", "blender"),
                         help="Path to the Blender executable.")
     parser.add_argument("--force", action="store_true",
                         help="Re-convert assets whose .obj already exists.")

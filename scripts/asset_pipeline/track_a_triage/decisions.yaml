@@ -2,7 +2,7 @@
 #
 # Each entry maps a `family_prefix` (a path prefix in the library's
 # library.txt EXPORT virtual paths) to one or more regions.  Regions follow
-# the same vocabulary as _O4SFR_PATH_REGION_TOKENS in
+# the same vocabulary as _O4XP_PATH_REGION_TOKENS in
 # src/O4_Building_Overlay.py:
 #   europe | scandinavia | mediterranean
 #   north_america | south_america

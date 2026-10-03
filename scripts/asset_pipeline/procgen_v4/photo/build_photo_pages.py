@@ -71,7 +71,7 @@ def main(argv=None):
                     help="page names (default: all, incl. ind_*)")
     ap.add_argument("--base", default=None)
     ap.add_argument("--cache", default=os.path.join(
-        REPO, "test_output", "procgen_v4", "O4SFR_ProcGen_v4", "_bake_cache"))
+        REPO, "test_output", "procgen_v4", "O4XP_ProcGen_v4", "_bake_cache"))
     ap.add_argument("--wear", type=float, default=0.0)
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--samples", type=int, default=64)

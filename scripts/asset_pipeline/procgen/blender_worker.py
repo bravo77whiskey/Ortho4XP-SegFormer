@@ -54,7 +54,7 @@ def _texture_relpath(flavor: str, group: str) -> str:
 
 
 def _material_for_flavor(flavor: str, group: str, output_root: str):
-    name = f"o4sfr_procgen_{flavor}_{group}"
+    name = f"o4xp_procgen_{flavor}_{group}"
     material = bpy.data.materials.get(name)
     if material is not None:
         return material
@@ -113,7 +113,7 @@ def _export_one(row: dict, output_root: str, layout: dict) -> str | None:
                                     output_root)
     obj = _build_mesh_object(stem, spec, material)
 
-    export_coll = bpy.data.collections.new(name=f"O4SFR_{stem}")
+    export_coll = bpy.data.collections.new(name=f"O4XP_{stem}")
     bpy.context.scene.collection.children.link(export_coll)
     export_coll.objects.link(obj)
     bpy.context.view_layer.update()

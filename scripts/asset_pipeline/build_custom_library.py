@@ -1,8 +1,8 @@
-"""Build the shipped O4SFR_Library Custom Scenery folder from sources.yaml.
+"""Build the shipped O4XP_Library Custom Scenery folder from sources.yaml.
 
 Inputs: a manifest file with one entry per asset (see sources.yaml).
 Outputs (under --output):
-  library.txt       -- one EXPORT line per asset, virtual paths o4sfr/<region>/...
+  library.txt       -- one EXPORT line per asset, virtual paths o4xp/<region>/...
   LICENSE           -- short summary of how individual asset licenses apply
   ATTRIBUTIONS.md   -- per-asset author/source/license credit (required for CC-BY)
 
@@ -14,7 +14,7 @@ the converted .obj files already live at <output>/<region>/<bucket>/<id>.obj
 Run via:
     python scripts/asset_pipeline/build_custom_library.py \
         --manifest scripts/asset_pipeline/sources.yaml \
-        --output "C:/X-Plane 12/Custom Scenery/O4SFR_Library"
+        --output "C:/X-Plane 12/Custom Scenery/O4XP_Library"
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Iterable, NamedTuple
 
 
 # Region keys accepted in the manifest. Kept in sync with
-# _O4SFR_PATH_REGION_TOKENS in src/O4_Building_Overlay.py.
+# _O4XP_PATH_REGION_TOKENS in src/O4_Building_Overlay.py.
 VALID_REGIONS = frozenset({
     "europe",
     "scandinavia",
@@ -73,7 +73,7 @@ class Asset(NamedTuple):
 
     @property
     def virtual_path(self) -> str:
-        return f"o4sfr/{self.region}/{self.bucket}/{self.id}.obj"
+        return f"o4xp/{self.region}/{self.bucket}/{self.id}.obj"
 
     @property
     def physical_path(self) -> str:
@@ -163,8 +163,8 @@ def render_library_txt(assets: Iterable[Asset]) -> str:
         "800",
         "LIBRARY",
         "",
-        "# O4SFR_Library -- shipped by Ortho4XP-SegFormer.",
-        "# Per-asset region is encoded as a path token: o4sfr/<region>/<bucket>/<id>.obj",
+        "# O4XP_Library -- shipped by Ortho4XP-SegFormer.",
+        "# Per-asset region is encoded as a path token: o4xp/<region>/<bucket>/<id>.obj",
         "",
     ]
     for asset in sorted(assets, key=lambda a: (a.region, a.bucket, a.id)):
@@ -175,7 +175,7 @@ def render_library_txt(assets: Iterable[Asset]) -> str:
 
 def render_license(assets: Iterable[Asset]) -> str:
     return (
-        "O4SFR_Library bundles open-source 3D models from third-party authors.\n"
+        "O4XP_Library bundles open-source 3D models from third-party authors.\n"
         "Each asset retains its original license; see ATTRIBUTIONS.md for the\n"
         "per-asset credit, source URL, and license terms.\n\n"
         "CC0 assets may be redistributed without attribution. CC-BY assets\n"
@@ -188,7 +188,7 @@ def render_attributions(assets: Iterable[Asset]) -> str:
     groups: dict[str, list[Asset]] = defaultdict(list)
     for asset in assets:
         groups[asset.license].append(asset)
-    out = ["# O4SFR_Library attributions", ""]
+    out = ["# O4XP_Library attributions", ""]
     for licence in sorted(groups):
         out.append(f"## {licence}")
         out.append("")
@@ -243,7 +243,7 @@ def build(args):
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(render)
         written.append(path)
-    print(f"Built O4SFR_Library at {args.output}")
+    print(f"Built O4XP_Library at {args.output}")
     for path in written:
         print(f"  wrote {os.path.basename(path)}")
     if missing:

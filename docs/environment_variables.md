@@ -41,7 +41,7 @@ Until the cleanup in [CHANGELOG.md](../CHANGELOG.md) these were all named
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `O4_BLD_ASSET_MODE` | setting | Overrides `bld_asset_mode` (`objects`, `facades` or `both`); `O4_BLD_O4SFR_LIBRARY_ASSETS` and `O4_BLD_EXTRA_LIBRARY_ASSETS` are older spellings |
+| `O4_BLD_ASSET_MODE` | setting | Overrides `bld_asset_mode` (`objects`, `facades` or `both`) |
 | `O4_BLD_EXTRA_LIBRARIES` | `auto` | Which optional third-party building libraries may be used |
 | `O4_BLD_ROOF_COLOR_MATCHING` | setting | Overrides `bld_roof_color_matching` |
 | `O4_BLD_SEG_FIRST` | `guarded` | Landcover-first footprints: `off`, `guarded` (regular outlines only) or `all` |

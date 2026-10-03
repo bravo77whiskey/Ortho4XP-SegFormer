@@ -1,4 +1,4 @@
-"""Pool-ingestion smoke test for the O4SFR ProcGen library.
+"""Pool-ingestion smoke test for the O4XP ProcGen library.
 
 Fabricates a tiny library package (OBJ8s written directly from archetype
 MeshSpecs -- no Blender required), emits library.txt via
@@ -23,7 +23,7 @@ import O4_Building_Overlay as overlay  # noqa: E402
 from archetypes import build_archetype  # noqa: E402
 from archetypes.common import fmt_dim  # noqa: E402
 
-PKG_NAME = "o4sfr_procgen_library"
+PKG_NAME = "o4xp_procgen_library"
 
 # (region, length, width, floors) -- areas span classes 1-3.
 SAMPLE_ASSETS = (
@@ -72,7 +72,7 @@ def _build_package(tmp_path: Path) -> Path:
                              "physical_path": physical})
         assets.append({
             "id": asset_id,
-            "virtual_path": f"o4sfr/{asset_id}.obj",
+            "virtual_path": f"o4xp/{asset_id}.obj",
             "archetype": "gable",
             "length_m": length,
             "width_m": width,
@@ -109,7 +109,7 @@ def test_pool_ingests_procgen_package(tmp_path):
     _build_package(tmp_path)
     pools = overlay._build_optional_library_asset_pools(
         custom_scenery_dir=str(tmp_path),
-        enabled_library_ids=("o4sfr",),
+        enabled_library_ids=("o4xp",),
         cache_dir=str(tmp_path / "cache"),
         asset_region="europe",
     )
@@ -119,7 +119,7 @@ def test_pool_ingests_procgen_package(tmp_path):
     # On a europe tile: europe + generic assets pool, north_america doesn't.
     expected_regions = {"generic", "europe"}
     expected_paths = {
-        f"o4sfr/{region}/residential/"
+        f"o4xp/{region}/residential/"
         f"gable_{fmt_dim(l)}x{fmt_dim(w)}x{f}.obj"
         for region, l, w, f in SAMPLE_ASSETS if region in expected_regions
     }
@@ -129,7 +129,7 @@ def test_pool_ingests_procgen_package(tmp_path):
         if region not in expected_regions:
             continue
         virtual = (
-            f"o4sfr/{region}/residential/"
+            f"o4xp/{region}/residential/"
             f"gable_{fmt_dim(length)}x{fmt_dim(width)}x{floors}.obj"
         )
         asset = by_path[virtual]
@@ -154,7 +154,7 @@ def test_pool_region_routing_excludes_other_regions(tmp_path):
     _build_package(tmp_path)
     pools = overlay._build_optional_library_asset_pools(
         custom_scenery_dir=str(tmp_path),
-        enabled_library_ids=("o4sfr",),
+        enabled_library_ids=("o4xp",),
         cache_dir=str(tmp_path / "cache"),
         asset_region="north_america",
     )

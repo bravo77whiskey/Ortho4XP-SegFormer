@@ -1,9 +1,9 @@
-# O4SFR_Library asset pipeline
+# O4XP_Library asset pipeline
 
-Builds the shipped X-Plane 12 building object library `O4SFR_Library/` from a
+Builds the shipped X-Plane 12 building object library `O4XP_Library/` from a
 curated catalog of open-source 3D models. The library is consumed by the
 building overlay through the existing `library.txt` plumbing — see
-`CURATED_EXTRA_BUILDING_LIBRARIES["o4sfr"]` in
+`CURATED_EXTRA_BUILDING_LIBRARIES["o4xp"]` in
 [`src/O4_Building_Overlay.py`](../../src/O4_Building_Overlay.py).
 
 ## Why this pipeline
@@ -19,7 +19,7 @@ Handy Objects) skew Western and small. This pipeline:
 - Converts each model to X-Plane `.obj` via headless Blender +
   [xplane2blender](https://github.com/X-Plane/XPlane2Blender).
 - Emits a `library.txt` whose virtual paths carry the region as a token
-  (`o4sfr/<region>/<bucket>/<asset>.obj`) so the overlay's path-token regional
+  (`o4xp/<region>/<bucket>/<asset>.obj`) so the overlay's path-token regional
   routing picks the right asset for each tile.
 
 **Out of scope:** sourcing from OSM/OSM2World. The whole project exists to fill
@@ -39,7 +39,7 @@ scripts/asset_pipeline/
 Build output (not committed) — drop next to SimHeaven in `Custom Scenery/`:
 
 ```
-Custom Scenery/O4SFR_Library/
+Custom Scenery/O4XP_Library/
   library.txt
   LICENSE
   ATTRIBUTIONS.md
@@ -73,7 +73,7 @@ assets:
     source_url: https://polyhaven.com/a/some-townhouse
     author: Poly Haven contributor
     license: CC0
-    region: europe                         # see _O4SFR_PATH_REGION_TOKENS for the set
+    region: europe                         # see _O4XP_PATH_REGION_TOKENS for the set
     bucket: residential                    # residential|commercial|industrial|farm|accessory
     footprint_m: [9.0, 12.0]               # [width, depth] in metres -- model is rescaled to fit
     source_file: polyhaven/townhouse_03.glb
@@ -95,12 +95,12 @@ Blender headless step.
 python scripts/asset_pipeline/convert_to_xplane_obj.py \
     --manifest scripts/asset_pipeline/sources.yaml \
     --blender "C:/Program Files/Blender Foundation/Blender 4.2/blender.exe" \
-    --output  "C:/X-Plane 12/Custom Scenery/O4SFR_Library"
+    --output  "C:/X-Plane 12/Custom Scenery/O4XP_Library"
 
 # 2. Emit library.txt + LICENSE + ATTRIBUTIONS.md from the manifest.
 python scripts/asset_pipeline/build_custom_library.py \
     --manifest scripts/asset_pipeline/sources.yaml \
-    --output  "C:/X-Plane 12/Custom Scenery/O4SFR_Library"
+    --output  "C:/X-Plane 12/Custom Scenery/O4XP_Library"
 ```
 
 ## Verification
@@ -115,7 +115,7 @@ candidate counts.
 
 ---
 
-# O4SFR ProcGen Library (`procgen/`)
+# O4XP ProcGen Library (`procgen/`)
 
 A second, fully procedural library that fills the dimension grid the curated
 catalog can never cover: the YOLO matcher places assets only when footprint
@@ -133,10 +133,10 @@ Mediterranean, corrugated metal on render for Africa, concrete + metal/glazed
 tile for Asia, …); one `asia` dir serves asia + se_asia tiles and europe
 already covers scandinavia via `OPTIONAL_ASSET_REGION_ALIASES`.
 
-It is discovered under the existing `o4sfr` library id (folder-name
+It is discovered under the existing `o4xp` library id (folder-name
 substring match) with **zero core-code changes**: heights parse from the
 `_LxWxF` filename token (F × 3.2 m), bounds are measured from OBJ `VT`
-lines, regions ride the `o4sfr/<region>/…` path token.
+lines, regions ride the `o4xp/<region>/…` path token.
 
 Key design points:
 
@@ -158,11 +158,11 @@ Key design points:
 python scripts/asset_pipeline/procgen/grid.py
 
 # 2. Atlases (into the package) + atlas_layout.json (committed).
-python scripts/asset_pipeline/procgen/atlas.py --output "<Custom Scenery>/O4SFR_ProcGen_Library"
+python scripts/asset_pipeline/procgen/atlas.py --output "<Custom Scenery>/O4XP_ProcGen_Library"
 
 # 3. Generate OBJ8s (headless Blender; ~35 min with --jobs 3).
 python scripts/asset_pipeline/procgen/generate_procedural_buildings.py \
-    --output "<Custom Scenery>/O4SFR_ProcGen_Library" \
+    --output "<Custom Scenery>/O4XP_ProcGen_Library" \
     --blender "F:/SteamLibrary/steamapps/common/Blender/blender.exe" --jobs 3
 
 # 4. library.txt + build_info.json.

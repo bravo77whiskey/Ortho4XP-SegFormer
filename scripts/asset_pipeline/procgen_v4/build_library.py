@@ -9,6 +9,9 @@ existing tile DSFs keep resolving -- and writes every OBJ with the v4
 builders, then library.txt (one EXPORT per physical variant, as before)
 and build_info.json.  Pure Python: no Blender needed for geometry.
 
+Every o4xp/ virtual path is also exported under its pre-rename o4sfr/ name,
+so tiles built before the library was renamed keep their buildings.
+
 Validate with the old verifier, unchanged:
     python ../procgen/verify_procgen_library.py --output <pkg>
 """
@@ -33,6 +36,8 @@ import buildings  # noqa: E402
 from meshkit import write_obj8  # noqa: E402
 
 HEADER = "A\n800\nLIBRARY\n\n"
+PREFIX = "o4xp/"
+LEGACY_PREFIX = "o4sfr/"
 
 
 def _build_chunk(args):
@@ -79,6 +84,9 @@ def main(argv=None):
                          "physical": v["physical_path"]})
             lines.append(f"EXPORT {asset['virtual_path']} "
                          f"{v['physical_path']}")
+            if asset["virtual_path"].startswith(PREFIX):
+                legacy = LEGACY_PREFIX + asset["virtual_path"][len(PREFIX):]
+                lines.append(f"EXPORT {legacy} {v['physical_path']}")
     if args.limit:
         rows = rows[:args.limit]
     t0 = time.time()
