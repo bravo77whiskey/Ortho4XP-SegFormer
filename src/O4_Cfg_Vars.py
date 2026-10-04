@@ -59,7 +59,7 @@ cfg_app_vars = {
         "default": 1,
         "values": tuple(range(1, 9)),
         "short_name": "Concurrent texture downloads",
-        "hint": "Number of 4096x4096 orthophotos to download concurrently. Each orthophoto normally uses 16 network-request threads, so a value of 2 can issue up to 32 requests at once. Start with 1 or 2; higher values use more memory, may overload slower drives, and can trigger provider limits.",
+        "hint": "Number of 4096x4096 orthophotos to download concurrently. Each orthophoto normally uses 64 network-request threads, so a value of 2 can issue up to 128 requests at once. Start with 1 or 2; higher values use more memory, may overload slower drives, and can trigger provider limits.",
     },
     "max_convert_slots": {
         "module": "TILE",
