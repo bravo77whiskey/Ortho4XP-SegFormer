@@ -1592,9 +1592,9 @@ OBJ_DIMS: dict = {
     "SFD_Global/Asia/Suburban_South_7.obj": (20.49, 13.09),
     "SFD_Global/Asia/Suburban_South_8.obj": (19.76, 10.31),
     # ── Asia apartment blocks (library aliases Apartment_N.obj → Apartment_N_1/_2) ──
-    "SFD_Global/Asia/Apartment_1.obj": (26.66, 9.5),
+    "SFD_Global/Asia/Apartment_1_1.obj": (26.66, 9.5),
     "SFD_Global/Asia/Apartment_2.obj": (60.0,  10.37),
-    "SFD_Global/Asia/Apartment_3.obj": (35.0,  9.12),
+    "SFD_Global/Asia/Apartment_3_1.obj": (35.0,  9.12),
     "SFD_Global/Buildings/Apartment_30m_1.obj": (34.5, 16.1),
     "SFD_Global/Buildings/Apartment_30m_2.obj": (18.0, 27.0),
     "SFD_Global/Buildings/Apartment_30m_3.obj": (28.9, 16.7),
@@ -1689,7 +1689,7 @@ OBJ_DIMS: dict = {
 OBJ_FOOTPRINTS: dict = {
     "SFD_Global/Africa/Residential/Suburban_4.obj": (-6.77, 6.77, -9.20, 10.52),
     "SFD_Global/Africa/Residential/Suburban_6.obj": (-8.93, 8.93, -6.68, 6.68),
-    "SFD_Global/Asia/Apartment_3.obj": (-17.50, 17.50, -4.21, 4.91),
+    "SFD_Global/Asia/Apartment_3_1.obj": (-17.50, 17.50, -4.21, 4.91),
     "SFD_Global/Asia/Industry_20x40.obj": (-10.13, 10.34, -19.44, 19.44),
     "SFD_Global/Asia/Industry_30x40.obj": (-15.78, 16.28, -20.66, 19.99),
     "SFD_Global/Asia/Industry_60x50.obj": (-15.35, 47.74, -33.44, 15.73),
@@ -2883,7 +2883,7 @@ def _sfd_catalog_paths(tile_lat, tile_lon, asset_region=None):
                 "SFD_Global/Asia/Carport_2.obj",
                 "SFD_Global/Asia/Shed_1.obj",
             ] +
-            ["SFD_Global/Asia/Apartment_1.obj", "SFD_Global/Asia/Apartment_3.obj"] +
+            ["SFD_Global/Asia/Apartment_1_1.obj", "SFD_Global/Asia/Apartment_3_1.obj"] +
             [f"SFD_Global/Buildings/Apartment_30m_{i}.obj" for i in range(1, 5)] +
             [
                 "SFD_Global/Asia/Industry_20x40.obj",
@@ -4835,9 +4835,21 @@ def _build_sfd_asset_pools(
     asset_pools = {cls: [] for cls in BLD_PLACEMENT_CLASSES}
     seen_paths = set()
     region = asset_region or _asset_region(tile_lat, tile_lon)
+    if library_exports is None and custom_scenery_dir:
+        library_exports = _scan_runtime_library_exports(
+            custom_scenery_dir,
+            include_sfd=True,
+        )
+    # Hand-listed paths the installed library does not export would be written
+    # as OBJECT_DEFs X-Plane cannot resolve ("Failed to find resource").
+    exported = (
+        {_norm_library_path(e.virtual_path) for e in library_exports}
+        if library_exports else None
+    )
     known_entries = [
         (obj_path, _bounds_for_object_path(obj_path))
         for obj_path in _sfd_catalog_paths(tile_lat, tile_lon, region)
+        if exported is None or _norm_library_path(obj_path) in exported
     ]
     scanned_entries = _scanned_sfd_catalog_entries(
         region,
