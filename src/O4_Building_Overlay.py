@@ -73,6 +73,91 @@ def _env_flag(name, default=False):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _review_dump_enabled():
+    """O4_BLD_REVIEW_DUMP=1: write <stem>_review.json per DDS for visual review.
+
+    Records every trained-YOLO candidate with its outcome (placed, or the
+    stage that dropped it), sub-threshold candidates down to
+    O4_BLD_REVIEW_CONF, and the existing-scenery geometry that blocks
+    placement. Off by default; never changes what is placed.
+    """
+    return _env_flag("O4_BLD_REVIEW_DUMP", False)
+
+
+class _SrcRing(list):
+    """A polygon ring that remembers its scenery pack (review dumps only)."""
+
+    __slots__ = ("src",)
+
+    def __init__(self, ring, src):
+        super().__init__(ring)
+        self.src = src
+
+
+class _ReviewTracker:
+    """Outcome of every trained-YOLO candidate on one texture (review dumps)."""
+
+    def __init__(self, detections):
+        self.fates = {}
+        self.below_conf = []
+        self.add(detections)
+
+    def add(self, detections):
+        for det in detections:
+            self.fates.setdefault(id(det), [det, "unresolved"])
+
+    def set(self, det, fate):
+        self.fates[id(det)] = [det, fate]
+
+    def dropped(self, before, after, fate):
+        kept = {id(det) for det in after}
+        for det in before:
+            if id(det) not in kept and self.fates.get(id(det), [None, "unresolved"])[1] == "unresolved":
+                self.set(det, fate)
+
+    def records(self, img_w, img_h):
+        out = []
+        for det, fate in self.fates.values():
+            out.append(_review_detection_record(det, fate))
+        for det in self._isolated_below_conf(img_w, img_h):
+            out.append(_review_detection_record(det, "below_conf"))
+        return out
+
+    def _isolated_below_conf(self, img_w, img_h):
+        """Near misses where nothing above the threshold was found.
+
+        Most sub-threshold boxes restate a building a kept detection already
+        covers; only ones whose centre lies outside every above-threshold box
+        can be a missed building. Overlapping near misses keep the strongest.
+        """
+        taken = np.zeros((img_h, img_w), dtype=np.uint8)
+        for det, _fate in self.fates.values():
+            pts = np.asarray(det.get('points', ()), dtype=np.float64).reshape(-1, 2)
+            if len(pts) >= 3:
+                cv2.fillPoly(taken, [np.rint(pts).astype(np.int32)], 1)
+        kept = []
+        for det in sorted(self.below_conf, key=lambda d: -float(d.get('confidence', 0.0))):
+            pts = np.asarray(det.get('points', ()), dtype=np.float64).reshape(-1, 2)
+            if len(pts) < 3:
+                continue
+            cx, cy = (int(v) for v in np.clip(pts.mean(axis=0), 0, [img_w - 1, img_h - 1]))
+            if taken[cy, cx]:
+                continue
+            kept.append(det)
+            cv2.fillPoly(taken, [np.rint(pts).astype(np.int32)], 1)
+        return kept
+
+
+def _review_detection_record(det, fate):
+    pts = np.asarray(det.get('points', ()), dtype=np.float64).reshape(-1, 2)
+    return {
+        "q": [[round(float(x), 1), round(float(y), 1)] for x, y in pts],
+        "c": round(float(det.get('confidence', 0.0)), 3),
+        "m2": round(float(det.get('area_m2', 0.0)), 1),
+        "f": fate,
+    }
+
+
 def _env_float(name, default):
     value = os.environ.get(name)
     if value is None:
@@ -1259,8 +1344,13 @@ def _load_simheaven_building_exclusions(custom_scenery_dir, tile_lat, tile_lon, 
                 _parse,
                 version="simheaven-buildings-v1",
             )
-            objects.extend(parsed.get("objects", ()))
-            polys.extend(parsed.get("polys", ()))
+            new_objects = parsed.get("objects", ())
+            new_polys = parsed.get("polys", ())
+            if _review_dump_enabled():
+                new_objects = [dict(obj, src=folder_name) for obj in new_objects]
+                new_polys = [_SrcRing(ring, folder_name) for ring in new_polys]
+            objects.extend(new_objects)
+            polys.extend(new_polys)
 
             print(
                 f"  [simHeaven bld] {folder_name}: "
@@ -1381,6 +1471,10 @@ def _load_custom_scenery_building_exclusions(
                         current_polygon_is_facade = False
                         current_winding = None
 
+            if _review_dump_enabled():
+                for obj in objects[n_obj0:]:
+                    obj['src'] = folder_name
+                polys[n_poly0:] = [_SrcRing(ring, folder_name) for ring in polys[n_poly0:]]
             print(
                 f"  [custom scenery bld] {folder_name}: "
                 f"+{len(objects) - n_obj0} objects  "
@@ -8200,6 +8294,7 @@ class _BuildingOverlayRun:
         self.timings['custom_scenery_parse'] += time.perf_counter() - self._t
         if custom_bld_polys or custom_bld_objects:
             self.existing_bld_polys.extend(custom_bld_polys)
+        self.custom_bld_objects = custom_bld_objects
         self.custom_bld_index = _prepare_simheaven_objects(custom_bld_objects)
         self.custom_bld_sig = (
             _polys_signature(custom_bld_polys),
@@ -9363,6 +9458,11 @@ class _TextureInference:
 
     def _filter_detections(self):
         """Coverage, evidence-gate, overlap and min-footprint filtering."""
+        self.review = None
+        if _review_dump_enabled():
+            self.review = _ReviewTracker(self.yolo_detections)
+            self._review_below_conf()
+        _review_before = list(self.yolo_detections)
         # Cross-ZL coverage: everything inside a covered region is detected and
         # placed at the higher ZL instead, so drop it here (trained YOLO,
         # stock YOLO, and — via the veg-map wipe — SegFormer zones/gap fill).
@@ -9387,6 +9487,7 @@ class _TextureInference:
                     self._covered_rects_px,
                     value=getattr(SEGFORMER, 'CLASS_BACKGROUND', 0),
                 )
+        _review_before = self._review_stage(_review_before, "covered_by_higher_zl")
         raw_yolo_count = len(self.yolo_detections)
         if self.yolo_detections:
             # Pixels load lazily (warm runs reach here with img=None), so gate
@@ -9406,6 +9507,7 @@ class _TextureInference:
             )
             if yolo_oversize_reject:
                 self.file_counts['yolo_oversize_reject'] = yolo_oversize_reject
+        _review_before = self._review_stage(_review_before, "oversize_reject")
         # Remove overlapping detections so each building area keeps a single
         # object: smallest-first, drop any detection that overlaps an
         # already-kept one, with no minimum-overlap area.
@@ -9425,6 +9527,7 @@ class _TextureInference:
             self._rec('yolo_suppress', _t)
             self.file_counts['yolo_raw_detections'] = raw_yolo_count
             self.file_counts['yolo_suppressed_overlap'] = yolo_suppressed
+        _review_before = self._review_stage(_review_before, "suppressed_overlap")
         # HeightNet no longer runs here: heights are consumed only by object
         # candidate selection and the facade fallback, both strictly after
         # the static placement gates, so the placement phase predicts them
@@ -9443,10 +9546,48 @@ class _TextureInference:
             _footprint_dropped = _pre_footprint_n - len(self.yolo_detections)
             if _footprint_dropped:
                 self.file_counts['yolo_min_footprint_dropped'] = _footprint_dropped
+        self._review_stage(_review_before, "below_min_footprint")
         self.file_counts['yolo_detections'] = len(self.yolo_detections)
+
+    def _review_stage(self, before, fate):
+        """Review dumps: tag what a filter stage just dropped; return the survivors."""
+        if self.review is not None:
+            self.review.dropped(before, self.yolo_detections, fate)
+        return list(self.yolo_detections)
+
+    def _review_below_conf(self):
+        """Review dumps: rerun YOLO down to O4_BLD_REVIEW_CONF to show near misses.
+
+        A separate pass whose results are only recorded, so placement is
+        exactly what the configured threshold produces.
+        """
+        review_conf = _env_float("O4_BLD_REVIEW_CONF", 0.01)
+        if (
+            self.img is None or self.run.yolo_model is None or
+            review_conf >= float(self.run.yolo_conf)
+        ):
+            return
+        low = _run_yolo_obb_inference(
+            self.run.yolo_model,
+            self.img,
+            imgsz=self.run.yolo_imgsz,
+            stride=self.run.yolo_stride,
+            conf=review_conf,
+            iou=self.run.yolo_iou,
+            max_det=self.run.yolo_max_det,
+            device=("0" if torch.cuda.is_available() else "cpu"),
+            m_per_px=self.m_per_px,
+            batch_size=self.run.yolo_batch_size,
+            skip_rects_px=self._covered_rects_px,
+        )
+        self.review.below_conf = [
+            det for det in low
+            if float(det.get('confidence', 0.0)) < float(self.run.yolo_conf)
+        ]
 
     def _publish(self):
         """Store the results on the prep record and return it."""
+        self.prep['review'] = self.review
         self.prep['img'] = self.img
         self.prep['veg_map'] = self.veg_map
         self.prep['mesh_water_mask'] = self.mesh_water_mask
@@ -9482,6 +9623,11 @@ class _TexturePass:
         self._apply_seg_first()
         self._predict_heights()
         self._place_detections()
+        if self.review is not None:
+            try:
+                self._write_review_dump()
+            except Exception as exc:
+                print(f"    [Bld review] {self.fname}: dump failed: {exc}", flush=True)
         self._report_and_cache()
         self._draw_overview_panels()
 
@@ -9528,6 +9674,7 @@ class _TexturePass:
         self.img_w = self.prep['img_w']
         self.m_per_px = self.prep['m_per_px']
         self.yolo_detections = self.prep['yolo_detections']
+        self.review = self.prep.get('review')
         self.roof_color_image = self.img if self.run.roof_color_matching_active else None
         self.roof_color_load_attempted = (
             self.img is not None or not self.run.roof_color_matching_active
@@ -9611,6 +9758,9 @@ class _TexturePass:
             self.run.sh_bld_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.002)
         local_custom_bld_objects = _simheaven_objects_for_bounds(
             self.run.custom_bld_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.002)
+        if self.review is not None:
+            self._review_existing_polys = local_existing_bld_polys
+            self._review_excl_polys = local_excl_polys
         _record_elapsed(self.run.timings, self.file_timings, 'lookup', _t)
 
         _t = time.perf_counter()
@@ -9794,10 +9944,15 @@ class _TexturePass:
                 )
 
             _n_agri_in = len(self.yolo_detections)
+            _review_before = list(self.yolo_detections)
             self.yolo_detections, greenhouse_detections = AGRI.split_detections(
                 self.yolo_detections, self.veg_map, _agri_image, self.m_per_px,
                 counts=self.file_counts, height_fn=_agri_heights,
             )
+            if self.review is not None:
+                for _gh in greenhouse_detections:
+                    self.review.set(_gh, "greenhouse")
+                self.review.dropped(_review_before, self.yolo_detections, "farmland_ground")
             self.file_counts['agri_greenhouse'] = len(greenhouse_detections)
             self.file_counts['agri_ground'] = (
                 _n_agri_in - len(self.yolo_detections) - len(greenhouse_detections)
@@ -9844,6 +9999,7 @@ class _TexturePass:
                 _seg_img = self.run._load_source_image(
                     self.fname, self.run._source_mode, self.run._orthophoto_dir
                 )
+            _review_before = list(self.yolo_detections)
             self.yolo_detections = _seg_first_detections(
                 self.yolo_detections, self.veg_map, _seg_img, self.m_per_px,
                 self.img_w, self.img_h, _seg_mode, self.file_counts,
@@ -9852,6 +10008,9 @@ class _TexturePass:
                     else (self.road_mask | self.rail_mask)
                 ),
             )
+            if self.review is not None:
+                self.review.dropped(_review_before, self.yolo_detections, "replaced_by_segments")
+                self.review.add(self.yolo_detections)
             _seg_img = None
             _record_elapsed(self.run.timings, self.file_timings, 'seg_first', _t)
 
@@ -10128,6 +10287,7 @@ class _TexturePass:
                         cv2.fillPoly(self.recent_spacing_mask, [ring_i], 1)
                         self.recent_spacing_marks += 1
                 detection['_large_footprint_placed'] = True
+                self._review_fate(detection, "placed_polygon_facade")
                 self.pts_this.append((jx, jy, float(detection['heading']), facade_cls))
                 _fp_key = (
                     'seg_first_polygon_placed' if _seg_poly
@@ -10161,6 +10321,7 @@ class _TexturePass:
             yolo_bbox = prepared_yolo['bbox']
             if not prepared_yolo['valid']:
                 self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                self._review_fate(detection, "invalid_shape")
                 if self._blkdbg is not None:
                     self._blkdbg.append(
                         ('invalid', None, None, detection.get('points'))
@@ -10171,11 +10332,16 @@ class _TexturePass:
             jy = int(prepared_yolo['jy'])
             if not (0 <= jx < self.img_w and 0 <= jy < self.img_h):
                 self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                self._review_fate(detection, "outside_texture")
                 if self._blkdbg is not None:
                     self._blkdbg.append(('outside', jx, jy, yolo_poly))
                 continue
             if self.placement_occ_mask[jy, jx]:
                 self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                self._review_fate(
+                    detection,
+                    "center_on_existing" if self.static_occ_mask[jy, jx] else "center_on_road",
+                )
                 if self._blkdbg is not None:
                     self._blkdbg.append(('static_center', jx, jy, yolo_poly))
                 continue
@@ -10205,6 +10371,7 @@ class _TexturePass:
                 self._pf_fits += time.perf_counter() - _t_pf
             if not footprint_clear:
                 self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                self._review_fate(detection, "overlaps_existing")
                 if self._blkdbg is not None:
                     self._blkdbg.append(('static_footprint', jx, jy, yolo_poly))
                 continue
@@ -10219,6 +10386,7 @@ class _TexturePass:
                 self.file_counts['yolo_inside_large_footprint'] = (
                     self.file_counts.get('yolo_inside_large_footprint', 0) + 1
                 )
+                self._review_fate(detection, "inside_placed_roof")
                 if self._blkdbg is not None:
                     self._blkdbg.append(('large_footprint', jx, jy, yolo_poly))
                 continue
@@ -10242,6 +10410,7 @@ class _TexturePass:
                                         self.lat_n, self.lat_s, self.lon_w, self.lon_e)
             if not (self.run.lon <= o_lon < self.run.lon + 1 and self.run.lat <= o_lat < self.run.lat + 1):
                 self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
+                self._review_fate(detection, "outside_tile")
                 if self._blkdbg is not None:
                     self._blkdbg.append(('out_of_tile', jx, jy, yolo_poly))
                 continue
@@ -10330,6 +10499,7 @@ class _TexturePass:
                 self.file_counts['yolo_object_placed'] = (
                     self.file_counts.get('yolo_object_placed', 0) + 1
                 )
+                self._review_fate(detection, "placed_object")
                 if object_candidate.get('roof_color_match'):
                     self.file_counts['roof_color_matched'] = (
                         self.file_counts.get('roof_color_matched', 0) + 1
@@ -10404,6 +10574,7 @@ class _TexturePass:
                     self.file_counts['yolo_facade_placed'] = (
                         self.file_counts.get('yolo_facade_placed', 0) + 1
                     )
+                    self._review_fate(detection, "placed_facade")
                     self.run.direct_yolo_facade_placements += 1
                     placed_direct_detection = True
                 elif _asset_kind_enabled('facade', self.run.building_asset_mode):
@@ -10414,6 +10585,10 @@ class _TexturePass:
                     else:
                         status_key = 'yolo_facade_spacing_reject'
                     self.file_counts[status_key] = self.file_counts.get(status_key, 0) + 1
+                    self._review_fate(
+                        detection,
+                        "no_asset:" + str(object_status) + "+" + status_key[len("yolo_"):],
+                    )
 
             self.yolo_viz_polys[-1] = (yolo_poly.copy(), placed_direct_detection)
             # The placed-OBB mask and the incremental occupancy
@@ -10439,6 +10614,75 @@ class _TexturePass:
                     self.recent_spacing_marks = 0
             if placed_direct_detection:
                 self.file_counts['yolo_placed'] = self.file_counts.get('yolo_placed', 0) + 1
+
+    def _review_fate(self, detection, fate):
+        if self.review is not None:
+            self.review.set(detection, fate)
+
+    def _write_review_dump(self):
+        """O4_BLD_REVIEW_DUMP: candidates with outcomes plus blocking scenery."""
+        lat_n, lat_s, lon_w, lon_e = self.lat_n, self.lat_s, self.lon_w, self.lon_e
+        w, h = self.img_w, self.img_h
+
+        def ll_px(lat, lon):
+            # The same linear mapping the blocker rasterizers use.
+            return [round((lon - lon_w) / (lon_e - lon_w) * w, 1),
+                    round((lat_n - lat) / (lat_n - lat_s) * h, 1)]
+
+        pad = 0.002
+        margin_px = max(1.0, 3.0 / max(self.m_per_px, 1e-6))
+        blockers = []
+        seen_objects = set()
+        for kind, objects in (
+            ("simheaven_object", getattr(self.run, 'sh_bld_objects', None) or ()),
+            ("custom_object", getattr(self.run, 'custom_bld_objects', None) or ()),
+        ):
+            for obj in objects:
+                lat, lon = float(obj['lat']), float(obj['lon'])
+                if not (lat_s - pad <= lat <= lat_n + pad and lon_w - pad <= lon <= lon_e + pad):
+                    continue
+                # simHeaven packs are also active custom scenery: list each object once.
+                key = (round(lat, 7), round(lon, 7), obj.get('path'))
+                if key in seen_objects:
+                    continue
+                seen_objects.add(key)
+                cx, cy = ll_px(lat, lon)
+                box = cv2.boxPoints((
+                    (cx, cy),
+                    (max(2.0, float(obj['w_m']) / self.m_per_px) + 2 * margin_px,
+                     max(2.0, float(obj['h_m']) / self.m_per_px) + 2 * margin_px),
+                    float(obj['heading']),
+                ))
+                blockers.append({
+                    "k": kind, "src": obj.get('src') or "", "a": obj.get('path') or "",
+                    "r": [[[round(float(x), 1), round(float(y), 1)] for x, y in box]],
+                })
+        for kind, polys in (
+            ("existing_facade", getattr(self, '_review_existing_polys', None) or ()),
+            ("exclusion", getattr(self, '_review_excl_polys', None) or ()),
+        ):
+            for poly in polys:
+                pts = poly.get('pts', poly) if isinstance(poly, dict) else poly
+                blockers.append({
+                    "k": kind, "src": getattr(pts, 'src', "") or "", "a": "",
+                    "r": [[ll_px(float(lat), float(lon)) for lat, lon in pts]],
+                })
+        for quad in self.stock_yolo_occupied_polys or ():
+            blockers.append({
+                "k": "stock_yolo", "src": "this overlay", "a": "",
+                "r": [[[round(float(x), 1), round(float(y), 1)]
+                       for x, y in np.asarray(quad).reshape(-1, 2)]],
+            })
+        path = os.path.join(self.run.cache_dir, self.fname.replace('.dds', '_review.json'))
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump({
+                "texture": self.fname,
+                "conf": float(self.run.yolo_conf),
+                "min_footprint_m2": float(self.run.min_footprint_m2),
+                "margin_m": 3.0,
+                "detections": self.review.records(w, h),
+                "blockers": blockers,
+            }, handle, separators=(",", ":"))
 
     def _finish_placement(self):
         """Write the block-debug dump and record placement timings."""
