@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overlay Review</title>
+<style>
+  :root {
+    --bg: #111315; --panel: #1b1e21; --line: #2c3035; --text: #e6e8ea; --muted: #9aa1a8;
+    --accent-a: #4aa3ff; --accent-b: #ffb340;
+    --obj: 255,140,40; --fac: 235,70,190; --tree: 60,210,90; --scenery: 40,215,235;
+    --near: 200,200,200; --filtered: 255,70,70; --resorted: 150,120,255; --blocked: 255,230,40;
+    --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --placedc: 255,255,255; --other: 130,130,130;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 270px 1fr; height: 100%; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 12px; overflow-y: auto; }
+  h1 { font-size: 15px; margin: 0 0 10px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 6px; }
+  .samples button { display: block; width: 100%; text-align: left; background: none; color: var(--text);
+    border: 1px solid transparent; border-radius: 6px; padding: 5px 8px; cursor: pointer; font: inherit; }
+  .samples button:hover { background: #24282c; }
+  .samples button.on { border-color: var(--line); background: #262b30; }
+  .samples small { color: var(--muted); display: block; }
+  label.row { display: flex; align-items: center; gap: 8px; margin: 3px 0; cursor: pointer; }
+  label.row .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  select, input[type=range] { width: 100%; }
+  select { background: #24282c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px; font: inherit; }
+  .side { display: grid; grid-template-columns: 22px 1fr; gap: 6px; align-items: center; margin: 4px 0; }
+  .tag { font-weight: 700; text-align: center; border-radius: 4px; color: #111; }
+  .tag.a { background: var(--accent-a); } .tag.b { background: var(--accent-b); }
+  .keys, .hint { color: var(--muted); font-size: 12px; }
+  .keys b { color: var(--text); font-weight: 600; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .sw.dash { background: none !important; border: 1.5px dashed currentColor; }
+  main { position: relative; overflow: hidden; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; }
+  canvas.drag { cursor: grabbing; }
+  #badge { position: absolute; top: 12px; left: 12px; padding: 6px 12px; border-radius: 6px; font-weight: 700;
+    color: #111; font-size: 15px; pointer-events: none; }
+  #status { position: absolute; left: 12px; bottom: 10px; background: rgba(0,0,0,.65); padding: 5px 10px;
+    border-radius: 6px; pointer-events: none; font-variant-numeric: tabular-nums; }
+  #tip { position: absolute; pointer-events: none; background: rgba(0,0,0,.88); padding: 6px 9px; border-radius: 6px;
+    max-width: 480px; display: none; word-break: break-all; }
+  #tip .t { word-break: normal; }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <h1>Overlay review</h1>
+    <h2>Location</h2>
+    <select id="location"></select>
+    <h2>Texture</h2>
+    <div class="samples" id="samples"></div>
+    <h2>Compare</h2>
+    <div class="side"><span class="tag a">A</span><select id="runA"></select></div>
+    <div class="side"><span class="tag b">B</span><select id="runB"></select></div>
+    <div class="hint" id="notes"></div>
+    <h2>Placed output</h2>
+    <div id="outLayers"></div>
+    <h2>Why not placed</h2>
+    <div id="candLayers"></div>
+    <div class="hint" id="nearHint" style="margin-top:6px"></div>
+    <input type="range" id="nearMin" min="0.01" max="0.2" step="0.005" value="0.02">
+    <h2>Existing scenery</h2>
+    <div id="sceneryLayers"></div>
+    <div class="hint">Footprints include the 3 m clearance the overlay keeps.</div>
+    <h2>Display</h2>
+    <label class="row"><input type="checkbox" id="lyFill" checked>Filled shapes</label>
+    <div class="hint">Overlay opacity</div>
+    <input type="range" id="opacity" min="0.1" max="1" step="0.05" value="0.55">
+    <h2>Keys</h2>
+    <div class="keys">
+      <b>Space</b> flip A / B &nbsp; <b>H</b> (hold) texture only<br>
+      <b>1–9</b> sample &nbsp; <b>F</b> fit &nbsp; <b>Wheel</b> zoom &nbsp; <b>drag</b> pan<br>
+      Hover a shape for details.
+    </div>
+  </aside>
+  <main id="main">
+    <canvas id="cv"></canvas>
+    <div id="badge"></div>
+    <div id="status"></div>
+    <div id="tip"></div>
+    <div id="empty">No runs yet.<br>Run <code>run_review.py RUN_NAME</code> first.</div>
+  </main>
+</div>
+<script>
+(async () => {
+  const BUST = Date.now();
+  const loadScript = src => new Promise((ok, bad) => {
+    const el = document.createElement("script");
+    el.src = src + (src.includes("?") ? "&" : "?") + "t=" + BUST; el.onload = ok; el.onerror = bad;
+    document.head.appendChild(el);
+  });
+  try { await loadScript("runs_index.js"); } catch (e) { /* no runs yet */ }
+  const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  const $ = id => document.getElementById(id);
+  const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const index = window.REVIEW_INDEX || [];
+  const loaded = {}, images = {}, geoms = {};
+  let sampleKeys = [], sample = null, side = "A", hideOverlay = false;
+  let view = { s: 0.2, x: 0, y: 0 };  // screen = image * s + (x, y)
+
+  // Layer definitions: placed output, candidate outcomes, existing scenery.
+  const OUT = [
+    { id: "obj", label: "Objects", color: "--obj", on: true },
+    { id: "fac", label: "Facades", color: "--fac", on: true },
+    { id: "tree", label: "Trees", color: "--tree", on: true },
+    { id: "placedc", label: "Detected box (before asset fit)", color: "--placedc", on: false, outline: true },
+  ];
+  const CAND = [
+    { id: "near", label: "Below confidence", color: "--near", on: true, dash: true },
+    { id: "filtered", label: "Filtered (size / overlap)", color: "--filtered", on: false },
+    { id: "blocked", label: "Blocked by existing scenery", color: "--blocked", on: true },
+    { id: "road", label: "Centre on a road", color: "--road", on: true },
+    { id: "noasset", label: "No asset fits", color: "--noasset", on: true },
+    { id: "dedup", label: "Removed: asset overlapped a neighbour", color: "--dedup", on: true, dash: true },
+    { id: "dedupAsset", label: "… the removed asset's footprint", color: "--dedup", on: true, fillOnly: true },
+    { id: "resorted", label: "Farmland / greenhouse / split", color: "--resorted", on: false },
+    { id: "other", label: "Other", color: "--other", on: false },
+  ];
+  const SCEN = [
+    { id: "scenery", label: "Objects & facades", color: "--scenery", on: true },
+  ];
+  const FATE_CAT = f =>
+    f === "below_conf" ? "near"
+    : ["below_min_footprint", "oversize_reject", "suppressed_overlap", "covered_by_higher_zl"].includes(f) ? "filtered"
+    : ["center_on_existing", "overlaps_existing", "inside_placed_roof"].includes(f) ? "blocked"
+    : f === "center_on_road" ? "road"
+    : f === "dropped_tile_dedup" ? "dedup"
+    : f.startsWith("no_asset") ? "noasset"
+    : ["farmland_ground", "greenhouse", "replaced_by_segments"].includes(f) ? "resorted"
+    : f.startsWith("placed") ? "placedc" : "other";
+  const FATE_TEXT = {
+    below_conf: "Below the confidence threshold",
+    below_min_footprint: "Smaller than the minimum footprint",
+    oversize_reject: "Rejected as oversized",
+    suppressed_overlap: "Overlapped a smaller kept detection",
+    covered_by_higher_zl: "Covered by a higher-ZL texture",
+    center_on_existing: "Centre lies on existing scenery",
+    overlaps_existing: "Footprint overlaps existing scenery",
+    inside_placed_roof: "Inside a roof already placed as one polygon",
+    center_on_road: "Centre lies on a road",
+    farmland_ground: "Classified as open farmland",
+    greenhouse: "Placed as a greenhouse",
+    replaced_by_segments: "Replaced by segmented outline pieces",
+    placed_object: "Placed as an object",
+    placed_facade: "Placed as a facade",
+    placed_polygon_facade: "Placed as a traced polygon facade",
+    dropped_tile_dedup: "Placed, then removed: its asset (filled orange) overlapped a neighbouring placement by more than 20%",
+  };
+
+  function layerRows(box, defs) {
+    for (const d of defs) {
+      const row = document.createElement("label");
+      row.className = "row";
+      row.innerHTML = `<input type="checkbox" id="ly_${d.id}" ${d.on ? "checked" : ""}>` +
+        `<span class="sw${d.dash ? " dash" : ""}" style="background:rgb(var(${d.color}));color:rgb(var(${d.color}))"></span>` +
+        `${d.label}<span class="n" id="n_${d.id}"></span>`;
+      box.appendChild(row);
+      row.querySelector("input").oninput = draw;
+    }
+  }
+  layerRows($("outLayers"), OUT); layerRows($("candLayers"), CAND); layerRows($("sceneryLayers"), SCEN);
+  const on = id => $("ly_" + id).checked;
+
+  if (!index.length) return;
+  $("empty").style.display = "none";
+
+  const runId = r => `${r.run}/${r.provider}`;
+  index.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+  const runLabel = r => r.run + (r.note ? `  —  ${r.note}` : "");
+  for (const sel of [$("runA"), $("runB")]) for (const r of index) sel.add(new Option(runLabel(r), runId(r)));
+  // A = newest baseline, B = newest other run (the change being judged).
+  const base = index.find(r => /baseline/i.test(r.run)) || index[index.length - 1];
+  const cand = index.find(r => r !== base) || base;
+  $("runA").value = runId(base);
+  $("runB").value = runId(cand);
+  function showNotes() {
+    const note = id => (index.find(r => runId(r) === id) || {}).note || "";
+    $("notes").innerHTML = `<b>A</b> ${esc(note($("runA").value) || "(no note)")}<br><b>B</b> ${esc(note($("runB").value) || "(no note)")}`;
+  }
+
+  function loadRun(id) {
+    if (loaded[id]) return loaded[id];
+    const r = index.find(e => runId(e) === id);
+    loaded[id] = new Promise((ok, bad) => {
+      const s = document.createElement("script");
+      s.src = r.src + "?t=" + BUST; s.onload = () => ok(window.REVIEW[id]); s.onerror = bad;
+      document.head.appendChild(s);
+    });
+    return loaded[id];
+  }
+  // Each sample's geometry is its own file, loaded when first shown.
+  const sampleData = (id, key) => (window.REVIEW_SAMPLE || {})[id + "/" + key];
+  function loadSample(id, key) {
+    const k = id + "/" + key;
+    if (loaded[k]) return loaded[k];
+    const m = window.REVIEW && window.REVIEW[id] && window.REVIEW[id][key];
+    if (!m) return Promise.resolve(null);
+    $("status").textContent = `Loading ${key} (${id})…`;
+    loaded[k] = new Promise((ok, bad) => {
+      const s = document.createElement("script");
+      s.src = m.src + "?t=" + BUST; s.onload = () => ok(sampleData(id, key)); s.onerror = bad;
+      document.head.appendChild(s);
+    });
+    return loaded[k];
+  }
+  const providerOf = id => id.split("/").pop();
+  const current = () => (side === "A" ? $("runA") : $("runB")).value;
+
+  function image(id, key) {
+    const data = window.REVIEW && window.REVIEW[id];
+    if (!data || !data[key]) return null;
+    const src = data[key].img;
+    if (!images[src]) { const im = new Image(); im.src = src; im.onload = draw; images[src] = im; }
+    return images[src];
+  }
+
+  function bbox(rings) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const r of rings) for (const [x, y] of r) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    return [x0, y0, x1, y1];
+  }
+  // Shapes per run+sample in texture pixels, grouped by layer, with a grid
+  // index for hover and Path2D per layer cached across redraws.
+  const CELL = 128, GRID = 4096 / CELL;
+  function geometry(id, key) {
+    const k = id + "|" + key;
+    if (geoms[k]) return geoms[k];
+    const d = sampleData(id, key), shapes = [];
+    for (const b of d.bld) {
+      const rings = b.t === "obj" ? [b.p] : b.r;
+      shapes.push({ layer: b.t, info: b, rings, bb: bbox(rings) });
+    }
+    for (const v of d.veg) shapes.push({ layer: "tree", info: v, rings: v.r, bb: bbox(v.r) });
+    const diag = d.diag;
+    if (diag) {
+      for (const c of diag.detections) {
+        if (c.q.length < 3) continue;
+        shapes.push({ layer: FATE_CAT(c.f), info: c, rings: [c.q], bb: bbox([c.q]), cand: true });
+        if (c.ap && c.ap.length >= 3) shapes.push({ layer: "dedupAsset", info: c, rings: [c.ap], bb: bbox([c.ap]), cand: true });
+      }
+      for (const b of diag.blockers) shapes.push({ layer: "scenery", info: b, rings: b.r, bb: bbox(b.r), scen: true });
+    }
+    const byLayer = {}, grid = Array.from({ length: GRID * GRID }, () => []);
+    shapes.forEach((s, i) => {
+      (byLayer[s.layer] = byLayer[s.layer] || []).push(s);
+      const cx0 = Math.max(0, Math.floor(s.bb[0] / CELL)), cx1 = Math.min(GRID - 1, Math.floor(s.bb[2] / CELL));
+      const cy0 = Math.max(0, Math.floor(s.bb[1] / CELL)), cy1 = Math.min(GRID - 1, Math.floor(s.bb[3] / CELL));
+      for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) grid[cy * GRID + cx].push(i);
+    });
+    return (geoms[k] = { shapes, byLayer, grid, diag, paths: {}, nearKey: null });
+  }
+  const visible = (s, nearMin) => on(s.layer) && !(s.layer === "near" && s.info.c < nearMin);
+  function layerPath(g, layer, nearMin) {
+    if (layer === "near" && g.nearKey !== nearMin) { delete g.paths.near; g.nearKey = nearMin; }
+    if (g.paths[layer]) return g.paths[layer];
+    const p = new Path2D(); let n = 0;
+    for (const s of g.byLayer[layer] || []) {
+      if (layer === "near" && s.info.c < nearMin) continue;
+      for (const r of s.rings) { r.forEach(([x, y], i) => i ? p.lineTo(x, y) : p.moveTo(x, y)); p.closePath(); }
+      n++;
+    }
+    return (g.paths[layer] = { p, n });
+  }
+  // Coalesce bursts of wheel/drag events into one frame.
+  let pending = false;
+  const requestDraw = () => { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; draw(); }); } };
+
+  function resize() {
+    const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+    draw();
+  }
+  function fit() {
+    const r = cv.getBoundingClientRect();
+    view.s = Math.min(r.width, r.height) / 4096 * 0.96;
+    view.x = (r.width - 4096 * view.s) / 2; view.y = (r.height - 4096 * view.s) / 2;
+    draw();
+  }
+
+  function draw() {
+    const dpr = window.devicePixelRatio || 1, id = current();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#0c0d0e"; ctx.fillRect(0, 0, cv.width, cv.height);
+    const badge = $("badge");
+    badge.textContent = `${side}  ·  ${id.split("/")[0]}`;
+    badge.style.background = side === "A" ? "var(--accent-a)" : "var(--accent-b)";
+    if (!sample || !window.REVIEW || !window.REVIEW[id]) return;
+    const meta = window.REVIEW[id][sample], data = sampleData(id, sample);
+    if (!meta) { $("status").textContent = `${sample} is not in ${id}`; return; }
+    if (!data) { loadSample(id, sample).then(draw); return; }
+    const g = geometry(id, sample), nearMin = +$("nearMin").value;
+    const conf = g.diag ? g.diag.conf : null;
+    $("nearMin").max = conf || 0.2;
+    $("nearHint").textContent = conf ? `Show near misses from confidence ${nearMin.toFixed(3)} (threshold ${conf})` : "This run has no candidate data.";
+    // Counts per layer for this side.
+    for (const d of [...OUT, ...CAND, ...SCEN]) {
+      const n = d.id === "near" ? layerPath(g, "near", nearMin).n : (g.byLayer[d.id] || []).length;
+      $("n_" + d.id).textContent = n || "";
+    }
+
+    const im = image(id, sample);
+    ctx.setTransform(view.s * dpr, 0, 0, view.s * dpr, view.x * dpr, view.y * dpr);
+    // Native pixels past 1:1: no smoothing, so detail is never blurred.
+    ctx.imageSmoothingEnabled = view.s < 1;
+    if (im && im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, 4096, 4096);
+    if (!hideOverlay) {
+      const op = +$("opacity").value, fill = $("lyFill").checked;
+      const order = ["scenery", "tree", "obj", "fac", "placedc", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "road", "blocked"];
+      const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
+      for (const layer of order) {
+        if (!on(layer)) continue;
+        const { p, n } = layerPath(g, layer, nearMin);
+        if (!n) continue;
+        const rgb = css(defs[layer].color), cand = CAND.some(c => c.id === layer) || defs[layer].outline;
+        // Existing scenery: fill only, so it reads as ground cover under everything else.
+        // Nonzero: blockers from different packs overlap and must not cancel out.
+        if (layer === "scenery" || defs[layer].fillOnly) { ctx.fillStyle = `rgba(${rgb},${op * 0.6})`; ctx.fill(p, "nonzero"); continue; }
+        // Placed output: always a solid border; fill optional. Candidates: border only.
+        ctx.lineWidth = (cand ? 1.6 : 2.0) / view.s;
+        ctx.setLineDash(defs[layer].dash ? [5 / view.s, 4 / view.s] : []);
+        if (fill && !cand) { ctx.fillStyle = `rgba(${rgb},${op * 0.45})`; ctx.fill(p, "evenodd"); }
+        ctx.strokeStyle = `rgba(${rgb},${Math.min(1, op + 0.45)})`; ctx.stroke(p);
+      }
+      ctx.setLineDash([]);
+    }
+    const nObj = data.bld.filter(b => b.t === "obj").length, nFac = data.bld.length - nObj;
+    $("status").textContent =
+      `${meta.label}  ·  ZL${meta.zl}  ·  ${meta.file}  ·  objects ${nObj}  facades ${nFac}  tree polys ${data.veg.length}` +
+      `  ·  zoom ${Math.round(view.s * 100)}%${hideOverlay ? "  ·  TEXTURE ONLY" : ""}`;
+  }
+
+  function inside(px, py, ring) {
+    let c = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j];
+      if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  }
+  const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  function describe(s) {
+    const i = s.info;
+    if (s.cand) {
+      let fate = FATE_TEXT[i.f];
+      if (!fate && i.f.startsWith("no_asset")) fate = `No asset fits (${esc(i.f.slice(9))})`;
+      return `<b class="t">${fate || esc(i.f)}</b><br>confidence ${i.c} · ${i.m2} m²${i.a ? `<br>asset: ${esc(i.a)}` : ""}`;
+    }
+    if (s.scen) {
+      const what = { simheaven_object: "simHeaven object", custom_object: "Custom scenery object",
+        existing_facade: "Existing facade", exclusion: "Exclusion polygon", stock_yolo: "Stock-YOLO placement (this overlay)" }[i.k] || i.k;
+      return `<b class="t">${what}</b>${i.src ? `<br>pack: ${esc(i.src)}` : ""}${i.a ? `<br>${esc(i.a)}` : ""}`;
+    }
+    if (s.layer === "obj") return `<b>object</b><br>${esc(i.a)}`;
+    if (s.layer === "fac") return `<b>facade</b> · height ${i.h} m<br>${esc(i.a)}`;
+    return `<b>trees</b> · density ${i.d}<br>${esc(i.a)}`;
+  }
+  function hover(e) {
+    const tip = $("tip"), id = current();
+    if (!sample || hideOverlay || !sampleData(id, sample)) { tip.style.display = "none"; return; }
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const ix = (mx - view.x) / view.s, iy = (my - view.y) / view.s, nearMin = +$("nearMin").value;
+    // Every visible shape under the cursor, most specific first: candidates, then output, then scenery.
+    const rank = s => s.cand ? 0 : s.scen ? 2 : s.layer === "tree" ? 3 : 1;
+    const hits = [], g = geometry(id, sample);
+    const cx = Math.floor(ix / CELL), cy = Math.floor(iy / CELL);
+    if (cx < 0 || cy < 0 || cx >= GRID || cy >= GRID) { tip.style.display = "none"; return; }
+    for (const i of g.grid[cy * GRID + cx]) {
+      const s = g.shapes[i];
+      if (!visible(s, nearMin) || ix < s.bb[0] || ix > s.bb[2] || iy < s.bb[1] || iy > s.bb[3]) continue;
+      let n = 0; for (const ring of s.rings) if (inside(ix, iy, ring)) n++;
+      if (n % 2 === 1) hits.push(s);
+    }
+    if (!hits.length) { tip.style.display = "none"; return; }
+    hits.sort((a, b) => rank(a) - rank(b));
+    tip.innerHTML = hits.slice(0, 3).map(describe).join("<hr style='border:0;border-top:1px solid #444;margin:5px 0'>");
+    tip.style.display = "block";
+    tip.style.left = Math.min(mx + 14, r.width - 490) + "px"; tip.style.top = (my + 14) + "px";
+  }
+
+  async function selectSample(key) {
+    sample = key;
+    document.querySelectorAll(".samples button").forEach(b => b.classList.toggle("on", b.dataset.key === key));
+    await Promise.all([loadRun($("runA").value), loadRun($("runB").value)]);
+    draw();
+    // Load both sides so the flip is instant.
+    await Promise.all([loadSample($("runA").value, key), loadSample($("runB").value, key)]);
+    draw();
+  }
+
+  const LOC_PREFIX = { khh: "Kaohsiung", szx: "Shenzhen", wnz: "Wenzhou", shouguang: "Shouguang" };
+  const locationOf = (data, k) => data[k].location || LOC_PREFIX[k.split("_")[0]] || "Other";
+  let manifestA = {};
+  function buildLocations(data) {
+    manifestA = data || {};
+    const locs = [...new Set(Object.keys(manifestA).map(k => locationOf(manifestA, k)))];
+    const sel = $("location"), prev = sel.value;
+    sel.innerHTML = "";
+    for (const l of locs) sel.add(new Option(l, l));
+    if (locs.includes(prev)) sel.value = prev;
+  }
+  function buildSampleList(data) {
+    const loc = $("location").value;
+    sampleKeys = Object.keys(data || {}).filter(k => locationOf(data, k) === loc);
+    const box = $("samples");
+    box.innerHTML = "";
+    sampleKeys.forEach((k, i) => {
+      const b = document.createElement("button");
+      b.dataset.key = k;
+      b.innerHTML = `${i + 1}. ${k}<small>${data[k].label} · ZL${data[k].zl}</small>`;
+      b.onclick = () => selectSample(k);
+      box.appendChild(b);
+    });
+  }
+  showNotes();
+  loadRun($("runA").value).then(data => {
+    buildLocations(data);
+    buildSampleList(data);
+    resize(); fit(); selectSample(sampleKeys[0]);
+  });
+  $("location").onchange = () => { buildSampleList(manifestA); fit(); selectSample(sampleKeys[0]); };
+
+  $("runA").onchange = () => loadRun($("runA").value).then(data => {
+    showNotes();
+    buildLocations(data);
+    buildSampleList(data);
+    selectSample(sampleKeys.includes(sample) ? sample : sampleKeys[0]);
+  });
+  $("runB").onchange = () => { showNotes();
+    loadRun($("runB").value).then(() => sample && loadSample($("runB").value, sample)).then(draw); };
+  for (const id of ["lyFill", "opacity", "nearMin"]) $(id).oninput = draw;
+
+  let drag = null;
+  cv.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; cv.classList.add("drag"); });
+  window.addEventListener("mouseup", () => { drag = null; cv.classList.remove("drag"); });
+  window.addEventListener("mousemove", e => {
+    if (drag) { view.x = drag.vx + e.clientX - drag.x; view.y = drag.vy + e.clientY - drag.y; requestDraw(); }
+    else if (e.target === cv) hover(e);
+  });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const ns = Math.min(32, Math.max(0.05, view.s * Math.pow(1.0015, -e.deltaY)));
+    view.x = mx - (mx - view.x) * ns / view.s; view.y = my - (my - view.y) * ns / view.s; view.s = ns;
+    requestDraw(); hover(e);
+  }, { passive: false });
+  window.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT" && e.target.type === "range") return;
+    if (e.target.tagName === "SELECT") {
+      // Arrow keys still drive the dropdown; viewer shortcuts take over.
+      if (!(e.code === "Space" || /^[hHfF1-9]$/.test(e.key))) return;
+      e.target.blur();
+    }
+    if (e.code === "Space") { e.preventDefault(); side = side === "A" ? "B" : "A"; draw(); }
+    else if (e.key === "h" || e.key === "H") { if (!hideOverlay) { hideOverlay = true; draw(); } }
+    else if (e.key === "f" || e.key === "F") fit();
+    else if (/^[1-9]$/.test(e.key) && sampleKeys[+e.key - 1]) selectSample(sampleKeys[+e.key - 1]);
+  });
+  window.addEventListener("keyup", e => { if (e.key === "h" || e.key === "H") { hideOverlay = false; draw(); } });
+  window.addEventListener("resize", resize);
+})();
+</script>
+</body>
+</html>
