@@ -145,6 +145,39 @@ class CrossTextureDedupTests(unittest.TestCase):
         finally:
             b._bounds_for_object_path = orig
 
+    def test_fallback_keeps_blocked_placement_with_smaller_asset(self):
+        # A 20x20 asset overlapping a kept 10x10 neighbour is dropped without
+        # a fallback; with one, its 4x4 alternative clears the neighbour and
+        # replaces it in place. An alternative that still overlaps is skipped.
+        import O4_Building_Overlay as b
+        import math
+        orig = b._bounds_for_object_path
+        # Half-sizes in metres; mid overlaps the neighbour by 25% (> 20%).
+        sizes = {"small.obj": 5.0, "big.obj": 10.0, "tiny.obj": 2.0, "mid.obj": 9.5}
+        b._bounds_for_object_path = lambda p: (-sizes[p], sizes[p], -sizes[p], sizes[p])
+        try:
+            mlon = 111320.0 * math.cos(math.radians(24.5))
+            neighbour = self._obj(0.0010, 0.0010, path="small.obj")
+            big = self._obj(0.0010 + 12.0 / mlon, 0.0010, path="big.obj")
+            kept, dropped = b._dedupe_overlapping_placements([neighbour, big], 24, 118)
+            self.assertEqual(dropped, 1)
+
+            calls = []
+
+            def fallback(placement):
+                calls.append(placement)
+                return [("mid.obj", 0.0), ("tiny.obj", 0.0)]
+
+            replaced = {}
+            kept, dropped = b._dedupe_overlapping_placements(
+                [neighbour, big], 24, 118, fallback=fallback, replaced_out=replaced)
+            self.assertEqual(dropped, 0)
+            self.assertEqual(calls, [big])
+            self.assertEqual([p[3] for p in kept], ["small.obj", "tiny.obj"])
+            self.assertEqual(replaced[id(big)][3], "tiny.obj")
+        finally:
+            b._bounds_for_object_path = orig
+
 
 class ConfigPropagationTests(unittest.TestCase):
     """Guards the mechanism the GUI single-tile build fix relies on:

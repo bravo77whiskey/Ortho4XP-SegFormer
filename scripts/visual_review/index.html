@@ -10,7 +10,7 @@
     --accent-a: #4aa3ff; --accent-b: #ffb340;
     --obj: 255,140,40; --fac: 235,70,190; --tree: 60,210,90; --scenery: 40,215,235;
     --near: 200,200,200; --filtered: 255,70,70; --resorted: 150,120,255; --blocked: 255,230,40;
-    --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --placedc: 255,255,255; --other: 130,130,130;
+    --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --smaller: 120,255,120; --placedc: 255,255,255; --other: 130,130,130;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -111,6 +111,7 @@
     { id: "fac", label: "Facades", color: "--fac", on: true },
     { id: "tree", label: "Trees", color: "--tree", on: true },
     { id: "placedc", label: "Detected box (before asset fit)", color: "--placedc", on: false, outline: true },
+    { id: "smaller", label: "Kept with a smaller asset (box)", color: "--smaller", on: true, outline: true },
   ];
   const CAND = [
     { id: "near", label: "Below confidence", color: "--near", on: true, dash: true },
@@ -132,6 +133,7 @@
     : ["center_on_existing", "overlaps_existing", "inside_placed_roof"].includes(f) ? "blocked"
     : f === "center_on_road" ? "road"
     : f === "dropped_tile_dedup" ? "dedup"
+    : f === "placed_object_smaller" ? "smaller"
     : f.startsWith("no_asset") ? "noasset"
     : ["farmland_ground", "greenhouse", "replaced_by_segments"].includes(f) ? "resorted"
     : f.startsWith("placed") ? "placedc" : "other";
@@ -151,6 +153,7 @@
     placed_object: "Placed as an object",
     placed_facade: "Placed as a facade",
     placed_polygon_facade: "Placed as a traced polygon facade",
+    placed_object_smaller: "Placed with a smaller asset: the first choice overlapped a neighbour",
     dropped_tile_dedup: "Placed, then removed: its asset (filled orange) overlapped a neighbouring placement by more than 20%",
   };
 
@@ -312,7 +315,7 @@
     if (im && im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, 4096, 4096);
     if (!hideOverlay) {
       const op = +$("opacity").value, fill = $("lyFill").checked;
-      const order = ["scenery", "tree", "obj", "fac", "placedc", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "road", "blocked"];
+      const order = ["scenery", "tree", "obj", "fac", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "road", "blocked"];
       const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
       for (const layer of order) {
         if (!on(layer)) continue;

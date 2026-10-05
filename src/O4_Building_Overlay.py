@@ -7057,6 +7057,88 @@ def _select_yolo_object_candidate_once(
     return None, 'no_candidates'
 
 
+def _smaller_object_alternatives(
+    fit_table,
+    detection,
+    yolo_poly,
+    jx,
+    jy,
+    heading,
+    m_per_px,
+    max_footprint_m2,
+    enabled_assets_by_path=None,
+    residential_context=True,
+    min_coverage=0.5,
+    limit=12,
+):
+    """Assets strictly smaller than ``max_footprint_m2`` that fit the detection.
+
+    Used when the tile-wide dedup would drop a placement: these are tried in
+    order (largest first) before giving the building up. Same candidate pool,
+    size, height-gate and inside-detection rules as the selector, but any
+    coverage down to ``min_coverage`` of the detection is accepted. Returns
+    ``[(path, final_heading, footprint_m2), ...]``, one per distinct footprint.
+    """
+    try:
+        length_m = float(detection.get('length_m'))
+        width_m = float(detection.get('width_m'))
+    except (TypeError, ValueError):
+        return []
+    if not (math.isfinite(length_m) and math.isfinite(width_m)) or min(length_m, width_m) <= 0.0:
+        return []
+    length_m, width_m = max(length_m, width_m), min(length_m, width_m)
+    try:
+        detection_area_m2 = float(detection.get('area_m2') or 0.0)
+    except (TypeError, ValueError):
+        detection_area_m2 = 0.0
+    if detection_area_m2 <= 0.0:
+        return []
+    zone_class = int(detection.get('placement_class') or BLD_CLASS_MEDIUM)
+    bundle = _merged_yolo_candidates_by_zone(fit_table, zone_class)
+    entries = bundle['entries']
+    if not entries:
+        return []
+    view = _bundle_enabled_view(bundle, enabled_assets_by_path, zone_class)
+    resolved_assets = view['assets']
+    requires_res = view['requires_res']
+    height_list = bundle['height_list']
+    height_known_list = bundle.get('height_known_list')
+    height_gate_m = _detection_height_gate_m(detection)
+    viable = np.flatnonzero(
+        (bundle['req_l'] <= length_m + 1e-6) & (bundle['req_w'] <= width_m + 1e-6) &
+        (bundle['cov_area'] >= float(min_coverage) * detection_area_m2 - 1e-12)
+    ).tolist()
+    out, seen = [], set()
+    for idx in viable:  # coverage-descending: largest smaller assets first
+        asset = resolved_assets[idx]
+        if asset is None:
+            continue
+        if not residential_context and requires_res[idx]:
+            continue
+        if (
+            height_gate_m is not None and height_known_list is not None and
+            height_known_list[idx] and height_list[idx] > height_gate_m + 1e-6
+        ):
+            continue
+        bounds_m = asset['bounds_m']
+        footprint_m2 = (float(bounds_m[1]) - float(bounds_m[0])) * (float(bounds_m[3]) - float(bounds_m[2]))
+        if footprint_m2 >= float(max_footprint_m2) - 1e-6:
+            continue
+        heading_delta = float(entries[idx][2]['heading_delta'])
+        key = (tuple(bounds_m), heading_delta)
+        if key in seen:
+            continue
+        seen.add(key)
+        final_heading = (float(heading) + heading_delta) % 360.0
+        poly = _footprint_poly(int(jx), int(jy), bounds_m, final_heading, m_per_px)
+        if not _footprint_inside_detection(poly, yolo_poly, m_per_px):
+            continue
+        out.append((asset['path'], final_heading, footprint_m2))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _select_yolo_object_candidate(
     fit_table,
     detection,
@@ -7393,7 +7475,8 @@ def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg):
 
 
 def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
-                                   debug_path=None, overlap_frac=0.20):
+                                   debug_path=None, overlap_frac=0.20,
+                                   fallback=None, replaced_out=None):
     """Drop object placements whose footprints overlap an already-kept one.
 
     Overlap removal during placement is scoped per DDS texture (each texture
@@ -7413,6 +7496,11 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
 
     ``placements`` is a list of ``(lon, lat, heading, path)`` tuples; returns the
     kept list (original order preserved) and the number dropped.
+
+    ``fallback(placement)``, when given, returns smaller ``(path, heading)``
+    alternatives for a placement about to be dropped; the first that clears
+    every kept neighbour replaces it in place (recorded in ``replaced_out``
+    as ``{id(original): new_tuple}``) instead of the building being lost.
     """
     overlap_frac = max(0.0, float(overlap_frac))
     if not placements:
@@ -7452,6 +7540,24 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
     order = sorted(range(n), key=lambda i: areas[i])
     grid = {}
     keep = [False] * n
+
+    def _footprint_blocked(poly, bbox, area):
+        x1, y1, x2, y2 = bbox
+        seen = set()
+        for cxx in range(int(math.floor(x1 / cell_m)), int(math.floor(x2 / cell_m)) + 1):
+            for cyy in range(int(math.floor(y1 / cell_m)), int(math.floor(y2 / cell_m)) + 1):
+                for j in grid.get((cxx, cyy), ()):
+                    if j in seen:
+                        continue
+                    seen.add(j)
+                    bj = bboxes[j]
+                    if x2 < bj[0] or bj[2] < x1 or y2 < bj[1] or bj[3] < y1:
+                        continue
+                    if _convex_intersection_area(poly, polys[j]) > overlap_frac * max(
+                        1e-6, min(area, areas[j])
+                    ):
+                        return True
+        return False
     dropped = 0
     dbg_pairs = [] if debug_path else None
     for i in order:
@@ -7484,6 +7590,32 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
                 if blocked:
                     break
             if blocked:
+                break
+        if blocked and fallback is not None:
+            o_lon, o_lat = float(placements[i][0]), float(placements[i][1])
+            x = (o_lon - float(lon)) * mlon
+            y = (o_lat - float(lat)) * mlat
+            for alt_path, alt_heading in fallback(placements[i]):
+                b = _bounds(alt_path)
+                if b is None:
+                    continue
+                alt_poly = _footprint_poly_metres(x, y, b, alt_heading)
+                alt_bbox = (
+                    float(alt_poly[:, 0].min()), float(alt_poly[:, 1].min()),
+                    float(alt_poly[:, 0].max()), float(alt_poly[:, 1].max()),
+                )
+                alt_area = (float(b[1]) - float(b[0])) * (float(b[3]) - float(b[2]))
+                if _footprint_blocked(alt_poly, alt_bbox, alt_area):
+                    continue
+                original = placements[i]
+                placements[i] = (original[0], original[1], alt_heading, alt_path)
+                if replaced_out is not None:
+                    replaced_out[id(original)] = placements[i]
+                polys[i], bboxes[i], areas[i] = alt_poly, alt_bbox, alt_area
+                x1, y1, x2, y2 = alt_bbox
+                cx0 = int(math.floor(x1 / cell_m)); cx1 = int(math.floor(x2 / cell_m))
+                cy0 = int(math.floor(y1 / cell_m)); cy1 = int(math.floor(y2 / cell_m))
+                blocked = False
                 break
         if blocked:
             dropped += 1
@@ -7988,6 +8120,9 @@ class _BuildingOverlayRun:
         # O4_BLD_REVIEW_DUMP: per-texture dumps wait for the tile-wide dedup.
         self._review_pending = []
         self._review_placements = {}
+        # O4_BLD_DEDUP_FALLBACK=1 (experimental): the tile-wide dedup tries a
+        # smaller asset for a placement it would otherwise drop.
+        self._dedup_fallback = {} if _env_flag("O4_BLD_DEDUP_FALLBACK", False) else None
         self.excl_rails = []           # road-style dicts for railways (simHeaven network)
         self.residential_polys = []    # no residential landuse source
 
@@ -8894,6 +9029,20 @@ class _BuildingOverlayRun:
         """Filter, place and record one texture's detections."""
         _TexturePass(self, fi, fname, m, _prep, file_timings, file_counts).execute()
 
+    def _dedup_alternatives(self, placement):
+        """Smaller (path, heading) options for a placement the dedup would drop."""
+        ctx = self._dedup_fallback.get(id(placement))
+        if ctx is None:
+            return []
+        detection, yolo_poly, jx, jy, heading, m_per_px, footprint_m2 = ctx
+        alts = _smaller_object_alternatives(
+            self.yolo_object_fit_table, detection, yolo_poly, jx, jy, heading, m_per_px,
+            footprint_m2,
+            enabled_assets_by_path=self.enabled_yolo_object_assets_by_path,
+            min_coverage=_env_float("O4_BLD_DEDUP_FALLBACK_MIN_COV", 0.5),
+        )
+        return [(path, final_heading) for path, final_heading, _area in alts]
+
     def _write_review_dumps(self):
         """O4_BLD_REVIEW_DUMP: write each texture's dump once all outcomes are final."""
         for path, tracker, img_w, img_h, payload in self._review_pending:
@@ -8919,6 +9068,7 @@ class _BuildingOverlayRun:
         ):
             self._t = time.perf_counter()
             _before = len(self.placed_stock_objects)
+            _replaced = {}
             self.placed_stock_objects, _seam_dropped = _dedupe_overlapping_placements(
                 self.placed_stock_objects, self.lat, self.lon,
                 debug_path=(
@@ -8929,6 +9079,8 @@ class _BuildingOverlayRun:
                 # footprints clip by less than this fraction of the smaller one;
                 # seam duplicates/stacks overlap near-100% and still drop.
                 overlap_frac=_env_float("O4_BLD_DEDUP_OVERLAP_FRAC", 0.20),
+                fallback=self._dedup_alternatives if self._dedup_fallback else None,
+                replaced_out=_replaced,
             )
             self.timings['global_dedup'] = self.timings.get('global_dedup', 0.0) + (
                 time.perf_counter() - self._t
@@ -8938,10 +9090,15 @@ class _BuildingOverlayRun:
                     f"[Bld] Cross-texture object dedup: dropped {_seam_dropped:,} "
                     f"overlapping objects ({_before:,} -> {len(self.placed_stock_objects):,})"
                 )
+            if _replaced:
+                print(f"[Bld] Dedup fallback: {len(_replaced):,} placements kept with a smaller asset")
             if self._review_placements:
                 _kept_ids = {id(p) for p in self.placed_stock_objects}
                 for _pid, (_tracker, _det) in self._review_placements.items():
-                    if _pid not in _kept_ids:
+                    if _pid in _replaced:
+                        _det['_review_asset'] = _replaced[_pid][3]
+                        _tracker.set(_det, "placed_object_smaller")
+                    elif _pid not in _kept_ids:
                         _tracker.set(_det, "dropped_tile_dedup")
         self._write_review_dumps()
 
@@ -10515,6 +10672,12 @@ class _TexturePass:
                 if self.review is not None:
                     detection['_review_asset'] = asset['path']
                     detection['_review_asset_poly'] = np.array(footprint_poly, copy=True)
+                if self.run._dedup_fallback is not None:
+                    _b = asset['bounds_m']
+                    self.run._dedup_fallback[id(_placement)] = (
+                        detection, np.array(yolo_poly, copy=True), jx, jy, heading, self.m_per_px,
+                        (float(_b[1]) - float(_b[0])) * (float(_b[3]) - float(_b[2])),
+                    )
                     self.run._review_placements[id(_placement)] = (self.review, detection)
                 self.placed_viz_polys.append((footprint_poly.copy(), facade_cls))
                 if object_candidate.get('roof_color_match'):
