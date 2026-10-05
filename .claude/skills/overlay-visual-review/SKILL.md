@@ -58,7 +58,7 @@ Why the runner works the way it does (don't "simplify" it away):
 
 Pick **Location**, then a texture. Space flips A/B, holding H shows the bare texture, 1-9 picks a texture, F fits, wheel zooms (native pixels past 100%). Hover any shape for details.
 
-- **Placed output** (solid borders): Objects (orange), Facades (pink), Trees (green). "Detected box (before asset fit)" (white outline, off by default) is YOLO's box for placed buildings, for judging asset fit.
+- **Placed output** (solid borders): Objects (orange), Facades (pink), Trees (green). "Detected box (before asset fit)" (white outline, off by default) is YOLO's box for placed buildings, for judging asset fit. "Kept with a smaller asset" (green box) appears in runs with `O4_BLD_DEDUP_FALLBACK=1`: buildings the de-dup would have dropped, kept with a smaller asset instead.
 - **Why not placed** (from the review instrumentation; each candidate has exactly one outcome):
   - **Below confidence** (dashed grey): near misses down to 0.01, only where nothing above the threshold was found.
   - **Filtered**: smaller than `bld_min_footprint_m2`, oversized, overlapping a kept detection, or under a higher-ZL texture. Off by default; mostly YOLO duplicates.
