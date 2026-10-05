@@ -150,12 +150,19 @@ class _ReviewTracker:
 
 def _review_detection_record(det, fate):
     pts = np.asarray(det.get('points', ()), dtype=np.float64).reshape(-1, 2)
-    return {
+    record = {
         "q": [[round(float(x), 1), round(float(y), 1)] for x, y in pts],
         "c": round(float(det.get('confidence', 0.0)), 3),
         "m2": round(float(det.get('area_m2', 0.0)), 1),
         "f": fate,
     }
+    if det.get('_review_asset'):
+        record["a"] = det['_review_asset']
+    # Surviving assets are in the DSF already; only removed ones need their footprint.
+    if fate == "dropped_tile_dedup" and det.get('_review_asset_poly') is not None:
+        poly = np.asarray(det['_review_asset_poly'], dtype=np.float64).reshape(-1, 2)
+        record["ap"] = [[round(float(x), 1), round(float(y), 1)] for x, y in poly]
+    return record
 
 
 def _env_float(name, default):
@@ -7978,6 +7985,9 @@ class _BuildingOverlayRun:
         # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
         self.excl_polys = []           # hard exclusions: water / airports
         self.existing_bld_polys = []   # occupancy-only blockers: simHeaven facade footprints
+        # O4_BLD_REVIEW_DUMP: per-texture dumps wait for the tile-wide dedup.
+        self._review_pending = []
+        self._review_placements = {}
         self.excl_rails = []           # road-style dicts for railways (simHeaven network)
         self.residential_polys = []    # no residential landuse source
 
@@ -8884,6 +8894,18 @@ class _BuildingOverlayRun:
         """Filter, place and record one texture's detections."""
         _TexturePass(self, fi, fname, m, _prep, file_timings, file_counts).execute()
 
+    def _write_review_dumps(self):
+        """O4_BLD_REVIEW_DUMP: write each texture's dump once all outcomes are final."""
+        for path, tracker, img_w, img_h, payload in self._review_pending:
+            try:
+                payload["detections"] = tracker.records(img_w, img_h)
+                with open(path, 'w', encoding='utf-8') as handle:
+                    json.dump(payload, handle, separators=(",", ":"))
+            except Exception as exc:
+                print(f"    [Bld review] {os.path.basename(path)}: dump failed: {exc}", flush=True)
+        self._review_pending = []
+        self._review_placements = {}
+
     def _finish(self):
         """Deduplicate, write and compile the DSF; returns the placement count."""
         # Tile-wide cross-texture / cross-pass object dedup — DEPRECATED as a
@@ -8916,6 +8938,12 @@ class _BuildingOverlayRun:
                     f"[Bld] Cross-texture object dedup: dropped {_seam_dropped:,} "
                     f"overlapping objects ({_before:,} -> {len(self.placed_stock_objects):,})"
                 )
+            if self._review_placements:
+                _kept_ids = {id(p) for p in self.placed_stock_objects}
+                for _pid, (_tracker, _det) in self._review_placements.items():
+                    if _pid not in _kept_ids:
+                        _tracker.set(_det, "dropped_tile_dedup")
+        self._write_review_dumps()
 
         total_time = time.time() - self.t_start
         total_placements = (
@@ -10482,7 +10510,12 @@ class _TexturePass:
                 asset = object_candidate['asset']
                 final_h = float(object_candidate['heading'])
                 footprint_poly = object_candidate['footprint_poly']
-                self.run.placed_stock_objects.append((o_lon, o_lat, final_h, asset['path']))
+                _placement = (o_lon, o_lat, final_h, asset['path'])
+                self.run.placed_stock_objects.append(_placement)
+                if self.review is not None:
+                    detection['_review_asset'] = asset['path']
+                    detection['_review_asset_poly'] = np.array(footprint_poly, copy=True)
+                    self.run._review_placements[id(_placement)] = (self.review, detection)
                 self.placed_viz_polys.append((footprint_poly.copy(), facade_cls))
                 if object_candidate.get('roof_color_match'):
                     roof_viz_status = "match"
@@ -10683,15 +10716,13 @@ class _TexturePass:
                        for x, y in np.asarray(quad).reshape(-1, 2)]],
             })
         path = os.path.join(self.run.cache_dir, self.fname.replace('.dds', '_review.json'))
-        with open(path, 'w', encoding='utf-8') as handle:
-            json.dump({
-                "texture": self.fname,
-                "conf": float(self.run.yolo_conf),
-                "min_footprint_m2": float(self.run.min_footprint_m2),
-                "margin_m": 3.0,
-                "detections": self.review.records(w, h),
-                "blockers": blockers,
-            }, handle, separators=(",", ":"))
+        self.run._review_pending.append((path, self.review, w, h, {
+            "texture": self.fname,
+            "conf": float(self.run.yolo_conf),
+            "min_footprint_m2": float(self.run.min_footprint_m2),
+            "margin_m": 3.0,
+            "blockers": blockers,
+        }))
 
     def _finish_placement(self):
         """Write the block-debug dump and record placement timings."""
