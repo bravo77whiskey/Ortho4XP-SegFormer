@@ -178,6 +178,50 @@ class CrossTextureDedupTests(unittest.TestCase):
         finally:
             b._bounds_for_object_path = orig
 
+    def test_fallback_on_by_default_and_switchable_off(self):
+        # A normal build needs no env var; O4_BLD_DEDUP_FALLBACK=0 turns it
+        # off, and so does turning the tile-wide dedup itself off.
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ):
+            os.environ.pop("O4_BLD_DEDUP_FALLBACK", None)
+            os.environ.pop("O4_BLD_TILE_DEDUP", None)
+            self.assertTrue(BLD._dedup_fallback_enabled())
+            os.environ["O4_BLD_DEDUP_FALLBACK"] = "0"
+            self.assertFalse(BLD._dedup_fallback_enabled())
+            os.environ["O4_BLD_DEDUP_FALLBACK"] = "1"
+            self.assertTrue(BLD._dedup_fallback_enabled())
+            os.environ["O4_BLD_TILE_DEDUP"] = "0"
+            self.assertFalse(BLD._dedup_fallback_enabled())
+
+    def test_cached_placements_bring_their_fallback_context(self):
+        # A texture replayed from its _bld.pkl must register the same
+        # fallback context as a fresh placement, or the dedup would silently
+        # drop instead of trying a smaller asset.
+        import pickle
+        import types
+        ctx = ((40.0, 20.0, 800.0, 3, None), np.zeros((4, 2), np.float32),
+               10, 12, 30.0, 1.2, 600.0)
+        payload = pickle.loads(pickle.dumps({
+            'objects': [self._obj(0.001, 0.001, path="a.obj"),
+                        self._obj(0.002, 0.002, path="landmark.obj")],
+            'facades': [],
+            'dedup_fallback': [ctx, None],
+        }))
+        run = types.SimpleNamespace(
+            placed_stock_objects=[], placed_facades=[], direct_yolo_facade_placements=0,
+            cache_dir="", n_files=1, _dedup_fallback={},
+        )
+        tp = BLD._TexturePass.__new__(BLD._TexturePass)
+        tp.run, tp.fi, tp.fname = run, 1, "1_2_BI16.dds"
+        tp.prep = {'cached_bld': payload, 'no_image': False}
+        self.assertTrue(tp._reuse_cached_placements())
+        a, landmark = run.placed_stock_objects
+        self.assertEqual(set(run._dedup_fallback), {id(a)})
+        self.assertEqual(run._dedup_fallback[id(a)][0], ctx[0])
+        self.assertEqual(
+            dict(zip(BLD._DEDUP_FALLBACK_DET_KEYS, ctx[0]))['placement_class'], 3)
+
 
 class ConfigPropagationTests(unittest.TestCase):
     """Guards the mechanism the GUI single-tile build fix relies on:

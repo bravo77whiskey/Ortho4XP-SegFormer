@@ -1890,8 +1890,8 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 74      # v74: farmland/greenhouse sorting
-BLD_PLACEMENT_FAST_CACHE_VERSION = 76  # v76: farmland/greenhouse sorting
+BLD_PLACEMENT_CACHE_VERSION = 75      # v75: dedup-fallback context in the cache
+BLD_PLACEMENT_FAST_CACHE_VERSION = 77  # v77: dedup-fallback context in the cache
 # Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
 # wing the detector missed) are extruded as a polygon facade traced from the
 # landcover building class (O4_Footprint_Polygons), and the smaller
@@ -7057,6 +7057,21 @@ def _select_yolo_object_candidate_once(
     return None, 'no_candidates'
 
 
+# The detection fields _smaller_object_alternatives reads. The tile-wide dedup
+# fallback keeps only these per placed object (in memory and in the _bld.pkl
+# caches), not the whole detection.
+_DEDUP_FALLBACK_DET_KEYS = (
+    'length_m', 'width_m', 'area_m2', 'placement_class', 'height_gate_max_m',
+)
+
+
+def _dedup_fallback_enabled():
+    """O4_BLD_DEDUP_FALLBACK (default on): let the tile-wide dedup keep a
+    building it would drop with a smaller asset. Off with the dedup itself
+    (O4_BLD_TILE_DEDUP=0), since nothing would use it."""
+    return _env_flag("O4_BLD_DEDUP_FALLBACK", True) and _env_flag("O4_BLD_TILE_DEDUP", True)
+
+
 def _smaller_object_alternatives(
     fit_table,
     detection,
@@ -8120,9 +8135,13 @@ class _BuildingOverlayRun:
         # O4_BLD_REVIEW_DUMP: per-texture dumps wait for the tile-wide dedup.
         self._review_pending = []
         self._review_placements = {}
-        # O4_BLD_DEDUP_FALLBACK=1 (experimental): the tile-wide dedup tries a
-        # smaller asset for a placement it would otherwise drop.
-        self._dedup_fallback = {} if _env_flag("O4_BLD_DEDUP_FALLBACK", False) else None
+        # Tile-wide dedup fallback: a placement the dedup would drop tries the
+        # detection's next-smaller assets at the same spot and keeps the first
+        # that clears its neighbours. {id(placement): context} is filled at
+        # placement (and from the _bld.pkl caches, which store the context) and
+        # released after the dedup. O4_BLD_DEDUP_FALLBACK=0 disables;
+        # O4_BLD_DEDUP_FALLBACK_MIN_COV (default 0.5) is the coverage floor.
+        self._dedup_fallback = {} if _dedup_fallback_enabled() else None
         self.excl_rails = []           # road-style dicts for railways (simHeaven network)
         self.residential_polys = []    # no residential landuse source
 
@@ -8926,6 +8945,9 @@ class _BuildingOverlayRun:
             # v32: every sports class dropped from the stock-YOLO pass —
             #      pitches, diamonds, tracks and courts place nothing at all,
             #      and their OBBs no longer occupy the building masks.
+            # v75/v77: the tile-wide dedup fallback (on by default) needs a
+            #      per-object context; caches store it only when it is on.
+            self._dedup_fallback is not None,
             "schema=v32-no-sports-classes",
         )
 
@@ -9034,9 +9056,10 @@ class _BuildingOverlayRun:
         ctx = self._dedup_fallback.get(id(placement))
         if ctx is None:
             return []
-        detection, yolo_poly, jx, jy, heading, m_per_px, footprint_m2 = ctx
+        det_values, yolo_poly, jx, jy, heading, m_per_px, footprint_m2 = ctx
         alts = _smaller_object_alternatives(
-            self.yolo_object_fit_table, detection, yolo_poly, jx, jy, heading, m_per_px,
+            self.yolo_object_fit_table, dict(zip(_DEDUP_FALLBACK_DET_KEYS, det_values)),
+            yolo_poly, jx, jy, heading, m_per_px,
             footprint_m2,
             enabled_assets_by_path=self.enabled_yolo_object_assets_by_path,
             min_coverage=_env_float("O4_BLD_DEDUP_FALLBACK_MIN_COV", 0.5),
@@ -9100,6 +9123,8 @@ class _BuildingOverlayRun:
                         _tracker.set(_det, "placed_object_smaller")
                     elif _pid not in _kept_ids:
                         _tracker.set(_det, "dropped_tile_dedup")
+        if self._dedup_fallback:
+            self._dedup_fallback.clear()  # one context per placed object; done with them
         self._write_review_dumps()
 
         total_time = time.time() - self.t_start
@@ -9838,6 +9863,11 @@ class _TexturePass:
         _cached_bld = self.prep['cached_bld']
         if _cached_bld is not None:
             self.run.placed_stock_objects.extend(_cached_bld.get('objects', ()))
+            if self.run._dedup_fallback is not None:
+                # The cache key carries whether this context was recorded.
+                for _p, _ctx in zip(_cached_bld.get('objects', ()), _cached_bld.get('dedup_fallback', ())):
+                    if _ctx is not None:
+                        self.run._dedup_fallback[id(_p)] = _ctx
             self.run.placed_facades.extend(_cached_bld.get('facades', ()))
             cached_count = (
                 len(_cached_bld.get('objects', ())) +
@@ -10672,13 +10702,14 @@ class _TexturePass:
                 if self.review is not None:
                     detection['_review_asset'] = asset['path']
                     detection['_review_asset_poly'] = np.array(footprint_poly, copy=True)
+                    self.run._review_placements[id(_placement)] = (self.review, detection)
                 if self.run._dedup_fallback is not None:
                     _b = asset['bounds_m']
                     self.run._dedup_fallback[id(_placement)] = (
-                        detection, np.array(yolo_poly, copy=True), jx, jy, heading, self.m_per_px,
+                        tuple(detection.get(k) for k in _DEDUP_FALLBACK_DET_KEYS),
+                        np.array(yolo_poly, copy=True), jx, jy, heading, self.m_per_px,
                         (float(_b[1]) - float(_b[0])) * (float(_b[3]) - float(_b[2])),
                     )
-                    self.run._review_placements[id(_placement)] = (self.review, detection)
                 self.placed_viz_polys.append((footprint_poly.copy(), facade_cls))
                 if object_candidate.get('roof_color_match'):
                     roof_viz_status = "match"
@@ -10981,15 +11012,23 @@ class _TexturePass:
         if not self.run.disable_cache and not self.run.ignore_placement_cache:
             try:
                 _t = time.perf_counter()
+                _objects = self.run.placed_stock_objects[self._start_object_idx:]
+                _placements = {
+                    'objects': _objects,
+                    'facades': self.run.placed_facades[self._start_facade_idx:],
+                }
+                if self.run._dedup_fallback is not None:
+                    # Aligned with 'objects' (None: no smaller-asset fallback),
+                    # so a replay still gets the tile-wide dedup fallback.
+                    _placements['dedup_fallback'] = [
+                        self.run._dedup_fallback.get(id(p)) for p in _objects
+                    ]
                 with open(self._bld_cache_file, 'wb') as _f:
                     pickle.dump({
                         'params': self._effective_bld_params,
                         'covered': self.run._covered_fracs_by_file.get(self.fname),
                         'source': 'direct_yolo',
-                        'placements': {
-                            'objects': self.run.placed_stock_objects[self._start_object_idx:],
-                            'facades': self.run.placed_facades[self._start_facade_idx:],
-                        },
+                        'placements': _placements,
                     }, _f)
                 _record_elapsed(self.run.timings, self.file_timings, 'cache_save', _t)
             except Exception:
