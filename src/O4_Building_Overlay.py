@@ -1383,7 +1383,16 @@ def _load_custom_scenery_building_exclusions(
         skip_dsf_path=out_dsf,
     )
 
+    own_folder = None
+    if _review_dump_enabled() and out_dsf:
+        # Review runs write their DSF elsewhere, so the realpath skip above
+        # misses an installed copy of this overlay; a real rebuild skips it.
+        own_folder = os.path.basename(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(out_dsf))))
+        ).lower()
     for folder_name, dsf_path, package_dir in dsf_matches:
+        if own_folder and folder_name.lower() == own_folder:
+            continue
         n_obj0 = len(objects)
         n_poly0 = len(polys)
         skipped0 = skipped_objects
