@@ -55,6 +55,7 @@ import O4_Footprint_Polygons as FOOTPRINTS
 import O4_Agri_Structures as AGRI
 import O4_Texture_Selection as TEXSEL
 import O4_Bld_Seams as SEAMS
+import O4_Bld_Overlap_Facades as OVLFAC
 from O4_Scenery_Packs import (
     active_scenery_pack_dirs,
     ensure_cached_dsf_text,
@@ -1024,7 +1025,30 @@ NONBLOCKING_CLUTTER_NAME_TOKENS = (
     "lightpole",
     "light_pole",
     "light-pole",
+    # Street furniture and point features (simHeaven X-World places thousands:
+    # a bus stop or construction marker killed 16,000 m2 detections, review
+    # set 2026-10-06).
+    "bus-stop",
+    "bus_stop",
+    "busstop",
+    "hydrant",
+    "bicycle",
+    "drinking_water",
+    "toilet",
+    "playground",
+    "bollard",
+    "lift_gate",
+    "buoy",
+    "bench",
+    "construction_area",
+    "waste_basket",
+    "recycling",
+    "post_box",
+    "vending",
 )
+# Anything smaller than this (its own footprint, before the clearance margin)
+# is a prop, not a building, and never blocks placement.
+SCENERY_BLOCKER_MIN_M2 = 25.0
 
 
 def _is_nonblocking_clutter_object(path):
@@ -1038,6 +1062,16 @@ def _is_nonblocking_clutter_object(path):
         return True
     name = p.rsplit('/', 1)[-1]
     return any(token in name for token in NONBLOCKING_CLUTTER_NAME_TOKENS)
+
+
+def _scenery_object_blocks(obj):
+    """True when an existing scenery object should block building placement."""
+    if _is_nonblocking_clutter_object(obj.get('path')):
+        return False
+    try:
+        return float(obj['w_m']) * float(obj['h_m']) >= SCENERY_BLOCKER_MIN_M2
+    except (KeyError, TypeError, ValueError):
+        return True
 
 
 def _is_simheaven_building_polygon(path):
@@ -2270,6 +2304,24 @@ RAIL_EXCLUSION_WIDTH_M = 5.0
 # detection genuinely straddling a road overlaps far more than this (and is
 # usually caught by the center-on-road check first).
 DIRECT_FACADE_ROAD_OVERLAP_FRAC = 0.15
+# Same for buildings already placed: a neighbour that was trimmed back to meet
+# this box (O4_Bld_Overlap_Facades) shares its edge, and rasterising both
+# overlaps a pixel row. Rejecting on that killed large buildings over a 0.1%
+# contact (review set szx_n: 28 of 41 rejected >=3000 m2 boxes were <0.3%).
+DIRECT_FACADE_SPACING_OVERLAP_FRAC = 0.02
+# ...measured on the box pulled this many pixels inward: a neighbour sharing a
+# whole side fills a pixel row inside the box (2-4% of a 40x40 px box), which
+# is rasterisation, not overlap.
+DIRECT_FACADE_SPACING_INSET_PX = 1.5
+# Existing building scenery (simHeaven/OSM facades, other packs' objects)
+# grazing a detection: the scenery wins and our box is trimmed back to meet it,
+# placed as a polygon facade (O4_BLD_TRIM_EXISTING=0 restores the block). Only
+# when the scenery covers at most this much of the box, at least
+# TRIM_EXISTING_MIN_KEEP_FRAC is left, and no piece is thinner than
+# TRIM_EXISTING_MIN_SIDE_M; scenery wholly inside the box (a hole) still blocks.
+TRIM_EXISTING_MAX_FRAC = 0.35
+TRIM_EXISTING_MIN_KEEP_FRAC = 0.4
+TRIM_EXISTING_MIN_SIDE_M = 3.0
 
 # Small residential objects should stay inside residential-looking fabric
 # instead of spilling into industrial/commercial zones. Prefer explicit OSM
@@ -7274,6 +7326,7 @@ def _suppress_overlapping_yolo_detections(
     pair_rule=False,
     containment_frac=0.35,
     explain_frac=0.60,
+    graze_out=None,
 ):
     """Greedily remove overlapping YOLO OBBs.
 
@@ -7294,6 +7347,10 @@ def _suppress_overlapping_yolo_detections(
     contained detections whose confidence does not beat its own -- they are
     roof furniture / sub-structure boxes of the same building. Mere sliver
     contact (below ``containment_frac``) keeps the smallest-first drop.
+
+    ``graze_out`` (a list, pair_rule only): sliver contact no longer drops
+    the bigger detection; both are kept and each grazing pair is appended as
+    ``(det_a, det_b)`` for O4_Bld_Overlap_Facades to resolve.
     """
     coverage_threshold = float(coverage_threshold or 0.0)
     if not detections:
@@ -7326,6 +7383,7 @@ def _suppress_overlapping_yolo_detections(
         containment_frac = min(1.0, max(0.0, float(containment_frac)))
         explain_frac = min(1.0, max(0.0, float(explain_frac)))
         confs = [float(det.get('confidence', 0.0)) for det in detections]
+        graze_pairs = []    # (slot, slot) kept despite sliver contact
         entries = []        # detection index per kept slot
         alive = []          # eviction tombstones, parallel to entries
         entry_areas = []
@@ -7350,6 +7408,7 @@ def _suppress_overlapping_yolo_detections(
             for cell in _bbox_grid_cells(gb, cell_size_px):
                 candidate_slots.update(grid.get(cell, ()))
             contained = []
+            grazed = []
             blocked = False
             for slot in candidate_slots:
                 if not alive[slot]:
@@ -7362,6 +7421,8 @@ def _suppress_overlapping_yolo_detections(
                     continue
                 if inter / max(1e-6, min(area, entry_areas[slot])) >= containment_frac:
                     contained.append(slot)
+                elif graze_out is not None:
+                    grazed.append(slot)
                 else:
                     # Sliver contact: two distinct buildings whose loose OBBs
                     # touch -- the earlier (smaller) one wins, as before.
@@ -7407,9 +7468,15 @@ def _suppress_overlapping_yolo_detections(
             entry_bboxes.append((fx1, fy1, fx2, fy2))
             for cell in _bbox_grid_cells(gb, cell_size_px):
                 grid.setdefault(cell, []).append(slot)
+            for other in grazed:
+                graze_pairs.append((other, slot))
         kept = [
             detections[entries[s]] for s in range(len(entries)) if alive[s]
         ]
+        if graze_out is not None:
+            for a, b in graze_pairs:
+                if alive[a] and alive[b]:
+                    graze_out.append((detections[entries[a]], detections[entries[b]]))
         return kept, len(detections) - len(kept)
 
     kept = []
@@ -7736,6 +7803,76 @@ def _poly_mask_overlap_frac(occ_mask, pts, scratch_mask=None, bbox=None):
 def _expand_bounds(bounds_m, pad_m: float):
     xmin, xmax, zmin, zmax = bounds_m
     return (xmin - pad_m, xmax + pad_m, zmin - pad_m, zmax + pad_m)
+
+
+def _trim_rings_against_mask(poly, block_mask, hard_mask, m_per_px,
+                             max_frac=TRIM_EXISTING_MAX_FRAC,
+                             min_keep_frac=TRIM_EXISTING_MIN_KEEP_FRAC,
+                             min_side_m=TRIM_EXISTING_MIN_SIDE_M):
+    """Rings (texture px) of ``poly`` with ``block_mask`` cut away, or None.
+
+    None when ``poly`` touches ``hard_mask``, does not touch ``block_mask``,
+    is covered by it beyond ``max_frac``, would keep less than
+    ``min_keep_frac``, or would need a hole. The cut stays one pixel clear of
+    the blocker so the rasterised rings never touch it.
+    """
+    h, w = block_mask.shape[:2]
+    pts = np.asarray(poly, dtype=np.float64).reshape(-1, 2)
+    x1 = max(0, int(np.floor(pts[:, 0].min())) - 2)
+    y1 = max(0, int(np.floor(pts[:, 1].min())) - 2)
+    x2 = min(w, int(np.ceil(pts[:, 0].max())) + 3)
+    y2 = min(h, int(np.ceil(pts[:, 1].max())) + 3)
+    if x1 >= x2 or y1 >= y2:
+        return None
+    own = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    cv2.fillPoly(own, [np.rint(pts - (x1, y1)).astype(np.int32)], 1)
+    own_n = int(cv2.countNonZero(own))
+    if own_n == 0:
+        return None
+    if hard_mask is not None and cv2.countNonZero(own & hard_mask[y1:y2, x1:x2]):
+        return None
+    block = np.ascontiguousarray(block_mask[y1:y2, x1:x2])
+    blocked = int(cv2.countNonZero(own & block))
+    if blocked == 0 or blocked > max_frac * own_n:
+        return None
+    clear = cv2.dilate(block, np.ones((3, 3), np.uint8))
+    free = own & (1 - clear)
+    contours, hierarchy = cv2.findContours(free, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    if hierarchy is not None and any(int(hh[3]) >= 0 for hh in hierarchy[0]):
+        return None  # blocker inside the box: a facade cannot have a hole
+    min_side_px = float(min_side_m) / max(float(m_per_px), 1e-6)
+    rings = []
+    kept = 0.0
+    for c in contours:
+        approx = cv2.approxPolyDP(c, 0.75, True).reshape(-1, 2)
+        if len(approx) < 3:
+            continue
+        (_cx, _cy), (rw, rh), _a = cv2.minAreaRect(approx.astype(np.float32))
+        if min(rw, rh) < min_side_px:
+            continue
+        kept += abs(float(cv2.contourArea(approx.astype(np.float32))))
+        rings.append(approx.astype(np.float64) + (x1, y1))
+    if not rings or kept < float(min_keep_frac) * own_n:
+        return None
+    return rings
+
+
+def _inset_poly_px(pts, inset_px):
+    """``pts`` pulled ``inset_px`` inward (square corners); ``pts`` itself when
+    the polygon is too small to inset."""
+    from shapely.geometry import Polygon
+
+    try:
+        shrunk = Polygon(np.asarray(pts, dtype=np.float64)).buffer(
+            -float(inset_px), join_style=2
+        )
+    except Exception:
+        return pts
+    if shrunk.is_empty or shrunk.geom_type != 'Polygon':
+        return pts
+    return np.rint(np.asarray(shrunk.exterior.coords)[:-1]).astype(np.int32)
 
 
 def _mark_poly(occ_mask: np.ndarray, pts: np.ndarray) -> None:
@@ -8171,6 +8308,7 @@ class _BuildingOverlayRun:
             'yolo_suppress': 0.0,
             'heightnet': 0.0,
             'footprint_polygons': 0.0,
+            'overlap_facades': 0.0,
             'seg_first': 0.0,
             'greenhouses': 0.0,
             'stock_yolo_inference': 0.0,
@@ -8442,6 +8580,7 @@ class _BuildingOverlayRun:
             )
         else:
             sh_bld_polys, self.sh_bld_objects = [], []
+        self.sh_bld_objects = [o for o in self.sh_bld_objects if _scenery_object_blocks(o)]
         self.timings['simheaven_parse'] += time.perf_counter() - self._t
         if sh_bld_polys or self.sh_bld_objects:
             self.existing_bld_polys.extend(sh_bld_polys)
@@ -8474,6 +8613,7 @@ class _BuildingOverlayRun:
         self.timings['custom_scenery_parse'] += time.perf_counter() - self._t
         if custom_bld_polys or custom_bld_objects:
             self.existing_bld_polys.extend(custom_bld_polys)
+        custom_bld_objects = [o for o in custom_bld_objects if _scenery_object_blocks(o)]
         self.custom_bld_objects = custom_bld_objects
         self.custom_bld_index = _prepare_simheaven_objects(custom_bld_objects)
         self.custom_bld_sig = (
@@ -8959,6 +9099,15 @@ class _BuildingOverlayRun:
             # v78: biggest piece wins (on by default) needs each texture's seam
             #      pieces; caches store them only when it is on.
             self._seam_owner,
+        ) + (
+            # v79: grazing detections become touching or merged facades
+            #      (O4_BLD_OVERLAP_FACADES, on by default) and the facade
+            #      fallback tolerates DIRECT_FACADE_SPACING_OVERLAP_FRAC.
+            ("overlap-facades-v2",) if OVLFAC.enabled() else ()
+        ) + (
+            # v80: boxes grazing existing building scenery are trimmed back
+            #      from it (O4_BLD_TRIM_EXISTING, on by default).
+            ("trim-existing",) if _env_flag("O4_BLD_TRIM_EXISTING", True) else ()
         )
 
     def _prepare_dds_inference(self, fi, fname, m):
@@ -9762,6 +9911,9 @@ class _TextureInference:
         # Remove overlapping detections so each building area keeps a single
         # object: smallest-first, drop any detection that overlaps an
         # already-kept one, with no minimum-overlap area.
+        # O4_BLD_OVERLAP_FACADES: grazing pairs are kept and recorded instead,
+        # for _TexturePass._resolve_overlap_facades.
+        self.graze_edges = [] if OVLFAC.enabled() else None
         if self.yolo_detections:
             _t = time.perf_counter()
             self.yolo_detections, yolo_suppressed = _suppress_overlapping_yolo_detections(
@@ -9774,8 +9926,11 @@ class _TextureInference:
                 pair_rule=self.run.yolo_pair_overlap_rule,
                 containment_frac=self.run.yolo_suppress_containment_frac,
                 explain_frac=self.run.yolo_suppress_explain_frac,
+                graze_out=self.graze_edges,
             )
             self._rec('yolo_suppress', _t)
+            if self.graze_edges:
+                self.file_counts['yolo_graze_pairs'] = len(self.graze_edges)
             self.file_counts['yolo_raw_detections'] = raw_yolo_count
             self.file_counts['yolo_suppressed_overlap'] = yolo_suppressed
         _review_before = self._review_stage(_review_before, "suppressed_overlap")
@@ -9847,6 +10002,7 @@ class _TextureInference:
         self.prep['img_w'] = self.img_w
         self.prep['m_per_px'] = self.m_per_px
         self.prep['yolo_detections'] = self.yolo_detections
+        self.prep['graze_edges'] = getattr(self, 'graze_edges', None)
         return self.prep
 
 
@@ -9872,6 +10028,7 @@ class _TexturePass:
         self._build_masks()
         self._sort_farmland()
         self._apply_seg_first()
+        self._trim_against_existing_scenery()
         self._predict_heights()
         self._place_detections()
         if self.review is not None:
@@ -10280,6 +10437,58 @@ class _TexturePass:
             _seg_img = None
             _record_elapsed(self.run.timings, self.file_timings, 'seg_first', _t)
 
+    def _trim_against_existing_scenery(self):
+        """O4_BLD_TRIM_EXISTING (default on): a box whose footprint grazes only
+        existing building scenery is trimmed back to meet it and placed as a
+        polygon facade by _place_large_footprints, instead of being blocked."""
+        if (
+            not self.yolo_detections or self.veg_map is None or
+            not _env_flag("O4_BLD_TRIM_EXISTING", True) or
+            not _asset_kind_enabled('facade', self.run.building_asset_mode)
+        ):
+            return
+        scenery = None
+        for _m in (self.existing_bld_mask, self.sh_bld_mask, self.custom_bld_mask):
+            if _m is not None and _m.any():
+                scenery = _m.copy() if scenery is None else (scenery | _m)
+        if scenery is None:
+            return
+        _t = time.perf_counter()
+        scenery = (scenery != 0).astype(np.uint8)
+        hard = ((self.static_occ_mask != 0) & (scenery == 0)).astype(np.uint8)
+        trimmed = 0
+        for det in self.yolo_detections:
+            if det.get('seg_rings') is not None:
+                continue
+            prep = _prepare_direct_yolo_detection(det, self.img_w, self.img_h)
+            if not prep['valid']:
+                continue
+            jx, jy = int(prep['jx']), int(prep['jy'])
+            if not (0 <= jx < self.img_w and 0 <= jy < self.img_h):
+                continue
+            if self.placement_occ_mask[jy, jx]:
+                continue
+            if _poly_fits_with_integral(
+                self.static_occ_mask, prep['poly'], self.fit_scratch,
+                self.static_occ_integral, bbox=prep['bbox'],
+            ):
+                continue
+            o_lon, o_lat = px_to_latlon(
+                jx, jy, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+            )
+            if not (self.run.lon <= o_lon < self.run.lon + 1 and self.run.lat <= o_lat < self.run.lat + 1):
+                continue
+            rings = _trim_rings_against_mask(det['points'], scenery, hard, self.m_per_px)
+            if rings is None:
+                continue
+            det['seg_rings'] = rings
+            det['_scenery_trimmed'] = True
+            det['_overlap_fate'] = 'placed_trimmed_existing'
+            trimmed += 1
+        if trimmed:
+            self.file_counts['trimmed_existing'] = trimmed
+        _record_elapsed(self.run.timings, self.file_timings, 'overlap_facades', _t)
+
     def _predict_heights(self):
         """Regional height fallbacks, footprint tracing jobs and lazy HeightNet."""
         _apply_regional_height_fallbacks(
@@ -10315,28 +10524,10 @@ class _TexturePass:
             # gate-passer would leave its height_m unset and shift the
             # facade height RNG stream.
             _t = time.perf_counter()
-            _height_dets = []
-            for _hdet in self.yolo_detections:
-                _hprep = _prepare_direct_yolo_detection(_hdet, self.img_w, self.img_h)
-                if not _hprep['valid']:
-                    continue
-                _hjx = int(_hprep['jx'])
-                _hjy = int(_hprep['jy'])
-                if not (0 <= _hjx < self.img_w and 0 <= _hjy < self.img_h):
-                    continue
-                if self.placement_occ_mask[_hjy, _hjx]:
-                    continue
-                if not _poly_fits_with_integral(
-                    self.static_occ_mask, _hprep['poly'], self.fit_scratch,
-                    self.static_occ_integral, bbox=_hprep['bbox'],
-                ):
-                    continue
-                _ho_lon, _ho_lat = px_to_latlon(
-                    _hjx, _hjy, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
-                )
-                if not (self.run.lon <= _ho_lon < self.run.lon + 1 and self.run.lat <= _ho_lat < self.run.lat + 1):
-                    continue
-                _height_dets.append(_hdet)
+            _height_dets = [
+                _hdet for _hdet in self.yolo_detections
+                if self._passes_static_gates(_hdet)
+            ]
             if _height_dets:
                 _height_img = self.img
                 if _height_img is None:
@@ -10375,11 +10566,42 @@ class _TexturePass:
             _height_dets = None
             _record_elapsed(self.run.timings, self.file_timings, 'heightnet', _t)
 
+    def _passes_static_gates(self, detection, trimmed_ok=True):
+        """The static gates at the top of _place_each_detection: valid shape,
+        centre in the texture and off static scenery/roads, footprint clear of
+        static scenery, centre inside the 1-degree tile. A box already trimmed
+        back from existing scenery passes the footprint gate when
+        ``trimmed_ok`` (its rings are tested when they place)."""
+        if detection.get('_scenery_trimmed'):
+            return trimmed_ok
+        prep = _prepare_direct_yolo_detection(detection, self.img_w, self.img_h)
+        if not prep['valid']:
+            return False
+        jx = int(prep['jx'])
+        jy = int(prep['jy'])
+        if not (0 <= jx < self.img_w and 0 <= jy < self.img_h):
+            return False
+        if self.placement_occ_mask[jy, jx]:
+            return False
+        if not _poly_fits_with_integral(
+            self.static_occ_mask, prep['poly'], self.fit_scratch,
+            self.static_occ_integral, bbox=prep['bbox'],
+        ):
+            return False
+        o_lon, o_lat = px_to_latlon(
+            jx, jy, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
+        )
+        return (
+            self.run.lon <= o_lon < self.run.lon + 1 and
+            self.run.lat <= o_lat < self.run.lat + 1
+        )
+
     def _place_detections(self):
         """Place large-roof polygons, then every remaining detection."""
         if not self.yolo_detections:
             return
         self._start_placement()
+        self._resolve_overlap_facades()
         self._place_large_footprints()
         self._place_each_detection()
         self._finish_placement()
@@ -10429,6 +10651,81 @@ class _TexturePass:
         # smaller detections on that roof are skipped below.
         self.large_roof_mask = None
         self._poly_refine = _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True)
+
+    def _resolve_overlap_facades(self):
+        """O4_BLD_OVERLAP_FACADES (default on): turn grazing pairs kept by suppression into
+        merged or touching polygon facades (O4_Bld_Overlap_Facades).
+
+        Runs after heights and height gates, before the large-roof pass that
+        places the polygons. Only pairs whose members both pass the static
+        gates are resolved: a member that cannot place leaves nothing to
+        share ground with.
+        """
+        edges = self.prep.get('graze_edges')
+        if (
+            not edges or self.veg_map is None or
+            not _asset_kind_enabled('facade', self.run.building_asset_mode)
+        ):
+            return
+        present = {id(d): d for d in self.yolo_detections}
+        gate = {}
+
+        def ok(det):
+            k = id(det)
+            if k not in gate:
+                # boxes trimmed back from existing scenery keep that shape
+                gate[k] = k in present and self._passes_static_gates(det, trimmed_ok=False)
+            return gate[k]
+
+        nodes = {}
+        pairs = []
+        for a, b in edges:
+            if not (ok(a) and ok(b)):
+                continue
+            for det in (a, b):
+                if id(det) in nodes:
+                    continue
+                try:
+                    h = float(det.get('height_m'))
+                    h = h if math.isfinite(h) and h > 0.0 else None
+                except (TypeError, ValueError):
+                    h = None
+                try_cls = int(det['placement_class'])
+                fcls = _yolo_facade_class(try_cls) or (
+                    try_cls if try_cls in BLD_PLACEMENT_CLASSES else BLD_CLASS_MEDIUM
+                )
+                nodes[id(det)] = OVLFAC.Node(
+                    id(det), det['points'], det.get('confidence', 0.0),
+                    det.get('area_m2', 0.0), h, fcls,
+                )
+            pairs.append((id(a), id(b)))
+        if not pairs:
+            return
+        _t = time.perf_counter()
+        outcomes = OVLFAC.resolve(nodes, pairs, self.m_per_px)
+        removed = set()
+        counts = Counter()
+        for key, out in outcomes.items():
+            det = present[key]
+            counts[out.kind] += 1
+            if out.kind in ('merged', 'split'):
+                det['seg_rings'] = out.rings
+                det['_overlap_fate'] = (
+                    'placed_merged_facade' if out.kind == 'merged' else 'placed_split_facade'
+                )
+            elif out.kind == 'member':
+                removed.add(key)
+                self._review_fate(det, 'placed_merged_member')
+            elif out.kind == 'dropped':
+                removed.add(key)
+                self._review_fate(det, 'dropped_overlap_trim')
+        if removed:
+            self.yolo_detections = [
+                d for d in self.yolo_detections if id(d) not in removed
+            ]
+        for kind, n in counts.items():
+            self.file_counts['overlap_' + kind] = n
+        _record_elapsed(self.run.timings, self.file_timings, 'overlap_facades', _t)
 
     def _place_large_footprints(self):
         """Trace large irregular roofs as polygon facades, largest first."""
@@ -10553,7 +10850,9 @@ class _TexturePass:
                         cv2.fillPoly(self.recent_spacing_mask, [ring_i], 1)
                         self.recent_spacing_marks += 1
                 detection['_large_footprint_placed'] = True
-                self._review_fate(detection, "placed_polygon_facade")
+                self._review_fate(
+                    detection, detection.get('_overlap_fate', "placed_polygon_facade")
+                )
                 self.pts_this.append((jx, jy, float(detection['heading']), facade_cls))
                 _fp_key = (
                     'seg_first_polygon_placed' if _seg_poly
@@ -10824,7 +11123,11 @@ class _TexturePass:
                     _asset_kind_enabled('facade', self.run.building_asset_mode) and
                     facade_footprint_ok and
                     facade_road_ok and
-                    _poly_fits(self.building_spacing_mask, yolo_poly, self.fit_scratch)
+                    _poly_mask_overlap_frac(
+                        self.building_spacing_mask,
+                        _inset_poly_px(yolo_poly, DIRECT_FACADE_SPACING_INSET_PX),
+                        self.fit_scratch, bbox=yolo_bbox,
+                    ) <= DIRECT_FACADE_SPACING_OVERLAP_FRAC
                 ):
                     facade_path = _facade_for_detection(
                         facade_cls,

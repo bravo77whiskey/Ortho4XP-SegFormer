@@ -210,7 +210,7 @@ class CrossTextureDedupTests(unittest.TestCase):
         }))
         run = types.SimpleNamespace(
             placed_stock_objects=[], placed_facades=[], direct_yolo_facade_placements=0,
-            cache_dir="", n_files=1, _dedup_fallback={},
+            cache_dir="", n_files=1, _dedup_fallback={}, _seam_owner=False,
         )
         tp = BLD._TexturePass.__new__(BLD._TexturePass)
         tp.run, tp.fi, tp.fname = run, 1, "1_2_BI16.dds"

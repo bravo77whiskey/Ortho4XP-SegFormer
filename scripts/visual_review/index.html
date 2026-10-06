@@ -132,7 +132,7 @@
   ];
   const FATE_CAT = f =>
     f === "below_conf" ? "near"
-    : ["below_min_footprint", "oversize_reject", "suppressed_overlap", "covered_by_higher_zl"].includes(f) ? "filtered"
+    : ["below_min_footprint", "oversize_reject", "suppressed_overlap", "covered_by_higher_zl", "dropped_overlap_trim"].includes(f) ? "filtered"
     : ["center_on_existing", "overlaps_existing", "inside_placed_roof"].includes(f) ? "blocked"
     : f === "center_on_road" ? "road"
     : f === "dropped_tile_dedup" ? "dedup"
@@ -158,6 +158,11 @@
     placed_object: "Placed as an object",
     placed_facade: "Placed as a facade",
     placed_polygon_facade: "Placed as a traced polygon facade",
+    placed_merged_facade: "Placed as one facade merged with grazing neighbours of similar height (this box's height)",
+    placed_merged_member: "Merged into a grazing neighbour's facade",
+    placed_split_facade: "Placed as a facade trimmed back to meet a grazing neighbour",
+    placed_trimmed_existing: "Placed as a facade trimmed back from existing scenery",
+    dropped_overlap_trim: "Too little left after trimming back from a grazing neighbour",
     placed_object_smaller: "Placed with a smaller asset: the first choice overlapped a neighbour",
     dropped_tile_dedup: "Placed, then removed: its asset (filled orange) overlapped a neighbouring placement by more than 20%",
   };

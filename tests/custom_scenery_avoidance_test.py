@@ -259,6 +259,16 @@ class CustomSceneryAvoidanceTests(unittest.TestCase):
         self.assertEqual(polys[0][0], (22.1, 120.1))
         self.assertEqual(skipped, 1)
 
+    def test_street_furniture_and_props_do_not_block(self):
+        def obj(path, w, h):
+            return {"path": path, "w_m": w, "h_m": h, "lat": 0.0, "lon": 0.0, "heading": 0.0}
+        self.assertFalse(BLD._scenery_object_blocks(obj("simheaven/commercial/bus-stop.obj", 14, 14)))
+        self.assertFalse(BLD._scenery_object_blocks(obj("simheaven/landmarks/construction_area.obj", 4, 8)))
+        self.assertFalse(BLD._scenery_object_blocks(obj("simheaven/misc/fire_hydrant.obj", 1, 1)))
+        self.assertFalse(BLD._scenery_object_blocks(obj("lib/props/unknown_prop.obj", 3, 5)))
+        self.assertTrue(BLD._scenery_object_blocks(obj("simheaven/houses/house_09x09x1.obj", 9, 9)))
+        self.assertTrue(BLD._scenery_object_blocks(obj("simheaven/industrial/industrial_30x84.obj", 30, 84)))
+
     def test_generic_custom_dsf_parser_skips_street_light_clutter(self):
         # Name-token matches (street lights, lamps, lanterns, light poles).
         self.assertTrue(BLD._is_nonblocking_clutter_object("objects/Street_Light_3.obj"))
