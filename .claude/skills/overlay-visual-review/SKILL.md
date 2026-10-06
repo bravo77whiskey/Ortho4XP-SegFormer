@@ -31,11 +31,16 @@ All assessment uses these four places, 23 Bing textures in set `hotspots` (the u
 
 `fetch_set.py [PROVIDER]` downloads or refreshes the set (it skips files already present). A/B is always **technique vs technique on the same imagery**, never Bing vs Google.
 
+### Whole-tile sets
+
+Changes that act across textures or tiles (seams, tile edges, tile-wide passes) need complete tiles, not samples. `make_tile_set.py SET TILE [TILE ...]` copies finished tiles read-only from the H: Tiles folder (textures, cfg, apt, mesh) to `sets/SET/tiles/` and writes a JPG per rendered texture. Runs on such a set build each tile complete, every zoom level together like a real build, one tile per worker; textures on a tile edge show both tiles' placements. The viewer's Location is the tile. Existing sets (user-approved, 2026-10-06): `gran-canaria` (+27-016/+28-016, 84 textures, ~16 min per run) and `taipei` (+25+121/+24+121, 250 textures, ~1 h per run). Use `--skip-veg` unless trees are being judged. Ask before adding tiles: the user picks them, and never read a tile folder while a build may be running.
+
 ## Making a comparison
 
 1. **Make sure the reference exists.** Run B is compared against `hotspots-baseline` ("Your current installed settings"). The baseline is a snapshot of the production code and settings. Re-run it (same name, so it is replaced) whenever production behaviour changes: a committed improvement, a new model, or the user changing their installed config.
 2. **Express the change.**
    - Setting only -> `--cfg KEY=VALUE` (any key from `src/O4_Cfg_Vars.py`, e.g. `--cfg bld_yolo_conf=0.02`). Nothing else to do.
+   - Env-flag experiment -> `--env KEY=VALUE` (e.g. `--env O4_BLD_SEAM_OWNER=0`), passed to the overlay processes.
    - Code change -> edit `src/` directly; workers import the repo's `src`, so the run tests the working tree. Run the baseline *before* editing if it isn't current, because once the code changes, a fresh "baseline" would include the change. Experimental code paths behind an env flag are the safest way to keep the baseline reproducible.
 3. **Run it** from the repo root, in the background (about 15 min for all 23 textures with 2 workers):
    ```
@@ -66,8 +71,10 @@ Pick **Location**, then a texture. Space flips A/B, holding H shows the bare tex
   - **Centre on a road.**
   - **No asset fits.**
   - **Removed: asset overlapped a neighbour** (dashed orange box, with the removed asset filled orange): placed, then dropped by the end-of-run tile de-dup (>20% overlap with a smaller kept placement).
+  - **Removed: smaller piece of a split building** (dashed blue): a building cut at a YOLO window edge or texture edge was detected as pieces; only the biggest piece keeps its placement (biggest piece wins, production default since 2026-10-06; off with `O4_BLD_SEAM_OWNER=0`).
   - **Farmland / greenhouse / split** (off by default): open-farmland drops, greenhouse placements, boxes replaced by segmented outlines.
 - **Existing scenery** (cyan, fill only, includes the 3 m clearance): simHeaven and other Custom Scenery objects and facades that block placement. Hover names the scenery pack and asset.
+- **Display toggles**: *Texture & tile boundaries* (on): the texture's edge, other-ZL textures overlapping it (dashed, labelled), and whole-degree tile edges with the tile names either side. *YOLO window seams*: the 512 px grid YOLO reads each texture through, where buildings get split.
 
 Display rules the user set: blockers are fill only with no border, and placed output has borders. Keep any new layer consistent with that.
 

@@ -7,7 +7,9 @@ Usage (from the repo, with the repo .venv):
 Textures that share a tile and a zoom level are built together as one overlay
 run, the way a real tile build sees them; different zoom levels never share a
 run (the overlay drops lower-ZL detections under higher-ZL textures, which
-would change their results). Groups are spread over --workers parallel worker
+would change their results). Whole-tile sets (make_tile_set.py) are the
+exception: each tile is built complete, every zoom level together, exactly
+like a real build. Groups are spread over --workers parallel worker
 processes, each with its own cache folder. Settings come from the installed
 Ortho4XP global config (read-only); nothing is linked into or changed in
 Custom Scenery. Output goes under DATA (default E:\\Ortho4XP_Review, override
@@ -40,12 +42,15 @@ ap.add_argument("--set", default="hotspots", help="sample set folder under sets/
 ap.add_argument("--note", help="what this run changes (shown in the viewer's A/B lists)")
 ap.add_argument("--cfg", action="append", default=[], metavar="KEY=VALUE",
                 help="override one Ortho4XP setting on top of the installed config (repeatable)")
+ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                help="environment variable for the overlays, e.g. an experiment flag (repeatable)")
 ap.add_argument("--workers", type=int, default=2, help="parallel worker processes (GPU shared)")
 ap.add_argument("--skip-veg", action="store_true")
 ap.add_argument("--skip-bld", action="store_true")
 # Internal: a worker process runs the groups listed in this JSON file.
 ap.add_argument("--worker", help=argparse.SUPPRESS)
 ap.add_argument("--cache-root", help=argparse.SUPPRESS)
+ap.add_argument("--merge-tiles", action="store_true", help=argparse.SUPPRESS)
 args = ap.parse_args()
 
 run_dir = os.path.join(DATA, "runs", args.run)
@@ -64,6 +69,8 @@ def load_samples(provider):
 
 
 def tile_of(sample):
+    if sample.get("tile"):
+        return tuple(sample["tile"])
     lat_s, lon_w, lat_n, lon_e = sample["bbox"]
     return int((lat_s + lat_n) // 2), int((lon_w + lon_e) // 2)
 
@@ -74,9 +81,12 @@ def plan_groups():
     for provider in args.providers:
         for s in load_samples(provider):
             lat, lon = tile_of(s)
-            key = (provider, lat, lon, s["zl"])
+            # Whole-tile sets build every zoom level of a tile together.
+            zl = "all" if s.get("tile_dir") else s["zl"]
+            key = (provider, lat, lon, zl)
             groups.setdefault(key, {"provider": provider, "lat": lat, "lon": lon,
-                                    "zl": s["zl"], "keys": []})["keys"].append(s["key"])
+                                    "zl": zl, "keys": [],
+                                    "tile_dir": s.get("tile_dir")})["keys"].append(s["key"])
     return list(groups.values())
 
 
@@ -114,9 +124,11 @@ def write_index():
             m = re.match(r"data_(.+)\.js$", f)
             if m:
                 note_path = os.path.join(DATA, "runs", r, "note.txt")
+                set_path = os.path.join(DATA, "runs", r, "set.txt")
                 index.append({"run": r, "provider": m.group(1), "src": f"runs/{r}/{f}",
                               "mtime": int(os.path.getmtime(os.path.join(DATA, "runs", r, f))),
-                              "note": open(note_path, encoding="utf-8").read() if os.path.exists(note_path) else ""})
+                              "note": open(note_path, encoding="utf-8").read() if os.path.exists(note_path) else "",
+                              "set": open(set_path).read().strip() if os.path.exists(set_path) else "hotspots"})
     with open(os.path.join(DATA, "runs_index.js"), "w") as f:
         f.write("window.REVIEW_INDEX = " + json.dumps(index, indent=1) + ";\n")
     # The viewer is served from DATA next to the runs it reads.
@@ -128,8 +140,10 @@ def orchestrate():
     if args.note:
         with open(os.path.join(run_dir, "note.txt"), "w", encoding="utf-8") as f:
             f.write(args.note.strip())
+    with open(os.path.join(run_dir, "set.txt"), "w") as f:
+        f.write(args.set)
     with open(os.path.join(run_dir, "overrides.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(args.cfg))
+        f.write("\n".join(args.cfg + args.env))
     groups = plan_groups()
     plan = assign(groups, args.workers)
     t0 = time.time()
@@ -143,6 +157,7 @@ def orchestrate():
                "--worker", plan_path, "--cache-root", os.path.join(DATA, "_cache", f"w{i}")]
         for override in args.cfg:
             cmd += ["--cfg", override]
+        env_extra = dict(e.split("=", 1) for e in args.env)
         if args.skip_veg:
             cmd.append("--skip-veg")
         if args.skip_bld:
@@ -152,7 +167,8 @@ def orchestrate():
         tmp = os.path.join(DATA, "_tmp")
         os.makedirs(tmp, exist_ok=True)
         procs.append((i, subprocess.Popen(cmd, cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
-                                          env=dict(os.environ, PYTHONUNBUFFERED="1", TMP=tmp, TEMP=tmp)), log))
+                                          env=dict(os.environ, PYTHONUNBUFFERED="1", TMP=tmp, TEMP=tmp,
+                                                   **env_extra)), log))
     failed = 0
     for i, proc, log in procs:
         rc = proc.wait()
@@ -164,6 +180,13 @@ def orchestrate():
             elif "Traceback" in line:
                 print(f"[w{i}] {line.rstrip()}", flush=True)
         print(f"[w{i}] exit {rc}", flush=True)
+    if any(g.get("tile_dir") for g in groups):
+        # Textures on a tile edge belong to both tiles: show both tiles' output.
+        cmd = [sys.executable, os.path.abspath(__file__), args.run, "--set", args.set,
+               "--worker", "-", "--merge-tiles", "--cache-root", os.path.join(DATA, "_cache", "w0")]
+        cmd += ["--providers", *args.providers]
+        rc = subprocess.call(cmd, cwd=REPO)
+        print(f"tile-edge merge exit {rc}", flush=True)
     for provider in args.providers:
         write_manifest(provider)
     write_index()
@@ -328,18 +351,42 @@ def write_sample(provider, key, data):
         f.write(";\n")
 
 
+def link_or_copy(src, dst):
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def stage_whole_tile(group, gdir):
+    """A full tile folder: every texture plus the cfg, apt and mesh it was built with."""
+    src = os.path.join(DATA, "sets", args.set, group["tile_dir"])
+    os.makedirs(os.path.join(gdir, "textures"))
+    for f in os.listdir(os.path.join(src, "textures")):
+        link_or_copy(os.path.join(src, "textures", f), os.path.join(gdir, "textures", f))
+    for f in os.listdir(src):
+        if os.path.isfile(os.path.join(src, f)):
+            link_or_copy(os.path.join(src, f), os.path.join(gdir, f))
+
+
 def run_group(group):
     t0 = time.time()
     provider, lat, lon, zl = group["provider"], group["lat"], group["lon"], group["zl"]
     by_key = {s["key"]: s for s in json.load(open(os.path.join(DATA, set_dir(provider), "samples.json")))}
     samples = [by_key[k] for k in group["keys"]]
-    gdir = os.path.join(run_dir, provider, "_builds", f"{lat:+03d}{lon:+04d}_zl{zl}")
+    if group.get("tile_dir"):
+        gdir = os.path.join(run_dir, provider, "_builds", os.path.basename(group["tile_dir"]))
+    else:
+        gdir = os.path.join(run_dir, provider, "_builds", f"{lat:+03d}{lon:+04d}_zl{zl}")
     shutil.rmtree(gdir, ignore_errors=True)
-    os.makedirs(os.path.join(gdir, "textures"))
     os.makedirs(os.path.join(run_dir, provider), exist_ok=True)
-    for s in samples:
-        dds_from_jpg(os.path.join(DATA, set_dir(provider), s["file"]),
-                     os.path.join(gdir, "textures", s["file"][:-4] + ".dds"))
+    if group.get("tile_dir"):
+        stage_whole_tile(group, gdir)
+    else:
+        os.makedirs(os.path.join(gdir, "textures"))
+        for s in samples:
+            dds_from_jpg(os.path.join(DATA, set_dir(provider), s["file"]),
+                         os.path.join(gdir, "textures", s["file"][:-4] + ".dds"))
     PIPELINE._data_dir = os.path.join(gdir, "out")
     tile = CFG.Tile(lat, lon, gdir)
     tile.read_from_config(use_global=True)
@@ -348,9 +395,11 @@ def run_group(group):
         key, value = key.strip(), value.strip()
         kind = CFGVARS.cfg_vars[key]["type"]
         setattr(tile, key, (value.lower() in ("1", "true", "yes")) if kind is bool else kind(value))
-    print(f"== {provider} {' '.join(group['keys'])} (tile {lat:+03d}{lon:+04d}, ZL{zl})", flush=True)
+    names = f"{len(group['keys'])} textures" if group.get("tile_dir") else " ".join(group["keys"])
+    print(f"== {provider} {names} (tile {lat:+03d}{lon:+04d}, ZL{zl})", flush=True)
     cache_dir = FNAMES.overlay_cache_dir(lat, lon)
-    review_json = {s["key"]: os.path.join(cache_dir, s["file"][:-4] + "_review.json") for s in samples}
+    review_json = {s["key"]: os.path.join(cache_dir, s.get("dds", s["file"])[:-4] + "_review.json")
+                   for s in samples}
     for path in review_json.values():
         if os.path.exists(path):
             os.remove(path)
@@ -377,5 +426,28 @@ def run_group(group):
     print(f"   group done in {time.time() - t0:.0f} s", flush=True)
 
 
-for group in json.load(open(args.worker)):
-    run_group(group)
+def merge_tiles():
+    """Re-collect every whole-tile sample from all tile builds of this run."""
+    import glob
+    from math import cos, radians
+    for provider in args.providers:
+        parsed = [parse_dsf_text(t) for t in glob.glob(
+            os.path.join(run_dir, provider, "_builds", "*", "out", "**", "*_review.txt"), recursive=True)]
+        for s in json.load(open(os.path.join(DATA, set_dir(provider), "samples.json"))):
+            if not s.get("tile_dir") or not os.path.exists(os.path.join(run_dir, provider, s["key"] + ".js")):
+                continue
+            gdir = os.path.join(run_dir, provider, "_builds", os.path.basename(s["tile_dir"]))
+            diag_path = os.path.join(gdir, s["key"] + "_review.json")
+            diag = json.load(open(diag_path, encoding="utf-8")) if os.path.exists(diag_path) else None
+            lat_s, lon_w, lat_n, lon_e = s["bbox"]
+            m_per_px = (lon_e - lon_w) * 111320.0 * cos(radians((lat_n + lat_s) / 2)) / 4096.0
+            bld, veg = collect(parsed, s, m_per_px)
+            write_sample(provider, s["key"], {"file": s["file"], "label": s["label"], "zl": s["zl"],
+                                              "bld": bld, "veg": veg, "diag": diag})
+
+
+if args.merge_tiles:
+    merge_tiles()
+else:
+    for group in json.load(open(args.worker)):
+        run_group(group)

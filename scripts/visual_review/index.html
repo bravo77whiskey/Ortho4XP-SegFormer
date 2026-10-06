@@ -10,7 +10,7 @@
     --accent-a: #4aa3ff; --accent-b: #ffb340;
     --obj: 255,140,40; --fac: 235,70,190; --tree: 60,210,90; --scenery: 40,215,235;
     --near: 200,200,200; --filtered: 255,70,70; --resorted: 150,120,255; --blocked: 255,230,40;
-    --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --smaller: 120,255,120; --placedc: 255,255,255; --other: 130,130,130;
+    --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --smaller: 120,255,120; --seam: 80,170,255; --placedc: 255,255,255; --other: 130,130,130;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -71,6 +71,8 @@
     <div class="hint">Footprints include the 3 m clearance the overlay keeps.</div>
     <h2>Display</h2>
     <label class="row"><input type="checkbox" id="lyFill" checked>Filled shapes</label>
+    <label class="row"><input type="checkbox" id="lyBounds" checked>Texture &amp; tile boundaries</label>
+    <label class="row"><input type="checkbox" id="lySeams">YOLO window seams (512 px)</label>
     <div class="hint">Overlay opacity</div>
     <input type="range" id="opacity" min="0.1" max="1" step="0.05" value="0.55">
     <h2>Keys</h2>
@@ -121,6 +123,7 @@
     { id: "noasset", label: "No asset fits", color: "--noasset", on: true },
     { id: "dedup", label: "Removed: asset overlapped a neighbour", color: "--dedup", on: true, dash: true },
     { id: "dedupAsset", label: "… the removed asset's footprint", color: "--dedup", on: true, fillOnly: true },
+    { id: "seam", label: "Removed: smaller piece of a split building", color: "--seam", on: true, dash: true },
     { id: "resorted", label: "Farmland / greenhouse / split", color: "--resorted", on: false },
     { id: "other", label: "Other", color: "--other", on: false },
   ];
@@ -133,6 +136,7 @@
     : ["center_on_existing", "overlaps_existing", "inside_placed_roof"].includes(f) ? "blocked"
     : f === "center_on_road" ? "road"
     : f === "dropped_tile_dedup" ? "dedup"
+    : f === "dropped_seam_piece" ? "seam"
     : f === "placed_object_smaller" ? "smaller"
     : f.startsWith("no_asset") ? "noasset"
     : ["farmland_ground", "greenhouse", "replaced_by_segments"].includes(f) ? "resorted"
@@ -143,6 +147,7 @@
     oversize_reject: "Rejected as oversized",
     suppressed_overlap: "Overlapped a smaller kept detection",
     covered_by_higher_zl: "Covered by a higher-ZL texture",
+    dropped_seam_piece: "Placed, then removed: a smaller piece of a building split at a seam (the biggest piece kept its placement)",
     center_on_existing: "Centre lies on existing scenery",
     overlaps_existing: "Footprint overlaps existing scenery",
     inside_placed_roof: "Inside a roof already placed as one polygon",
@@ -179,8 +184,10 @@
   const runLabel = r => r.run + (r.note ? `  —  ${r.note}` : "");
   for (const sel of [$("runA"), $("runB")]) for (const r of index) sel.add(new Option(runLabel(r), runId(r)));
   // A = newest baseline, B = newest other run (the change being judged).
-  const base = index.find(r => /baseline/i.test(r.run)) || index[index.length - 1];
-  const cand = index.find(r => r !== base) || base;
+  // Runs from different sample sets never pair up by default.
+  const cand = index.find(r => !/baseline/i.test(r.run)) || index[0];
+  const base = index.find(r => /baseline/i.test(r.run) && (r.set || "hotspots") === (cand.set || "hotspots"))
+    || index.find(r => r !== cand) || cand;
   $("runA").value = runId(base);
   $("runB").value = runId(cand);
   function showNotes() {
@@ -315,7 +322,7 @@
     if (im && im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, 4096, 4096);
     if (!hideOverlay) {
       const op = +$("opacity").value, fill = $("lyFill").checked;
-      const order = ["scenery", "tree", "obj", "fac", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "road", "blocked"];
+      const order = ["scenery", "tree", "obj", "fac", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "seam", "road", "blocked"];
       const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
       for (const layer of order) {
         if (!on(layer)) continue;
@@ -332,11 +339,91 @@
         ctx.strokeStyle = `rgba(${rgb},${Math.min(1, op + 0.45)})`; ctx.stroke(p);
       }
       ctx.setLineDash([]);
+      if ($("lySeams").checked) {
+        // The 512 px windows the baseline YOLO pass reads a texture through.
+        ctx.lineWidth = 1 / view.s; ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.beginPath();
+        for (let v = 512; v < 4096; v += 512) { ctx.moveTo(v, 0); ctx.lineTo(v, 4096); ctx.moveTo(0, v); ctx.lineTo(4096, v); }
+        ctx.stroke();
+      }
+      if ($("lyBounds").checked) drawBounds(meta);
     }
     const nObj = data.bld.filter(b => b.t === "obj").length, nFac = data.bld.length - nObj;
     $("status").textContent =
       `${meta.label}  ·  ZL${meta.zl}  ·  ${meta.file}  ·  objects ${nObj}  facades ${nFac}  tree polys ${data.veg.length}` +
       `  ·  zoom ${Math.round(view.s * 100)}%${hideOverlay ? "  ·  TEXTURE ONLY" : ""}`;
+  }
+
+  // Texture and tile boundaries, from the set's samples.json (a bbox per texture).
+  const setSamples = {};
+  function samplesFor(meta) {
+    const dir = meta.img.slice(0, meta.img.lastIndexOf("/"));
+    if (!(dir in setSamples)) {
+      setSamples[dir] = null;
+      fetch(dir + "/samples.json?t=" + BUST).then(r => r.json())
+        .then(j => { setSamples[dir] = j; draw(); }).catch(() => {});
+    }
+    return setSamples[dir];
+  }
+  const mercY = lat => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+  // Lon/lat to this texture's pixels (Web Mercator rows, like the texture itself).
+  function toPx(bb, lon, lat) {
+    const [s, w, n, e] = bb;
+    return [(lon - w) / (e - w) * 4096, (mercY(n) - mercY(lat)) / (mercY(n) - mercY(s)) * 4096];
+  }
+  const tileName = (lat, lon) => (lat < 0 ? "-" : "+") + String(Math.abs(lat)).padStart(2, "0") +
+    (lon < 0 ? "-" : "+") + String(Math.abs(lon)).padStart(3, "0");
+  function boundsLabel(text, x, y, px) {
+    const w = ctx.measureText(text).width + 8 * px, h = 17 * px;
+    x = Math.min(Math.max(x, 2 * px), 4096 - w - 2 * px); y = Math.min(Math.max(y, 2 * px), 4096 - h - 2 * px);
+    ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#fff"; ctx.fillText(text, x + 4 * px, y + 3 * px);
+  }
+  function drawBounds(meta) {
+    const list = samplesFor(meta);
+    const me = list && list.find(s => s.key === sample);
+    if (!me) return;
+    const bb = me.bbox, px = 1 / view.s, key = b => b.map(v => v.toFixed(6)).join();
+    ctx.font = `${12 * px}px system-ui, sans-serif`; ctx.textBaseline = "top";
+    // This texture's own edge.
+    ctx.setLineDash([]); ctx.lineWidth = 2 * px; ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.strokeRect(0, 0, 4096, 4096);
+    // Other textures overlapping this one (other ZLs). Edge textures are listed
+    // under both tiles, so each footprint is drawn once.
+    const seen = new Set([key(bb)]);
+    ctx.setLineDash([8 * px, 5 * px]); ctx.lineWidth = 1.5 * px;
+    for (const s of list) {
+      const [s0, w0, n0, e0] = s.bbox, id = key(s.bbox);
+      if (seen.has(id) || !(s0 < bb[2] && n0 > bb[0] && w0 < bb[3] && e0 > bb[1])) continue;
+      seen.add(id);
+      const [x0, y0] = toPx(bb, w0, n0), [x1, y1] = toPx(bb, e0, s0);
+      ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      const inner = x0 > 0 || y0 > 0 || x1 < 4096 || y1 < 4096;
+      boundsLabel(`ZL${s.zl} texture` + (inner ? "" : " (contains this one)"), x0 + 4 * px, y0 + 4 * px, px);
+    }
+    // Whole-degree tile edges crossing the texture, named on each side.
+    ctx.setLineDash([]);
+    const [s, w, n, e] = bb;
+    const lines = [];
+    for (let lon = Math.ceil(w); lon < e; lon++) if (lon > w) lines.push(["v", lon]);
+    for (let lat = Math.ceil(s); lat < n; lat++) if (lat > s) lines.push(["h", lat]);
+    for (const [dir, v] of lines) {
+      ctx.beginPath();
+      if (dir === "v") { const x = toPx(bb, v, n)[0]; ctx.moveTo(x, 0); ctx.lineTo(x, 4096); }
+      else { const y = toPx(bb, w, v)[1]; ctx.moveTo(0, y); ctx.lineTo(4096, y); }
+      ctx.lineWidth = 6 * px; ctx.strokeStyle = "rgba(0,0,0,0.6)"; ctx.stroke();
+      ctx.lineWidth = 3 * px; ctx.strokeStyle = "rgb(255,255,255)"; ctx.stroke();
+      const midLat = Math.floor((s + n) / 2), midLon = Math.floor((w + e) / 2);
+      if (dir === "v") {
+        const x = toPx(bb, v, n)[0];
+        boundsLabel(`tile ${tileName(midLat, v - 1)}`, x - 120 * px, 8 * px, px);
+        boundsLabel(`tile ${tileName(midLat, v)}`, x + 8 * px, 8 * px, px);
+      } else {
+        const y = toPx(bb, w, v)[1];
+        boundsLabel(`tile ${tileName(v, midLon)}`, 8 * px, y - 24 * px, px);
+        boundsLabel(`tile ${tileName(v - 1, midLon)}`, 8 * px, y + 8 * px, px);
+      }
+    }
   }
 
   function inside(px, py, ring) {
@@ -437,7 +524,7 @@
   });
   $("runB").onchange = () => { showNotes();
     loadRun($("runB").value).then(() => sample && loadSample($("runB").value, sample)).then(draw); };
-  for (const id of ["lyFill", "opacity", "nearMin"]) $(id).oninput = draw;
+  for (const id of ["lyFill", "lyBounds", "lySeams", "opacity", "nearMin"]) $(id).oninput = draw;
 
   let drag = null;
   cv.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; cv.classList.add("drag"); });
