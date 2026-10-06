@@ -54,6 +54,7 @@ import O4_Height_Priors as HEIGHTPRIORS
 import O4_Footprint_Polygons as FOOTPRINTS
 import O4_Agri_Structures as AGRI
 import O4_Texture_Selection as TEXSEL
+import O4_Bld_Seams as SEAMS
 from O4_Scenery_Packs import (
     active_scenery_pack_dirs,
     ensure_cached_dsf_text,
@@ -8142,6 +8143,12 @@ class _BuildingOverlayRun:
         # released after the dedup. O4_BLD_DEDUP_FALLBACK=0 disables;
         # O4_BLD_DEDUP_FALLBACK_MIN_COV (default 0.5) is the coverage floor.
         self._dedup_fallback = {} if _dedup_fallback_enabled() else None
+        # Biggest piece wins: placements whose detection box ends on a YOLO
+        # window edge or texture edge, grouped at the end of the tile so a
+        # building split at a seam keeps only its largest piece
+        # (O4_Bld_Seams; O4_BLD_SEAM_OWNER=0 disables).
+        self._seam_owner = SEAMS.owner_enabled()
+        self._seam_pieces = []
         self.excl_rails = []           # road-style dicts for railways (simHeaven network)
         self.residential_polys = []    # no residential landuse source
 
@@ -8949,6 +8956,9 @@ class _BuildingOverlayRun:
             #      per-object context; caches store it only when it is on.
             self._dedup_fallback is not None,
             "schema=v32-no-sports-classes",
+            # v78: biggest piece wins (on by default) needs each texture's seam
+            #      pieces; caches store them only when it is on.
+            self._seam_owner,
         )
 
     def _prepare_dds_inference(self, fi, fname, m):
@@ -9078,8 +9088,30 @@ class _BuildingOverlayRun:
         self._review_pending = []
         self._review_placements = {}
 
+    def _drop_seam_pieces(self):
+        """Keep only the biggest piece of each building split at a seam."""
+        pieces, self._seam_pieces = self._seam_pieces, []
+        drop, counts = SEAMS.group_pieces(pieces)
+        if not drop:
+            return
+        drop_ids = {id(p.placement) for p in drop}
+        self.placed_stock_objects = [p for p in self.placed_stock_objects if id(p) not in drop_ids]
+        self.placed_facades = [p for p in self.placed_facades if id(p) not in drop_ids]
+        for piece in drop:
+            self._review_placements.pop(id(piece.placement), None)
+            if self._dedup_fallback is not None:
+                self._dedup_fallback.pop(id(piece.placement), None)
+            if piece.review is not None:
+                piece.review[0].set(piece.review[1], "dropped_seam_piece")
+        print(
+            f"[Bld] Biggest piece wins: removed {len(drop):,} smaller pieces of buildings split at a seam "
+            f"(YOLO window edges {counts.get('window', 0):,}, texture edges {counts.get('texture', 0):,})"
+        )
+
     def _finish(self):
         """Deduplicate, write and compile the DSF; returns the placement count."""
+        if self._seam_pieces:
+            self._drop_seam_pieces()
         # Tile-wide cross-texture / cross-pass object dedup — DEPRECATED as a
         # required stage: cross-ZL double coverage (its dominant feed) is now
         # removed at the source, so this pass only mops up rare coverage-boundary
@@ -9869,6 +9901,14 @@ class _TexturePass:
                     if _ctx is not None:
                         self.run._dedup_fallback[id(_p)] = _ctx
             self.run.placed_facades.extend(_cached_bld.get('facades', ()))
+            if self.run._seam_owner:
+                # The cache key carries whether the pieces were recorded.
+                _til_y, _til_x, _zl = int(self.m.group(1)), int(self.m.group(2)), int(self.m.group(4))
+                _lists = {'obj': _cached_bld.get('objects', ()), 'fac': _cached_bld.get('facades', ())}
+                for _kind, _idx, _pts, _area, _lines in _cached_bld.get('seam_pieces', ()):
+                    self.run._seam_pieces.append(SEAMS.SeamPiece(
+                        _lists[_kind][_idx], _til_y, _til_x, _zl, _pts, _area, _lines,
+                    ))
             cached_count = (
                 len(_cached_bld.get('objects', ())) +
                 len(_cached_bld.get('facades', ()))
@@ -9882,10 +9922,12 @@ class _TexturePass:
         """Unpack the inference results and derive per-texture sizes."""
         self._start_object_idx = len(self.run.placed_stock_objects)
         self._start_facade_idx = len(self.run.placed_facades)
+        self._seam_cache = []
         self.stock_yolo_occupied_polys = []  # OBB quads in image-pixel space for this DDS
         self.til_y_top  = int(self.m.group(1))
         self.til_x_left = int(self.m.group(2))
         zl         = int(self.m.group(4))
+        self.zl = zl
 
         # Geographic bounds
         self.lat_n, self.lat_s, self.lon_w, self.lon_e = dds_bounds(self.til_y_top, self.til_x_left, zl)
@@ -10699,6 +10741,8 @@ class _TexturePass:
                 footprint_poly = object_candidate['footprint_poly']
                 _placement = (o_lon, o_lat, final_h, asset['path'])
                 self.run.placed_stock_objects.append(_placement)
+                if self.run._seam_owner:
+                    self._record_seam_piece(_placement, detection)
                 if self.review is not None:
                     detection['_review_asset'] = asset['path']
                     detection['_review_asset_poly'] = np.array(footprint_poly, copy=True)
@@ -10792,7 +10836,7 @@ class _TexturePass:
                         lon=float(o_lon),
                         include_simheaven_assets=self.run.simheaven_assets_available,
                     )
-                    self.run.placed_facades.append((
+                    _facade = (
                         _pixel_ring_to_latlon(
                             yolo_poly, self.img_w, self.img_h, self.lat_n, self.lat_s, self.lon_w, self.lon_e
                         ),
@@ -10800,7 +10844,10 @@ class _TexturePass:
                         _yolo_facade_height_m(
                             detection, self.height_rng, self.run.height_priors_by_class, facade_cls
                         ),
-                    ))
+                    )
+                    self.run.placed_facades.append(_facade)
+                    if self.run._seam_owner:
+                        self._record_seam_piece(_facade, detection)
                     self.placed_viz_polys.append((yolo_poly.copy(), facade_cls))
                     _mark_poly(self.building_spacing_mask, yolo_poly)
                     if self.run._obj_avoid:
@@ -10854,6 +10901,24 @@ class _TexturePass:
     def _review_fate(self, detection, fate):
         if self.review is not None:
             self.review.set(detection, fate)
+
+    def _record_seam_piece(self, placement, detection):
+        """Biggest piece wins: remember a placement whose box ends on a seam."""
+        lines = SEAMS.seam_lines_touched(
+            detection['points'], self.img_w, self.img_h,
+            # YOLO windows line up with texture pixels only on the native path.
+            crop_stride=None if self.run.yolo_analysis_target_zl else self.run.yolo_stride,
+        )
+        if not lines:
+            return
+        points = np.asarray(detection['points'], dtype=np.float64).tolist()
+        area = float(detection.get('area_m2', 0.0))
+        self.run._seam_pieces.append(SEAMS.SeamPiece(
+            placement, self.til_y_top, self.til_x_left, self.zl, points, area, lines,
+            review=(self.review, detection) if self.review is not None else None,
+        ))
+        # Kept for the placement cache, which stores pieces by list index.
+        self._seam_cache.append((id(placement), points, area, lines))
 
     def _write_review_dump(self):
         """O4_BLD_REVIEW_DUMP: candidates with outcomes plus blocking scenery."""
@@ -11022,6 +11087,13 @@ class _TexturePass:
                     # so a replay still gets the tile-wide dedup fallback.
                     _placements['dedup_fallback'] = [
                         self.run._dedup_fallback.get(id(p)) for p in _objects
+                    ]
+                if self.run._seam_owner:
+                    _index = {id(p): ('obj', i) for i, p in enumerate(_objects)}
+                    _index.update({id(p): ('fac', i) for i, p in enumerate(_placements['facades'])})
+                    _placements['seam_pieces'] = [
+                        _index[_pid] + (_pts, _area, _lines)
+                        for _pid, _pts, _area, _lines in self._seam_cache if _pid in _index
                     ]
                 with open(self._bld_cache_file, 'wb') as _f:
                     pickle.dump({

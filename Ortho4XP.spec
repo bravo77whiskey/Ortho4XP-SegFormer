@@ -49,6 +49,7 @@ added_datas = [
 OVERLAY_MODULES = [
     "O4_Agri_Structures",
     "O4_Asset_Inventory",
+    "O4_Bld_Seams",
     "O4_Bounds_Index",
     "O4_Building_Overlay",
     "O4_Climate_Regions",
