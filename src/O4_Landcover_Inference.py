@@ -73,6 +73,43 @@ segformer_default_cuda_batch_size = 8
 segformer_use_amp          = os.environ.get("O4_SEGFORMER_AMP", "").strip() == "1"
 segformer_channels_last    = os.environ.get("O4_SEGFORMER_CHANNELS_LAST", "").strip() == "1"
 segformer_confidence_threshold   = 0.5     # minimum softmax probability for a pixel to be assigned
+# Tree support (vegetation only): pixels the class map leaves out although the
+# model leans towards tree — tree is the top class but under the confidence
+# threshold, or tree is a strong runner-up behind rangeland or water (dark
+# canopy at ZL16 reads as water). Kept apart from the class map, which the
+# building overlay shares, and cached beside it as <stem>_vegtree.npy.
+TREE_SUPPORT_MIN_PROB = 0.30
+
+
+def tree_support_enabled():
+    """O4_VEG_TREE_RULE=0 turns the vegetation tree-support mask off."""
+    value = os.environ.get("O4_VEG_TREE_RULE")
+    return value is None or value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def tree_support_cache_path(veg_cache_path):
+    return veg_cache_path[:-len('_veg.npy')] + '_vegtree.npy'
+
+
+def save_tree_support(path, mask):
+    """Store a boolean mask bit-packed (1/8 of the class map's size)."""
+    mask = np.asarray(mask, dtype=bool)
+    np.save(path, np.concatenate([
+        np.asarray(mask.shape, dtype=np.uint32).view(np.uint8),
+        np.packbits(mask, axis=None),
+    ]))
+
+
+def load_tree_support(path, shape):
+    """Return the cached mask for a class map of ``shape``, or None."""
+    try:
+        raw = np.load(path)
+        h, w = (int(v) for v in raw[:8].view(np.uint32))
+        if (h, w) != tuple(shape):
+            return None
+        return np.unpackbits(raw[8:], count=h * w).reshape(h, w).astype(bool)
+    except Exception:
+        return None
 
 # ── Remote inference offload (optional, session-scoped) ──────────────────────
 # Set by O4_Remote_GPU.activate() when the user opted to run model inference
@@ -404,7 +441,7 @@ def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size
     return max_batch_size
 
 
-def run_inference(model, device, img_rgb, processor=None):
+def run_inference(model, device, img_rgb, processor=None, tree_support=False):
     """
     Run patch-wise inference on a full-resolution RGB image.
 
@@ -418,10 +455,12 @@ def run_inference(model, device, img_rgb, processor=None):
     Patches are grouped into batches sized to available GPU VRAM for throughput.
     The model is run in its native dtype (FP16 on CUDA, FP32 on CPU).
 
-    Returns a (H, W) class-index array.
+    Returns a (H, W) class-index array; with ``tree_support`` a tuple of that
+    array and the boolean tree-support mask (None when inferred remotely).
     """
     if remote_client is not None and isinstance(model, RemoteModelHandle):
-        return remote_client.segformer_infer(model.kind, img_rgb)
+        cls_map = remote_client.segformer_infer(model.kind, img_rgb)
+        return (cls_map, None) if tree_support else cls_map
     import torch
     import torch.nn.functional as F
     from PIL import Image as _Image
@@ -580,22 +619,39 @@ def run_inference(model, device, img_rgb, processor=None):
         _wt_sum_gpu.clamp_(min=1e-4)
         avg = _accum_gpu / _wt_sum_gpu.unsqueeze(0)
         max_prob, cls_map = avg.max(dim=0)
-        return torch.where(
+        out = torch.where(
             max_prob >= segformer_confidence_threshold,
             cls_map,
             torch.full_like(cls_map, -1),
         ).to(torch.int8).cpu().numpy()
+        if not tree_support:
+            return out
+        weak = (
+            ((cls_map == CLASS_TREE) & (max_prob < segformer_confidence_threshold))
+            | ((avg[CLASS_TREE] >= TREE_SUPPORT_MIN_PROB)
+               & ((cls_map == CLASS_RANGELAND) | (cls_map == CLASS_WATER)))
+        )
+        return out, weak.cpu().numpy()
 
     wt_sum = np.maximum(wt_sum, np.float16(1e-4))  # avoid div-by-zero; stay float16
     avg    = accum / wt_sum                          # (C, H, W) float16 — sufficient for argmax
     max_prob = avg.max(axis=0)                       # (H, W)
     # Pixels whose best-class probability is below the threshold are left
     # unclassified (-1).
-    return np.where(
+    cls_map = avg.argmax(axis=0)
+    out = np.where(
         max_prob >= segformer_confidence_threshold,
-        avg.argmax(axis=0),
+        cls_map,
         -1,
     ).astype(np.int8)   # int8 sufficient for classes -1..8; 4× smaller cache files
+    if not tree_support:
+        return out
+    weak = (
+        ((cls_map == CLASS_TREE) & (max_prob < segformer_confidence_threshold))
+        | ((avg[CLASS_TREE] >= TREE_SUPPORT_MIN_PROB)
+           & ((cls_map == CLASS_RANGELAND) | (cls_map == CLASS_WATER)))
+    )
+    return out, weak
 
 
 # ─────────────────────────────────────────────────────────────────────────────

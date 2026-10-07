@@ -11,6 +11,7 @@
     --obj: 255,140,40; --fac: 235,70,190; --tree: 60,210,90; --scenery: 40,215,235;
     --near: 200,200,200; --filtered: 255,70,70; --resorted: 150,120,255; --blocked: 255,230,40;
     --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --smaller: 120,255,120; --seam: 80,170,255; --placedc: 255,255,255; --other: 130,130,130;
+    --treept: 150,255,60; --vegroad: 255,40,220; --vegother: 255,110,40;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -112,6 +113,7 @@
     { id: "obj", label: "Objects", color: "--obj", on: true },
     { id: "fac", label: "Facades", color: "--fac", on: true },
     { id: "tree", label: "Trees", color: "--tree", on: true },
+    { id: "treept", label: "Single trees (one per crown)", color: "--treept", on: true },
     { id: "placedc", label: "Detected box (before asset fit)", color: "--placedc", on: false, outline: true },
     { id: "smaller", label: "Kept with a smaller asset (box)", color: "--smaller", on: true, outline: true },
   ];
@@ -126,6 +128,8 @@
     { id: "seam", label: "Removed: smaller piece of a split building", color: "--seam", on: true, dash: true },
     { id: "resorted", label: "Farmland / greenhouse / split", color: "--resorted", on: false },
     { id: "other", label: "Other", color: "--other", on: false },
+    { id: "vegRoad", label: "Trees removed: road exclusion", color: "--vegroad", on: true, fillOnly: true },
+    { id: "vegOther", label: "Trees removed: other exclusions", color: "--vegother", on: false, fillOnly: true },
   ];
   const SCEN = [
     { id: "scenery", label: "Objects & facades", color: "--scenery", on: true },
@@ -252,7 +256,11 @@
       const rings = b.t === "obj" ? [b.p] : b.r;
       shapes.push({ layer: b.t, info: b, rings, bb: bbox(rings) });
     }
-    for (const v of d.veg) shapes.push({ layer: "tree", info: v, rings: v.r, bb: bbox(v.r) });
+    for (const v of d.veg) shapes.push({ layer: v.pt ? "treept" : "tree", info: v, rings: v.r, bb: bbox(v.r) });
+    // Canopy SegFormer found that an exclusion layer then removed.
+    for (const [cut, layer] of [["road", "vegRoad"], ["other", "vegOther"]])
+      for (const r of (d.vegcut && d.vegcut[cut]) || [])
+        shapes.push({ layer, info: { cut }, rings: [r], bb: bbox([r]), vcut: true });
     const diag = d.diag;
     if (diag) {
       for (const c of diag.detections) {
@@ -327,7 +335,7 @@
     if (im && im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, 4096, 4096);
     if (!hideOverlay) {
       const op = +$("opacity").value, fill = $("lyFill").checked;
-      const order = ["scenery", "tree", "obj", "fac", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "seam", "road", "blocked"];
+      const order = ["scenery", "vegOther", "vegRoad", "tree", "treept", "obj", "fac", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "seam", "road", "blocked"];
       const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
       for (const layer of order) {
         if (!on(layer)) continue;
@@ -354,8 +362,9 @@
       if ($("lyBounds").checked) drawBounds(meta);
     }
     const nObj = data.bld.filter(b => b.t === "obj").length, nFac = data.bld.length - nObj;
+    const nPt = data.veg.reduce((n, v) => n + (v.pt || 0), 0), nPoly = data.veg.filter(v => !v.pt).length;
     $("status").textContent =
-      `${meta.label}  ·  ZL${meta.zl}  ·  ${meta.file}  ·  objects ${nObj}  facades ${nFac}  tree polys ${data.veg.length}` +
+      `${meta.label}  ·  ZL${meta.zl}  ·  ${meta.file}  ·  objects ${nObj}  facades ${nFac}  tree polys ${nPoly}  single trees ${nPt}` +
       `  ·  zoom ${Math.round(view.s * 100)}%${hideOverlay ? "  ·  TEXTURE ONLY" : ""}`;
   }
 
@@ -452,6 +461,10 @@
         existing_facade: "Existing facade", exclusion: "Exclusion polygon", stock_yolo: "Stock-YOLO placement (this overlay)" }[i.k] || i.k;
       return `<b class="t">${what}</b>${i.src ? `<br>pack: ${esc(i.src)}` : ""}${i.a ? `<br>${esc(i.a)}` : ""}`;
     }
+    if (s.vcut) return i.cut === "road"
+      ? `<b class="t">Trees removed by the road exclusion</b><br>canopy within a road's clearance (simHeaven network / OSM roads)`
+      : `<b class="t">Trees removed by another exclusion</b><br>SegFormer road/building/developed buffer, existing buildings, water, forests or exclusion zones`;
+    if (s.layer === "treept") return `<b>single trees</b> · ${i.pt} tree${i.pt > 1 ? "s" : ""}, one per crown<br>${esc(i.a)}`;
     if (s.layer === "obj") return `<b>object</b><br>${esc(i.a)}`;
     if (s.layer === "fac") return `<b>facade</b> · height ${i.h} m<br>${esc(i.a)}`;
     return `<b>trees</b> · density ${i.d}<br>${esc(i.a)}`;
@@ -462,7 +475,7 @@
     const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
     const ix = (mx - view.x) / view.s, iy = (my - view.y) / view.s, nearMin = +$("nearMin").value;
     // Every visible shape under the cursor, most specific first: candidates, then output, then scenery.
-    const rank = s => s.cand ? 0 : s.scen ? 2 : s.layer === "tree" ? 3 : 1;
+    const rank = s => s.cand ? 0 : s.scen || s.vcut ? 2 : s.layer === "tree" ? 3 : 1;
     const hits = [], g = geometry(id, sample);
     const cx = Math.floor(ix / CELL), cy = Math.floor(iy / CELL);
     if (cx < 0 || cy < 0 || cx >= GRID || cy >= GRID) { tip.style.display = "none"; return; }

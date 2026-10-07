@@ -33,7 +33,7 @@ Example:
         --cache-dir "cache_zl16_36_101"
 """
 
-import os, argparse, warnings, time, math
+import os, argparse, warnings, time, math, json
 warnings.filterwarnings('ignore')
 
 import hashlib
@@ -51,6 +51,7 @@ import O4_Landcover_Inference as SEGFORMER
 import O4_Texture_Selection as TEXSEL
 from O4_Building_Overlay import (
     _load_simheaven_building_exclusions,
+    _load_simheaven_network as _load_simheaven_network_typed,
     _load_mesh_water_index,
     _mesh_file_for_tile,
     _mesh_water_signature,
@@ -107,6 +108,70 @@ RESIDENTIAL_FALLBACK_BUFFER_M = 45.0
 RESIDENTIAL_FALLBACK_BUFFER_PX_MIN = 16
 TREE_ROW_WIDTH_M = 8.0
 CONTEXT_RING_M = 18.0
+
+# Exclusion half-widths for typed simHeaven network segments (road.net subtype
+# → OSM class, see O4_Building_Overlay._XP_ROAD_SUBTYPE_RANGES): the carriageway
+# X-Plane draws plus about a metre, so kerbside street trees survive. Untyped
+# 'network' segments are simHeaven's powerlines and cableways.
+SIMHEAVEN_ROAD_HALF_WIDTH_M = {
+    'motorway': 13, 'trunk': 10, 'motorway_link': 6,
+    'primary': 8, 'secondary': 6, 'residential': 4, 'service': 3,
+    'rail': 4, 'network': 3,
+}
+
+# Small canopy blobs become point-mode forests: X-Plane's forests plant on a
+# SPACING grid (12 m for lib/g8), so a blob under a few grid cells usually gets
+# no tree at all. Instead one tree goes on each crown, picked greedily from the
+# deepest canopy pixel outwards, at least POINT_TREE_SPACING_M apart.
+POINT_TREE_MAX_AREA_M2 = 600.0
+POINT_TREE_SPACING_M = 8.0
+POINT_TREE_MIN_DEPTH_M = 1.5
+POINT_MODE = 512
+LINE_MODE = 256
+
+
+def _veg_flag(name):
+    """Vegetation experiment switches: on unless the env var says 0/off."""
+    value = os.environ.get(name)
+    return value is None or value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _road_widths_enabled():
+    """O4_VEG_ROAD_WIDTHS=0: every simHeaven segment excludes a flat 16 m."""
+    return _veg_flag("O4_VEG_ROAD_WIDTHS")
+
+
+def _road_width_scale():
+    """O4_VEG_ROAD_WIDTH_SCALE: multiplies every road clearance; 0 = no road removal."""
+    try:
+        return max(0.0, float(os.environ.get("O4_VEG_ROAD_WIDTH_SCALE", "1")))
+    except ValueError:
+        return 1.0
+
+
+def _road_clip_enabled():
+    """O4_VEG_ROAD_CLIP=0: clamp road points to the texture edge (old bug)."""
+    return _veg_flag("O4_VEG_ROAD_CLIP")
+
+
+def _point_trees_enabled():
+    """O4_VEG_POINT_TREES=0: small canopy blobs stay area-fill forests."""
+    return _veg_flag("O4_VEG_POINT_TREES")
+
+
+def _veg_feature_sig():
+    """Cache-key part for the switches above and the tree-support rule."""
+    return (
+        _road_widths_enabled(),
+        _road_clip_enabled(),
+        _road_width_scale(),
+        _point_trees_enabled(),
+        SEGFORMER.tree_support_enabled(),
+        tuple(sorted(SIMHEAVEN_ROAD_HALF_WIDTH_M.items())),
+        POINT_TREE_MAX_AREA_M2, POINT_TREE_SPACING_M, POINT_TREE_MIN_DEPTH_M,
+        SEGFORMER.TREE_SUPPORT_MIN_PROB,
+    )
+
 
 # DSF density (0–255 integer) + fill-mode bits (treeline +256, point +512)
 _BASE_DENSITY = {
@@ -276,15 +341,25 @@ def _rasterize_roads_typed(roads, lat_n, lat_s, lon_w, lon_e,
     granular exclusion zones that match the actual road surface + verge.
     """
     mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    scale = _road_width_scale()
+    if scale <= 0:
+        return mask
+
+    clip = _road_clip_enabled()
 
     def ll_to_px(lat, lon):
         x = int((lon - lon_w) / (lon_e - lon_w) * img_w)
         y = int((lat_n - lat) / (lat_n - lat_s) * img_h)
+        if clip:
+            # cv2.line clips to the image itself; clamping each end to the
+            # edge separately bends lines into phantom wedges along it.
+            return (x, y)
         return (max(0, min(img_w - 1, x)),
                 max(0, min(img_h - 1, y)))
 
     for road in roads:
-        half_m   = ROAD_EXCL_HALF_WIDTH_M.get(road['type'], _ROAD_DEFAULT_HALF_M)
+        half_m   = road.get('half_m') or ROAD_EXCL_HALF_WIDTH_M.get(road['type'], _ROAD_DEFAULT_HALF_M)
+        half_m  *= scale
         thickness = max(1, int(2 * half_m / mpp))
         pts_px    = [ll_to_px(lat, lon) for lat, lon in road['pts']]
         for i in range(len(pts_px) - 1):
@@ -443,9 +518,15 @@ def _rasterize_ways_constant_width(ways, lat_n, lat_s, lon_w, lon_e,
     if not ways:
         return mask
 
+    clip = _road_clip_enabled()
+
     def ll_to_px(lat, lon):
         x = int((lon - lon_w) / (lon_e - lon_w) * img_w)
         y = int((lat_n - lat) / (lat_n - lat_s) * img_h)
+        if clip:
+            # cv2.line clips to the image itself; clamping each end to the
+            # edge separately bends lines into phantom wedges along it.
+            return (x, y)
         return (max(0, min(img_w - 1, x)),
                 max(0, min(img_h - 1, y)))
 
@@ -515,6 +596,7 @@ def _dds_mask_cache_key(fname, lat_n, lat_s, lon_w, lon_e, img_h, img_w, mpp,
         'residential_buffer_m': float(RESIDENTIAL_FALLBACK_BUFFER_M),
         'residential_buffer_px_min': int(RESIDENTIAL_FALLBACK_BUFFER_PX_MIN),
         'tree_row_width_m': float(TREE_ROW_WIDTH_M),
+        'veg_features': _veg_feature_sig(),
     }
 
 
@@ -640,6 +722,7 @@ def _dds_polygon_cache_key(
         'climate_code': climate_code,
         'asset_selection_mode': asset_selection_mode,
         'forest_type_source_path': forest_type_source_path,
+        'veg_features': _veg_feature_sig(),
     }
 
 
@@ -1218,6 +1301,39 @@ def _for_entry(veg_cls, frac, shape, region, rng,
     return path, dsf_density
 
 
+# ── Visual-review dump ────────────────────────────────────────────────────────
+def _review_dump_enabled():
+    """O4_BLD_REVIEW_DUMP=1 (set by the review harness) also dumps tree cuts."""
+    value = os.environ.get("O4_BLD_REVIEW_DUMP", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _write_veg_review(path, img_w, img_h, layers):
+    """Write canopy the exclusion layers removed, as rings in 4096-px texture space."""
+    sx, sy = 4096.0 / img_w, 4096.0 / img_h
+    out = {}
+    for name, mask in layers.items():
+        rings = []
+        if mask is not None and mask.any():
+            cnts, _ = cv2.findContours(
+                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for cnt in cnts:
+                if cv2.contourArea(cnt) < 2.0:
+                    continue
+                cnt = cv2.approxPolyDP(cnt, 1.0, closed=True)
+                if len(cnt) < 3:
+                    continue
+                rings.append([[round(float(x) * sx, 1), round(float(y) * sy, 1)]
+                              for x, y in cnt[:, 0, :]])
+        out[name] = rings
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, separators=(",", ":"))
+    except OSError as exc:
+        print(f"    veg review dump failed: {exc}", flush=True)
+
+
 # ── Polygon helpers ───────────────────────────────────────────────────────────
 def _polygon_fill_frac(mask, cnt, prepared=None):
     prepared = prepared or _contour_fill_stats(cnt, m_per_px=1.0, include_ring=False)
@@ -1389,6 +1505,42 @@ def _contour_to_latlon(cnt, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
     return result
 
 
+def _crown_points(mask, prepared, m_per_px):
+    """Crown centres in a small canopy blob, as image pixel (x, y) pairs.
+
+    Greedy: the deepest canopy pixel (distance transform) takes a tree, a
+    POINT_TREE_SPACING_M disc around it is cleared, repeat. Later trees must
+    sit at least POINT_TREE_MIN_DEPTH_M inside the canopy; the first always
+    goes in, so every blob that survives the filters gets one tree.
+    """
+    x, y, fill = prepared['x'], prepared['y'], prepared['fill']
+    h, w = fill.shape
+    canopy = (mask[y:y + h, x:x + w] & fill).astype(np.uint8)
+    if not canopy.any():
+        canopy = fill
+    padded = cv2.copyMakeBorder(canopy, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    dist = cv2.distanceTransform(padded, cv2.DIST_L2, 5)
+    spacing_px = max(1, int(round(POINT_TREE_SPACING_M / max(m_per_px, 1e-6))))
+    min_depth_px = POINT_TREE_MIN_DEPTH_M / max(m_per_px, 1e-6)
+    pts = []
+    while True:
+        _, depth, _, (px, py) = cv2.minMaxLoc(dist)
+        if depth <= 0 or (pts and depth < min_depth_px):
+            break
+        pts.append((x + px - 1, y + py - 1))
+        cv2.circle(dist, (px, py), spacing_px, 0, -1)
+    return pts
+
+
+def _write_point_windings(f, pts):
+    """Point-mode forest: one tree per point, so the ring is never closed."""
+    for start in range(0, len(pts), MAX_RING_PTS):
+        f.write("BEGIN_WINDING\n")
+        for lo, la in pts[start:start + MAX_RING_PTS]:
+            f.write(f"POLYGON_POINT {lo:.7f} {la:.7f}\n")
+        f.write("END_WINDING\n")
+
+
 def _write_winding(f, ring_pts):
     pts = ring_pts
     if len(pts) > MAX_RING_PTS + 1:
@@ -1418,8 +1570,9 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
     """
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polys   = []
+    point_trees = _point_trees_enabled()
     for cnt in cnts:
-        shape, _ = _contour_shape(cnt, min_area_px, m_per_px)
+        shape, area_px = _contour_shape(cnt, min_area_px, m_per_px)
         if shape == 'tiny':
             continue
         if veg_cls == SEGFORMER.CLASS_AGRICULTURE and shape != 'treeline':
@@ -1441,6 +1594,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         if min(lats) >= tile_lat + 1 or max(lats) <= tile_lat: continue
 
         prepared_stats = None
+        prepared_fill = None
         frac = 0.0
         veg_type = None
         if veg_cls == SEGFORMER.CLASS_TREE:
@@ -1479,6 +1633,19 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             c_lon = sum(p[0] for p in ring) / len(ring)
             c_lat = sum(p[1] for p in ring) / len(ring)
             fpath = forest_path_mapper.map_path(fpath, c_lon, c_lat, veg_type)
+        if (
+            point_trees and prepared_fill is not None and shape == 'area'
+            and area_px * m_per_px * m_per_px < POINT_TREE_MAX_AREA_M2
+        ):
+            pts = []
+            for px, py in _crown_points(mask, prepared_fill, m_per_px):
+                lo = lon_w + px / img_w * (lon_e - lon_w)
+                la = lat_n - py / img_h * (lat_n - lat_s)
+                if tile_lon <= lo < tile_lon + 1 and tile_lat <= la < tile_lat + 1:
+                    pts.append((lo, la))
+            if pts:
+                polys.append((fpath, (dsf_den % LINE_MODE) + POINT_MODE, pts))
+            continue
         polys.append((fpath, dsf_den, ring))
     return polys
 
@@ -1590,6 +1757,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             os.path.join(cache_dir, stem + suffix)
             for suffix in (
                 '_veg.npy',
+                '_vegtree.npy',
                 '_road.pkl',
                 '_bld.pkl',
                 '_vegaux.pkl',
@@ -1719,9 +1887,19 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     sh_network = []
     if use_simheaven and dsftool_path and os.path.exists(dsftool_path):
         _t = time.perf_counter()
-        sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
+        if _road_widths_enabled():
+            sh_network = _load_simheaven_network_typed(
+                custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir
+            )
+            for way in sh_network:
+                way['half_m'] = SIMHEAVEN_ROAD_HALF_WIDTH_M.get(
+                    way['type'], SIMHEAVEN_ROAD_HALF_WIDTH_M['network']
+                )
+        else:
+            sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
         timings['scenery_parse'] += time.perf_counter() - _t
-        print(f"simHeaven network: {len(sh_network)} road segments")
+        print(f"simHeaven network: {len(sh_network)} road segments"
+              + (" (exclusion width by road type)" if _road_widths_enabled() else ""))
     elif use_simheaven:
         print(f"  [simHeaven] DSFTool not found at {dsftool_path} — skipping")
 
@@ -1974,6 +2152,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
         cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
+        tree_support_path = SEGFORMER.tree_support_cache_path(cache_path)
+        want_tree_support = SEGFORMER.tree_support_enabled()
+        tree_support = None
         img = None
         veg_map = None
         mesh_water_mask = None
@@ -2000,6 +2181,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 except OSError:
                     pass
                 print(f"  [{idx}/{n_files}] {fname}  (stale all-water cache ignored)", flush=True)
+            elif want_tree_support and not mesh_water_full:
+                tree_support = SEGFORMER.load_tree_support(tree_support_path, veg_map.shape)
+                if tree_support is None:
+                    # Class map cached without its tree-support mask: infer again.
+                    veg_map = None
+                    print(f"  [{idx}/{n_files}] {fname}  (no tree-support cache; re-inferring)", flush=True)
+                else:
+                    print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
             else:
                 print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
         if veg_map is None:
@@ -2028,10 +2217,17 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 if model is None:
                     model, proc, device = SEGFORMER.load_vegetation_model(device)
                 _t = time.perf_counter()
-                veg_map = SEGFORMER.run_inference(model, device, img, proc)
+                if want_tree_support:
+                    veg_map, tree_support = SEGFORMER.run_inference(
+                        model, device, img, proc, tree_support=True
+                    )
+                else:
+                    veg_map = SEGFORMER.run_inference(model, device, img, proc)
                 timings['inference'] += time.perf_counter() - _t
             if not disable_cache and not mesh_water_full:
                 np.save(cache_path, veg_map)
+                if tree_support is not None:
+                    SEGFORMER.save_tree_support(tree_support_path, tree_support)
 
         if disable_cache:
             veg_cache_stat = None
@@ -2039,6 +2235,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             try:
                 _veg_st = os.stat(cache_path)
                 veg_cache_stat = (_veg_st.st_mtime_ns, _veg_st.st_size)
+                if tree_support is not None:
+                    _ts_st = os.stat(tree_support_path)
+                    veg_cache_stat += (_ts_st.st_mtime_ns, _ts_st.st_size)
             except OSError:
                 veg_cache_stat = None
 
@@ -2056,6 +2255,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 mesh_water_mask = cv2.resize(
                     mesh_water_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST
                 ).astype(np.uint8, copy=False)
+            if tree_support is not None:
+                tree_support = cv2.resize(
+                    tree_support.astype(np.uint8), (new_w, new_h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
             img_h, img_w = veg_map.shape
             mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
 
@@ -2073,7 +2277,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             m = cv2.morphologyEx(m,   cv2.MORPH_OPEN,  ko)
             return m
 
-        tree_raw  = (veg_map == SEGFORMER.CLASS_TREE).astype(np.uint8)
+        tree_raw  = (veg_map == SEGFORMER.CLASS_TREE)
+        if tree_support is not None:
+            tree_raw = tree_raw | tree_support
+        tree_raw = tree_raw.astype(np.uint8)
         tree_mask = _morph(tree_raw)
 
         # ── Exclusion layer 1: SegFormer CLASS_BUILDING / CLASS_ROAD / CLASS_DEVELOPED
@@ -2335,6 +2542,18 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 local_context_masks.get('water'), mesh_water_mask
             )
 
+        review_cuts = None
+        if _review_dump_enabled():
+            cut = cv2.bitwise_and(tree_mask, excl_mask)
+            cut_road = (
+                cv2.bitwise_and(cut, road_excl) if road_excl is not None
+                else np.zeros_like(cut)
+            )
+            review_cuts = {
+                'road': cut_road,
+                'other': cv2.bitwise_and(cut, cv2.bitwise_not(cut_road)),
+            }
+
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
 
         # Regions covered by kept higher-ZL textures emit their forests at the
@@ -2343,6 +2562,16 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if _covered_fracs:
             mask_covered_regions(
                 tree_mask, covered_rects_to_px(_covered_fracs, img_w, img_h)
+            )
+        if review_cuts is not None:
+            for _cut in review_cuts.values():
+                if _covered_fracs:
+                    mask_covered_regions(
+                        _cut, covered_rects_to_px(_covered_fracs, img_w, img_h)
+                    )
+            _write_veg_review(
+                os.path.join(cache_dir, fname.replace('.dds', '_vegreview.json')),
+                img_w, img_h, review_cuts,
             )
 
         _poly_cache_file = os.path.join(cache_dir, fname.replace('.dds', '_vegpoly.pkl'))
@@ -2515,7 +2744,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f.write("\n")
         for fpath, dsf_den, ring in polygons:
             f.write(f"BEGIN_POLYGON {for_idx[fpath]} {dsf_den} 2\n")
-            _write_winding(f, ring)
+            if dsf_den >= POINT_MODE:
+                _write_point_windings(f, ring)
+            else:
+                _write_winding(f, ring)
             f.write("END_POLYGON\n")
     timings['dsf_text'] += time.perf_counter() - _t
 

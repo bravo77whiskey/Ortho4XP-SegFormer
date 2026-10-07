@@ -2947,7 +2947,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         """Delete SegFormer vegetation inference maps (*_veg.npy) for this tile."""
         import glob as _glob
         cache_dir = FNAMES.overlay_cache_dir(lat, lon)
-        files = _glob.glob(os.path.join(cache_dir, '*_veg.npy'))
+        files = (_glob.glob(os.path.join(cache_dir, '*_veg.npy'))
+                 + _glob.glob(os.path.join(cache_dir, '*_vegtree.npy')))
         if not files:
             UI.vprint(3, "No vegetation overlay cache exists for tile at " + str(lat) + str(lon))
             return False

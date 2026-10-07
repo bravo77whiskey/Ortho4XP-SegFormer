@@ -8137,6 +8137,7 @@ class _BuildingOverlayRun:
             os.path.join(self.cache_dir, stem + suffix)
             for suffix in (
                 '_veg.npy',
+                '_vegtree.npy',
                 '_road.pkl',
                 '_bld.pkl',
                 '_yolo_obb.pkl',
@@ -9637,8 +9638,21 @@ class _TextureInference:
                 if self.run.model is None:
                     self.run.model, self.run.proc, self.run.device = SEGFORMER.load_vegetation_model(self.run.device)
                 _t = time.perf_counter()
-                self.veg_map = SEGFORMER.run_inference(self.run.model, self.run.device, self.img, self.run.proc)
+                tree_support = None
+                if SEGFORMER.tree_support_enabled():
+                    # The vegetation overlay reads its tree-support mask from
+                    # beside the shared class-map cache written here.
+                    self.veg_map, tree_support = SEGFORMER.run_inference(
+                        self.run.model, self.run.device, self.img, self.run.proc,
+                        tree_support=True,
+                    )
+                else:
+                    self.veg_map = SEGFORMER.run_inference(self.run.model, self.run.device, self.img, self.run.proc)
                 self._rec('segformer_inference', _t)
+                if not self.run.disable_cache and tree_support is not None:
+                    SEGFORMER.save_tree_support(
+                        SEGFORMER.tree_support_cache_path(cache_path), tree_support
+                    )
             if not self.run.disable_cache and not self.mesh_water_full:
                 _t = time.perf_counter()
                 np.save(cache_path, self.veg_map)

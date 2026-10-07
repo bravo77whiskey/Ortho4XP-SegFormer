@@ -19,6 +19,7 @@ viewer, which is served from DATA.
 """
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -316,6 +317,12 @@ def inside(px):
     return 0.0 <= px[0] < 4096.0 and 0.0 <= px[1] < 4096.0
 
 
+def crown(p, r):
+    """An octagon of radius r pixels around p, standing in for one tree."""
+    return [[round(p[0] + r * math.cos(a * math.pi / 4), 1),
+             round(p[1] + r * math.sin(a * math.pi / 4), 1)] for a in range(8)]
+
+
 def collect(parsed, sample, m_per_px):
     """The group's placements that belong to this texture, in its pixels."""
     bld, veg = [], []
@@ -334,7 +341,13 @@ def collect(parsed, sample, m_per_px):
             centre = (sum(p[0] for p in outer) / len(outer), sum(p[1] for p in outer) / len(outer))
             if not inside(centre):
                 continue
-            if poly["def"].lower().endswith(".for"):
+            if poly["def"].lower().endswith(".for") and poly["param"] >= 512:
+                # Point-mode forest: one tree per point, drawn as a 3 m crown.
+                pts = [p for r in rings for p in r if inside(p)]
+                if pts:
+                    veg.append({"a": poly["def"], "d": poly["param"], "pt": len(pts),
+                                "r": [crown(p, 3.0 / m_per_px) for p in pts]})
+            elif poly["def"].lower().endswith(".for"):
                 veg.append({"a": poly["def"], "d": poly["param"], "r": rings})
             else:
                 bld.append({"t": "fac", "a": poly["def"], "h": poly["param"], "r": rings})
@@ -400,7 +413,9 @@ def run_group(group):
     cache_dir = FNAMES.overlay_cache_dir(lat, lon)
     review_json = {s["key"]: os.path.join(cache_dir, s.get("dds", s["file"])[:-4] + "_review.json")
                    for s in samples}
-    for path in review_json.values():
+    veg_json = {s["key"]: os.path.join(cache_dir, s.get("dds", s["file"])[:-4] + "_vegreview.json")
+                for s in samples}
+    for path in list(review_json.values()) + list(veg_json.values()):
         if os.path.exists(path):
             os.remove(path)
     if not args.skip_bld:
@@ -419,9 +434,13 @@ def run_group(group):
         if os.path.exists(review_json[s["key"]]):
             shutil.copy(review_json[s["key"]], os.path.join(gdir, s["key"] + "_review.json"))
             diag = json.load(open(review_json[s["key"]], encoding="utf-8"))
+        vegcut = None
+        if os.path.exists(veg_json[s["key"]]):
+            shutil.copy(veg_json[s["key"]], os.path.join(gdir, s["key"] + "_vegreview.json"))
+            vegcut = json.load(open(veg_json[s["key"]], encoding="utf-8"))
         write_sample(provider, s["key"], {
             "file": s["file"], "label": s["label"], "zl": s["zl"],
-            "bld": bld, "veg": veg, "diag": diag})
+            "bld": bld, "veg": veg, "diag": diag, "vegcut": vegcut})
         print(f"   {s['key']}: {len(bld)} buildings, {len(veg)} tree polygons", flush=True)
     print(f"   group done in {time.time() - t0:.0f} s", flush=True)
 
@@ -439,11 +458,13 @@ def merge_tiles():
             gdir = os.path.join(run_dir, provider, "_builds", os.path.basename(s["tile_dir"]))
             diag_path = os.path.join(gdir, s["key"] + "_review.json")
             diag = json.load(open(diag_path, encoding="utf-8")) if os.path.exists(diag_path) else None
+            veg_path = os.path.join(gdir, s["key"] + "_vegreview.json")
+            vegcut = json.load(open(veg_path, encoding="utf-8")) if os.path.exists(veg_path) else None
             lat_s, lon_w, lat_n, lon_e = s["bbox"]
             m_per_px = (lon_e - lon_w) * 111320.0 * cos(radians((lat_n + lat_s) / 2)) / 4096.0
             bld, veg = collect(parsed, s, m_per_px)
             write_sample(provider, s["key"], {"file": s["file"], "label": s["label"], "zl": s["zl"],
-                                              "bld": bld, "veg": veg, "diag": diag})
+                                              "bld": bld, "veg": veg, "diag": diag, "vegcut": vegcut})
 
 
 if args.merge_tiles:

@@ -818,7 +818,7 @@ def process_veg_tile(lat, lon, build_dir):
         if veg_disable_cache:
             _purge_overlay_cache(
                 cache_dir,
-                ['*_veg.npy', '*_vegaux.pkl', '*_vegpoly.pkl'],
+                ['*_veg.npy', '*_vegtree.npy', '*_vegaux.pkl', '*_vegpoly.pkl'],
                 'veg',
             )
         else:
@@ -928,7 +928,7 @@ def process_bld_tile(lat, lon, build_dir):
         if bld_disable_cache:
             _purge_overlay_cache(
                 cache_dir,
-                ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl', '*_veg.npy'],
+                ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl', '*_veg.npy', '*_vegtree.npy'],
                 'bld',
             )
         else:
