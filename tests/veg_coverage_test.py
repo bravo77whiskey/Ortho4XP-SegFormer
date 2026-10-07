@@ -36,6 +36,20 @@ def _ll(px, py):
 
 
 class RoadRasterTests(unittest.TestCase):
+    def setUp(self):
+        # Production default is no road clearance (scale 0); these tests
+        # exercise the widths themselves.
+        patcher = mock.patch.dict(os.environ, {"O4_VEG_ROAD_WIDTH_SCALE": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_default_is_no_road_removal(self):
+        road = self._road((100, 500), (900, 500), half_m=4)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("O4_VEG_ROAD_WIDTH_SCALE", None)
+            mask = VEG._rasterize_roads_typed([road], LAT_N, LAT_S, LON_W, LON_E, SIZE, SIZE, MPP)
+        self.assertFalse(mask.any())
+
     def _road(self, a, b, **extra):
         return dict({"pts": [_ll(*a), _ll(*b)], "type": "network"}, **extra)
 

@@ -142,11 +142,16 @@ def _road_widths_enabled():
 
 
 def _road_width_scale():
-    """O4_VEG_ROAD_WIDTH_SCALE: multiplies every road clearance; 0 = no road removal."""
+    """O4_VEG_ROAD_WIDTH_SCALE: multiplies every road clearance.
+
+    Default 0: roads remove no canopy, so street trees and canopy over the
+    carriageway are planted (user choice after the 2026-10-07 review). 1 uses
+    the road-type widths in SIMHEAVEN_ROAD_HALF_WIDTH_M / ROAD_EXCL_HALF_WIDTH_M.
+    """
     try:
-        return max(0.0, float(os.environ.get("O4_VEG_ROAD_WIDTH_SCALE", "1")))
+        return max(0.0, float(os.environ.get("O4_VEG_ROAD_WIDTH_SCALE", "0")))
     except ValueError:
-        return 1.0
+        return 0.0
 
 
 def _road_clip_enabled():
