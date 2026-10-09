@@ -1860,6 +1860,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'contours': 0.0,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
+        'bld_wait': 0.0,
     }
 
     # ── Pre-load road / network exclusion sources ────────────────────────────
@@ -2136,6 +2137,25 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     else:
         print(f"Mesh water: unavailable from {mesh_water_path}")
 
+    # With caches off, read the SegFormer class map the building pass of this
+    # build left behind instead of inferring it again; it is deleted once this
+    # DDS is done. O4_VEG_REUSE_BLD_SEG=0 always infers.
+    reuse_bld_seg = os.environ.get("O4_VEG_REUSE_BLD_SEG", "").strip().lower() not in ("0", "false", "no", "off")
+    # Set by the pipeline when the building overlay runs alongside: the path
+    # of the flag it writes when it is done. Until then, wait for each
+    # texture's class map (or its "no class map" marker) to appear.
+    bld_done_flag = os.environ.get("O4_VEG_WAIT_FOR_BLD_SEG", "").strip() if reuse_bld_seg else ""
+
+    def _wait_for_bld_seg(cache_path):
+        if not bld_done_flag:
+            return
+        skip_path = cache_path[:-len('_veg.npy')] + '_bldseg.skip'
+        _t = time.perf_counter()
+        while not (
+            os.path.exists(cache_path) or os.path.exists(skip_path) or os.path.exists(bld_done_flag)
+        ):
+            time.sleep(0.2)
+        timings['bld_wait'] += time.perf_counter() - _t
     for idx, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
         if not m: continue
@@ -2146,6 +2166,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             _pre_dds_cleanup = tuple(
                 path for path in _dds_cache_files
                 if not (bld_excl_m > 0 and path.endswith('_bld.pkl'))
+                and not (reuse_bld_seg and path.endswith(('_veg.npy', '_vegtree.npy')))
             )
             _remove_cache_files(
                 _pre_dds_cleanup
@@ -2164,7 +2185,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         veg_map = None
         mesh_water_mask = None
         mesh_water_full = False
-        if not disable_cache and os.path.exists(cache_path):
+        if reuse_bld_seg:
+            _wait_for_bld_seg(cache_path)
+        if (not disable_cache or reuse_bld_seg) and os.path.exists(cache_path):
             _t = time.perf_counter()
             veg_map = np.load(cache_path)
             timings['cache_load'] += time.perf_counter() - _t
@@ -2816,7 +2839,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"leaf_type={timings['leaf_type']:.1f}s  "
         f"contours={timings['contours']:.1f}s  "
         f"dsf_text={timings['dsf_text']:.1f}s  "
-        f"dsf_compile={timings['dsf_compile']:.1f}s"
+        f"dsf_compile={timings['dsf_compile']:.1f}s  "
+        f"bld_wait={timings['bld_wait']:.1f}s"
     )
 
     return len(polygons)

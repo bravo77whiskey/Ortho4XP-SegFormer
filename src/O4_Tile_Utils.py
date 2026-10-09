@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import shutil
@@ -363,6 +364,80 @@ def _clear_todo_marker(lat, lon):
         pass
 
 ################################################################################
+def _batch_pipelining():
+    """Run a tile's overlays while the batch builds the next tile (O4_BATCH_PIPELINE=0: don't)."""
+    return os.environ.get("O4_BATCH_PIPELINE", "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _build_tile_overlays(tile, do_bld, do_veg, link):
+    """Building and/or vegetation overlays of one tile, then link and clear it."""
+    lat, lon = tile.lat, tile.lon
+    name = FNAMES.short_latlon(lat, lon)
+    try:
+        if do_bld:
+            UI.lvprint(0, f"\nBuilding overlay for {name} :\n--------\n")
+            PIPELINE.apply_tile_settings(tile, CFGVARS.list_bld_pipeline_vars)
+        if do_veg:
+            UI.lvprint(0, f"\nVegetation overlay for {name} :\n--------\n")
+            PIPELINE.apply_tile_settings(tile, CFGVARS.list_veg_pipeline_vars)
+        errors = PIPELINE.process_overlays_tile(
+            lat, lon, tile.build_dir, do_bld=do_bld, do_veg=do_veg,
+        )
+    except Exception as exc:
+        UI.lvprint(0, f"[Overlay] Overlays failed for {name}: {exc}")
+        return
+    if UI.red_flag:
+        return
+    if "bld" in errors:
+        done = errors["bld"] is None
+        if not done:
+            UI.lvprint(0, f"[Overlay] Building overlay failed for {name}: {errors['bld']}")
+        if done:
+            BSTATE.mark_done(lat, lon, "bld_overlay")
+    if "veg" in errors:
+        done = errors["veg"] is None
+        if not done:
+            UI.lvprint(0, f"[Overlay] Vegetation overlay failed for {name}: {errors['veg']}")
+        if done:
+            BSTATE.mark_done(lat, lon, "veg_overlay")
+    if link:
+        # build_tile() links the tile itself; catch the runs which only
+        # refreshed overlays over an already built tile.
+        SLINK.auto_link_tile(tile)
+    _clear_todo_marker(lat, lon)
+
+
+class _TileOverlays:
+    """One tile's overlays in a background thread while the batch builds the next tile.
+
+    The overlays are GPU and CPU work in their own processes; the next
+    tile's OSM, mesh, mask and DSF steps are mostly downloads and other CPU
+    work, so the two overlap well. Only one tile's overlays run at a time,
+    and they get their own copy of the tile settings.
+    """
+
+    def __init__(self):
+        self.thread = None
+
+    def start(self, tile, do_bld, do_veg, link):
+        self.wait()
+        self.thread = threading.Thread(
+            target=_build_tile_overlays,
+            args=(copy.copy(tile), do_bld, do_veg, link),
+            name="tile-overlays",
+            daemon=True,
+        )
+        self.thread.start()
+        if not _batch_pipelining():
+            self.wait()
+
+    def wait(self):
+        if self.thread is not None:
+            self.thread.join()
+            self.thread = None
+
+
+################################################################################
 def _end_journal_on_stop():
     """Settle the journal of a batch that red_flag cut short.
 
@@ -426,6 +501,20 @@ def _build_tile_list(
         len(list_lat_lon),
         "tiles.",
     )
+    overlays = _TileOverlays()
+    try:
+        return _build_tiles(
+            tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
+            do_bld_overlay, do_veg_overlay, override_cfg, steps, timer, overlays,
+        )
+    finally:
+        overlays.wait()
+
+
+def _build_tiles(
+    tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
+    do_bld_overlay, do_veg_overlay, override_cfg, steps, timer, overlays,
+):
     k = 0
     for (lat, lon) in list_lat_lon:
         k += 1
@@ -524,47 +613,27 @@ def _build_tile_list(
                 return 0
             if done:
                 BSTATE.mark_done(lat, lon, "ovl")
-        if do_bld_overlay and not BSTATE.is_done(lat, lon, "bld_overlay"):
+        want_bld = do_bld_overlay and not BSTATE.is_done(lat, lon, "bld_overlay")
+        want_veg = do_veg_overlay and not BSTATE.is_done(lat, lon, "veg_overlay")
+        # One tile's overlays at a time: wait for the previous tile's, which
+        # ran while this tile's steps above were built.
+        overlays.wait()
+        if UI.red_flag:
+            _end_journal_on_stop()
+            UI.exit_message_and_bottom_line()
+            return 0
+        if want_bld or want_veg:
             UI.check_pause()
-            UI.lvprint(0, f"\nBuilding overlay for "
-                       f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
-            PIPELINE.apply_tile_settings(tile, CFGVARS.list_bld_pipeline_vars)
-            done = True
-            try:
-                PIPELINE.process_bld_tile(tile.lat, tile.lon, tile.build_dir)
-            except Exception as exc:
-                done = False
-                UI.lvprint(0, f"[Overlay] Building overlay failed for "
-                           f"{FNAMES.short_latlon(lat, lon)}: {exc}")
-            if UI.red_flag:
-                _end_journal_on_stop()
-                UI.exit_message_and_bottom_line()
-                return 0
-            if done:
-                BSTATE.mark_done(lat, lon, "bld_overlay")
-        if do_veg_overlay and not BSTATE.is_done(lat, lon, "veg_overlay"):
-            UI.check_pause()
-            UI.lvprint(0, f"\nVegetation overlay for "
-                       f"{FNAMES.short_latlon(lat, lon)} :\n--------\n")
-            PIPELINE.apply_tile_settings(tile, CFGVARS.list_veg_pipeline_vars)
-            done = True
-            try:
-                PIPELINE.process_veg_tile(tile.lat, tile.lon, tile.build_dir)
-            except Exception as exc:
-                done = False
-                UI.lvprint(0, f"[Overlay] Vegetation overlay failed for "
-                           f"{FNAMES.short_latlon(lat, lon)}: {exc}")
-            if UI.red_flag:
-                _end_journal_on_stop()
-                UI.exit_message_and_bottom_line()
-                return 0
-            if done:
-                BSTATE.mark_done(lat, lon, "veg_overlay")
-        if not do_dsf:
-            # build_tile() links the tile itself; catch the runs which only
-            # refreshed overlays over an already built tile.
-            SLINK.auto_link_tile(tile)
-        _clear_todo_marker(lat, lon)
+            overlays.start(tile, want_bld, want_veg, link=not do_dsf)
+        else:
+            if not do_dsf:
+                SLINK.auto_link_tile(tile)
+            _clear_todo_marker(lat, lon)
+    overlays.wait()
+    if UI.red_flag:
+        _end_journal_on_stop()
+        UI.exit_message_and_bottom_line()
+        return 0
     BSTATE.complete()
     UI.lvprint(
         0, "Batch process completed in", UI.nicer_timer(time.time() - timer)

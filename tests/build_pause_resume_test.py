@@ -459,7 +459,10 @@ class StopEndsTheBatchTest(JournalTestCase):
 
     def test_every_stop_exit_in_the_batch_loop_settles_the_journal(self):
         source = (SRC / "O4_Tile_Utils.py").read_text(encoding="utf-8")
-        body = source.split("def _build_tile_list(")[1].split("\ndef ")[0]
+        body = (
+            source.split("def _build_tile_list(")[1].split("\ndef ")[0]
+            + source.split("def _build_tiles(")[1].split("\ndef ")[0]
+        )
         self.assertNotIn('BSTATE.set_status("stopped")', body)
         self.assertEqual(
             body.count("if UI.red_flag:"), body.count("_end_journal_on_stop()")

@@ -32,6 +32,8 @@ Example:
 """
 import os, json, argparse, warnings, time, math, re, hashlib, fnmatch
 import pickle
+import sys
+import threading
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
@@ -66,6 +68,7 @@ from O4_Scenery_Packs import (
     resolve_custom_scenery_dir,
 )
 from O4_Region_Boundaries import asset_region_for_latlon
+import O4_Scenery_Packs as SCENERYPACKS
 
 
 def _env_flag(name, default=False):
@@ -107,6 +110,12 @@ class _ReviewTracker:
     def add(self, detections):
         for det in detections:
             self.fates.setdefault(id(det), [det, "unresolved"])
+
+    def __setstate__(self, state):
+        # Detections are keyed by id(); a tracker unpickled in another process
+        # (texture-parallel builds) holds new objects, so re-key them.
+        self.__dict__.update(state)
+        self.fates = {id(det): [det, fate] for det, fate in self.fates.values()}
 
     def set(self, det, fate):
         self.fates[id(det)] = [det, fate]
@@ -281,6 +290,8 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
             f"{label}={int(file_counts.get(key, 0))}"
             for label, key in (
                 ("yolo_raw", "yolo_raw_detections"),
+                ("yolo_skip_empty", "yolo_crops_skipped_empty"),
+                ("stock_skip_empty", "stock_crops_skipped_empty"),
                 ("yolo_det", "yolo_detections"),
                 ("heightnet_dets", "heightnet_dets"),
                 ("yolo_supp", "yolo_suppressed_overlap"),
@@ -1425,6 +1436,9 @@ def _load_custom_scenery_building_exclusions(
         skip_dsf_path=out_dsf,
     )
 
+    # One lookup per distinct (object, package): a tile references the same
+    # few thousand OBJs hundreds of thousands of times.
+    dims_memo = {}
     own_folder = None
     if _review_dump_enabled() and out_dsf:
         # Review runs write their DSF elsewhere, so the realpath skip above
@@ -1474,12 +1488,16 @@ def _load_custom_scenery_building_exclusions(
                             # block building placement in other scenery.
                             skipped_clutter += 1
                             continue
-                        dims = _custom_object_dims(
-                            object_path,
-                            package_dir,
-                            library_index,
-                            cache_dir,
-                        )
+                        dims_key = (object_path, package_dir)
+                        if dims_key in dims_memo:
+                            dims = dims_memo[dims_key]
+                        else:
+                            dims = dims_memo[dims_key] = _custom_object_dims(
+                                object_path,
+                                package_dir,
+                                library_index,
+                                cache_dir,
+                            )
                         if dims is None:
                             skipped_objects += 1
                             continue
@@ -2240,7 +2258,7 @@ DEFAULT_YOLO_OBB_STRIDE = 512
 DEFAULT_YOLO_OBB_CONF = 0.18
 DEFAULT_YOLO_OBB_IOU = 0.5
 DEFAULT_YOLO_OBB_MAX_DET = 100000
-DEFAULT_YOLO_OBB_BATCH = 1
+DEFAULT_YOLO_OBB_BATCH = 8
 
 
 # Retired with the candidate-grid placement; kept for the placement-cache key.
@@ -5757,6 +5775,27 @@ def crop_fully_covered(x, y, stride, img_w, img_h, rects_px):
     return False
 
 
+def empty_crop_rects_px(class_map, stride, min_px, classes=None):
+    """Crop windows of ``stride`` px holding fewer than ``min_px`` built-up pixels.
+
+    Built-up = SegFormer building or developed classes. Returned as
+    (x0, y0, x1, y1) rects, the format the YOLO crop iterators skip.
+    """
+    if class_map is None or min_px <= 0:
+        return []
+    if classes is None:
+        classes = (SEGFORMER.CLASS_BUILDING, SEGFORMER.CLASS_DEVELOPED)
+    built = np.isin(class_map, classes)
+    img_h, img_w = built.shape[:2]
+    rects = []
+    for y in range(0, img_h, stride):
+        for x in range(0, img_w, stride):
+            x1, y1 = min(x + stride, img_w), min(y + stride, img_h)
+            if int(np.count_nonzero(built[y:y1, x:x1])) < min_px:
+                rects.append((x, y, x1, y1))
+    return rects
+
+
 def mask_covered_regions(mask, rects_px, value=0):
     """Set covered rects of a 2D map to ``value`` (in place) and return it."""
     for x0, y0, x1, y1 in rects_px:
@@ -6015,6 +6054,95 @@ def _yolo_obb_detection_from_points(
     }
 
 
+def _yolo_obb_detections_from_corners(corners, confs, classes, img_w, img_h, m_per_px, model_class_count=None):
+    """Batch form of _yolo_obb_detection_from_points over (N, 4, 2) image-pixel corners.
+
+    Same values in the same order; only boxes crossing the image edge go
+    through the per-box clipper. O4_BLD_YOLO_VEC_CONVERT=0 restores the
+    one-box-at-a-time loop.
+    """
+    pts = np.asarray(corners, dtype=np.float32).reshape(-1, 4, 2)
+    n = len(pts)
+    if n == 0:
+        return []
+    confs = np.asarray(confs).reshape(-1)
+    classes = np.asarray(classes).reshape(-1)
+    x, y = pts[..., 0], pts[..., 1]
+    valid_any = ((x >= 0) & (x < img_w) & (y >= 0) & (y < img_h)).any(axis=1)
+    raw_center = pts.mean(axis=1)
+    keep = valid_any | (
+        (raw_center[:, 0] >= 0) & (raw_center[:, 0] < img_w) &
+        (raw_center[:, 1] >= 0) & (raw_center[:, 1] < img_h)
+    )
+    x_max = float(max(0, int(img_w) - 1))
+    y_max = float(max(0, int(img_h) - 1))
+    inside = (x.min(axis=1) >= 0.0) & (x.max(axis=1) <= x_max) & (y.min(axis=1) >= 0.0) & (y.max(axis=1) <= y_max)
+    clipped = pts.copy()
+    ok = keep.copy()
+    for i in np.flatnonzero(keep & ~inside):
+        c = _rect_clip_obb_to_image(pts[i], img_w, img_h)
+        if c is None:
+            ok[i] = False
+        else:
+            clipped[i] = c
+    # Shoelace in the same order and precision as cv2.contourArea.
+    c64 = clipped.astype(np.float64)
+    px, py = np.roll(c64, 1, axis=1)[..., 0], np.roll(c64, 1, axis=1)[..., 1]
+    t = px * c64[..., 1] - py * c64[..., 0]
+    area_px = np.abs((((t[:, 0] + t[:, 1]) + t[:, 2]) + t[:, 3]) * 0.5)
+    ok &= area_px > 1.0
+    center = clipped.mean(axis=1)
+    edges = np.roll(clipped, -1, axis=1) - clipped
+    lengths = np.sqrt((edges * edges).sum(axis=2))
+    long_idx = lengths.argmax(axis=1)
+    rows = np.arange(n)
+    long_vec = edges[rows, long_idx]
+    max_side = lengths[rows, long_idx].astype(np.float64)
+    min_side = lengths[rows, (long_idx + 1) % 4].astype(np.float64)
+    swap = min_side > max_side
+    max_side[swap], min_side[swap] = min_side[swap], max_side[swap].copy()
+    img_angle = np.degrees(np.arctan2(long_vec[:, 1].astype(np.float64), long_vec[:, 0].astype(np.float64)))
+    heading = (img_angle + 90.0) % 180.0
+    mpp = float(m_per_px)
+    cx = np.clip(center[:, 0], 0, max(0, img_w - 1)).astype(np.float64)
+    cy = np.clip(center[:, 1], 0, max(0, img_h - 1)).astype(np.float64)
+    decoded = {}
+    out = []
+    for i in np.flatnonzero(ok):
+        cls_int = int(classes[i])
+        area_m2 = float(area_px[i]) * mpp * mpp
+        max_side_m = float(max_side[i]) * mpp
+        dec = decoded.get(cls_int)
+        if dec is None:
+            dec = decoded[cls_int] = _decode_yolo_obb_detection_class(cls_int, model_class_count=model_class_count)
+        placement_cls, height_m = dec
+        if placement_cls is not None:
+            placement_cls = int(placement_cls)
+        else:
+            placement_cls = _roof_fragment_class(area_m2, max_side_m, 1.0)
+        if height_m is None:
+            height_m = float(DEFAULT_FACADE_HEIGHT_M.get(placement_cls, 8.0))
+            height_source = 'class_default'
+        else:
+            height_m = float(height_m)
+            height_source = 'height_bins'
+        out.append({
+            'points': clipped[i].tolist(),
+            'center': [float(cx[i]), float(cy[i])],
+            'heading': float(heading[i]),
+            'confidence': float(confs[i]),
+            'model_class': cls_int,
+            'area_m2': area_m2,
+            'max_side_m': max_side_m,
+            'length_m': max_side_m,
+            'width_m': float(min_side[i]) * mpp,
+            'placement_class': int(placement_cls),
+            'height_m': float(height_m),
+            'height_source': height_source,
+        })
+    return out
+
+
 def _append_yolo_result_detections(
     detections,
     result,
@@ -6048,6 +6176,15 @@ def _append_yolo_result_detections(
         )
         if xywhr is not None and len(xywhr) != len(corners):
             xywhr = None
+        if _env_flag("O4_BLD_YOLO_VEC_CONVERT", True):
+            shifted_all = np.asarray(corners, dtype=np.float32).reshape(-1, 4, 2).copy()
+            shifted_all[..., 0] += float(ox)
+            shifted_all[..., 1] += float(oy)
+            detections.extend(_yolo_obb_detections_from_corners(
+                shifted_all, confs, classes, img_w, img_h, m_per_px,
+                model_class_count=model_class_count,
+            ))
+            return
         for det_idx, (points, score, cls) in enumerate(zip(corners, confs, classes)):
             shifted = np.asarray(points, dtype=np.float32).reshape(4, 2)
             shifted[:, 0] += float(ox)
@@ -6146,6 +6283,8 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
     model_class_count = _yolo_model_class_count(model)
     skip_rects_px = tuple(skip_rects_px or ())
 
+    predict_options = STOCKYOLO.yolo_predict_options()
+
     def _detect(effective_batch):
         detections = []
         if effective_batch <= 1:
@@ -6163,6 +6302,7 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                         device=device,
                         verbose=False,
                         stream=True,
+                        **predict_options,
                     )
                     for result in results:
                         _append_yolo_result_detections(
@@ -6188,6 +6328,7 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                         device=device,
                         verbose=False,
                         stream=True,
+                        **predict_options,
                         batch=effective_batch,
                     )
                     for (ox, oy), result in zip(offsets, results):
@@ -8011,6 +8152,279 @@ _DDS_NAME_RE = re.compile(
 )
 
 
+# ── Texture-parallel building pass ───────────────────────────────────────────
+# Textures of one tile place independently: no texture reads what another
+# placed; only the tile-wide passes in _finish (seam pieces, de-dup, DSF write)
+# see them all. So K processes can share the textures and the main run merges
+# their placements in file order. O4_BLD_TEXTURE_WORKERS sets K ("auto" or a
+# number; 1 = the sequential build). 2 measured best on a 3-texture tile
+# (2026-10-09); more may pay on big tiles, where setup is a smaller share.
+DEFAULT_TEXTURE_WORKERS = 2
+
+
+def _mark_bld_seg_skipped(cache_dir, fname):
+    """Tell a waiting vegetation overlay this texture will get no class map from us."""
+    stem = os.path.join(cache_dir, fname.replace('.dds', ''))
+    if os.path.exists(stem + '_veg.npy'):
+        return
+    try:
+        with open(stem + '_bldseg.skip', 'w'):
+            pass
+    except OSError:
+        pass
+
+
+def _texture_worker_count(run, n_files):
+    raw = os.environ.get("O4_BLD_TEXTURE_WORKERS", "").strip().lower()
+    if raw in ("", "auto"):
+        workers = DEFAULT_TEXTURE_WORKERS
+    else:
+        try:
+            workers = int(raw)
+        except ValueError:
+            workers = DEFAULT_TEXTURE_WORKERS
+    if workers <= 1 or n_files < 2:
+        return 1
+    if run.make_viz or run.debug_image_only or not torch.cuda.is_available():
+        return 1
+    if getattr(SEGFORMER, 'remote_client', None) is not None:
+        return 1  # remote GPU offload serves one process
+    return min(workers, n_files)
+
+
+def _unthrottle_self():
+    """Opt this process out of Windows power throttling (EcoQoS)."""
+    if not sys.platform.startswith('win') or os.environ.get(
+        "O4_OVERLAY_SELF_NOTHROTTLE", ""
+    ).strip().lower() in ("0", "false", "no", "off"):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _State(ctypes.Structure):
+            _fields_ = [('Version', wintypes.ULONG), ('ControlMask', wintypes.ULONG),
+                        ('StateMask', wintypes.ULONG)]
+
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.SetProcessInformation.restype = wintypes.BOOL
+        state = _State(1, 0x1 | 0x4, 0)
+        k32.SetProcessInformation(k32.GetCurrentProcess(), 4, ctypes.byref(state), ctypes.sizeof(state))
+    except Exception:
+        pass
+
+
+def _kill_on_close_job():
+    """A Windows job object that kills its processes when this process ends."""
+    if not sys.platform.startswith('win'):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [('PerProcessUserTimeLimit', ctypes.c_int64), ('PerJobUserTimeLimit', ctypes.c_int64),
+                        ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t),
+                        ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD),
+                        ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD),
+                        ('SchedulingClass', wintypes.DWORD)]
+
+        class _Io(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                'ReadOperationCount', 'WriteOperationCount', 'OtherOperationCount',
+                'ReadTransferCount', 'WriteTransferCount', 'OtherTransferCount')]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [('BasicLimitInformation', _Basic), ('IoInfo', _Io),
+                        ('ProcessMemoryLimit', ctypes.c_size_t), ('JobMemoryLimit', ctypes.c_size_t),
+                        ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t)]
+
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.SetInformationJobObject.restype = wintypes.BOOL
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            return None
+        return job
+    except Exception:
+        return None
+
+
+def _assign_to_job(job, proc):
+    if job is None:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.AssignProcessToJobObject(job, wintypes.HANDLE(int(proc._handle)))
+    except Exception:
+        pass
+
+
+def _relay_output(proc):
+    """Copy a helper's output into this process's log, line by line."""
+    try:
+        for line in proc.stdout:
+            print(line, end='', flush=True)
+    except Exception:
+        pass
+
+
+def _write_pickle_atomic(path, payload):
+    part = f"{path}.part"
+    with open(part, 'wb') as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(part, path)
+
+
+class _TextureParallel:
+    """Texture-parallel building pass: several processes share one tile's textures.
+
+    The main run starts helper processes that run the same stages with the
+    same arguments. Every process claims textures in file order through
+    lock files in a shared work folder; a helper pickles each finished
+    texture's placements there, and the main run merges every texture in
+    file order before the tile-wide passes and the DSF write, which only it
+    runs. A texture a helper claimed but never delivered is redone by the
+    main run.
+    """
+
+    def __init__(self, work_dir, worker_id, helper):
+        self.work_dir = work_dir
+        self.worker_id = worker_id
+        self.helper = helper
+        self.expected_files = None
+        self.procs = []
+        self.local = {}
+        self._job = None
+        self._closed = False
+
+    @classmethod
+    def start(cls, run, workers):
+        import subprocess
+        import tempfile
+        work_dir = tempfile.mkdtemp(prefix="bld_textures_")
+        par = cls(work_dir, 0, helper=False)
+        spec_path = os.path.join(work_dir, 'spec.pkl')
+        _write_pickle_atomic(spec_path, {
+            'init_kwargs': run._init_kwargs,
+            'files': list(run.files),
+            'shared_text_dir': run.sidecar_cache_dir,
+            'seg_globals': {
+                name: getattr(SEGFORMER, name)
+                for name in ('segformer_patch_size', 'segformer_overlap', 'segformer_batch_size', '_dsftool')
+                if hasattr(SEGFORMER, name)
+            },
+        })
+        # Start the interpreter itself, as multiprocessing does in a venv: the
+        # venv python.exe is a launcher, and its child would escape the job.
+        exe = getattr(sys, '_base_executable', None) or sys.executable
+        env = dict(os.environ)
+        if os.path.normcase(exe) != os.path.normcase(sys.executable):
+            env['__PYVENV_LAUNCHER__'] = sys.executable
+        src_dir = os.path.dirname(os.path.abspath(__file__))
+        env['PYTHONPATH'] = os.pathsep.join([src_dir] + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        par._job = _kill_on_close_job()
+        for wid in range(1, workers):
+            code = (
+                "import O4_Building_Overlay as B\n"
+                f"B._texture_helper_main({spec_path!r}, {wid})\n"
+            )
+            proc = subprocess.Popen(
+                [exe, '-u', '-c', code],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace', env=env,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            _assign_to_job(par._job, proc)
+            threading.Thread(target=_relay_output, args=(proc,), daemon=True).start()
+            par.procs.append(proc)
+        print(f"[Bld] Texture workers: {workers} processes share {len(run.files)} textures", flush=True)
+        return par
+
+    def claim(self, fi):
+        try:
+            fd = os.open(os.path.join(self.work_dir, f"claim_{fi:05d}"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.write(fd, str(self.worker_id).encode('ascii'))
+        os.close(fd)
+        return True
+
+    def store(self, run, fi, result):
+        if self.helper:
+            _write_pickle_atomic(os.path.join(self.work_dir, f"tex_{fi:05d}.pkl"), result)
+        else:
+            self.local[fi] = result
+
+    def finish_helper(self, run):
+        _write_pickle_atomic(
+            os.path.join(self.work_dir, f"done_{self.worker_id:02d}.pkl"),
+            {'timings': dict(run.timings)},
+        )
+
+    def wait_helpers(self):
+        for wid, proc in enumerate(self.procs, 1):
+            rc = proc.wait()
+            if rc != 0:
+                print(f"[Bld] Texture helper {wid} exited with code {rc}", flush=True)
+
+    def collect(self, run):
+        """Every finished texture's result, plus the helpers' stage timings."""
+        results = dict(self.local)
+        for name in sorted(os.listdir(self.work_dir)):
+            path = os.path.join(self.work_dir, name)
+            if name.startswith('tex_') and name.endswith('.pkl'):
+                with open(path, 'rb') as handle:
+                    results[int(name[4:9])] = pickle.load(handle)
+            elif name.startswith('done_') and name.endswith('.pkl'):
+                with open(path, 'rb') as handle:
+                    for key, value in pickle.load(handle).get('timings', {}).items():
+                        run.timings[key] = run.timings.get(key, 0.0) + value
+        return results
+
+    def cleanup(self):
+        if self._closed:
+            return
+        self._closed = True
+        for proc in self.procs:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        import shutil
+        shutil.rmtree(self.work_dir, ignore_errors=True)
+
+    def abort(self):
+        self.cleanup()
+
+
+def _texture_helper_main(spec_path, worker_id):
+    """Entry point of a texture-parallel helper process (see _TextureParallel)."""
+    _unthrottle_self()
+    with open(spec_path, 'rb') as handle:
+        spec = pickle.load(handle)
+    for name, value in spec['seg_globals'].items():
+        setattr(SEGFORMER, name, value)
+    if spec.get('shared_text_dir'):
+        SCENERYPACKS.SHARED_DSF_TEXT_DIRS.append(spec['shared_text_dir'])
+    run = _BuildingOverlayRun(**spec['init_kwargs'])
+    run._par = _TextureParallel(os.path.dirname(spec_path), worker_id, helper=True)
+    run._par.expected_files = spec['files']
+    run.execute()
+
+
 class _BuildingOverlayRun:
     """One building-overlay run: the stages of run() and the state they share."""
 
@@ -8025,6 +8439,9 @@ class _BuildingOverlayRun:
         yolo_max_det, yolo_imgsz, yolo_min_coverage, height_checkpoint,
         roof_color_matching, library_cache_dir,
     ):
+        # Texture-parallel helpers rebuild an identical run from these.
+        self._init_kwargs = {k: v for k, v in locals().items() if k != 'self'}
+        self._par = None
         self.tex_dir = tex_dir
         self.lat = lat
         self.lon = lon
@@ -8060,9 +8477,17 @@ class _BuildingOverlayRun:
 
     def execute(self):
         """Run every stage; returns run()'s result."""
+        try:
+            return self._execute()
+        finally:
+            if self._par is not None and not self._par.helper:
+                self._par.abort()  # no-op once the merge has cleaned up
+
+    def _execute(self):
         self._prepare_inputs()
         if not self._select_textures():
             return None
+        self._start_dsf_predecode()
         self._load_osm_vectors()
         self._resolve_settings()
         self._load_yolo_model()
@@ -8074,6 +8499,11 @@ class _BuildingOverlayRun:
         self._prepare_tile_vectors()
         self._start_outputs()
         self._process_textures()
+        if self._par is not None:
+            if self._par.helper:
+                self._par.finish_helper(self)
+                return None
+            self._merge_texture_results()
         return self._finish()
 
     def _prepare_inputs(self):
@@ -8331,6 +8761,9 @@ class _BuildingOverlayRun:
             'place_maskfill': 0.0,
         }
         self.detail_timing = _env_flag("O4_OVERLAY_TIMING_DETAIL")
+        # With caches off, leave this build's SegFormer class maps for the
+        # vegetation pass, which deletes them (O4_VEG_REUSE_BLD_SEG=0: don't).
+        self.keep_seg_for_veg = _env_flag("O4_VEG_REUSE_BLD_SEG", True)
         self.place_profile = _env_flag("O4_BLD_PLACE_PROFILE")
         # Slow-texture timing lines are verbose output; an explicitly set
         # O4_OVERLAY_TIMING_SLOW still enables them regardless of verbose_log.
@@ -8376,10 +8809,10 @@ class _BuildingOverlayRun:
             0,
             _env_int("O4_BLD_YOLO_ANALYSIS_ZL", 0),
         )
-        # Batch stays 1 by default: the scripts/*_batch_autotune.py harnesses
-        # showed batch>1 changes borderline detections on dense tiles (not
-        # placement-exact), for ~0.3s/DDS saved on an RTX 4080. Opting in via the
-        # env vars is OOM-safe — the inference loops retry at batch=1 on CUDA OOM.
+        # Batch 8 (2026-10-09): 2x faster model step, 99.8% of batch-1
+        # detections kept (borderline ones differ), visually checked.
+        # O4_BLD_YOLO_BATCH / O4_STOCK_YOLO_BATCH override; the inference loops
+        # retry at batch=1 on CUDA OOM.
         self.yolo_batch_size = max(
             1,
             _env_int("O4_BLD_YOLO_BATCH", DEFAULT_YOLO_OBB_BATCH),
@@ -8551,11 +8984,54 @@ class _BuildingOverlayRun:
             print(f"Stock YOLO OBB unavailable ({exc}); skipping pre-step", flush=True)
             self.stock_yolo_model = None
 
+    def _start_dsf_predecode(self):
+        """Disassemble every scenery DSF this tile reads, in parallel, while the models load."""
+        self._predecode = None
+        dsftool = self.dsftool_path or SEGFORMER._dsftool
+        if not dsftool or not os.path.exists(dsftool):
+            return
+        try:
+            paths = [p for _, p in find_simheaven_network_dsfs(self.custom_scenery_dir, self.lat, self.lon)]
+            paths += [p for _, p in find_simheaven_building_dsfs(self.custom_scenery_dir, self.lat, self.lon)]
+            if self.avoid_custom_scenery:
+                dsf_name = os.path.basename(self.out_dsf or _tile_name_for_latlon(self.lat, self.lon))
+                paths += [p for _, p, _ in find_active_custom_scenery_dsfs(
+                    self.custom_scenery_dir, dsf_name, skip_dsf_path=self.out_dsf,
+                )]
+        except Exception:
+            return
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+        workers = max(1, min(len(paths), _env_int("O4_BLD_DSF_DECODE_WORKERS", 8)))
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsf-decode")
+        self._predecode = [
+            executor.submit(
+                ensure_cached_dsf_text, path, dsftool, self.sidecar_cache_dir,
+                create_no_window=SEGFORMER._CREATE_NO_WINDOW,
+            )
+            for path in paths
+        ]
+        executor.shutdown(wait=False)
+
+    def _wait_dsf_predecode(self):
+        """Block until the parallel DSF disassembly is done (failures re-run in the loaders)."""
+        for future in getattr(self, '_predecode', None) or ():
+            try:
+                future.result()
+            except Exception:
+                pass
+        self._predecode = None
+
     def _load_scenery_exclusions(self):
         """Read the simHeaven network/buildings and other installed scenery."""
         # simHeaven network roads provide the local street grid when available.
         if self.dsftool_path is None:
             self.dsftool_path = SEGFORMER._dsftool
+        self._wait_dsf_predecode()
+        # Helpers start once the DSF text exists, so they only parse it.
+        self._start_texture_helpers()
 
         if self.dsftool_path and os.path.exists(self.dsftool_path):
             self.sh_network = _load_simheaven_network(self.custom_scenery_dir, self.lat, self.lon, self.dsftool_path, self.sidecar_cache_dir)
@@ -9123,7 +9599,12 @@ class _BuildingOverlayRun:
         return _TextureInference(self, fi, fname, m).execute()
 
     def _process_textures(self):
-        """Run inference and placement over every texture, in order."""
+        """Run inference and placement over every texture this process owns, in order.
+
+        Sequentially that is every texture. In a texture-parallel build each
+        process claims textures one at a time and keeps each finished
+        texture's placements apart for the file-order merge.
+        """
         # One-ahead inference prefetch: a single worker thread keeps the GPU busy
         # with the next DDS while the main thread runs the CPU placement stages.
         # Disable with O4_BLD_PREFETCH=0 to get the fully sequential path.
@@ -9138,74 +9619,192 @@ class _BuildingOverlayRun:
             )
 
         self.t_start = time.time()
-        for fi, fname in enumerate(self.files, 1):
-            m = _DDS_NAME_RE.match(fname)
-            if not m: continue
-            _dds_cache_files = self._dds_cache_paths(fname)
-            file_timings = {}
-            file_counts = {}
-            file_t0 = time.perf_counter()
+        try:
+            fi = self._next_texture(0)
+            while fi:
+                fi = self._process_one_texture(fi, claim_next=True)
+        finally:
+            if self.prefetch_executor is not None and (self._par is None or self._par.helper):
+                self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
+                self.prefetch_executor = None
 
-            try:
-                if self.verbose_log:
-                    print(f"  [{fi:3d}/{self.n_files}] {fname}  (starting)", flush=True)
-                _prep_future = self._prefetch_futures.pop(fi, None)
-                if _prep_future is None and self.prefetch_executor is not None:
-                    # Not prefetched yet (first DDS): still run it on the worker
-                    # thread so ALL inference happens on one thread — cuDNN
-                    # handles are per-thread and re-warm on a new thread.
-                    _prep_future = self.prefetch_executor.submit(
-                        self._prepare_dds_inference, fi, fname, m
-                    )
-                if _prep_future is not None:
-                    _prep = _prep_future.result()
-                else:
-                    _prep = self._prepare_dds_inference(fi, fname, m)
-                self._submit_prefetch(fi + 1)
-                file_timings = _prep['file_timings']
-                file_counts = _prep['file_counts']
-                for _tk, _tv in _prep['local_timings'].items():
-                    self.timings[_tk] = self.timings.get(_tk, 0.0) + _tv
-
-                self._place_texture(fi, fname, m, _prep, file_timings, file_counts)
-            except BaseException:
-                if self.prefetch_executor is not None:
-                    self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
-                    self.prefetch_executor = None
-                raise
-            finally:
-                file_elapsed = time.perf_counter() - file_t0
-                if self.detail_timing or (self.slow_timing_s > 0 and file_elapsed >= self.slow_timing_s):
-                    _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
-                if (
-                    self.yolo_cuda_cleanup_every > 0 and
-                    fi % self.yolo_cuda_cleanup_every == 0 and
-                    torch.cuda.is_available()
-                ):
-                    try:
-                        import gc
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-                if self.disable_cache:
-                    self._remove_cache_files(_dds_cache_files)
-
-        if self.prefetch_executor is not None:
-            self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
-
-    def _submit_prefetch(self, start_idx):
-        if self.prefetch_executor is None or self._prefetch_futures:
-            return
-        for nfi in range(start_idx, self.n_files + 1):
-            nfname = self.files[nfi - 1]
-            nm = _DDS_NAME_RE.match(nfname)
-            if not nm:
+    def _next_texture(self, after_fi):
+        """Index of the next texture after ``after_fi`` this process should do; 0 when none."""
+        for nfi in range(after_fi + 1, self.n_files + 1):
+            if not _DDS_NAME_RE.match(self.files[nfi - 1]):
                 continue
+            if self._par is None or self._par.claim(nfi):
+                return nfi
+        return 0
+
+    def _process_one_texture(self, fi, claim_next=False):
+        """Infer and place texture ``fi``; returns the next claimed texture (or 0)."""
+        fname = self.files[fi - 1]
+        m = _DDS_NAME_RE.match(fname)
+        _dds_cache_files = self._dds_cache_paths(fname)
+        file_timings = {}
+        file_counts = {}
+        file_t0 = time.perf_counter()
+        nxt = 0
+        marks = self._texture_marks() if self._par is not None else None
+        try:
+            if self.verbose_log:
+                print(f"  [{fi:3d}/{self.n_files}] {fname}  (starting)", flush=True)
+            _prep_future = self._prefetch_futures.pop(fi, None)
+            if _prep_future is None and self.prefetch_executor is not None:
+                # Not prefetched yet (first DDS): still run it on the worker
+                # thread so ALL inference happens on one thread — cuDNN
+                # handles are per-thread and re-warm on a new thread.
+                _prep_future = self.prefetch_executor.submit(
+                    self._prepare_dds_inference, fi, fname, m
+                )
+            if _prep_future is not None:
+                _prep = _prep_future.result()
+            else:
+                _prep = self._prepare_dds_inference(fi, fname, m)
+            if claim_next:
+                nxt = self._next_texture(fi)
+                self._submit_prefetch(nxt)
+            file_timings = _prep['file_timings']
+            file_counts = _prep['file_counts']
+            for _tk, _tv in _prep['local_timings'].items():
+                self.timings[_tk] = self.timings.get(_tk, 0.0) + _tv
+
+            self._place_texture(fi, fname, m, _prep, file_timings, file_counts)
+            if marks is not None:
+                self._par.store(self, fi, self._cut_texture_result(marks))
+        except BaseException:
+            if self.prefetch_executor is not None:
+                self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
+                self.prefetch_executor = None
+            raise
+        finally:
+            file_elapsed = time.perf_counter() - file_t0
+            if self.detail_timing or (self.slow_timing_s > 0 and file_elapsed >= self.slow_timing_s):
+                _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
+            if (
+                self.yolo_cuda_cleanup_every > 0 and
+                fi % self.yolo_cuda_cleanup_every == 0 and
+                torch.cuda.is_available()
+            ):
+                try:
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            if self.disable_cache:
+                self._remove_cache_files(
+                    _dds_cache_files if not self.keep_seg_for_veg else tuple(
+                        p for p in _dds_cache_files
+                        if not p.endswith(('_veg.npy', '_vegtree.npy'))
+                    )
+                )
+            if self.keep_seg_for_veg and self.cache_dir:
+                _mark_bld_seg_skipped(self.cache_dir, fname)
+        return nxt
+
+    def _submit_prefetch(self, nfi):
+        if self.prefetch_executor is None or not nfi or nfi in self._prefetch_futures:
+            return
+        nfname = self.files[nfi - 1]
+        nm = _DDS_NAME_RE.match(nfname)
+        if nm:
             self._prefetch_futures[nfi] = self.prefetch_executor.submit(
                 self._prepare_dds_inference, nfi, nfname, nm
             )
+
+    # ── Texture-parallel builds ─────────────────────────────────────────────
+    def _start_texture_helpers(self):
+        """Main run of a texture-parallel build: start the helper processes."""
+        if self._par is not None:
+            # A helper: it must see exactly the textures the main run split.
+            if list(self.files) != list(self._par.expected_files):
+                raise RuntimeError("texture helper selected different textures than the main run")
             return
+        workers = _texture_worker_count(self, len(self.files))
+        if workers > 1:
+            self._par = _TextureParallel.start(self, workers)
+
+    def _texture_marks(self):
+        """Where this texture's entries will start in the run-wide lists."""
+        return (
+            len(self.placed_stock_objects), len(self.placed_facades), len(self.placed_draped),
+            len(self._seam_pieces), len(self._review_pending), self.direct_yolo_facade_placements,
+        )
+
+    def _cut_texture_result(self, marks):
+        """Remove one texture's placements from the run-wide state and return them."""
+        n_obj, n_fac, n_drp, n_seam, n_rev, n_facc = marks
+        objects = self.placed_stock_objects[n_obj:]
+        facades = self.placed_facades[n_fac:]
+        draped = self.placed_draped[n_drp:]
+        del self.placed_stock_objects[n_obj:], self.placed_facades[n_fac:], self.placed_draped[n_drp:]
+        seam_pieces = self._seam_pieces[n_seam:]
+        del self._seam_pieces[n_seam:]
+        review_pending = self._review_pending[n_rev:]
+        del self._review_pending[n_rev:]
+        result = {
+            'objects': objects,
+            'facades': facades,
+            'draped': draped,
+            'dedup_fallback': (
+                None if self._dedup_fallback is None
+                else [self._dedup_fallback.pop(id(p), None) for p in objects]
+            ),
+            'review_placements': [
+                self._review_placements.pop(id(p), None) for p in objects + facades
+            ],
+            'seam_pieces': seam_pieces,
+            'review_pending': review_pending,
+            'facade_count': self.direct_yolo_facade_placements - n_facc,
+        }
+        self.direct_yolo_facade_placements = n_facc
+        return result
+
+    def _replay_texture_result(self, result):
+        """Append one texture's placements to the run-wide state (file-order merge)."""
+        objects, facades = result['objects'], result['facades']
+        self.placed_stock_objects.extend(objects)
+        self.placed_facades.extend(facades)
+        self.placed_draped.extend(result['draped'])
+        if self._dedup_fallback is not None and result['dedup_fallback'] is not None:
+            for p, ctx in zip(objects, result['dedup_fallback']):
+                if ctx is not None:
+                    self._dedup_fallback[id(p)] = ctx
+        for p, entry in zip(objects + facades, result['review_placements']):
+            if entry is not None:
+                self._review_placements[id(p)] = entry
+        self._seam_pieces.extend(result['seam_pieces'])
+        self._review_pending.extend(result['review_pending'])
+        self.direct_yolo_facade_placements += result['facade_count']
+
+    def _merge_texture_results(self):
+        """Main run: wait for the helpers, redo what they lost, merge in file order."""
+        par = self._par
+        try:
+            par.wait_helpers()
+            results = par.collect(self)
+            missing = [
+                fi for fi in range(1, self.n_files + 1)
+                if _DDS_NAME_RE.match(self.files[fi - 1]) and fi not in results
+            ]
+            if missing:
+                print(
+                    f"[Bld] Texture workers: redoing {len(missing)} texture(s) a helper did not finish",
+                    flush=True,
+                )
+                for fi in missing:
+                    # Stores its result in par.local, as for the main run's own textures.
+                    self._process_one_texture(fi)
+                    results[fi] = par.local.pop(fi)
+        finally:
+            if self.prefetch_executor is not None:
+                self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
+                self.prefetch_executor = None
+            par.cleanup()
+        for fi in sorted(results):
+            self._replay_texture_result(results[fi])
 
     def _place_texture(self, fi, fname, m, _prep, file_timings, file_counts):
         """Filter, place and record one texture's detections."""
@@ -9649,13 +10248,13 @@ class _TextureInference:
                 else:
                     self.veg_map = SEGFORMER.run_inference(self.run.model, self.run.device, self.img, self.run.proc)
                 self._rec('segformer_inference', _t)
-                if not self.run.disable_cache and tree_support is not None:
+                if (not self.run.disable_cache or self.run.keep_seg_for_veg) and tree_support is not None:
                     SEGFORMER.save_tree_support(
                         SEGFORMER.tree_support_cache_path(cache_path), tree_support
                     )
-            if not self.run.disable_cache and not self.mesh_water_full:
+            if (not self.run.disable_cache or self.run.keep_seg_for_veg) and not self.mesh_water_full:
                 _t = time.perf_counter()
-                np.save(cache_path, self.veg_map)
+                SEGFORMER.save_array_atomic(cache_path, self.veg_map)
                 self._rec('cache_save', _t)
             if self.run.detail_timing:
                 if not self.mesh_water_full:
@@ -9683,6 +10282,19 @@ class _TextureInference:
         )
         if self._covered_rects_px:
             self.file_counts['covered_rects'] = len(self._covered_rects_px)
+        # O4_BLD_YOLO_SKIP_EMPTY_PX (experiment, default 0 = off): crops with
+        # fewer built-up SegFormer pixels than this are not run through YOLO.
+        self._yolo_skip_rects_px = self._covered_rects_px
+        self._stock_skip_rects_px = ()
+        _skip_empty_px = _env_int("O4_BLD_YOLO_SKIP_EMPTY_PX", 0)
+        if _skip_empty_px > 0 and self.veg_map is not None:
+            _empty = empty_crop_rects_px(self.veg_map, int(self.run.yolo_stride), _skip_empty_px)
+            if _empty:
+                self._yolo_skip_rects_px = list(self._covered_rects_px or ()) + _empty
+                self.file_counts['yolo_crops_skipped_empty'] = len(_empty)
+            self._stock_skip_rects_px = tuple(empty_crop_rects_px(self.veg_map, 1024, _skip_empty_px))
+            if self._stock_skip_rects_px:
+                self.file_counts['stock_crops_skipped_empty'] = len(self._stock_skip_rects_px)
         if self.run.yolo_enabled:
             _source_path = self.run._source_image_path(self.fname, self.run._source_mode, self.run._orthophoto_dir)
             # Native-ZL inference is the default; the ZL16-analysis downsample
@@ -9709,7 +10321,7 @@ class _TextureInference:
                 # Fully covered crops are skipped at inference time on the
                 # native path, so the raw detection set depends on coverage.
                 covered_rects=(
-                    None if _use_analysis else (self._covered_rects_px or None)
+                    None if _use_analysis else (self._yolo_skip_rects_px or None)
                 ),
             )
             if not self.run.disable_cache:
@@ -9792,7 +10404,7 @@ class _TextureInference:
                                 m_per_px=self.m_per_px,
                                 batch_size=self.run.yolo_batch_size,
                                 return_metadata=True,
-                                skip_rects_px=self._covered_rects_px,
+                                skip_rects_px=self._yolo_skip_rects_px,
                             )
                             self.yolo_detections = yolo_result['detections']
                         self.prep['effective_yolo_batch_size'] = yolo_result['effective_batch']
@@ -9821,7 +10433,7 @@ class _TextureInference:
                                     ),
                                     covered_rects=(
                                         None if _use_analysis
-                                        else (self._covered_rects_px or None)
+                                        else (self._yolo_skip_rects_px or None)
                                     ),
                                 ),
                                 self.yolo_detections,
@@ -9849,6 +10461,7 @@ class _TextureInference:
                     batch_size=self.run.stock_yolo_batch_size,
                     asset_map=self.run.stock_yolo_asset_map,
                     static_classes=self.run.stock_yolo_static_classes,
+                    **({'skip_rects_px': self._stock_skip_rects_px} if self._stock_skip_rects_px else {}),
                 )
                 self._rec('stock_yolo_inference', _t)
                 self.prep['stock_res'] = stock_res

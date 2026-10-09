@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import subprocess
+import threading
 
 
 def _entry_is_dir(entry):
@@ -258,18 +259,38 @@ def cached_dsf_text_path(dsf_path, cache_dir):
     return os.path.join(cache_dir, "dsf_disassembly", f"{cache_key}.txt")
 
 
+# Other cache folders whose already-disassembled DSF text may be reused, e.g.
+# the parent run's folder for a building-overlay texture helper process.
+SHARED_DSF_TEXT_DIRS = []
+
+
 def ensure_cached_dsf_text(dsf_path, dsftool_path, cache_dir, create_no_window=0):
     """Disassemble a DSF into a persistent cache file and return that file path."""
     text_cache_path = cached_dsf_text_path(dsf_path, cache_dir)
     if os.path.isfile(text_cache_path):
         return text_cache_path
+    for shared_dir in SHARED_DSF_TEXT_DIRS:
+        shared_path = cached_dsf_text_path(dsf_path, shared_dir)
+        if os.path.isfile(shared_path):
+            return shared_path
 
     os.makedirs(os.path.dirname(text_cache_path), exist_ok=True)
-    subprocess.run(
-        [dsftool_path, "--dsf2text", dsf_path, text_cache_path],
-        capture_output=True,
-        timeout=120,
-        creationflags=create_no_window,
-        check=True,
-    )
+    # Write under a private name and rename, so a reader in another thread or
+    # process never sees a half-written file.
+    part_path = f"{text_cache_path}.{os.getpid()}.{threading.get_ident()}.part"
+    try:
+        subprocess.run(
+            [dsftool_path, "--dsf2text", dsf_path, part_path],
+            capture_output=True,
+            timeout=120,
+            creationflags=create_no_window,
+            check=True,
+        )
+        os.replace(part_path, text_cache_path)
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
     return text_cache_path

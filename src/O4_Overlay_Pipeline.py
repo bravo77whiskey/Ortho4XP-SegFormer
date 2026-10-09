@@ -396,6 +396,29 @@ def _dsftool_path():
     return os.path.join(utils_dir, 'lin', 'DSFTool')
 
 
+# The venv's python.exe is a launcher that runs the real interpreter as a
+# child process, so _disable_power_throttling() on the Popen only reaches the
+# launcher. This snippet makes the worker opt itself out of EcoQoS instead
+# (measured 2.5x on the trained-YOLO stage). O4_OVERLAY_SELF_NOTHROTTLE=0
+# turns it off.
+_SELF_UNTHROTTLE_CODE = '''
+try:
+    import ctypes as _c
+    from ctypes import wintypes as _w
+    class _PTS(_c.Structure):
+        _fields_ = [('Version', _w.ULONG), ('ControlMask', _w.ULONG), ('StateMask', _w.ULONG)]
+    _k32 = _c.WinDLL('kernel32', use_last_error=True)
+    _k32.GetCurrentProcess.restype = _w.HANDLE
+    _k32.SetProcessInformation.argtypes = [_w.HANDLE, _c.c_int, _c.c_void_p, _w.DWORD]
+    _k32.SetProcessInformation.restype = _w.BOOL
+    _pts = _PTS(1, 0x1 | 0x4, 0)
+    _k32.SetProcessInformation(_k32.GetCurrentProcess(), 4, _c.byref(_pts), _c.sizeof(_pts))
+    del _c, _w, _PTS, _k32, _pts
+except Exception:
+    pass
+'''
+
+
 def _run_venv(code):
     """Run Python code in .venv, streaming stdout line by line to this process.
 
@@ -421,6 +444,10 @@ def _run_venv(code):
         filtered_prev.append(path)
     py_paths = [_root_dir, _src_dir]
     env['PYTHONPATH'] = os.pathsep.join(py_paths + filtered_prev)
+    if sys.platform.startswith('win') and os.environ.get(
+        "O4_OVERLAY_SELF_NOTHROTTLE", ""
+    ).strip().lower() not in ("0", "false", "no", "off"):
+        code = _SELF_UNTHROTTLE_CODE + code
 
     proc = subprocess.Popen(
         [_venv_python(), '-u', '-c', code],
@@ -716,8 +743,13 @@ def restore_veg_tile_replacement(lat, lon, keep_exclusion=False):
     return result
 
 
-def process_veg_tile(lat, lon, build_dir):
-    """Run the vegetation overlay for one tile."""
+def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
+    """Run the vegetation overlay for one tile.
+
+    ``wait_for_bld_flag``: the building overlay runs alongside (see
+    process_overlays_tile); read its class maps as they appear, and stop
+    waiting once this flag file exists.
+    """
     print(f"[Veg] Starting for tile +{lat:02d}+{lon:03d} …", flush=True)
     tex_dir   = os.path.join(build_dir, 'textures')
     cache_dir = _overlay_cache_dir(lat, lon)
@@ -768,6 +800,10 @@ def process_veg_tile(lat, lon, build_dir):
     )
 
     code = (
+        (
+            f"import os\nos.environ['O4_VEG_WAIT_FOR_BLD_SEG'] = {wait_for_bld_flag!r}\n"
+            if wait_for_bld_flag else ""
+        ) +
         f"import O4_Landcover_Inference as SEG\n"
         f"SEG.segformer_patch_size = {segformer_patch_size!r}\n"
         f"SEG.segformer_overlap    = {segformer_overlap!r}\n"
@@ -926,14 +962,115 @@ def process_bld_tile(lat, lon, build_dir):
             raise RuntimeError(f"Building overlay subprocess failed (exit {ret})")
     finally:
         if bld_disable_cache:
+            # Leave the class maps for the vegetation pass, whose own purge
+            # removes them (O4_VEG_REUSE_BLD_SEG=0: don't).
+            _keep_seg = os.environ.get("O4_VEG_REUSE_BLD_SEG", "").strip().lower() not in ("0", "false", "no", "off")
             _purge_overlay_cache(
                 cache_dir,
-                ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl', '*_veg.npy', '*_vegtree.npy'],
+                ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl'] +
+                ([] if _keep_seg else ['*_veg.npy', '*_vegtree.npy']),
                 'bld',
             )
         else:
             _cleanup_derived_cache(cache_dir, 'bld')
     print(f"[Bld] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
+
+
+def _env_on(name):
+    return os.environ.get(name, "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def overlays_run_together():
+    """Whether process_overlays_tile runs the two overlays side by side.
+
+    The vegetation overlay then reads the building overlay's SegFormer class
+    maps as they are written. Only with caches off: with caches on, the
+    vegetation overlay also reads the building placements (_bld.pkl) for its
+    clearance, which exist only once the building overlay is done.
+    O4_OVERLAYS_TOGETHER=0 always runs them one after the other.
+    """
+    return (
+        _env_on("O4_OVERLAYS_TOGETHER") and _env_on("O4_VEG_REUSE_BLD_SEG")
+        and bld_disable_cache and veg_disable_cache
+    )
+
+
+def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
+    """Building and vegetation overlays for one tile.
+
+    Apply both overlays' tile settings first. When both are wanted they run
+    side by side (see overlays_run_together), otherwise one after the other.
+    Returns {"bld": exception or None, "veg": exception or None} for the
+    overlays that ran.
+    """
+    errors = {}
+    if not (do_bld and do_veg and overlays_run_together()):
+        for key, wanted, step in (("bld", do_bld, process_bld_tile), ("veg", do_veg, process_veg_tile)):
+            if not wanted:
+                continue
+            try:
+                step(lat, lon, build_dir)
+                errors[key] = None
+            except Exception as exc:
+                errors[key] = exc
+            if _red_flag_set():
+                break
+        return errors
+
+    import glob
+    import shutil
+    import tempfile
+
+    cache_dir = _overlay_cache_dir(lat, lon)
+    os.makedirs(cache_dir, exist_ok=True)
+    seg_patterns = ('*_veg.npy', '*_vegtree.npy', '*_bldseg.skip')
+
+    def _clear_class_maps():
+        for pattern in seg_patterns:
+            for path in glob.glob(os.path.join(cache_dir, pattern)):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    # Only class maps written by this build may be read: clear leftovers.
+    _clear_class_maps()
+    # Keeps the folder non-empty: the building overlay's cache purge removes
+    # an empty tile cache folder, which the vegetation overlay still uses.
+    keep_path = os.path.join(cache_dir, 'overlays_running.keep')
+    with open(keep_path, 'w'):
+        pass
+    flag_dir = tempfile.mkdtemp(prefix="o4_overlays_")
+    done_flag = os.path.join(flag_dir, 'bld_done.flag')
+
+    def _bld():
+        try:
+            process_bld_tile(lat, lon, build_dir)
+            errors["bld"] = None
+        except Exception as exc:
+            errors["bld"] = exc
+        finally:
+            with open(done_flag, 'w'):
+                pass
+
+    print("[Overlay] Building and vegetation overlays run side by side.", flush=True)
+    bld_thread = threading.Thread(target=_bld, name="bld-overlay", daemon=True)
+    bld_thread.start()
+    try:
+        process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=done_flag)
+        errors["veg"] = None
+    except Exception as exc:
+        errors["veg"] = exc
+    finally:
+        bld_thread.join()
+        _clear_class_maps()
+        try:
+            os.remove(keep_path)
+        except OSError:
+            pass
+        shutil.rmtree(flag_dir, ignore_errors=True)
+        _cleanup_empty_dirs(cache_dir)
+    return errors
 
 
 def rescan_building_libraries():

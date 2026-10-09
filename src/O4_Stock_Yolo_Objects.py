@@ -82,7 +82,7 @@ def _default_stock_yolo_checkpoint(module_root=_MODULE_ROOT):
 DEFAULT_STOCK_YOLO_CHECKPOINT = os.environ.get(
     "O4_STOCK_YOLO_CHECKPOINT", _default_stock_yolo_checkpoint()
 )
-DEFAULT_STOCK_YOLO_BATCH = 1
+DEFAULT_STOCK_YOLO_BATCH = 8
 STORAGE_TANK_DOTA_CLASS = 2
 STORAGE_TANK_CIRCLE_SEGMENTS = 24
 
@@ -267,12 +267,34 @@ def load_stock_yolo_model(checkpoint: str = DEFAULT_STOCK_YOLO_CHECKPOINT):
     return YOLO(path)
 
 
-def _iter_yolo_crops(image: np.ndarray, stride: int):
+def yolo_predict_options() -> dict:
+    """Extra ultralytics predict() options for both YOLO passes.
+
+    Inference runs in fp16; O4_BLD_YOLO_HALF=0 runs it in fp32.
+    """
+    if os.environ.get("O4_BLD_YOLO_HALF", "").strip().lower() not in ("0", "false", "no", "off"):
+        return {"half": True}
+    return {}
+
+
+def _crop_skipped(x: int, y: int, stride: int, img_w: int, img_h: int, skip_rects_px) -> bool:
+    """True when the crop window lies entirely inside one skip rect."""
+    cx1 = min(x + stride, img_w)
+    cy1 = min(y + stride, img_h)
+    for x0, y0, x1, y1 in skip_rects_px:
+        if x >= x0 and y >= y0 and cx1 <= x1 and cy1 <= y1:
+            return True
+    return False
+
+
+def _iter_yolo_crops(image: np.ndarray, stride: int, skip_rects_px=()):
     """Tile the image into overlapping crops for stride-based YOLO inference.
     Identical pattern to the trained-YOLO loop in O4_Building_Overlay."""
     img_h, img_w = image.shape[:2]
     for y in range(0, img_h, stride):
         for x in range(0, img_w, stride):
+            if skip_rects_px and _crop_skipped(x, y, stride, img_w, img_h, skip_rects_px):
+                continue
             crop = image[y:min(y + stride, img_h), x:min(x + stride, img_w)]
             if crop.shape[0] != stride or crop.shape[1] != stride:
                 padded = np.zeros((stride, stride, 3), dtype=image.dtype)
@@ -281,9 +303,9 @@ def _iter_yolo_crops(image: np.ndarray, stride: int):
             yield x, y, crop
 
 
-def _iter_yolo_crop_batches(image: np.ndarray, stride: int, batch_size: int):
+def _iter_yolo_crop_batches(image: np.ndarray, stride: int, batch_size: int, skip_rects_px=()):
     batch = []
-    for item in _iter_yolo_crops(image, stride):
+    for item in _iter_yolo_crops(image, stride, skip_rects_px):
         batch.append(item)
         if len(batch) >= batch_size:
             yield batch
@@ -479,9 +501,13 @@ def run_stock_yolo_pass(
     batch_size: int = 1,
     asset_map: Optional[dict[int, tuple[str, tuple[str, ...], Optional[float]]]] = None,
     static_classes: Optional[tuple[int, ...]] = None,
+    skip_rects_px=(),
 ) -> StockYoloResults:
     """Run the stock DOTAv1 YOLO-OBB on `image`, map detections to assets, and
     return placements + occupancy polygons.
+
+    Crops lying wholly inside one of `skip_rects_px` (x0, y0, x1, y1) are not
+    inferred.
 
     If `static_occ_mask` is provided, detections whose center pixel is already
     occupied are filtered out (cheap sanity check; doesn't replace full
@@ -582,6 +608,8 @@ def run_stock_yolo_pass(
             res.occupied_owner.append(owner)
             res.counts_by_class[cls_i] = res.counts_by_class.get(cls_i, 0) + 1
 
+    predict_options = yolo_predict_options()
+
     def _detect(effective_batch):
         res = StockYoloResults(
             requested_batch_size=batch_size,
@@ -589,7 +617,7 @@ def run_stock_yolo_pass(
             batch_fell_back=(effective_batch != batch_size),
         )
         if effective_batch <= 1:
-            for ox, oy, crop in _iter_yolo_crops(image, int(stride)):
+            for ox, oy, crop in _iter_yolo_crops(image, int(stride), skip_rects_px):
                 crop_bgr = np.ascontiguousarray(crop[..., ::-1])
                 with torch.inference_mode():
                     results = model.predict(
@@ -601,13 +629,14 @@ def run_stock_yolo_pass(
                         device=device,
                         verbose=False,
                         stream=True,
+                        **predict_options,
                     )
                     for r in results:
                         _consume_result(res, r, ox, oy)
                     del results
                 del crop_bgr
         else:
-            for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch):
+            for batch in _iter_yolo_crop_batches(image, int(stride), effective_batch, skip_rects_px):
                 offsets = [(ox, oy) for ox, oy, _ in batch]
                 crops = [np.ascontiguousarray(crop[..., ::-1]) for _, _, crop in batch]
                 with torch.inference_mode():
@@ -620,6 +649,7 @@ def run_stock_yolo_pass(
                         device=device,
                         verbose=False,
                         stream=True,
+                        **predict_options,
                         batch=effective_batch,
                     )
                     for (ox, oy), r in zip(offsets, results):

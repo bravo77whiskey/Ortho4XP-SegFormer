@@ -91,10 +91,22 @@ def tree_support_cache_path(veg_cache_path):
     return veg_cache_path[:-len('_veg.npy')] + '_vegtree.npy'
 
 
+def save_array_atomic(path, array):
+    """np.save under a private name, then rename: readers never see half a file.
+
+    The vegetation overlay can read class maps while the building overlay is
+    still writing them (overlays run side by side).
+    """
+    part = f"{path}.{os.getpid()}.part"
+    with open(part, 'wb') as handle:
+        np.save(handle, array)
+    os.replace(part, path)
+
+
 def save_tree_support(path, mask):
     """Store a boolean mask bit-packed (1/8 of the class map's size)."""
     mask = np.asarray(mask, dtype=bool)
-    np.save(path, np.concatenate([
+    save_array_atomic(path, np.concatenate([
         np.asarray(mask.shape, dtype=np.uint32).view(np.uint8),
         np.packbits(mask, axis=None),
     ]))

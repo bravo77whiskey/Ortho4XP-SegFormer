@@ -420,10 +420,15 @@ def run_group(group):
             os.remove(path)
     if not args.skip_bld:
         PIPELINE.apply_tile_settings(tile, CFGVARS.list_bld_pipeline_vars)
-        PIPELINE.process_bld_tile(lat, lon, gdir)
     if not args.skip_veg:
         PIPELINE.apply_tile_settings(tile, CFGVARS.list_veg_pipeline_vars)
-        PIPELINE.process_veg_tile(lat, lon, gdir)
+    # Same entry point as a batch build: both overlays side by side when allowed.
+    errors = PIPELINE.process_overlays_tile(
+        lat, lon, gdir, do_bld=not args.skip_bld, do_veg=not args.skip_veg,
+    )
+    for exc in errors.values():
+        if exc is not None:
+            raise exc
     parsed = read_outputs(os.path.join(gdir, "out"))
     from math import cos, radians
     for s in samples:
