@@ -1,4 +1,7 @@
+import hashlib
 import os
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -365,6 +368,88 @@ class CustomSceneryAvoidanceTests(unittest.TestCase):
                 static_occ_integral=BLD.cv2.integral(static_occ_mask, sdepth=BLD.cv2.CV_32S),
             )
         )
+
+
+def _binary_dsf(objects=(), polygons=(), terrain=("terrain/mesh.ter",)):
+    """A minimal uncompressed DSF with the given definition tables."""
+    def atom(tag, payload):
+        return tag + struct.pack("<I", len(payload) + 8) + payload
+
+    def strings(values):
+        return b"".join(v.encode("utf-8") + b"\0" for v in values)
+
+    head = atom(b"DAEH", atom(b"PORP", strings(["sim/west", "120"])))
+    defn = atom(b"NFED", atom(b"TRET", strings(terrain)) + atom(b"TJBO", strings(objects))
+                + atom(b"YLOP", strings(polygons)) + atom(b"WTEN", b""))
+    body = b"XPLNEDSF" + struct.pack("<I", 1) + head + defn + atom(b"SDMC", b"\x01\x02")
+    return body + hashlib.md5(body).digest()
+
+
+class DsfDefinitionProbeTests(unittest.TestCase):
+    def _write(self, tmpdir, data, name="+22+120.dsf"):
+        path = Path(tmpdir) / name
+        path.write_bytes(data)
+        return str(path)
+
+    def test_reads_definition_tables_from_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, _binary_dsf(["a.obj", "b.obj"], ["x.fac", "y.for"]))
+            self.assertEqual(
+                DSF.read_dsf_definitions(path),
+                {"object": ["a.obj", "b.obj"], "polygon": ["x.fac", "y.for"]},
+            )
+
+    def test_only_objects_or_facades_can_hold_buildings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cases = {
+                "mesh": (_binary_dsf(), False),
+                "forests": (_binary_dsf(polygons=["lib/g8/a.for", "b.pol"]), False),
+                "object": (_binary_dsf(objects=["a.obj"]), True),
+                "facade": (_binary_dsf(polygons=["lib\\Building.FAC"]), True),
+                "not a dsf": (b"garbage", True),
+            }
+            for name, (data, expected) in cases.items():
+                path = self._write(tmpdir, data, f"{name}.dsf")
+                self.assertEqual(DSF.dsf_may_hold_buildings(path), expected, name)
+
+    def test_truncated_dsf_is_treated_as_unknown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, _binary_dsf(objects=["a.obj"])[:40])
+            self.assertIsNone(DSF.read_dsf_definitions(path))
+            self.assertTrue(DSF.dsf_may_hold_buildings(path))
+
+    @unittest.skipUnless((ROOT / "Utils" / "win" / "7z.exe").exists() and os.name == "nt", "needs bundled 7-Zip")
+    def test_reads_7z_packed_dsf_through_7zip_beside_dsftool(self):
+        sevenzip = ROOT / "Utils" / "win" / "7z.exe"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw = self._write(tmpdir, _binary_dsf(polygons=["lib/g8/a.for"]), "inner.dsf")
+            packed = str(Path(tmpdir) / "+22+120.dsf")
+            subprocess.run([str(sevenzip), "a", "-t7z", packed, raw], check=True, capture_output=True)
+            dsftool = str(sevenzip.parent / "DSFTool.exe")
+            self.assertEqual(DSF.read_dsf_definitions(packed, dsftool),
+                             {"object": [], "polygon": ["lib/g8/a.for"]})
+            self.assertFalse(DSF.dsf_may_hold_buildings(packed, dsftool))
+            # Without a DSFTool folder to find 7-Zip in, it is unknown.
+            self.assertIsNone(DSF.read_dsf_definitions(packed))
+
+    def test_custom_scenery_loader_skips_mesh_without_disassembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package = Path(tmpdir) / "Custom Scenery" / "zOrtho4XP_+22+120"
+            dsf = package / "Earth nav data" / "+20+120" / "+22+120.dsf"
+            dsf.parent.mkdir(parents=True)
+            dsf.write_bytes(_binary_dsf())
+            with mock.patch.object(BLD, "ensure_cached_dsf_text") as decode, \
+                    mock.patch.object(
+                        BLD, "find_active_custom_scenery_dsfs",
+                        return_value=[(package.name, str(dsf), str(package))],
+                    ), \
+                    mock.patch.object(BLD, "_active_custom_library_index", return_value={}):
+                polys, objects, skipped, layers = BLD._load_custom_scenery_building_exclusions(
+                    str(Path(tmpdir) / "Custom Scenery"), 22, 120,
+                    str(Path(tmpdir) / "out.dsf"), "DSFTool.exe", tmpdir,
+                )
+            decode.assert_not_called()
+            self.assertEqual((polys, objects, skipped, layers), ([], [], 0, 1))
 
 
 if __name__ == "__main__":

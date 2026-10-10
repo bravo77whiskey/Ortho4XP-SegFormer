@@ -294,3 +294,100 @@ def ensure_cached_dsf_text(dsf_path, dsftool_path, cache_dir, create_no_window=0
             except OSError:
                 pass
     return text_cache_path
+
+
+# On-disk (little-endian) atom IDs of the DSF definition tables.
+_DSF_DEFINITION_ATOMS = {b"TJBO": "object", b"YLOP": "polygon"}
+
+
+def _read_dsf_definitions_from(stream, can_seek):
+    """Object and polygon definition paths from a binary DSF stream; None if not a DSF."""
+    import struct
+
+    if stream.read(12)[:8] != b"XPLNEDSF":
+        return None
+    while True:
+        atom_header = stream.read(8)
+        if len(atom_header) < 8:
+            return None
+        atom_id = atom_header[:4]
+        atom_len = struct.unpack("<I", atom_header[4:])[0]
+        if atom_len < 8:
+            return None
+        if atom_id == b"NFED":  # 'DEFN', stored little-endian
+            payload = stream.read(atom_len - 8)
+            if len(payload) < atom_len - 8:
+                return None
+            break
+        if can_seek:
+            stream.seek(atom_len - 8, os.SEEK_CUR)
+        else:
+            remaining = atom_len - 8
+            while remaining:
+                chunk = stream.read(min(remaining, 1 << 20))
+                if not chunk:
+                    return None
+                remaining -= len(chunk)
+
+    tables = {"object": [], "polygon": []}
+    offset = 0
+    while offset + 8 <= len(payload):
+        child_id = payload[offset:offset + 4]
+        child_len = struct.unpack_from("<I", payload, offset + 4)[0]
+        if child_len < 8 or offset + child_len > len(payload):
+            return None
+        kind = _DSF_DEFINITION_ATOMS.get(child_id)
+        if kind:
+            strings = payload[offset + 8:offset + child_len].rstrip(b"\0")
+            tables[kind] = [s.decode("utf-8", "replace") for s in strings.split(b"\0")] if strings else []
+        offset += child_len
+    return tables
+
+
+def read_dsf_definitions(dsf_path, dsftool_path=None):
+    """Return ``{'object': [...], 'polygon': [...]}`` from a DSF without disassembling it.
+
+    The definition tables sit near the front of the file. A 7z-packed DSF is
+    streamed through the 7-Zip beside DSFTool, stopping once they are read.
+    Returns None when the file can't be read this way, so the caller falls
+    back to a full disassembly.
+    """
+    try:
+        with open(dsf_path, "rb") as handle:
+            magic = handle.read(8)
+            if magic == b"XPLNEDSF":
+                handle.seek(0)
+                return _read_dsf_definitions_from(handle, can_seek=True)
+        if not magic.startswith(b"7z\xbc\xaf") or not dsftool_path:
+            return None
+        sevenzip = os.path.join(os.path.dirname(dsftool_path), "7z.exe" if os.name == "nt" else "7z")
+        if not os.path.isfile(sevenzip):
+            return None
+        proc = subprocess.Popen(
+            [sevenzip, "e", "-so", dsf_path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            return _read_dsf_definitions_from(proc.stdout, can_seek=False)
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdout.close()
+    except (OSError, ValueError):
+        return None
+
+
+def dsf_may_hold_buildings(dsf_path, dsftool_path=None):
+    """False only when a DSF provably defines no objects and no facades.
+
+    A base mesh, a forest pack or a vegetation overlay has neither, so its
+    disassembly - hundreds of MB of text for an ortho mesh - can be skipped
+    by anything that only reads buildings out of it.
+    """
+    tables = read_dsf_definitions(dsf_path, dsftool_path)
+    if tables is None:
+        return True
+    return bool(tables["object"]) or any(
+        path.replace("\\", "/").lower().endswith(".fac") for path in tables["polygon"]
+    )

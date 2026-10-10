@@ -60,6 +60,7 @@ import O4_Bld_Seams as SEAMS
 import O4_Bld_Overlap_Facades as OVLFAC
 from O4_Scenery_Packs import (
     active_scenery_pack_dirs,
+    dsf_may_hold_buildings,
     ensure_cached_dsf_text,
     find_active_custom_scenery_dsfs,
     find_simheaven_building_dsfs,
@@ -1448,6 +1449,11 @@ def _load_custom_scenery_building_exclusions(
         ).lower()
     for folder_name, dsf_path, package_dir in dsf_matches:
         if own_folder and folder_name.lower() == own_folder:
+            continue
+        if not dsf_may_hold_buildings(dsf_path, dsftool_path):
+            # A base mesh or forest pack: no objects or facades to read, and
+            # disassembling an ortho mesh alone costs ~15 s.
+            print(f"  [custom scenery bld] {folder_name}: no objects or facades defined")
             continue
         n_obj0 = len(objects)
         n_poly0 = len(polys)
@@ -8997,7 +9003,7 @@ class _BuildingOverlayRun:
                 dsf_name = os.path.basename(self.out_dsf or _tile_name_for_latlon(self.lat, self.lon))
                 paths += [p for _, p, _ in find_active_custom_scenery_dsfs(
                     self.custom_scenery_dir, dsf_name, skip_dsf_path=self.out_dsf,
-                )]
+                ) if dsf_may_hold_buildings(p, dsftool)]
         except Exception:
             return
         paths = list(dict.fromkeys(paths))
