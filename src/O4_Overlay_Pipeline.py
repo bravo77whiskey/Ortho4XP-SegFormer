@@ -69,6 +69,7 @@ _DERIVED_FILE_PATTERNS = (
     "*_road.pkl",
     "*_vegaux.pkl",
     "*_vegpoly.pkl",
+    "*_grasscls.npy",     # class maps the grass step keeps until it is done
 )
 _DISABLED_TILE_FILE_PATTERNS = (
     "*.osm.bz2",
@@ -278,6 +279,8 @@ veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False
 veg_res_m         = 0.0     # 0 = native DDS resolution
 veg_disable_cache = False
+grass_enabled     = True    # 3-d grass around airports, inside the veg overlay
+grass_airport_buffer_m = 500.0
 
 bld_spacing_m     = 0.0
 bld_close_m       = 30.0
@@ -811,6 +814,11 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         f"SEG._dsftool     = {dsftool!r}\n"
         + _remote_activation_code(remote_host) +
         f"import O4_Vegetation_Overlay as veg_overlay\n"
+        + (
+            f"import O4_Grass_Overlay as _GRASS\n"
+            f"_grass = _GRASS.GrassSettings(airport_buffer_m={float(grass_airport_buffer_m)!r})\n"
+            if grass_enabled else "_grass = None\n"
+        ) +
         f"veg_overlay.run(\n"
         f"    tex_dir          = {tex_dir!r},\n"
         f"    lat              = {lat!r},\n"
@@ -840,6 +848,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         f"    bld_excl_m       = {0.0 if veg_disable_cache else 10.0!r},\n"
         f"    dsftool_path     = {dsftool!r},\n"
         f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
+        f"    grass_settings   = _grass,\n"
         f")\n"
     )
     ret = None
@@ -854,7 +863,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         if veg_disable_cache:
             _purge_overlay_cache(
                 cache_dir,
-                ['*_veg.npy', '*_vegtree.npy', '*_vegaux.pkl', '*_vegpoly.pkl'],
+                ['*_veg.npy', '*_vegtree.npy', '*_vegaux.pkl', '*_vegpoly.pkl', '*_grasscls.npy'],
                 'veg',
             )
         else:

@@ -1671,7 +1671,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         avoid_gfv2=False, gfv2_buffer_m=0.0,
         use_gfv2_asset_proximity=False,
         use_leaf_type_maps=True, leaf_type_cache_dir=None,
-        use_xp_forests=True):
+        use_xp_forests=True, grass_settings=None):
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
@@ -1797,6 +1797,31 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         _selection_report, region_label="vegetation masks"
     ):
         print(_line)
+    # Grass around airports (O4_Grass_Overlay) rides along: it collects the
+    # class maps of the textures its airport zones reach as this loop goes,
+    # and its polygons are merged into this DSF below. A grass failure never
+    # costs the trees.
+    grass_pack_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(out_dsf))))
+    grass_hook = None
+    if grass_settings is not None:
+        try:
+            import O4_Grass_Overlay as GRASS
+            grass_hook = GRASS.GrassHook(
+                tex_dir, lat, lon, cache_dir, custom_scenery_dir, grass_pack_dir,
+                dsftool_path, settings=grass_settings,
+            )
+            if not grass_hook.sources:
+                grass_hook = None
+                GRASS.remove_tile_assets(grass_pack_dir, lat, lon)
+        except Exception as exc:
+            print(f"[Grass] disabled for this tile: {exc!r}")
+            grass_hook = None
+    else:
+        try:
+            import O4_Grass_Overlay as GRASS
+            GRASS.remove_tile_assets(grass_pack_dir, lat, lon)
+        except Exception:
+            pass
     _used_zls = sorted(set(int(STD_RE.match(_f).group(4)) for _f in files))
     _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
 
@@ -2256,6 +2281,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 np.save(cache_path, veg_map)
                 if tree_support is not None:
                     SEGFORMER.save_tree_support(tree_support_path, tree_support)
+
+        # Grass reuses this class map instead of inferring again: with caches
+        # off it is deleted once this DDS is done.
+        if grass_hook is not None and grass_hook.wants(fname):
+            grass_hook.take_class_map(fname, veg_map)
 
         if disable_cache:
             veg_cache_stat = None
@@ -2719,7 +2749,31 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         summary = ", ".join(f"{name}={count}" for name, count in ordered)
         print(f"Tree types: {summary}")
 
-    if not polygons:
+    # Grass polygons for this same DSF, their POLYGON_DEFs numbered after the
+    # tree ones.
+    grass_result = None
+    if grass_hook is not None:
+        try:
+            grass_result = grass_hook.build(len(set(p for p, _, _ in polygons)))
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"[Grass] failed, writing trees only: {exc!r}")
+            try:
+                GRASS.remove_tile_assets(grass_pack_dir, lat, lon)
+            except Exception:
+                pass
+        finally:
+            grass_hook.cleanup()
+    if grass_result:
+        status['grass'] = grass_result[2]
+    if not polygons and grass_result:
+        # Grass but no trees of our own: the DSF carries the grass, but never
+        # the tile-wide exclusion -- nothing of ours would replace the lower
+        # forests it removes.
+        exclude_lower_forests = False
+
+    if not polygons and not grass_result:
         # A processed tile with nothing to plant must not keep a tile-wide
         # exclusion alive: with no generated trees of our own, excluding the
         # lower layers would leave the tile bare. Drop any managed overlay we
@@ -2769,6 +2823,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f.write("\n")
         for p in for_paths:
             f.write(f"POLYGON_DEF {p}\n")
+        if grass_result:
+            for p in grass_result[0]:
+                f.write(f"POLYGON_DEF {p}\n")
         f.write("\n")
         for fpath, dsf_den, ring in polygons:
             f.write(f"BEGIN_POLYGON {for_idx[fpath]} {dsf_den} 2\n")
@@ -2777,9 +2834,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             else:
                 _write_winding(f, ring)
             f.write("END_POLYGON\n")
+        if grass_result:
+            f.write(grass_result[1])
     timings['dsf_text'] += time.perf_counter() - _t
 
-    print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs)")
+    print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs"
+          + (f" + {len(grass_result[0])} grass" if grass_result else "") + ")")
 
     _t = time.perf_counter()
     try:

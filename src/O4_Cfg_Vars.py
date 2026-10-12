@@ -498,6 +498,25 @@ cfg_tile_vars = {
         "short_name": "veg_res",
         "hint": "Downsample inference maps to this ground resolution in metres before polygon extraction. 0 = native DDS detail (about 2 m at ZL16). Use 5–10 m to reduce polygon count on performance-critical tiles.",
     },
+    "grass_enabled": {
+        "type": bool,
+        "default": True,
+        "short_name": "grass",
+        "hint": "Plant 3-d grass around every airport in the tile, coloured "
+                "from the ortho underneath. Runs as part of the vegetation "
+                "overlay and goes into the same DSF. Grass grows inside each "
+                "airport's apt.dat boundary (or, without one, a circle out to "
+                "its furthest runway or taxiway point) plus the buffer below, "
+                "never on runways, taxiways, aprons, roads or rail, and in "
+                "desert climates only where the ortho is green.",
+    },
+    "grass_airport_buffer_m": {
+        "type": float,
+        "default": 500.0,
+        "short_name": "grass_buf",
+        "hint": "How far the grass reaches beyond each airport's boundary, in "
+                "metres.",
+    },
     "veg_disable_cache": {
         "type": bool,
         "default": False,
@@ -772,6 +791,8 @@ list_veg_vars = [
     "veg_use_leaf_type_maps",
     "veg_use_xp_forests",
     "veg_res_m",
+    "grass_enabled",
+    "grass_airport_buffer_m",
     "veg_disable_cache",
     "segformer_patch_size",
     "segformer_overlap",
