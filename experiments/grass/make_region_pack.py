@@ -37,7 +37,11 @@ ap.add_argument("--road-extra-m", type=float, default=0.0,
 ap.add_argument("--pave-buffer-m", type=float, default=2.0,
                 help="grow airport pavement by this much before removing it from the grass")
 ap.add_argument("--k", type=int, default=48)
-ap.add_argument("--mask", choices=("segformer", "colour"), default="segformer",
+ap.add_argument("--green-chroma", type=float, default=10.0,
+                help="fused: Lab chroma a pixel needs (hue 95-170 deg) to count as clearly green")
+ap.add_argument("--sparse-density", type=float, default=0.25,
+                help="fused: DSF density for sparse grass (steppe climates), 0..1")
+ap.add_argument("--mask", choices=("segformer", "colour", "fused"), default="segformer",
                 help="segformer: rangeland class only; colour: grass everywhere except grey / bright / roof-coloured pixels (no model)")
 ap.add_argument("--sigma-m", type=float, default=20.0)
 ap.add_argument("--win-m", type=float, default=41.0)
@@ -457,6 +461,14 @@ def road_mask(roads, bbox, h, w):
     return mask.astype(bool)
 
 
+def green_mask(L, mpp):
+    """Clearly green pixels: Lab hue 95-170 deg, chroma >= --green-chroma, not black."""
+    Ls = cv2.GaussianBlur(L, (0, 0), max(0.5, 1.0 / mpp))
+    C = np.hypot(Ls[..., 1], Ls[..., 2])
+    hue = np.degrees(np.arctan2(Ls[..., 2], Ls[..., 1])) % 360
+    return (hue >= 95) & (hue <= 170) & (C >= args.green_chroma) & (Ls[..., 0] >= 20)
+
+
 def colour_ground_mask(L, mpp):
     """Programmatic 'not obviously built' mask from the ortho alone.
 
@@ -485,6 +497,9 @@ if args.airports == "auto" and args.tile_dir:
     PAVEMENT, used = apt_pavement.pavement_near(xplane_dir, lat0, lon0, radius_m)
     print("airport pavement:", used or "none in the circle", flush=True)
 
+if args.mask == "fused":
+    import O4_Climate_Regions as CLIM
+
 ROADS = []
 if args.roads == "auto" and args.tile_dir:
     import O4_Building_Overlay as BLD
@@ -508,7 +523,7 @@ for key, path, bbox, zl, excl in sources:
         print(f"SKIP {key}: {exc}")
         continue
     cls = None
-    if args.mask == "segformer":
+    if args.mask in ("segformer", "fused"):
         cls_path = os.path.join(SPIKE, "classmaps_tile" if args.tile_dir else "classmaps", key + "_cls.npy")
         os.makedirs(os.path.dirname(cls_path), exist_ok=True)
         if not os.path.isfile(cls_path):
@@ -530,8 +545,28 @@ for key, path, bbox, zl, excl in sources:
     for fx0, fy0, fx1, fy1 in excl:   # footprint parts another texture owns
         owned[int(round(fy0 * h)):int(round(fy1 * h)), int(round(fx0 * w)):int(round(fx1 * w))] = False
     L = cv2.cvtColor(img.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+    sparse = np.zeros((h, w), bool)
+    climate = ""
     if args.mask == "colour":
         grass = colour_ground_mask(L, mpp)
+    elif args.mask == "fused":
+        # SegFormer decides vegetation vs bare/built ground (it tells straw
+        # grass from sand), the colour rule vetoes built-looking pixels and
+        # rescues clearly green ones SegFormer put in a non-vegetation class,
+        # and the climate regime -- static, so it cannot go out of date --
+        # sets how much the ortho must show: in deserts only green pixels,
+        # in steppe non-green vegetation is sparse.  Every parcel-scale
+        # decision comes from the ortho on screen.
+        ground = colour_ground_mask(L, mpp)
+        green = green_mask(L, mpp)
+        veg = np.isin(cls, (2, 5, 7))                 # rangeland, tree, agriculture
+        soft = np.isin(cls, (0, 1, 3, 255))           # background, bareland, developed, none
+        grass = ground & (veg | (soft & green))
+        climate = CLIM.koppen_code(0.5 * (lat_n + lat_s), 0.5 * (lon_w + lon_e)) or ""
+        if climate.startswith("BW"):
+            grass &= green
+        elif climate.startswith("BS"):
+            sparse = grass & ~green
     else:
         grass = cv2.morphologyEx((cls == RANGELAND).astype(np.uint8), cv2.MORPH_OPEN,
                                  np.ones((3, 3), np.uint8)).astype(bool)
@@ -545,9 +580,11 @@ for key, path, bbox, zl, excl in sources:
     sel = grass & inside & owned
     paste(mosaic_img, img, bbox, None, keep_mask=owned)
     paste(mosaic_excl, (inside & ~grass).astype(np.uint8), bbox, None, keep_mask=owned)
-    tex.append(dict(key=key, zl=zl, bbox=bbox, mpp=mpp, h=h, w=w, ym=(ym_n, ym_s),
-                    sel=np.packbits(sel), S_sel=S[sel], owned=np.packbits(owned)))
-    print(f"{key} ZL{zl} grass in circle {sel.sum() * mpp * mpp / 1e6:.3f} km2", flush=True)
+    tex.append(dict(key=key, zl=zl, bbox=bbox, mpp=mpp, h=h, w=w, ym=(ym_n, ym_s), climate=climate,
+                    sel=np.packbits(sel), S_sel=S[sel], owned=np.packbits(owned),
+                    sparse=np.packbits(sparse & sel)))
+    print(f"{key} ZL{zl} {climate} grass in circle {sel.sum() * mpp * mpp / 1e6:.3f} km2"
+          f" (sparse {(sparse & sel).sum() * mpp * mpp / 1e6:.3f})", flush=True)
     del img, L, S, cls
 
 
@@ -564,7 +601,9 @@ _, _, centres = cv2.kmeans(samp, args.k, None,
                            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.05),
                            3, cv2.KMEANS_PP_CENTERS)
 # Colour mode assumes grass everywhere it plants: no palette-level veto.
-keep = list(range(args.k)) if args.mask == "colour" else [k for k, c in enumerate(centres) if is_grass_colour(*c)]
+# Colour and fused modes decide where grass grows before the palette: no colour veto.
+keep = list(range(args.k)) if args.mask in ("colour", "fused") else \
+    [k for k, c in enumerate(centres) if is_grass_colour(*c)]
 
 pack = os.path.join(args.out, PACK_NAME)
 if os.path.isdir(pack):
@@ -593,8 +632,10 @@ for t in tex:
 
     tile = (math.floor(lat_s), math.floor(lon_w))
     polys = []
-    for k in keep:
-        m = (lbl == k).astype(np.uint8)
+    sparse = unpack(t, "sparse")
+    sparse_den = max(1, min(255, int(round(args.sparse_density * 255))))
+    for k, (den, part) in ((k, dp) for k in keep for dp in ((255, ~sparse), (sparse_den, sparse))):
+        m = ((lbl == k) & part).astype(np.uint8)
         if not m.any():
             continue
         cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -609,12 +650,13 @@ for t in tex:
                 ch = hier[0][ch][0]
             rings = [[to_ll(p[0]) for p in r] for r in rings if len(r) >= 3]
             if rings:
-                polys.append((f"grass/{args.name}/c{k:02d}.for", rings))
+                polys.append((f"grass/{args.name}/c{k:02d}.for", rings, den))
     tiles.setdefault(tile, []).extend(polys)
     planted = np.isin(lbl, keep)
     paste(mosaic_lbl, np.where(planted, lbl, -1).astype(np.int16), t["bbox"], None,
           keep_mask=unpack(t, "owned"))
-    report.append({"texture": t["key"], "zl": t["zl"], "polygons": len(polys),
+    report.append({"texture": t["key"], "zl": t["zl"], "climate": t["climate"], "polygons": len(polys),
+                   "sparse_km2": round(float(sparse.sum()) * t["mpp"] ** 2 / 1e6, 3),
                    "grass_km2_in_circle": round(float(sel.sum()) * t["mpp"] ** 2 / 1e6, 3)})
 
 # Mosaic preview: ortho | ortho with planted grass in its palette colour, circle drawn.
@@ -622,7 +664,7 @@ rgbc = lab2rgb(centres)
 filled = mosaic_img.copy(); g = mosaic_lbl >= 0
 filled[g] = rgbc[mosaic_lbl[g]]
 outline = mosaic_img.copy()
-if args.mask == "colour":
+if args.mask in ("colour", "fused"):
     ex = mosaic_excl > 0
     outline[ex] = (0.45 * outline[ex] + 0.55 * np.array([255, 0, 64])).astype(np.uint8)
 else:
@@ -636,7 +678,7 @@ Image.fromarray(cv2.resize(pv, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
     os.path.join(SPIKE, f"{args.name}_mosaic_preview.jpg"), quality=88)
 
 for (lat, lon), polys in tiles.items():
-    defs = sorted({p for p, _ in polys}); di = {p: i for i, p in enumerate(defs)}
+    defs = sorted({p for p, _, _ in polys}); di = {p: i for i, p in enumerate(defs)}
     folder = f"{math.floor(lat / 10) * 10:+03d}{math.floor(lon / 10) * 10:+04d}"
     name = f"{lat:+03d}{lon:+04d}"
     os.makedirs(os.path.join(pack, "Earth nav data", folder), exist_ok=True)
@@ -647,8 +689,8 @@ for (lat, lon), polys in tiles.items():
         for p in defs:
             f.write(f"POLYGON_DEF {p}\n")
         f.write("\n")
-        for p, rings in polys:
-            f.write(f"BEGIN_POLYGON {di[p]} 255 2\n")
+        for p, rings, den in polys:
+            f.write(f"BEGIN_POLYGON {di[p]} {den} 2\n")
             for r in rings:
                 f.write("BEGIN_WINDING\n")
                 for lo, la in r + [r[0]]:

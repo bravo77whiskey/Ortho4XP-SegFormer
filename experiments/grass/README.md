@@ -12,7 +12,7 @@ Built with:
 ```
 python make_region_pack.py --center 22.5772 120.3500 --radius-nm 2 --name rckh \
     --tile-dir "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Scenery/zOrtho4XP_+22+120" \
-    --mask colour --k 64 --sigma-m 8 --win-m 9 --min-m2 50 \
+    --mask fused --k 64 --sigma-m 8 --win-m 9 --min-m2 50 \
     --tiers "110:24:3:1.0,220:10:2:2.2,230:0:1:1.0" --px-mrad 0 \
     --tier-contrast "1,0.6,0" --tier-wind "1,1,0" --tier-tip "0.25,0.25,0.25" \
     --tier-height "1,1,1" --out <dir>
@@ -30,9 +30,27 @@ geometry change.  A built copy of this checkpoint is at
 
 The parts:
 
-* **Where:** `--mask colour` plants everywhere except pixels that are clearly
-  not ground: grey low-chroma, very bright, or roof-coloured (red/orange,
-  blue).  There is no model.  Water is left to `SKIP_SURFACE water`.
+* **Where (`--mask fused`, the current rule):** each source decides what
+  it is good at, and every decision at the scale of a single field comes
+  from the ortho on screen:
+  * SegFormer vegetation (rangeland, tree, agriculture) gets grass unless
+    the colour rule says the pixel looks built.  SegFormer is what tells
+    dry straw grass from sand or soil.
+  * Pixels that SegFormer calls bareland, developed or unclassified get
+    grass only where the ortho is clearly green (Lab hue 95–170°, chroma at
+    least 10).  This catches lawns and yards.
+  * SegFormer building, road and water never get grass.  The water class
+    catches some of the canals.
+  * The climate regime (Köppen, `O4_Climate_Regions`; static, so it cannot
+    go out of date) sets how much the ortho must show.  In desert (BW*) only
+    green pixels get grass.  In steppe (BS*) non-green vegetation becomes
+    sparse grass at `--sparse-density`, written as a lower DSF polygon
+    density.
+  * The colour still comes from the ortho palette, so SegFormer's large,
+    uniform segments never flatten it.
+* `--mask colour` is the model-free first version.  It plants everywhere
+  except grey, very bright or roof-coloured pixels, and that puts grass in
+  deserts and in city shadows.
 * **Exclusions from map data:** both are cut out before the colour is smoothed.
   * `--airports auto`: runways with their blast pads, helipads, and taxiway,
     apron and shoulder pavement from apt.dat (`apt_pavement.py`, curved
@@ -74,6 +92,11 @@ The parts:
   empty mesh and transparent billboard.  The frame-rate cost was too high.
   Near-only density belongs in a separate `.for` with its own short `LOD`.
 * **Shorter blades / a 6-blade mid level:** both tried and put back.
+* **ESA WorldCover as a gate** (`worldcover.py`, `compare_masks.py
+  --worldcover`; kept as a record): it fixed Garowe, but it is a 2021 map.
+  Any dated outside layer that decides individual fields can contradict the
+  ortho under it, so it was rejected.  The 10 m pixels also left blocky
+  edges.  The climate regime replaced it.
 * **SegFormer rangeland as the grass mask:** it misses a lot, including green
   areas and the dried airport infield.  It also gives no grass under trees.
 
@@ -84,8 +107,14 @@ The parts:
 * Narrow canals and drains get grass.  OSM maps them as `waterway=*` lines,
   which never become mesh water.  Ortho4XP's cached water file holds only
   water areas, so the lines need fetching (Overpass or planet mode).
-* `--mask colour` assumes grass everywhere, which is wrong in deserts and on
-  bare soil.
+* SegFormer calls some dried grass "developed".  At RCKH that leaves a patch
+  at the east end of the infield bare.
+* The climate grid is 0.5°, so it lumps wet and dry halves of islands such
+  as Gran Canaria together.  The 1 km Beck map would fix that.  The steppe
+  case is untested.
+* `compare_masks.py` maps the masks against each other around a point
+  (`--fused`, `--climate`, `--worldcover`, `--wc-only`).  `fetch_circle.py`
+  downloads review imagery for places without a tile.
 * About 79k polygons per 2 nm circle.  This is fine for a test but needs
   measuring at tile scale.
 * Zooming in extends X-Plane's draw distance, so the grass cost rises when zoomed.
