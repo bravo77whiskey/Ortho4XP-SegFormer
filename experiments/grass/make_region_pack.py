@@ -1,0 +1,550 @@
+"""Grass spike, round 2: one shared colour palette over a radius around a point,
+multi-tier LOD tufts, one X-Plane 12 test pack.
+
+Usage (CUDA venv):
+  python make_region_pack.py --center 22.5772 120.3500 --radius-nm 2 \
+      --textures 28528_54656 28528_54672 28544_54656 28544_54672
+
+Colour: Lab, normalised-Gaussian smoothed over grass pixels only (SIGMA_M),
+k-means palette pooled over every grass pixel in the circle (K), mode filter
+(WIN_M), polygons >= MIN_M2.  Geometry: --tiers "far:blades:segs:width,..."
+nearest first; each farther tier reuses the first N blades of the nearest
+tuft, widened, so the silhouette stays put across the switch.
+"""
+import argparse, glob, json, math, os, shutil, subprocess, sys
+import numpy as np, cv2
+from PIL import Image
+
+SPIKE = r"E:\Ortho4XP_Review\_grass_spike"
+SETS = [r"E:\Ortho4XP_Review\sets\hotspots\BI", os.path.join(SPIKE, "extra")]
+DSFTOOL = r"G:\Dev\Ortho4XP-SegFormer\Utils\win\DSFTool.exe"
+PACK_NAME = "O4XP_Grass_Spike"
+RANGELAND = 2
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--center", nargs=2, type=float, required=True)
+ap.add_argument("--radius-nm", type=float, default=2.0)
+ap.add_argument("--textures", nargs="+", default=[])
+ap.add_argument("--tile-dir")
+ap.add_argument("--k", type=int, default=48)
+ap.add_argument("--mask", choices=("segformer", "colour"), default="segformer",
+                help="segformer: rangeland class only; colour: grass everywhere except grey / bright / roof-coloured pixels (no model)")
+ap.add_argument("--sigma-m", type=float, default=20.0)
+ap.add_argument("--win-m", type=float, default=41.0)
+ap.add_argument("--min-m2", type=float, default=400.0)
+ap.add_argument("--spacing", type=float, default=1.0)
+ap.add_argument("--tiers", default="40:24:3:1.0,200:24:2:1.0,800:24:1:1.0")
+ap.add_argument("--px-mrad", type=float, default=0.55,
+                help="one screen pixel in milliradians (2560 px across ~70 deg = 0.55); "
+                     "0 disables the pixel-width rule")
+ap.add_argument("--min-px", type=float, default=1.0,
+                help="blade width in pixels at the far end of each farther detail level")
+ap.add_argument("--tier-contrast", default="1,0.4,0",
+                help="per level: 1 = full root/tip gradient, 0 = flat ground colour")
+ap.add_argument("--tier-wind", default="1,0.3,0", help="per level wind scale")
+ap.add_argument("--tier-height", default="1,1,1",
+                help="per level blade height scale (a short last level sinks the grass into the ground at the draw-distance edge)")
+ap.add_argument("--tier-tip", default="0.25,0.7,0.7",
+                help="per level blade width at the tip as a fraction of the base")
+ap.add_argument("--shadows", action="store_true")
+ap.add_argument("--tint-tiers", action="store_true",
+                help="diagnostic: 2nd detail level red, 3rd blue, to see where each starts")
+ap.add_argument("--name", default="region")
+ap.add_argument("--out", default=os.path.join(SPIKE, "pack"))
+ap.add_argument("--only-for", action="store_true",
+                help="keep the existing pack in --out (DSF, palette); rewrite only the "
+                     ".for files and textures with the current geometry options")
+args = ap.parse_args()
+TIERS = [tuple(float(x) if i in (0, 3) else int(x) for i, x in enumerate(t.split(":")))
+         for t in args.tiers.split(",")]
+LOD = TIERS[-1][0]
+BLADE_W = 0.011                 # mean near-blade width (m), tuft() draws 0.008..0.014
+CONTRAST = [float(x) for x in args.tier_contrast.split(",")]
+WIND = [float(x) for x in args.tier_wind.split(",")]
+TIP = [float(x) for x in args.tier_tip.split(",")]
+HEIGHT = [float(x) for x in args.tier_height.split(",")]
+# Pixel-width rule: a blade thinner than a pixel lands on it in one frame and
+# misses it in the next, which is the shimmer.  Every farther level gets
+# blades at least --min-px wide at its far end, and correspondingly fewer of
+# them so the tuft covers about the same ground (near tuft = 24 x 1.1 cm).
+if args.px_mrad > 0:
+    for i in range(1, len(TIERS)):
+        far, blades, segs, wscale = TIERS[i]
+        need = far * args.px_mrad / 1000.0 * args.min_px / BLADE_W
+        wscale = max(wscale, need)
+        blades = max(1, min(blades, int(round(24 / wscale))))
+        TIERS[i] = (far, blades, segs, wscale)
+print("detail levels (far m, blades, segments, width x):",
+      [(f, b, sg, round(w, 1)) for f, b, sg, w in TIERS])
+# One small opaque texture per palette colour (TEX_W x TEX_H per block; a
+# block per detail level with --tint-tiers).  A shared atlas was tried first:
+# at coarse mips, bilinear sampling near cell edges pulled in neighbouring
+# colours and the empty transparent-black area (roots up to -50 L, alpha
+# down to 143), which showed in the sim as dark speckle beyond ~150 m.  A
+# single-colour texture's mips just converge on that colour.
+TEX_W, TEX_H = 16, 64
+TINTS = [(0.0, 0.0, 0.0), (0.0, 45.0, 25.0), (0.0, 20.0, -55.0)]   # Lab offsets per detail level
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+def merc_y(lat):
+    return math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+
+
+def inv_merc(y):
+    return math.degrees(2 * math.atan(math.exp(y)) - math.pi / 2)
+
+
+def lab2rgb(lab):
+    lab = np.asarray(lab, np.float32).reshape(-1, 1, 3)
+    return (np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB), 0, 1) * 255).round().astype(np.uint8).reshape(-1, 3)
+
+
+def smooth_masked(lab_img, mask, sigma_px):
+    m = mask.astype(np.float32)
+    w = cv2.GaussianBlur(m, (0, 0), sigma_px)
+    out = np.empty_like(lab_img)
+    for c in range(3):
+        out[..., c] = cv2.GaussianBlur(lab_img[..., c] * m, (0, 0), sigma_px) / np.maximum(w, 1e-6)
+    return out
+
+
+def assign(px, centres):
+    best = np.full(len(px), np.inf, np.float32); lbl = np.zeros(len(px), np.int32)
+    for i, c in enumerate(centres):
+        d = ((px - c) ** 2).sum(1); b = d < best; best[b] = d[b]; lbl[b] = i
+    return lbl
+
+
+def mode_filter(labels, mask, k, win):
+    best_n = np.full(labels.shape, -1, np.float32); out = labels.copy()
+    for i in range(k):
+        n = cv2.boxFilter(((labels == i) & mask).astype(np.float32), -1, (win, win), normalize=False)
+        b = n > best_n; out[b] = i; best_n[b] = n[b]
+    out[~mask] = -1
+    return out
+
+
+def is_grass_colour(L, a, b):
+    """Spike rule: drop pinkish/brown (soil, granite) and pale grey (bare rock)."""
+    C = math.hypot(a, b); h = math.degrees(math.atan2(b, a)) % 360
+    return h >= 80 and not (L > 55 and C < 18)
+
+
+# ── atlas + .for ─────────────────────────────────────────────────────────────
+def build_texture(lab_colour, path):
+    """Opaque root->tip ramp around one palette colour (row 0 = tip), with a
+    +-4 L ramp across so blades sampling different u vary a little."""
+    L, a, b = lab_colour
+    blocks = len(TIERS) if args.tint_tiers else 1
+    yy, xx = np.mgrid[0:TEX_H, 0:TEX_W].astype(np.float32)
+    up = 1.0 - yy / (TEX_H - 1)
+    side = xx / (TEX_W - 1) * 2 - 1
+    cols = []
+    for t in range(blocks):
+        dL, da, db = TINTS[t] if args.tint_tiers else TINTS[0]
+        lab = np.stack([L + dL - 7 + 14 * up + 4 * side, a + da + 0.75 - 1.5 * up, b + db - 1.5 + 3 * up], -1)
+        cols.append(lab2rgb(lab.reshape(-1, 3)).reshape(TEX_H, TEX_W, 3))
+    Image.fromarray(np.hstack(cols), "RGB").save(path)
+
+
+def cell_uv(block, fx, fy):
+    """fx across the block, fy 0 = root.  X-Plane t=0 is the image bottom."""
+    blocks = len(TIERS) if args.tint_tiers else 1
+    px = block * TEX_W + 2 + fx * (TEX_W - 4)
+    py = 2 + (1 - fy) * (TEX_H - 4)
+    return px / (TEX_W * blocks), 1 - py / TEX_H
+
+
+def tuft(seed, block, height, n_blades, segs, width_scale, contrast=1.0, tip=0.25):
+    rng = np.random.default_rng(seed)
+    blades = []
+    for _ in range(24 if n_blades <= 24 else n_blades):   # same draw order for every tier
+        blades.append(dict(ang=rng.uniform(0, 2 * math.pi), r0=rng.uniform(0, 0.18),
+                           lean=rng.uniform(0.15, 0.45) * height, face=rng.uniform(0, 2 * math.pi),
+                           h=height * rng.uniform(0.6, 1.0), w=rng.uniform(0.008, 0.014),
+                           fx=rng.uniform(0, 1), phase=rng.uniform(0, 1)))
+    verts, idx = [], []
+    for bl in blades[:n_blades]:
+        x0, z0 = bl["r0"] * math.cos(bl["ang"]), bl["r0"] * math.sin(bl["ang"])
+        w = bl["w"] * width_scale
+        dx, dz = math.cos(bl["face"]) * w, math.sin(bl["face"]) * w
+        lx, lz = math.cos(bl["ang"]), math.sin(bl["ang"])
+        base = len(verts)
+        for s in range(segs + 1):
+            f = s / segs
+            cx, cz = x0 + lx * bl["lean"] * f * f, z0 + lz * bl["lean"] * f * f
+            cy = bl["h"] * f * (1 - 0.2 * f)
+            # contrast squeezes the sampled ramp toward the texture's middle,
+            # which is the palette colour: 0 = flat ground colour
+            u, v = cell_uv(block, 0.5 + (bl["fx"] - 0.5) * contrast, 0.5 + (f - 0.5) * contrast)
+            wgt = (f * f, 0.5 * f, bl["phase"])
+            t = 1 - (1 - tip) * f
+            if s < segs or tip > 0.3:      # wide-tipped blades end in an edge, not a point
+                verts.append((cx - dx * t, cy, cz - dz * t, u, v, wgt))
+                verts.append((cx + dx * t, cy, cz + dz * t, u, v, wgt))
+            else:
+                verts.append((cx, cy, cz, u, v, wgt))
+        tris = []
+        quads = segs if tip > 0.3 else segs - 1
+        for s in range(quads):
+            a0 = base + 2 * s
+            tris += [(a0, a0 + 2, a0 + 1), (a0 + 1, a0 + 2, a0 + 3)]
+        if tip <= 0.3:
+            a0 = base + 2 * (segs - 1)
+            tris.append((a0, a0 + 2, a0 + 1))
+        for t in tris:
+            idx.extend(t); idx.extend((t[0], t[2], t[1]))
+    if n_blades == 0:
+        # Empty last level: one zero-area triangle.  X-Plane cross-fades mesh
+        # into mesh almost invisibly, but the last mesh into the billboard
+        # showed as a band; ending on an empty mesh makes the draw-distance
+        # edge a mesh-to-mesh fade too.
+        u, v = cell_uv(block, 0.5, 0.5)
+        verts = [(0.0, 0.0, 0.0, u, v, (0.0, 0.0, 0.0))] * 3
+        idx = [0, 1, 2]
+    return verts, idx
+
+
+BILLBOARD_TEX = "bb_empty.png"
+
+
+def write_empty_billboard(gdir):
+    """Fully transparent texture for the mandatory billboard LOD step, the
+    same size as a blade texture so the TREE rectangle stays valid."""
+    w = TEX_W * (len(TIERS) if args.tint_tiers else 1)
+    Image.fromarray(np.zeros((TEX_H, w, 4), np.uint8), "RGBA").save(os.path.join(gdir, BILLBOARD_TEX))
+
+
+def write_for(path, tex_name, k):
+    variants = [("a", 0.35, 34), ("b", 0.50, 33), ("c", 0.70, 33)]
+    out = ["A", "1200", "FOREST", "",
+           # The billboard X-Plane insists on as every tree's last LOD step gets
+           # its own fully transparent texture.  With the blade texture it was a
+           # camera-facing card, lit far brighter than up-normal blades, that the
+           # last mesh cross-faded into: a whitish band at the draw-distance edge.
+           # Matte (SUPER_ROUGHNESS 1.0) as Laminar's own grass.
+           "SHADER_2D", f"\tTEXTURE {BILLBOARD_TEX}", "\tSUPER_ROUGHNESS 1.0", "",
+           "SHADER_3D", f"\tTEXTURE {tex_name}", "\tSUPER_ROUGHNESS 1.0", "",
+           f"LOD\t{LOD:g}", f"SCALE_X\t{TEX_W * (len(TIERS) if args.tint_tiers else 1)}", f"SCALE_Y\t{TEX_H}",
+           f"SPACING\t{args.spacing:g} {args.spacing:g}",
+           f"RANDOM\t{args.spacing * 0.5:g} {args.spacing * 0.5:g}", ""]
+    flag = "" if args.shadows else "\tNO_SHADOW"
+    for vi, (name, height, _) in enumerate(variants):
+        near = 0.0
+        for ti, (far, blades, segs, wscale) in enumerate(TIERS):
+            verts, idx = tuft(1000 * k + vi, ti if args.tint_tiers else 0, height * HEIGHT[ti], blades, segs, wscale,
+                              contrast=CONTRAST[ti], tip=TIP[ti])
+            wind = WIND[ti]
+            out.append(f"MESH\tg_{name}{ti}\t{near:g}\t{far:g}\t{len(verts)}\t{len(idx)}"
+                       f"\t{1.0 * wind:g}\t{0.15 * wind:g}\t10.0{flag}")
+            for x, y, z, u, v, (w1, w2, w3) in verts:
+                out.append(f"VERTEX\t{x:.4f} {y:.4f} {z:.4f}\t0 1 0\t{u:.5f} {v:.5f}\t{w1:.3f} {w2:.3f} {w3:.3f}")
+            for i in range(0, len(idx), 10):
+                out.append("IDX\t" + " ".join(map(str, idx[i:i + 10])))
+            near = far
+    out.append("")
+    for name, height, freq in variants:
+        out.append(f"TREE\t0\t0\t{TEX_W}\t{TEX_H}\t{TEX_W // 2}\t{freq}\t{height}\t{height}\t1\t0\tgrass_{name}")
+        for ti in range(len(TIERS)):
+            out.append(f"MESH_3D\tg_{name}{ti}")
+    out += ["", "SKIP_SURFACE water", ""]
+    with open(path, "w", newline="\n") as f:
+        f.write("\n".join(out))
+
+
+if args.only_for:
+    pack = os.path.join(args.out, PACK_NAME)
+    info_path = os.path.join(pack, "spike_info.json")
+    info = json.load(open(info_path))
+    centres = np.array(info["palette_lab"], np.float32)
+    gdirs = [d for d in glob.glob(os.path.join(pack, "grass", "*")) if os.path.isdir(d)]
+    n = 0
+    for gdir in gdirs:
+        write_empty_billboard(gdir)
+        for old in glob.glob(os.path.join(gdir, "c*.for")):
+            k = int(os.path.basename(old)[1:3])
+            build_texture(centres[k], os.path.join(gdir, f"c{k:02d}.png"))
+            write_for(old, f"c{k:02d}.png", k)
+            n += 1
+    info["geometry"] = {"tiers": TIERS, "px_mrad": args.px_mrad, "tier_contrast": args.tier_contrast,
+                        "tier_wind": args.tier_wind, "tier_tip": args.tier_tip, "tier_height": args.tier_height, "tint_tiers": args.tint_tiers}
+    json.dump(info, open(info_path, "w"), indent=1)
+    print("rewrote", n, ".for files + textures in", pack)
+    sys.exit(0)
+
+
+# ── texture sources ──────────────────────────────────────────────────────────
+# --tile-dir: the installed Ortho4XP tile, textures chosen by the overlays' own
+# cfg replay (O4_Texture_Selection) so we read exactly what X-Plane draws,
+# with the parts of a footprint that another texture owns masked out.
+# Otherwise: review-set / extra JPEGs named with --textures.
+sys.path.insert(0, r"G:\Dev\Ortho4XP-SegFormer\src")
+lat0, lon0 = args.center
+radius_m = args.radius_nm * 1852.0
+cos0 = math.cos(math.radians(lat0))
+
+
+def footprint_bbox(til_y, til_x, zl):
+    def g2w(tx, ty):
+        rx = tx / (2 ** (zl - 1)) - 1; ry = 1 - ty / (2 ** (zl - 1))
+        return 360 / math.pi * math.atan(math.exp(math.pi * ry)) - 90, rx * 180
+    lat_n, lon_w = g2w(til_x, til_y)
+    lat_s, lon_e = g2w(til_x + 16, til_y + 16)
+    return [lat_s, lon_w, lat_n, lon_e]
+
+
+def bbox_hits_circle(b):
+    lat_s, lon_w, lat_n, lon_e = b
+    cy = min(max(lat0, lat_s), lat_n); cx = min(max(lon0, lon_w), lon_e)
+    return ((cy - lat0) * 110574) ** 2 + ((cx - lon0) * 111320 * cos0) ** 2 <= radius_m ** 2
+
+
+sources = []      # (key, path, bbox, zl, excluded_fracs)
+if args.tile_dir:
+    import O4_Texture_Selection as TEXSEL
+    tex_dir = os.path.join(args.tile_dir, "textures")
+    tlat, tlon = math.floor(lat0), math.floor(lon0)
+    files, excluded, rep = TEXSEL.select_textures(os.listdir(tex_dir), tex_dir, tlat, tlon)
+    print(f"texture selection: {rep.get('selected')} selected, {rep.get('skipped')} skipped, "
+          f"{rep.get('partial')} partial; notes={rep.get('notes')}")
+    for f in files:
+        m = TEXSEL.TEXTURE_NAME_RE.match(f)
+        til_y, til_x, zl = int(m.group(1)), int(m.group(2)), int(m.group(4))
+        b = footprint_bbox(til_y, til_x, zl)
+        if bbox_hits_circle(b):
+            sources.append((f[:-4], os.path.join(tex_dir, f), b, zl, excluded.get(f, ())))
+else:
+    samples = {}
+    for d in SETS:
+        p = os.path.join(d, "samples.json")
+        if os.path.isfile(p):
+            for s in json.load(open(p)):
+                samples[s["file"]] = dict(s, dir=d)
+    for t in args.textures:
+        s = samples[f"{t}_BI16.jpg"]
+        sources.append((s["file"][:-4], os.path.join(s["dir"], s["file"]), s["bbox"], 16, ()))
+sources.sort(key=lambda s: s[3])      # low ZL first: mosaic lets higher ZL paint over
+print(f"{len(sources)} textures touch the {args.radius_nm} nm circle:",
+      {zl: sum(1 for s in sources if s[3] == zl) for zl in sorted({s[3] for s in sources})})
+
+# Mosaic canvas for the preview: Web-Mercator-linear, ~MOSAIC_M m/px, over the circle.
+MOSAIC_M = 2.0
+dlat = radius_m / 110574; dlon = radius_m / (111320 * cos0)
+mz_n, mz_s = merc_y(lat0 + dlat), merc_y(lat0 - dlat)
+mlon_w, mlon_e = lon0 - dlon, lon0 + dlon
+MW = int(round(2 * radius_m / MOSAIC_M)); MH = MW
+mosaic_img = np.zeros((MH, MW, 3), np.uint8)
+mosaic_lbl = np.full((MH, MW), -1, np.int16)
+mosaic_excl = np.zeros((MH, MW), np.uint8)
+
+
+def mosaic_rect(b):
+    lat_s, lon_w, lat_n, lon_e = b
+    x0 = (lon_w - mlon_w) / (mlon_e - mlon_w) * MW; x1 = (lon_e - mlon_w) / (mlon_e - mlon_w) * MW
+    y0 = (mz_n - merc_y(lat_n)) / (mz_n - mz_s) * MH; y1 = (mz_n - merc_y(lat_s)) / (mz_n - mz_s) * MH
+    return x0, y0, x1, y1
+
+
+def paste(canvas, tile_arr, b, interp, keep_mask=None):
+    """Paste a texture-sized array into the mosaic at its footprint."""
+    x0, y0, x1, y1 = mosaic_rect(b)
+    ix0, iy0 = max(0, int(math.floor(x0))), max(0, int(math.floor(y0)))
+    ix1, iy1 = min(MW, int(math.ceil(x1))), min(MH, int(math.ceil(y1)))
+    if ix1 <= ix0 or iy1 <= iy0:
+        return
+    h, w = tile_arr.shape[:2]
+    xs = ((np.arange(ix0, ix1) + 0.5 - x0) / (x1 - x0) * w).astype(int).clip(0, w - 1)
+    ys = ((np.arange(iy0, iy1) + 0.5 - y0) / (y1 - y0) * h).astype(int).clip(0, h - 1)
+    sub = tile_arr[ys][:, xs]
+    if keep_mask is None:
+        canvas[iy0:iy1, ix0:ix1] = sub
+    else:
+        km = keep_mask[ys][:, xs]
+        region = canvas[iy0:iy1, ix0:ix1]
+        region[km] = sub[km]
+
+
+def colour_ground_mask(L, mpp):
+    """Programmatic 'not obviously built' mask from the ortho alone.
+
+    Lab on a ~1 m blur: grey low-chroma (asphalt, concrete, grey roofs),
+    very bright (white roofs, apron), and roof hues (red/orange tiles below
+    60 deg, blue metal above 200 deg) are built; everything else -- grass,
+    canopy, soil, shadow -- counts as ground that can carry grass.
+    """
+    Ls = cv2.GaussianBlur(L, (0, 0), max(0.5, 1.0 / mpp))
+    l, a, b = Ls[..., 0], Ls[..., 1], Ls[..., 2]
+    C = np.hypot(a, b)
+    hue = np.degrees(np.arctan2(b, a)) % 360
+    built = ((C < 8) & (l > 25)) | (l > 72) | ((C > 14) & ((hue < 60) | (hue > 200)))
+    r = max(1, int(round(1.5 / mpp)))
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    built = cv2.morphologyEx(built.astype(np.uint8), cv2.MORPH_CLOSE, ker)
+    ground = cv2.morphologyEx(1 - built, cv2.MORPH_OPEN, ker)   # drop slivers between buildings
+    return ground.astype(bool)
+
+
+# ── load textures, class maps, circle ────────────────────────────────────────
+tex = []
+model = None
+for key, path, bbox, zl, excl in sources:
+    try:
+        img = np.asarray(Image.open(path).convert("RGB"))
+    except Exception as exc:          # H: has bad sectors: skip, don't abort
+        print(f"SKIP {key}: {exc}")
+        continue
+    cls = None
+    if args.mask == "segformer":
+        cls_path = os.path.join(SPIKE, "classmaps_tile" if args.tile_dir else "classmaps", key + "_cls.npy")
+        os.makedirs(os.path.dirname(cls_path), exist_ok=True)
+        if not os.path.isfile(cls_path):
+            import O4_Landcover_Inference as SEG
+            if model is None:
+                model, proc, dev = SEG.load_vegetation_model()
+            np.save(cls_path, SEG.run_inference(model, dev, img, proc).astype(np.uint8))
+        cls = np.load(cls_path)
+    lat_s, lon_w, lat_n, lon_e = bbox
+    h, w = img.shape[:2]
+    mpp = (lon_e - lon_w) * 111320 * cos0 / w
+    ym_n, ym_s = merc_y(lat_n), merc_y(lat_s)
+    lons = lon_w + (np.arange(w) + 0.5) / w * (lon_e - lon_w)
+    lats = np.array([inv_merc(ym_n + (y + 0.5) / h * (ym_s - ym_n)) for y in range(h)])
+    dx = (lons - lon0) * 111320 * cos0
+    dy = (lats - lat0) * 110574
+    inside = (dy[:, None] ** 2 + dx[None, :] ** 2) <= radius_m ** 2
+    owned = np.ones((h, w), bool)
+    for fx0, fy0, fx1, fy1 in excl:   # footprint parts another texture owns
+        owned[int(round(fy0 * h)):int(round(fy1 * h)), int(round(fx0 * w)):int(round(fx1 * w))] = False
+    L = cv2.cvtColor(img.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+    if args.mask == "colour":
+        grass = colour_ground_mask(L, mpp)
+    else:
+        grass = cv2.morphologyEx((cls == RANGELAND).astype(np.uint8), cv2.MORPH_OPEN,
+                                 np.ones((3, 3), np.uint8)).astype(bool)
+    S = smooth_masked(L, grass, args.sigma_m / mpp)   # smooth before the cuts: no edge bias
+    sel = grass & inside & owned
+    paste(mosaic_img, img, bbox, None, keep_mask=owned)
+    paste(mosaic_excl, (inside & ~grass).astype(np.uint8), bbox, None, keep_mask=owned)
+    tex.append(dict(key=key, zl=zl, bbox=bbox, mpp=mpp, h=h, w=w, ym=(ym_n, ym_s),
+                    sel=np.packbits(sel), S_sel=S[sel], owned=np.packbits(owned)))
+    print(f"{key} ZL{zl} grass in circle {sel.sum() * mpp * mpp / 1e6:.3f} km2", flush=True)
+    del img, L, S, cls
+
+
+def unpack(t, name):
+    return np.unpackbits(t[name])[:t["h"] * t["w"]].reshape(t["h"], t["w"]).astype(bool)
+
+
+# ── shared palette ───────────────────────────────────────────────────────────
+pool = np.concatenate([t["S_sel"] for t in tex])
+rng = np.random.default_rng(0)
+samp = pool[rng.choice(len(pool), min(300000, len(pool)), replace=False)].astype(np.float32)
+cv2.setRNGSeed(0)
+_, _, centres = cv2.kmeans(samp, args.k, None,
+                           (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.05),
+                           3, cv2.KMEANS_PP_CENTERS)
+# Colour mode assumes grass everywhere it plants: no palette-level veto.
+keep = list(range(args.k)) if args.mask == "colour" else [k for k, c in enumerate(centres) if is_grass_colour(*c)]
+
+pack = os.path.join(args.out, PACK_NAME)
+if os.path.isdir(pack):
+    shutil.rmtree(pack)
+gdir = os.path.join(pack, "grass", args.name)
+os.makedirs(gdir)
+write_empty_billboard(gdir)
+for k in keep:
+    build_texture(centres[k], os.path.join(gdir, f"c{k:02d}.png"))
+    write_for(os.path.join(gdir, f"c{k:02d}.for"), f"c{k:02d}.png", k)
+
+# ── per texture: labels -> polygons ──────────────────────────────────────────
+tiles, report = {}, []
+for t in tex:
+    sel = unpack(t, "sel")
+    lbl = np.full(sel.shape, -1, np.int32)
+    lbl[sel] = assign(t["S_sel"], centres)
+    win = max(3, int(round(args.win_m / t["mpp"])) | 1)
+    lbl = mode_filter(lbl, sel, args.k, win)
+    lat_s, lon_w, lat_n, lon_e = t["bbox"]; ym_n, ym_s = t["ym"]; h, w = t["h"], t["w"]
+    min_px = args.min_m2 / t["mpp"] ** 2
+
+    def to_ll(pt):
+        return (lon_w + float(pt[0]) / w * (lon_e - lon_w),
+                inv_merc(ym_n + float(pt[1]) / h * (ym_s - ym_n)))
+
+    tile = (math.floor(lat_s), math.floor(lon_w))
+    polys = []
+    for k in keep:
+        m = (lbl == k).astype(np.uint8)
+        if not m.any():
+            continue
+        cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        for j, c in enumerate(cnts):
+            if hier[0][j][3] >= 0 or cv2.contourArea(c) < min_px:
+                continue
+            rings = [cv2.approxPolyDP(c, 2.0, True)]
+            ch = hier[0][j][2]
+            while ch >= 0:
+                if cv2.contourArea(cnts[ch]) >= min_px:
+                    rings.append(cv2.approxPolyDP(cnts[ch], 2.0, True))
+                ch = hier[0][ch][0]
+            rings = [[to_ll(p[0]) for p in r] for r in rings if len(r) >= 3]
+            if rings:
+                polys.append((f"grass/{args.name}/c{k:02d}.for", rings))
+    tiles.setdefault(tile, []).extend(polys)
+    planted = np.isin(lbl, keep)
+    paste(mosaic_lbl, np.where(planted, lbl, -1).astype(np.int16), t["bbox"], None,
+          keep_mask=unpack(t, "owned"))
+    report.append({"texture": t["key"], "zl": t["zl"], "polygons": len(polys),
+                   "grass_km2_in_circle": round(float(sel.sum()) * t["mpp"] ** 2 / 1e6, 3)})
+
+# Mosaic preview: ortho | ortho with planted grass in its palette colour, circle drawn.
+rgbc = lab2rgb(centres)
+filled = mosaic_img.copy(); g = mosaic_lbl >= 0
+filled[g] = rgbc[mosaic_lbl[g]]
+outline = mosaic_img.copy()
+if args.mask == "colour":
+    ex = mosaic_excl > 0
+    outline[ex] = (0.45 * outline[ex] + 0.55 * np.array([255, 0, 64])).astype(np.uint8)
+else:
+    cnts, _ = cv2.findContours(g.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(outline, cnts, -1, (255, 0, 255), 2)
+for im in (outline, filled):
+    cv2.circle(im, (MW // 2, MH // 2), MW // 2 - 2, (255, 255, 0), 3)
+pv = np.hstack([outline, filled])
+sc = min(1.0, 3200 / pv.shape[1])
+Image.fromarray(cv2.resize(pv, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)).save(
+    os.path.join(SPIKE, f"{args.name}_mosaic_preview.jpg"), quality=88)
+
+for (lat, lon), polys in tiles.items():
+    defs = sorted({p for p, _ in polys}); di = {p: i for i, p in enumerate(defs)}
+    folder = f"{math.floor(lat / 10) * 10:+03d}{math.floor(lon / 10) * 10:+04d}"
+    name = f"{lat:+03d}{lon:+04d}"
+    os.makedirs(os.path.join(pack, "Earth nav data", folder), exist_ok=True)
+    txt = os.path.join(args.out, name + ".txt")
+    with open(txt, "w", newline="\n") as f:
+        f.write("PROPERTY sim/planet earth\nPROPERTY sim/overlay 1\nPROPERTY sim/creation_agent O4XP_grass_spike\n")
+        f.write(f"PROPERTY sim/west {lon}\nPROPERTY sim/east {lon + 1}\nPROPERTY sim/south {lat}\nPROPERTY sim/north {lat + 1}\n\n")
+        for p in defs:
+            f.write(f"POLYGON_DEF {p}\n")
+        f.write("\n")
+        for p, rings in polys:
+            f.write(f"BEGIN_POLYGON {di[p]} 255 2\n")
+            for r in rings:
+                f.write("BEGIN_WINDING\n")
+                for lo, la in r + [r[0]]:
+                    f.write(f"POLYGON_POINT {lo:.8f} {la:.8f}\n")
+                f.write("END_WINDING\n")
+            f.write("END_POLYGON\n")
+    dsf = os.path.join(pack, "Earth nav data", folder, name + ".dsf")
+    r = subprocess.run([DSFTOOL, "-text2dsf", txt, dsf], capture_output=True, text=True)
+    print("DSFTool", name, "rc", r.returncode)
+
+tri = {}
+for far, blades, segs, ws in TIERS:
+    tri[f"<= {far:g} m"] = blades * (2 * (segs - 1) + 1)   # front-face triangles per tuft
+info = {"params": vars(args), "tiers": TIERS, "tris_per_tuft": tri,
+        "colours": args.k, "colours_kept": len(keep), "textures": report,
+        "palette_lab": centres.round(2).tolist()}
+json.dump(info, open(os.path.join(pack, "spike_info.json"), "w"), indent=1)
+print(json.dumps({k: info[k] for k in ("tiers", "tris_per_tuft", "colours_kept", "textures")}, indent=1))
