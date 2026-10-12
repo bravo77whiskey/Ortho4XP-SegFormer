@@ -51,6 +51,9 @@ ap.add_argument("--tint-tiers", action="store_true",
                 help="diagnostic: 2nd detail level red, 3rd blue, to see where each starts")
 ap.add_argument("--name", default="region")
 ap.add_argument("--out", default=os.path.join(SPIKE, "pack"))
+ap.add_argument("--near-layer", default="",
+                help="FAR:FADE_END:BLADES[:COPIES] adds COPIES (default 1, max 3) extra forest layers of "
+                     "near-only tufts (e.g. 50:60:6:2), each offset half a cell, ending on an empty mesh at FADE_END")
 ap.add_argument("--only-for", action="store_true",
                 help="keep the existing pack in --out (DSF, palette); rewrite only the "
                      ".for files and textures with the current geometry options")
@@ -156,7 +159,7 @@ def cell_uv(block, fx, fy):
     return px / (TEX_W * blocks), 1 - py / TEX_H
 
 
-def tuft(seed, block, height, n_blades, segs, width_scale, contrast=1.0, tip=0.25):
+def tuft(seed, block, height, n_blades, segs, width_scale, contrast=1.0, tip=0.25, offset=(0.0, 0.0)):
     rng = np.random.default_rng(seed)
     blades = []
     for _ in range(24 if n_blades <= 24 else n_blades):   # same draw order for every tier
@@ -166,7 +169,8 @@ def tuft(seed, block, height, n_blades, segs, width_scale, contrast=1.0, tip=0.2
                            fx=rng.uniform(0, 1), phase=rng.uniform(0, 1)))
     verts, idx = [], []
     for bl in blades[:n_blades]:
-        x0, z0 = bl["r0"] * math.cos(bl["ang"]), bl["r0"] * math.sin(bl["ang"])
+        x0 = offset[0] + bl["r0"] * math.cos(bl["ang"])
+        z0 = offset[1] + bl["r0"] * math.sin(bl["ang"])
         w = bl["w"] * width_scale
         dx, dz = math.cos(bl["face"]) * w, math.sin(bl["face"]) * w
         lx, lz = math.cos(bl["ang"]), math.sin(bl["ang"])
@@ -230,24 +234,47 @@ def write_for(path, tex_name, k):
            f"SPACING\t{args.spacing:g} {args.spacing:g}",
            f"RANDOM\t{args.spacing * 0.5:g} {args.spacing * 0.5:g}", ""]
     flag = "" if args.shadows else "\tNO_SHADOW"
-    for vi, (name, height, _) in enumerate(variants):
-        near = 0.0
-        for ti, (far, blades, segs, wscale) in enumerate(TIERS):
-            verts, idx = tuft(1000 * k + vi, ti if args.tint_tiers else 0, height * HEIGHT[ti], blades, segs, wscale,
-                              contrast=CONTRAST[ti], tip=TIP[ti])
-            wind = WIND[ti]
-            out.append(f"MESH\tg_{name}{ti}\t{near:g}\t{far:g}\t{len(verts)}\t{len(idx)}"
-                       f"\t{1.0 * wind:g}\t{0.15 * wind:g}\t10.0{flag}")
-            for x, y, z, u, v, (w1, w2, w3) in verts:
-                out.append(f"VERTEX\t{x:.4f} {y:.4f} {z:.4f}\t0 1 0\t{u:.5f} {v:.5f}\t{w1:.3f} {w2:.3f} {w3:.3f}")
-            for i in range(0, len(idx), 10):
-                out.append("IDX\t" + " ".join(map(str, idx[i:i + 10])))
-            near = far
+    # Layers: X-Plane plants one tree per layer per grid cell (Laminar's grass
+    # has tree percentages summing to 100 within each layer), so a near-only
+    # second layer doubles tuft density close up without touching SPACING.
+    # Its geometry sits half a cell off the grid point in case both layers
+    # share placement positions.
+    layers = [dict(layer=0, tiers=list(TIERS), seed=0, offset=(0.0, 0.0),
+                   contrast=CONTRAST, wind=WIND, tip=TIP, height=HEIGHT)]
+    if args.near_layer:
+        parts = args.near_layer.split(":")
+        nfar, nfade, nblades = parts[:3]
+        copies = int(parts[3]) if len(parts) > 3 else 1
+        half = args.spacing * 0.5
+        # One extra layer per copy, each with its own tufts and its own
+        # half-cell offset, so they fill the gaps between the base layer's tufts.
+        offsets = [(half, half)] if copies == 1 else [(half, 0.0), (0.0, half), (half, half)][:copies]
+        for c, off in enumerate(offsets):
+            layers.append(dict(layer=1 + c, tiers=[(float(nfar), int(nblades), 3, 1.0), (float(nfade), 0, 1, 1.0)],
+                               seed=500 * (c + 1), offset=off, contrast=[CONTRAST[0], 0.0],
+                               wind=[WIND[0], 0.0], tip=[TIP[0], TIP[0]], height=[HEIGHT[0], 1.0]))
+    for ly in layers:
+        for vi, (name, height, _) in enumerate(variants):
+            near = 0.0
+            for ti, (far, blades, segs, wscale) in enumerate(ly["tiers"]):
+                verts, idx = tuft(1000 * k + vi + ly["seed"], ti if args.tint_tiers else 0,
+                                  height * ly["height"][ti], blades, segs, wscale,
+                                  contrast=ly["contrast"][ti], tip=ly["tip"][ti], offset=ly["offset"])
+                wind = ly["wind"][ti]
+                out.append(f"MESH\tg{ly['layer']}_{name}{ti}\t{near:g}\t{far:g}\t{len(verts)}\t{len(idx)}"
+                           f"\t{1.0 * wind:g}\t{0.15 * wind:g}\t10.0{flag}")
+                for x, y, z, u, v, (w1, w2, w3) in verts:
+                    out.append(f"VERTEX\t{x:.4f} {y:.4f} {z:.4f}\t0 1 0\t{u:.5f} {v:.5f}\t{w1:.3f} {w2:.3f} {w3:.3f}")
+                for i in range(0, len(idx), 10):
+                    out.append("IDX\t" + " ".join(map(str, idx[i:i + 10])))
+                near = far
     out.append("")
-    for name, height, freq in variants:
-        out.append(f"TREE\t0\t0\t{TEX_W}\t{TEX_H}\t{TEX_W // 2}\t{freq}\t{height}\t{height}\t1\t0\tgrass_{name}")
-        for ti in range(len(TIERS)):
-            out.append(f"MESH_3D\tg_{name}{ti}")
+    for ly in layers:
+        for name, height, freq in variants:
+            out.append(f"TREE\t0\t0\t{TEX_W}\t{TEX_H}\t{TEX_W // 2}\t{freq}\t{height}\t{height}"
+                       f"\t1\t{ly['layer']}\tgrass{ly['layer']}_{name}")
+            for ti in range(len(ly["tiers"])):
+                out.append(f"MESH_3D\tg{ly['layer']}_{name}{ti}")
     out += ["", "SKIP_SURFACE water", ""]
     with open(path, "w", newline="\n") as f:
         f.write("\n".join(out))
@@ -268,7 +295,8 @@ if args.only_for:
             write_for(old, f"c{k:02d}.png", k)
             n += 1
     info["geometry"] = {"tiers": TIERS, "px_mrad": args.px_mrad, "tier_contrast": args.tier_contrast,
-                        "tier_wind": args.tier_wind, "tier_tip": args.tier_tip, "tier_height": args.tier_height, "tint_tiers": args.tint_tiers}
+                        "tier_wind": args.tier_wind, "tier_tip": args.tier_tip, "tier_height": args.tier_height,
+                        "near_layer": args.near_layer, "tint_tiers": args.tint_tiers}
     json.dump(info, open(info_path, "w"), indent=1)
     print("rewrote", n, ".for files + textures in", pack)
     sys.exit(0)

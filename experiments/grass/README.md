@@ -15,8 +15,12 @@ python make_region_pack.py --center 22.5772 120.3500 --radius-nm 2 --name rckh \
     --mask colour --k 64 --sigma-m 8 --win-m 9 --min-m2 50 \
     --tiers "110:24:3:1.0,220:10:2:2.2,230:0:1:1.0" --px-mrad 0 \
     --tier-contrast "1,0.6,0" --tier-wind "1,1,0" --tier-tip "0.25,0.25,0.25" \
-    --tier-height "0.75,0.75,1" --out <dir>
+    --tier-height "1,1,1" --out <dir>
 ```
+
+The blades are full height: the tallest in each tuft size are 0.27, 0.40
+and 0.55 m.  A version with blades 25 % shorter (`--tier-height
+0.75,0.75,1`) was tried and then put back.
 
 Run it in the CUDA venv (`G:\Dev\Ortho4XP\.venv`); the full build reads 35
 textures and takes a while.  `--only-for` rewrites only the `.for` files and
@@ -34,7 +38,8 @@ The parts:
   one polygon per colour region.  Each colour is its own `.for` with its own
   16x64 opaque texture.
 * **Geometry:** 24-blade tufts at 1 m spacing out to 110 m, 10 wider blades
-  (60 % contrast) to 220 m, then an **empty mesh** to 230 m.  The draw-distance
+  (60 % contrast) to 220 m, then an **empty mesh** to 230 m.  An empty mesh is
+  one zero-area triangle; a tier with 0 blades in `--tiers` writes one.  The draw-distance
   edge is therefore a mesh-to-mesh cross-fade, which X-Plane blends almost
   invisibly.  Blades have up-facing normals so they light like the ground, are
   matte (`SUPER_ROUGHNESS 1.0`), cast no shadows, and the mandatory billboard
@@ -53,6 +58,13 @@ The parts:
   card that is lit brighter than up-normal blades, which showed as a whitish
   band at the edge.  Fixed by the transparent billboard and ending on an
   empty mesh.
+* **Denser near grass as extra forest layers** (`--near-layer`; kept only as
+  a record): X-Plane plants every layer out to the file's full draw distance,
+  whatever that layer's own meshes cover.  Two near-only layers ending at
+  30 m left about 300k invisible tufts out to 230 m, each still drawing its
+  empty mesh and transparent billboard.  The frame-rate cost was too high.
+  Near-only density belongs in a separate `.for` with its own short `LOD`.
+* **Shorter blades / a 6-blade mid level:** both tried and put back.
 * **SegFormer rangeland as the grass mask:** it misses a lot, including green
   areas and the dried airport infield.  It also gives no grass under trees.
 
