@@ -26,6 +26,16 @@ ap.add_argument("--center", nargs=2, type=float, required=True)
 ap.add_argument("--radius-nm", type=float, default=2.0)
 ap.add_argument("--textures", nargs="+", default=[])
 ap.add_argument("--tile-dir")
+ap.add_argument("--airports", choices=("auto", "none"), default="auto",
+                help="auto: keep grass off apt.dat runways/taxiways/aprons of every airport in the "
+                     "circle, highest-priority pack per airport (needs --tile-dir inside Custom Scenery)")
+ap.add_argument("--roads", choices=("auto", "none"), default="auto",
+                help="auto: keep grass off the simHeaven road + rail network X-Plane draws "
+                     "for this tile (needs --tile-dir inside Custom Scenery)")
+ap.add_argument("--road-extra-m", type=float, default=0.0,
+                help="added to each road type's half-width")
+ap.add_argument("--pave-buffer-m", type=float, default=2.0,
+                help="grow airport pavement by this much before removing it from the grass")
 ap.add_argument("--k", type=int, default=48)
 ap.add_argument("--mask", choices=("segformer", "colour"), default="segformer",
                 help="segformer: rangeland class only; colour: grass everywhere except grey / bright / roof-coloured pixels (no model)")
@@ -393,6 +403,60 @@ def paste(canvas, tile_arr, b, interp, keep_mask=None):
         region[km] = sub[km]
 
 
+def pavement_mask(shapes, bbox, h, w, mpp):
+    """Rasterise apt.dat pavement (outer rings filled, holes cleared) onto one
+    texture's Web-Mercator pixel grid, grown by --pave-buffer-m."""
+    lat_s, lon_w, lat_n, lon_e = bbox
+    ym_n, ym_s = merc_y(lat_n), merc_y(lat_s)
+    mask = np.zeros((h, w), np.uint8)
+
+    def px(ring):
+        return np.array([[(lon - lon_w) / (lon_e - lon_w) * w,
+                          (ym_n - merc_y(lat)) / (ym_n - ym_s) * h] for lon, lat in ring],
+                        np.float64).round().astype(np.int32)
+
+    for outer, holes in shapes:
+        o = px(outer)
+        if o[:, 0].max() < 0 or o[:, 0].min() >= w or o[:, 1].max() < 0 or o[:, 1].min() >= h:
+            continue
+        one = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(one, [o], 1)
+        if holes:
+            cv2.fillPoly(one, [px(r) for r in holes], 0)
+        mask |= one
+    if mask.any() and args.pave_buffer_m > 0:
+        r = max(1, int(round(args.pave_buffer_m / mpp)))
+        mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+    return mask.astype(bool)
+
+
+# Half-widths (m) per simHeaven network type: the carriageway X-Plane draws
+# plus about a metre -- the same table the vegetation overlay uses for trees.
+# Untyped 'network' segments are power lines and cableways: not excluded.
+ROAD_HALF_WIDTH_M = {
+    'motorway': 13, 'trunk': 10, 'motorway_link': 6,
+    'primary': 8, 'secondary': 6, 'residential': 4, 'service': 3, 'rail': 4,
+}
+
+
+def road_mask(roads, bbox, h, w):
+    """Rasterise road/rail polylines at their type's width onto one texture's
+    Web-Mercator pixel grid."""
+    lat_s, lon_w, lat_n, lon_e = bbox
+    ym_n, ym_s = merc_y(lat_n), merc_y(lat_s)
+    mpp_x = (lon_e - lon_w) * 111320 * math.cos(math.radians(0.5 * (lat_n + lat_s))) / w
+    mask = np.zeros((h, w), np.uint8)
+    for road in roads:
+        lats = [p[0] for p in road["pts"]]; lons = [p[1] for p in road["pts"]]
+        if max(lons) < lon_w or min(lons) > lon_e or max(lats) < lat_s or min(lats) > lat_n:
+            continue
+        half = ROAD_HALF_WIDTH_M[road["type"]] + args.road_extra_m
+        pts = np.array([[(lo - lon_w) / (lon_e - lon_w) * w, (ym_n - merc_y(la)) / (ym_n - ym_s) * h]
+                        for la, lo in road["pts"]]).round().astype(np.int32)
+        cv2.polylines(mask, [pts], False, 1, thickness=max(1, int(round(2 * half / mpp_x))))
+    return mask.astype(bool)
+
+
 def colour_ground_mask(L, mpp):
     """Programmatic 'not obviously built' mask from the ortho alone.
 
@@ -414,6 +478,27 @@ def colour_ground_mask(L, mpp):
 
 
 # ── load textures, class maps, circle ────────────────────────────────────────
+PAVEMENT = []
+if args.airports == "auto" and args.tile_dir:
+    import apt_pavement
+    xplane_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.tile_dir)))
+    PAVEMENT, used = apt_pavement.pavement_near(xplane_dir, lat0, lon0, radius_m)
+    print("airport pavement:", used or "none in the circle", flush=True)
+
+ROADS = []
+if args.roads == "auto" and args.tile_dir:
+    import O4_Building_Overlay as BLD
+    cs_dir = os.path.dirname(os.path.abspath(args.tile_dir))
+    dsf_cache = os.path.join(SPIKE, "_dsf_cache")
+    os.makedirs(dsf_cache, exist_ok=True)
+    nets = BLD._load_simheaven_network(cs_dir, math.floor(lat0), math.floor(lon0),
+                                       os.path.join(os.path.dirname(DSFTOOL), "DSFTool.exe"), dsf_cache)
+    ROADS = [r for r in nets if r.get("type") in ROAD_HALF_WIDTH_M]
+    counts = {}
+    for r in ROADS:
+        counts[r["type"]] = counts.get(r["type"], 0) + 1
+    print("road/rail segments kept:", counts, flush=True)
+
 tex = []
 model = None
 for key, path, bbox, zl, excl in sources:
@@ -450,6 +535,12 @@ for key, path, bbox, zl, excl in sources:
     else:
         grass = cv2.morphologyEx((cls == RANGELAND).astype(np.uint8), cv2.MORPH_OPEN,
                                  np.ones((3, 3), np.uint8)).astype(bool)
+    if PAVEMENT:
+        # Off the pavement before smoothing, so concrete never tints the
+        # grass colour field either.
+        grass &= ~pavement_mask(PAVEMENT, bbox, h, w, mpp)
+    if ROADS:
+        grass &= ~road_mask(ROADS, bbox, h, w)
     S = smooth_masked(L, grass, args.sigma_m / mpp)   # smooth before the cuts: no edge bias
     sel = grass & inside & owned
     paste(mosaic_img, img, bbox, None, keep_mask=owned)

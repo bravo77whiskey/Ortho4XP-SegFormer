@@ -33,6 +33,15 @@ The parts:
 * **Where:** `--mask colour` plants everywhere except pixels that are clearly
   not ground: grey low-chroma, very bright, or roof-coloured (red/orange,
   blue).  There is no model.  Water is left to `SKIP_SURFACE water`.
+* **Exclusions from map data:** both are cut out before the colour is smoothed.
+  * `--airports auto`: runways with their blast pads, helipads, and taxiway,
+    apron and shoulder pavement from apt.dat (`apt_pavement.py`, curved
+    edges included), plus a 2 m margin.  For each airport it uses the
+    highest-priority pack, in `scenery_packs.ini` order, and falls back to
+    Global Airports.
+  * `--roads auto`: the simHeaven road and rail network X-Plane draws for the
+    tile, at the vegetation overlay's widths for each road type.  Power lines
+    and cableways are not cut.
 * **Colour:** Lab, smoothed over grass pixels only (8 m), one k-means palette
   (64 colours) shared by every texture in the circle, a 9 m mode filter, then
   one polygon per colour region.  Each colour is its own `.for` with its own
@@ -70,9 +79,13 @@ The parts:
 
 ## Known gaps
 
-* Warm-tinted apron concrete and dark building shadows pass the colour rules.
-  The apt.dat pavement, simHeaven roads and our building footprints would be
-  exact, model-free exclusions.
+* Dark building shadows pass the colour rules.  Building footprints would be
+  an exact, model-free exclusion.
+* Narrow canals and drains get grass.  OSM maps them as `waterway=*` lines,
+  which never become mesh water.  Ortho4XP's cached water file holds only
+  water areas, so the lines need fetching (Overpass or planet mode).
+* `--mask colour` assumes grass everywhere, which is wrong in deserts and on
+  bare soil.
 * About 79k polygons per 2 nm circle.  This is fine for a test but needs
   measuring at tile scale.
 * Zooming in extends X-Plane's draw distance, so the grass cost rises when zoomed.
