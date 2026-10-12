@@ -19,6 +19,7 @@ in place.
 
 from __future__ import annotations
 
+from O4_Overlay_Logging import verbose_print
 from concurrent.futures import ThreadPoolExecutor
 import os
 import pickle
@@ -436,20 +437,20 @@ def open_catalog(custom_scenery_dir, cache_dir):
         print(f"[Library] Ignoring unreadable library catalog: {exc}", flush=True)
     counts = catalog.sync()
     if not loaded:
-        print(
+        verbose_print(
             "[Library] No library catalog yet; scanned installed libraries "
             f"in {counts['seconds']:.1f}s ({catalog.summary()})",
             flush=True,
         )
     elif counts["parsed"] or counts["removed"]:
-        print(
+        verbose_print(
             f"[Library] Library catalog: re-read {counts['parsed']} changed and "
             f"dropped {counts['removed']} removed package(s) "
             f"in {counts['seconds']:.1f}s ({catalog.summary()})",
             flush=True,
         )
     else:
-        print(
+        verbose_print(
             f"[Library] Library catalog up to date ({catalog.summary()}; "
             f"checked in {counts['seconds']:.1f}s)",
             flush=True,

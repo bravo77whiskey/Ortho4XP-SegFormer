@@ -6,6 +6,7 @@ text with DSFTool. Model forward passes can be offloaded to a remote GPU host
 through ``remote_client`` (see O4_Remote_GPU).
 """
 
+from O4_Overlay_Logging import verbose_print
 import os
 import re
 import sys
@@ -242,7 +243,7 @@ def collect_source_texture_files(tex_dir, lat, lon):
         except OSError:
             dds_files = []
     if dds_files:
-        print(f"Using {len(dds_files)} DDS textures from {tex_dir}", flush=True)
+        verbose_print(f"Using {len(dds_files)} DDS textures from {tex_dir}", flush=True)
         return dds_files, "dds", None
 
     ortho_dir = orthophoto_tile_dir_for_tex_dir(tex_dir, lat, lon)
@@ -316,7 +317,7 @@ def _apply_vram_limit(device):
         fraction = max(1e-3, min(1.0, float(limit_bytes) / float(total_bytes)))
         torch.cuda.set_per_process_memory_fraction(fraction, device=device)
         effective_limit_gb = total_bytes * fraction / (1024 ** 3)
-        print(
+        verbose_print(
             f"[SegFormer] VRAM cap: {effective_limit_gb:.2f} GB "
             f"(requested {float(segformer_max_vram_gb):.2f} GB)"
         )
@@ -434,9 +435,8 @@ _last_batch_size_message = None
 def _print_batch_size_once(message):
     """Print the batch-size line only when it changes, not once per texture."""
     global _last_batch_size_message
-    if message != _last_batch_size_message:
+    if message != _last_batch_size_message and verbose_print(message):
         _last_batch_size_message = message
-        print(message)
 
 
 def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size, num_classes, mean, std):
@@ -677,7 +677,8 @@ def compile_dsf(txt_path, dsf_path):
     result = subprocess.run(cmd, capture_output=True, text=True,
                              creationflags=_CREATE_NO_WINDOW)
     if result.stdout.strip():
-        print(f"[SegFormer] DSFTool stdout:\n{result.stdout}")
+        output = print if result.returncode else verbose_print
+        output(f"[SegFormer] DSFTool stdout:\n{result.stdout}")
     if result.stderr.strip():
         print(f"[SegFormer] DSFTool stderr:\n{result.stderr}")
     if result.returncode != 0:

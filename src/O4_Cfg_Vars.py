@@ -523,6 +523,12 @@ cfg_tile_vars = {
         "short_name": "veg_no_cache",
         "hint": "Disable persistent per-DDS vegetation cache files for this tile. When enabled, vegetation cache files are not reused and any transient per-texture cache written during processing is deleted immediately after that texture is finished.",
     },
+    "veg_verbose_log": {
+        "type": bool,
+        "default": False,
+        "short_name": "veg_verbose_log",
+        "hint": "Show vegetation setup, scenery scans, cache diagnostics and timing breakdowns. When disabled, keep texture progress, final results, warnings and errors.",
+    },
     "segformer_patch_size": {
         "type": int,
         "default": 512,
@@ -582,7 +588,7 @@ cfg_tile_vars = {
         "type": bool,
         "default": False,
         "short_name": "bld_verbose_log",
-        "hint": "Verbose per-texture building-overlay logging (placement class counts, YOLO accept/block statistics, coverage percentages). When disabled, each texture logs a single summary line like the vegetation overlay.",
+        "hint": "Show building setup, asset and scenery scans, cache diagnostics, placement statistics and timing breakdowns. When disabled, keep one summary per texture, final results, warnings and errors.",
     },
     "bld_avoid_custom_scenery": {
         "type": bool,
@@ -794,6 +800,7 @@ list_veg_vars = [
     "grass_enabled",
     "grass_airport_buffer_m",
     "veg_disable_cache",
+    "veg_verbose_log",
     "segformer_patch_size",
     "segformer_overlap",
     "segformer_batch_size",

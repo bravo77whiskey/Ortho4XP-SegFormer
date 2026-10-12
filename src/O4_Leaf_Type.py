@@ -649,7 +649,7 @@ class TileLeafTypes:
     """
 
     def __init__(self, lat, lon, cache_dir, forest_records=(), log=_log_default,
-                 online=True, grid_sources=GRID_SOURCES):
+                 online=True, grid_sources=GRID_SOURCES, warning_log=None):
         self.lat, self.lon = int(math.floor(lat)), int(math.floor(lon))
         self.log = log
         self.grids = {}
@@ -659,7 +659,7 @@ class TileLeafTypes:
             try:
                 grid = fn(cache_dir, self.lat, self.lon, log=log, online=online)
             except Exception as exc:
-                log(f"  [LeafType] {name}: unavailable ({exc})")
+                (warning_log or log)(f"  [LeafType] {name}: unavailable ({exc})")
                 grid = None
             if grid is not None and grid.codes.any():
                 self.grids[name] = grid
@@ -907,7 +907,7 @@ class XPForestMapper:
     """Turn a tree family into X-Plane 12's forest for the local climate band."""
 
     def __init__(self, lat, lon, cache_dir, custom_scenery_dir, dsftool_path,
-                 log=_log_default):
+                 log=_log_default, warning_log=None):
         self.lat, self.lon = int(math.floor(lat)), int(math.floor(lon))
         self.fallback_band = koppen_band(self.lat + 0.5, self.lon + 0.5)
         grid = None
@@ -915,7 +915,7 @@ class XPForestMapper:
             grid = xp_band_grid(cache_dir, self.lat, self.lon, custom_scenery_dir,
                                 dsftool_path, log=log)
         except Exception as exc:
-            log(f"  [XPForests] global scenery unreadable ({exc})")
+            (warning_log or log)(f"  [XPForests] global scenery unreadable ({exc})")
         self.grid = grid.filled(float("inf")) if grid is not None else None
         if self.grid is None:
             t, m = band_name(self.fallback_band)

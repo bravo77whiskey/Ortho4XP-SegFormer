@@ -33,6 +33,7 @@ Example:
         --cache-dir "cache_zl16_36_101"
 """
 
+from O4_Overlay_Logging import verbose_print, with_verbose_logging
 import os, argparse, warnings, time, math, json
 warnings.filterwarnings('ignore')
 
@@ -332,7 +333,7 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
                     version="simheaven-network-v1",
                 )
             )
-            print(f"  [simHeaven] {folder_name}: +{len(road_ways) - segment_count_before} segments")
+            verbose_print(f"  [simHeaven] {folder_name}: +{len(road_ways) - segment_count_before} segments")
         except Exception as exc:
             print(f"  [simHeaven] failed {dsf_path}: {exc}")
     return road_ways
@@ -840,7 +841,7 @@ def _load_forest_polygons(layer_name, dsf_matches, dsftool_path, cache_dir):
                 )
             )
 
-            print(
+            verbose_print(
                 f"  [{layer_name}] {folder_name}: +{len(polys) - n_poly0} forest polys"
             )
         except Exception as exc:
@@ -1145,12 +1146,12 @@ def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lo
                 rings.append(ring)
                 n_pack_forest += 1
         if zones:
-            print(
+            verbose_print(
                 f"  [excl zones] {folder_name}: {n_pack_forest} forest zones "
                 f"of {sum(len(v) for v in zones.values())} exclusion properties"
             )
     if skipped_packs:
-        print(
+        verbose_print(
             f"  [excl zones] {len(skipped_packs)} non-airport pack(s) not "
             f"consulted: {', '.join(sorted(skipped_packs))}"
         )
@@ -1656,6 +1657,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
 
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
+@with_verbose_logging
 def run(tex_dir, lat, lon, out_dsf, cache_dir,
         close_m, open_m, min_area_m2, simplify_m,
         make_viz, density_override=None, res_m=None, disable_cache=False,
@@ -1671,7 +1673,18 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         avoid_gfv2=False, gfv2_buffer_m=0.0,
         use_gfv2_asset_proximity=False,
         use_leaf_type_maps=True, leaf_type_cache_dir=None,
-        use_xp_forests=True, grass_settings=None):
+        use_xp_forests=True, grass_settings=None, verbose_log=False):
+
+    started = time.perf_counter()
+
+    def _print_tile_summary(tree_polygons=0, grass_polygons=0):
+        tile = f"{int(math.floor(lat)):+03d}{int(math.floor(lon)):+04d}"
+        print(
+            f"[Veg] Tile {tile}: tree polygons={tree_polygons:,}; "
+            f"grass polygons={grass_polygons:,}; "
+            f"total generation time={time.perf_counter() - started:.1f}s",
+            flush=True,
+        )
 
     import re as _re
     STD_RE = _re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$",
@@ -1688,7 +1701,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         requested_avoid_simheaven_forests, exclude_lower_forests
     )
     if requested_avoid_simheaven_forests and not avoid_simheaven_forests:
-        print(
+        verbose_print(
             "[Veg] tile forest replacement on: forest-overlap avoidance "
             "forced off for this run (saved setting unchanged) so replaced "
             "forests do not leave holes"
@@ -1792,9 +1805,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         _source_files, tex_dir, lat, lon
     )
     if not files:
-        print("No DDS files found."); return 0
+        print("No DDS files found.")
+        _print_tile_summary()
+        return 0
     for _line in TEXSEL.format_selection_report(
-        _selection_report, region_label="vegetation masks"
+        _selection_report, region_label="vegetation masks", include_details=verbose_log
     ):
         print(_line)
     # Grass around airports (O4_Grass_Overlay) rides along: it collects the
@@ -1827,31 +1842,31 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     dens_str = f"{density_override:.2f}" if density_override is not None else "auto"
     print(f"Tile: lat={lat} lon={lon}  DDS: {len(files)} ({_zl_str})")
-    print(f"close={close_m}m  open={open_m}m  min_area={min_area_m2}m²  "
+    verbose_print(f"close={close_m}m  open={open_m}m  min_area={min_area_m2}m²  "
           f"simplify={simplify_m}m  density={dens_str}  excl_buffer={excl_buffer_m}m")
     if avoid_gfv2 or use_gfv2_asset_proximity or gfv2_buffer_m:
-        print("Legacy Global Forests settings ignored; the pipeline is simHeaven-only")
-    print(
+        verbose_print("Legacy Global Forests settings ignored; the pipeline is simHeaven-only")
+    verbose_print(
         "vegetation asset selection: "
         + ("leaf-type maps, simHeaven X-World fallback" if use_leaf_type_maps
            else "simHeaven X-World forests")
         + ("; planted as X-Plane 12 climate forests (lib/g8)" if use_xp_forests
            else "; planted as simHeaven forest aliases")
     )
-    print(
+    verbose_print(
         "simHeaven forest overlap avoid:"
         f" {'on' if avoid_simheaven_forests else 'off'}"
         f" (requested {'on' if requested_avoid_simheaven_forests else 'off'},"
         f" {simheaven_forest_buffer_m}m); closest asset:"
         f" {'on' if use_simheaven_asset_proximity else 'off'}"
     )
-    print(
+    verbose_print(
         "tile forest replacement:"
         f" {'on' if exclude_lower_forests else 'off'}"
         + (f" — {FOREST_EXCLUSION_PROPERTY_KEYS[0]} {exclusion_value}"
            " over the whole tile" if exclude_lower_forests else "")
     )
-    print(
+    verbose_print(
         f"building overlap avoid: overlay cache={'on' if bld_excl_m > 0 else 'off'} ({bld_excl_m}m)"
         f" simHeaven={'on' if avoid_simheaven_buildings else 'off'} ({simheaven_building_buffer_m}m)"
     )
@@ -1864,7 +1879,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     asset_region = asset_region_for_latlon(tile_center_lat, tile_center_lon)
     koppen_code = CLIMATE_REGIONS.koppen_code(tile_center_lat, tile_center_lon)
     region = FOREST_ASSETS.climate_region(tile_center_lat, tile_center_lon)
-    print(
+    verbose_print(
         f"vegetation context: climate={region}"
         f" koppen={koppen_code or 'ocean/unknown'} asset_region={asset_region}"
     )
@@ -1906,7 +1921,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f'{lat_s_str}{lon_s_str}_big_roads.osm.bz2')
 
     osm_roads = _load_osm_roads(osm_roads_path, cache_dir=sidecar_cache_dir)
-    print(f"OSM roads: {len(osm_roads)} ways  ({osm_roads_path})")
+    verbose_print(f"OSM roads: {len(osm_roads)} ways  ({osm_roads_path})")
     osm_roads = _prepare_roads(osm_roads)
 
     osm_residential_roads = _prepare_roads(_residential_roads(osm_roads))
@@ -1929,7 +1944,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         else:
             sh_network = _load_simheaven_network(custom_scenery_dir, lat, lon, dsftool_path, sidecar_cache_dir)
         timings['scenery_parse'] += time.perf_counter() - _t
-        print(f"simHeaven network: {len(sh_network)} road segments"
+        verbose_print(f"simHeaven network: {len(sh_network)} road segments"
               + (" (exclusion width by road type)" if _road_widths_enabled() else ""))
     elif use_simheaven:
         print(f"  [simHeaven] DSFTool not found at {dsftool_path} — skipping")
@@ -1973,7 +1988,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     simheaven_type_source_path,
                     lat,
                 )
-                print(
+                verbose_print(
                     "simHeaven closest-asset sources:"
                     f" {simheaven_type_resolver.n} tree polygons;"
                     f" tile fallback={simheaven_type_source_path or 'climate'}"
@@ -1990,11 +2005,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         'index': BBOX.build_bounds_index(forest_records),
                     }
                 )
-                print(
+                verbose_print(
                     f"simHeaven forest overlap: {len(forest_records)} polygons"
                 )
         else:
-            print("simHeaven forests: no enabled 7-forests DSF for this tile")
+            verbose_print("simHeaven forests: no enabled 7-forests DSF for this tile")
     else:
         print(
             "simHeaven forests: skipped "
@@ -2015,20 +2030,21 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     leaf_types = None
     if use_leaf_type_maps:
         _t = time.perf_counter()
-        print("Leaf-type maps:")
+        verbose_print("Leaf-type maps:")
         try:
             leaf_types = LEAF_TYPE.TileLeafTypes(
                 lat,
                 lon,
                 leaf_type_cache_dir or LEAF_TYPE.default_cache_dir(cache_dir),
                 forest_records=forest_records,
-                log=print,
+                log=verbose_print,
+                warning_log=print,
             )
         except Exception as exc:
             print(f"  [LeafType] failed: {exc}")
             leaf_types = None
         if leaf_types is not None and not leaf_types.available:
-            print("  [LeafType] no map coverage — using simHeaven closest asset")
+            verbose_print("  [LeafType] no map coverage — using simHeaven closest asset")
             leaf_types = None
         timings['leaf_type'] += time.perf_counter() - _t
 
@@ -2045,7 +2061,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 leaf_type_cache_dir or LEAF_TYPE.default_cache_dir(cache_dir),
                 custom_scenery_dir,
                 dsftool_path,
-                log=print,
+                log=verbose_print,
+                warning_log=print,
             )
         except Exception as exc:
             print(f"  [XPForests] failed, keeping simHeaven aliases: {exc}")
@@ -2054,7 +2071,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     # ── Forest-asset context ────────────────────────────────────────────────
     veg_context = _veg_context_from_simheaven(forest_records)
-    print(
+    verbose_print(
         "Forest-asset context (simHeaven 7-forests): "
         f"forest={len(veg_context['forest_polys'])} "
         f"woodland={len(veg_context['woodland_hint_polys'])} "
@@ -2097,12 +2114,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f"{key.rsplit('_', 1)[-1]}={count}"
             for key, count in sorted(excl_zone_types.items())
         )
-        print(
+        verbose_print(
             f"Custom scenery exclusion zones: {len(excl_zone_polys)} forest "
             f"({type_summary})"
         )
     else:
-        print("Custom scenery exclusion zones: none")
+        verbose_print("Custom scenery exclusion zones: none")
 
     t_inf = time.time()
     n_tree = n_range = n_agri = 0
@@ -2145,7 +2162,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             checksum = float(np.sum(arr[:, 0] * 3.0 + arr[:, 1] * 5.0 +
                                     arr[:, 2] * 0.01 + arr[:, 3] + arr[:, 4]))
             sh_bld_obj_sig = (int(arr.shape[0]), round(checksum, 3))
-        print(f"simHeaven buildings: {n_sh_bld_objs} objects  {n_sh_bld_polys} facade polys")
+        verbose_print(f"simHeaven buildings: {n_sh_bld_objs} objects  {n_sh_bld_polys} facade polys")
     elif avoid_simheaven_buildings:
         print(f"simHeaven buildings: skipped (DSFTool unavailable at {dsftool_path})")
 
@@ -2155,7 +2172,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     mesh_water_index = _load_mesh_water_index(mesh_water_path, sidecar_cache_dir)
     timings['mesh_water'] += time.perf_counter() - _t
     if mesh_water_index:
-        print(
+        verbose_print(
             f"Mesh water: {len(mesh_water_index['tris'])} water triangles from "
             f"{mesh_water_path}"
         )
@@ -2233,13 +2250,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     os.remove(cache_path)
                 except OSError:
                     pass
-                print(f"  [{idx}/{n_files}] {fname}  (stale all-water cache ignored)", flush=True)
+                verbose_print(f"  [{idx}/{n_files}] {fname}  (stale all-water cache ignored)", flush=True)
             elif want_tree_support and not mesh_water_full:
                 tree_support = SEGFORMER.load_tree_support(tree_support_path, veg_map.shape)
                 if tree_support is None:
                     # Class map cached without its tree-support mask: infer again.
                     veg_map = None
-                    print(f"  [{idx}/{n_files}] {fname}  (no tree-support cache; re-inferring)", flush=True)
+                    verbose_print(f"  [{idx}/{n_files}] {fname}  (no tree-support cache; re-inferring)", flush=True)
                 else:
                     print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
             else:
@@ -2265,7 +2282,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             )
             if mesh_water_full:
                 veg_map = np.full((img_h, img_w), SEGFORMER.CLASS_WATER, dtype=np.int8)
-                print(f"    {fname}: mesh water full; inference skipped", flush=True)
+                verbose_print(f"    {fname}: mesh water full; inference skipped", flush=True)
             else:
                 if model is None:
                     model, proc, device = SEGFORMER.load_vegetation_model(device)
@@ -2739,15 +2756,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if disable_cache:
             _remove_cache_files(_dds_cache_files)
 
-    print(f"Loaded {len(files)} DDS  ({time.time()-t_inf:.1f}s)  "
+    verbose_print(f"Loaded {len(files)} DDS  ({time.time()-t_inf:.1f}s)  "
           f"climate={region}  "
           f"bld_excl: {n_bld_excl_used} used / {n_bld_excl_missing} missing  "
           f"simh_bld: {n_sh_bld_objs} obj / {n_sh_bld_polys} poly")
-    print(f"Polygons: tree={n_tree}  total={len(polygons)}")
+    verbose_print(f"Polygons: tree={n_tree}  total={len(polygons)}")
     if tree_type_counts:
         ordered = sorted(tree_type_counts.items(), key=lambda item: (-item[1], item[0]))
         summary = ", ".join(f"{name}={count}" for name, count in ordered)
-        print(f"Tree types: {summary}")
+        verbose_print(f"Tree types: {summary}")
 
     # Grass polygons for this same DSF, their POLYGON_DEFs numbered after the
     # tree ones.
@@ -2767,6 +2784,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             grass_hook.cleanup()
     if grass_result:
         status['grass'] = grass_result[2]
+    n_grass = int(grass_result[2]['polygons']) if grass_result else 0
     if not polygons and grass_result:
         # Grass but no trees of our own: the DSF carries the grass, but never
         # the tile-wide exclusion -- nothing of ours would replace the lower
@@ -2791,6 +2809,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 status['outcome'] = 'failed'
                 status['error'] = f"stale overlay not removable: {exc}"
         write_generation_status(status_path, status)
+        _print_tile_summary(n_tree, n_grass)
         return 0
 
     # ── Write DSF ────────────────────────────────────────────────────────────
@@ -2838,7 +2857,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f.write(grass_result[1])
     timings['dsf_text'] += time.perf_counter() - _t
 
-    print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs"
+    verbose_print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs"
           + (f" + {len(grass_result[0])} grass" if grass_result else "") + ")")
 
     _t = time.perf_counter()
@@ -2860,7 +2879,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         os.replace(tmp_dsf, out_dsf)
         print(f"DSF compiled → {out_dsf}")
         if exclude_lower_forests:
-            print(f"Tile forest replacement installed: "
+            verbose_print(f"Tile forest replacement installed: "
                   f"{FOREST_EXCLUSION_PROPERTY_KEYS[0]} {exclusion_value}")
         status['outcome'] = 'ok'
         status['compiled'] = True
@@ -2883,7 +2902,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     status['polygons'] = len(polygons)
     write_generation_status(status_path, status)
 
-    print(
+    verbose_print(
         "[Veg timing] "
         f"scenery_parse={timings['scenery_parse']:.1f}s  "
         f"cache_load={timings['cache_load']:.1f}s  "
@@ -2903,6 +2922,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"bld_wait={timings['bld_wait']:.1f}s"
     )
 
+    _print_tile_summary(n_tree, n_grass)
     return len(polygons)
 
 
@@ -2971,6 +2991,8 @@ def parse_args():
     ap.add_argument('--no-xp-forests', action='store_true', dest='no_xp_forests',
                     help='Emit the simHeaven forest aliases instead of X-Plane 12 '
                          'climate forests (lib/g8).')
+    ap.add_argument('--verbose-log', action='store_true',
+                    help='Show setup, scenery, cache and timing diagnostics')
     ap.add_argument('--no-viz',     action='store_true')
     return ap.parse_args()
 
@@ -3002,7 +3024,6 @@ def main():
                                f'{lat_s}{lon_s}.dsf')
     print(f"Output DSF: {out_dsf}")
 
-    t0 = time.time()
     n = run(
         tex_dir          = args.tex_dir,
         lat              = args.lat,
@@ -3014,6 +3035,7 @@ def main():
         min_area_m2      = args.min_area,
         simplify_m       = args.simplify,
         make_viz         = not args.no_viz,
+        verbose_log      = args.verbose_log,
         density_override = args.density,
         res_m            = args.res_m,
         excl_buffer_m    = args.excl_buffer_m,
@@ -3034,7 +3056,6 @@ def main():
         leaf_type_cache_dir = args.leaf_type_cache_dir,
         use_xp_forests = not args.no_xp_forests,
     )
-    print(f"\nDone: {n} vegetation polygons in {(time.time()-t0)/60:.1f}min")
     return n
 
 

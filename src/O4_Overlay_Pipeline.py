@@ -279,6 +279,7 @@ veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False
 veg_res_m         = 0.0     # 0 = native DDS resolution
 veg_disable_cache = False
+veg_verbose_log = False
 grass_enabled     = True    # 3-d grass around airports, inside the veg overlay
 grass_airport_buffer_m = 500.0
 
@@ -792,15 +793,16 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
             flush=True,
         )
         remove_embedded_trees = False
-    print(
-        "[Veg] Effective settings: "
-        f"exclude_lower_forests={exclude_lower_forests!r} "
-        f"remove_embedded_trees={remove_embedded_trees!r} "
-        f"avoid_simheaven_forests={veg_avoid_simheaven_forests!r}"
-        + (" (forced off for this run by tile replacement)"
-           if exclude_lower_forests and veg_avoid_simheaven_forests else ""),
-        flush=True,
-    )
+    if veg_verbose_log:
+        print(
+            "[Veg] Effective settings: "
+            f"exclude_lower_forests={exclude_lower_forests!r} "
+            f"remove_embedded_trees={remove_embedded_trees!r} "
+            f"avoid_simheaven_forests={veg_avoid_simheaven_forests!r}"
+            + (" (forced off for this run by tile replacement)"
+               if exclude_lower_forests and veg_avoid_simheaven_forests else ""),
+            flush=True,
+        )
 
     code = (
         (
@@ -833,6 +835,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         f"    density_override = {density_override!r},\n"
         f"    res_m            = {res_m!r},\n"
         f"    disable_cache    = {veg_disable_cache!r},\n"
+        f"    verbose_log      = {veg_verbose_log!r},\n"
         f"    excl_buffer_m    = {veg_excl_buffer_m!r},\n"
         f"    use_simheaven    = {veg_use_simheaven!r},\n"
         f"    avoid_simheaven_buildings = {veg_avoid_simheaven_buildings!r},\n"
@@ -897,21 +900,22 @@ def process_bld_tile(lat, lon, build_dir):
     out_dsf     = _dsf_output_path(lat, lon, 'yOrtho4XP_Bld_Overlays')
     custom_scenery_dir = _scenery_paths()
     remote_host = _resolve_remote_host()
-    print(
-        "[Bld] Effective settings: "
-        f"yolo_enabled={bld_yolo_enabled!r} "
-        f"checkpoint={bld_yolo_checkpoint!r} "
-        f"height_checkpoint={bld_height_checkpoint!r} "
-        f"conf={bld_yolo_conf!r} iou={bld_yolo_iou!r} "
-        f"stride={bld_yolo_stride!r} max_det={bld_yolo_max_det!r} "
-        f"min_coverage={bld_yolo_min_coverage!r} "
-        f"asset_mode={bld_asset_mode!r} "
-        f"roof_color_matching={bld_roof_color_matching!r} "
-        f"disable_cache={bld_disable_cache!r} "
-        f"verbose_log={bld_verbose_log!r} "
-        f"out_dsf={out_dsf!r}",
-        flush=True,
-    )
+    if bld_verbose_log:
+        print(
+            "[Bld] Effective settings: "
+            f"yolo_enabled={bld_yolo_enabled!r} "
+            f"checkpoint={bld_yolo_checkpoint!r} "
+            f"height_checkpoint={bld_height_checkpoint!r} "
+            f"conf={bld_yolo_conf!r} iou={bld_yolo_iou!r} "
+            f"stride={bld_yolo_stride!r} max_det={bld_yolo_max_det!r} "
+            f"min_coverage={bld_yolo_min_coverage!r} "
+            f"asset_mode={bld_asset_mode!r} "
+            f"roof_color_matching={bld_roof_color_matching!r} "
+            f"disable_cache={bld_disable_cache!r} "
+            f"verbose_log={bld_verbose_log!r} "
+            f"out_dsf={out_dsf!r}",
+            flush=True,
+        )
 
     code = (
         f"import os\n"
@@ -924,7 +928,8 @@ def process_bld_tile(lat, lon, build_dir):
         + _remote_activation_code(remote_host) +
         f"import O4_Building_Overlay as bld_overlay\n"
         f"_bld_path = os.path.abspath(getattr(bld_overlay, '__file__', ''))\n"
-        f"print(f'[Bld] bld_overlay.__file__={{_bld_path}}', flush=True)\n"
+        f"if {bld_verbose_log!r}:\n"
+        f"    print(f'[Bld] bld_overlay.__file__={{_bld_path}}', flush=True)\n"
         f"_bld_norm = os.path.normcase(os.path.normpath(_bld_path))\n"
         f"_stale_markers = (\n"
         f"    os.path.normcase(os.path.join('Ortho4XP_Data', 'overlay_scripts')),\n"

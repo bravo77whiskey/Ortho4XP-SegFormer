@@ -569,11 +569,13 @@ def select_textures(source_files, tex_dir, lat, lon, cfg_path=None):
     return selection
 
 
-def format_selection_report(report, region_label="detection/placement"):
+def format_selection_report(report, region_label="detection/placement", include_details=True):
     """Render the selection outcome as printable lines."""
     lines = []
     for note in report.get("notes", ()):
         lines.append(f"Texture selection: WARNING {note}")
+    if not include_details:
+        return lines
     if report.get("cfg_path"):
         skipped = report.get("skipped", 0)
         lines.append(

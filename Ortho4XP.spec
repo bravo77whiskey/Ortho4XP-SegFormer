@@ -71,6 +71,7 @@ OVERLAY_MODULES = [
     "O4_Scenery_Packs",
     "O4_Stock_Yolo_Objects",
     "O4_Texture_Selection",
+    "O4_Overlay_Logging",
     "O4_Veg_Replacement",
     "O4_Vegetation_Overlay",
 ]

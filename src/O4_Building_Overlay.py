@@ -30,6 +30,7 @@ Example:
         "H:/XP12/Custom Scenery/yOrtho4XP_Bld_Overlays/-02+037.dsf" ^
         --spacing 15 --close 15 --open 5
 """
+from O4_Overlay_Logging import verbose_print, with_verbose_logging
 import os, json, argparse, warnings, time, math, re, hashlib, fnmatch
 import pickle
 import sys
@@ -360,7 +361,7 @@ def parse_args():
                     help='Generate overview/footprint PNGs then exit — no DSF written.')
     ap.add_argument('--cache-dir', default=None)
     ap.add_argument('--verbose-log', action='store_true', dest='verbose_log',
-                    help='Verbose per-texture logging (placement/YOLO statistics). '
+                    help='Show setup, scenery, asset, cache and timing diagnostics, '
                          'Off by default: each texture logs a single summary line.')
     ap.add_argument('--grid-n',    type=int,   default=HEADING_GRID_N, dest='grid_n')
     ap.add_argument('--osm-roads', default=None,
@@ -990,7 +991,7 @@ def _load_simheaven_network(custom_scenery_dir, tile_lat, tile_lon, dsftool_path
                     version="simheaven-network-v2",
                 )
             )
-            print(f"  [simHeaven net] {folder_name}: +{len(road_ways) - segment_count_before} segments")
+            verbose_print(f"  [simHeaven net] {folder_name}: +{len(road_ways) - segment_count_before} segments")
         except Exception as exc:
             print(f"  [simHeaven net] failed {dsf_path}: {exc}")
     return road_ways
@@ -1406,7 +1407,7 @@ def _load_simheaven_building_exclusions(custom_scenery_dir, tile_lat, tile_lon, 
             objects.extend(new_objects)
             polys.extend(new_polys)
 
-            print(
+            verbose_print(
                 f"  [simHeaven bld] {folder_name}: "
                 f"+{len(objects) - n_obj0} objects  +{len(polys) - n_poly0} facade polys"
             )
@@ -1453,7 +1454,7 @@ def _load_custom_scenery_building_exclusions(
         if not dsf_may_hold_buildings(dsf_path, dsftool_path):
             # A base mesh or forest pack: no objects or facades to read, and
             # disassembling an ortho mesh alone costs ~15 s.
-            print(f"  [custom scenery bld] {folder_name}: no objects or facades defined")
+            verbose_print(f"  [custom scenery bld] {folder_name}: no objects or facades defined")
             continue
         n_obj0 = len(objects)
         n_poly0 = len(polys)
@@ -1550,7 +1551,7 @@ def _load_custom_scenery_building_exclusions(
                 for obj in objects[n_obj0:]:
                     obj['src'] = folder_name
                 polys[n_poly0:] = [_SrcRing(ring, folder_name) for ring in polys[n_poly0:]]
-            print(
+            verbose_print(
                 f"  [custom scenery bld] {folder_name}: "
                 f"+{len(objects) - n_obj0} objects  "
                 f"+{len(polys) - n_poly0} facade polys  "
@@ -4250,7 +4251,7 @@ def _filter_exports_for_tile_region(library_exports, tile_region):
         else:
             dropped += 1
     if dropped:
-        print(
+        verbose_print(
             f"Library exports: dropped {dropped} region-gated exports "
             f"inactive for tile region '{tile_region}' "
             f"({len(kept)} remain)"
@@ -8355,7 +8356,7 @@ class _TextureParallel:
             _assign_to_job(par._job, proc)
             threading.Thread(target=_relay_output, args=(proc,), daemon=True).start()
             par.procs.append(proc)
-        print(f"[Bld] Texture workers: {workers} processes share {len(run.files)} textures", flush=True)
+        verbose_print(f"[Bld] Texture workers: {workers} processes share {len(run.files)} textures", flush=True)
         return par
 
     def claim(self, fi):
@@ -8481,10 +8482,20 @@ class _BuildingOverlayRun:
         self.roof_color_matching = roof_color_matching
         self.library_cache_dir = library_cache_dir
 
+    @with_verbose_logging
     def execute(self):
         """Run every stage; returns run()'s result."""
+        started = time.perf_counter()
         try:
-            return self._execute()
+            result = self._execute()
+            if self._par is None or not self._par.helper:
+                tile = f"{int(math.floor(self.lat)):+03d}{int(math.floor(self.lon)):+04d}"
+                print(
+                    f"[Bld] Tile {tile}: building placements={result or 0:,}; "
+                    f"total generation time={time.perf_counter() - started:.1f}s",
+                    flush=True,
+                )
+            return result
         finally:
             if self._par is not None and not self._par.helper:
                 self._par.abort()  # no-op once the merge has cleaned up
@@ -8610,19 +8621,21 @@ class _BuildingOverlayRun:
         if not self.files:
             print("No DDS files found.")
             return False
-        for _line in TEXSEL.format_selection_report(_selection_report):
+        for _line in TEXSEL.format_selection_report(
+            _selection_report, include_details=self.verbose_log
+        ):
             print(_line)
         file_filter = _env_patterns("O4_OVERLAY_FILE_FILTER")
         if self.dds_filter:
             self.dds_filter = [os.path.basename(str(name)) for name in self.dds_filter]
             self.files = [name for name in self.files if name in set(self.dds_filter)]
-            print(f"DDS debug filter: {', '.join(self.dds_filter)} -> {len(self.files)} files")
+            verbose_print(f"DDS debug filter: {', '.join(self.dds_filter)} -> {len(self.files)} files")
         if file_filter:
             self.files = [
                 name for name in self.files
                 if any(fnmatch.fnmatchcase(name, pattern) for pattern in file_filter)
             ]
-            print(f"DDS filter: {', '.join(file_filter)} -> {len(self.files)} files")
+            verbose_print(f"DDS filter: {', '.join(file_filter)} -> {len(self.files)} files")
         if not self.files:
             print("No DDS files found.")
             return False
@@ -8632,7 +8645,7 @@ class _BuildingOverlayRun:
         self._layout_overview(min(_used_zls))
 
         print(f"Tile: lat={self.lat} lon={self.lon}  DDS: {len(self.files)} ({_zl_str})  Grid: {self.n_cols}×{self.n_rows}")
-        print(
+        verbose_print(
             f"Params: edge_spacing={self.spacing_m}m  close={self.close_k}px  open={self.open_k}px  "
             f"min_footprint={self.min_footprint_m2}m²"
         )
@@ -8699,7 +8712,7 @@ class _BuildingOverlayRun:
         # Ortho4XP's own OSM extracts; the full street grid and the railways come
         # from the installed simHeaven network below. Nothing is downloaded here.
         self.osm_roads = (osm_big_roads or []) + (osm_small_roads or [])
-        print(
+        verbose_print(
             f"OSM roads: {len(self.osm_roads)} ways "
             f"(big={len(osm_big_roads)} small={len(osm_small_roads)})"
         )
@@ -8731,7 +8744,7 @@ class _BuildingOverlayRun:
                 '_big_roads.osm.bz2', suffix
             )
             self.excl_polys.extend(_load_osm_closed_ways(p, cache_dir=self.sidecar_cache_dir))
-        print(f"Exclusion polygons (water+airports): {len(self.excl_polys)}")
+        verbose_print(f"Exclusion polygons (water+airports): {len(self.excl_polys)}")
 
     def _resolve_settings(self):
         """Resolve model and placement settings from arguments and environment."""
@@ -8894,18 +8907,18 @@ class _BuildingOverlayRun:
                     "or set O4_BLD_YOLO_ALLOW_MISSING=1 to fall back to SegFormer-only placement."
                 )
         elif self.yolo_enabled:
-            print(
+            verbose_print(
                 f"YOLO OBB placement: enabled checkpoint={self.yolo_checkpoint} "
                 f"conf={self.yolo_conf} iou={self.yolo_iou} stride={self.yolo_stride} "
                 f"max_det={self.yolo_max_det} batch={self.yolo_batch_size} "
                 f"analysis_zl={self.yolo_analysis_target_zl or 'native'} "
                 f"fuse={self.yolo_fuse_model}"
             )
-            print(
+            verbose_print(
                 "YOLO OBB placement: direct detections only "
                 f"(asset pool heights up to {MAX_GENERATED_BUILDING_HEIGHT_M:.0f}m)"
             )
-            print(
+            verbose_print(
                 "YOLO OBB placement: object/facade mode controlled by bld_assets"
                 f" (strict containment, +{YOLO_OBJECT_OUTLINE_MARGIN_M:.2f}m quantisation margin)"
             )
@@ -8953,7 +8966,7 @@ class _BuildingOverlayRun:
                         self.height_checkpoint,
                         device=("cuda" if torch.cuda.is_available() else "cpu"),
                     )
-                    print(
+                    verbose_print(
                         f"HeightNet heights: enabled checkpoint={self.height_checkpoint} "
                         f"arch={self.height_model._o4_heightnet_arch} "
                         f"crop={self.height_model._o4_crop_px}px "
@@ -8980,7 +8993,7 @@ class _BuildingOverlayRun:
             self.stock_yolo_model = STOCKYOLO.load_stock_yolo_model(
                 STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT
             )
-            print(
+            verbose_print(
                 f"Stock YOLO OBB (DOTAv1): loaded "
                 f"{STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT}; "
                 f"batch={self.stock_yolo_batch_size}",
@@ -9043,7 +9056,7 @@ class _BuildingOverlayRun:
             self.sh_network = _load_simheaven_network(self.custom_scenery_dir, self.lat, self.lon, self.dsftool_path, self.sidecar_cache_dir)
             self.timings['simheaven_parse'] += time.perf_counter() - self._t
             self.excl_rails.extend(way for way in self.sh_network if way['type'] == 'rail')
-            print(
+            verbose_print(
                 f"simHeaven network: {len(self.sh_network)} road segments "
                 f"({len(self.excl_rails)} railway)"
             )
@@ -9070,7 +9083,7 @@ class _BuildingOverlayRun:
         self.sh_bld_index = _prepare_simheaven_objects(self.sh_bld_objects)
         self.sh_bld_sig = (_polys_signature(sh_bld_polys),
                       _simheaven_objects_signature(self.sh_bld_objects))
-        print(f"simHeaven buildings: {len(self.sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
+        verbose_print(f"simHeaven buildings: {len(self.sh_bld_objects)} objects  {len(sh_bld_polys)} facade polys")
 
         # Installed libraries rarely change between tiles: read their exports and
         # OBJ footprints from the shared catalog instead of re-scanning the disk.
@@ -9104,14 +9117,14 @@ class _BuildingOverlayRun:
             _simheaven_objects_signature(custom_bld_objects),
         )
         if self.avoid_custom_scenery:
-            print(
+            verbose_print(
                 "Custom scenery buildings: "
                 f"{len(custom_bld_objects)} objects  "
                 f"{len(custom_bld_polys)} facade polys  "
                 f"layers={custom_bld_layers}  skipped_objects={custom_bld_skipped}"
             )
         else:
-            print("Custom scenery buildings: disabled")
+            verbose_print("Custom scenery buildings: disabled")
 
     def _prepare_assets(self):
         """Build the asset pools placements choose from; False when there are none."""
@@ -9177,7 +9190,7 @@ class _BuildingOverlayRun:
             GREENHOUSE_HEIGHT_M,
         )
         if _agri_mode() == "greenhouse":
-            print(
+            verbose_print(
                 "Greenhouses: "
                 + (
                     f"{len(self.greenhouse_tunnel_paths)} O4XP tunnel-array objects"
@@ -9199,7 +9212,7 @@ class _BuildingOverlayRun:
         )
         if self.stock_yolo_model is not None:
             if self.stock_yolo_static_classes:
-                print(
+                verbose_print(
                     "Stock YOLO OBB (DOTAv1): "
                     f"keeping classes {self.stock_yolo_static_classes}",
                     flush=True,
@@ -9213,7 +9226,7 @@ class _BuildingOverlayRun:
                 self.stock_yolo_model = None
             if dropped_stock_paths:
                 sample = ", ".join(dropped_stock_paths[:5])
-                print(
+                verbose_print(
                     "Stock YOLO OBB (DOTAv1): disabled unavailable asset refs "
                     f"{len(dropped_stock_paths)}"
                     + (f" ({sample})" if sample else ""),
@@ -9224,7 +9237,7 @@ class _BuildingOverlayRun:
                     f"{cls}:{STOCKYOLO.DOTA_CLASS_NAMES.get(cls, cls)}"
                     for cls in dropped_stock_classes
                 )
-                print(
+                verbose_print(
                     "Stock YOLO OBB (DOTAv1): disabled classes with no assets "
                     f"({labels})",
                     flush=True,
@@ -9242,7 +9255,7 @@ class _BuildingOverlayRun:
             asset_lat, asset_lon, self.simheaven_package_region
         )
         if self.simheaven_package_region:
-            print(
+            verbose_print(
                 "Asset region: "
                 f"natural={self.natural_asset_region}  "
                 f"simHeaven={self.simheaven_package_region} "
@@ -9250,7 +9263,7 @@ class _BuildingOverlayRun:
                 f"effective={self.effective_asset_region}"
             )
         else:
-            print(
+            verbose_print(
                 "Asset region: "
                 f"natural={self.natural_asset_region}  "
                 f"simHeaven=none  effective={self.effective_asset_region}"
@@ -9297,7 +9310,7 @@ class _BuildingOverlayRun:
                 asset_pools, runtime_library_exports, self.sidecar_cache_dir
             )
             if _alias_dropped:
-                print(
+                verbose_print(
                     f"[Bld] Dropped {_alias_dropped} oversized library alias(es) "
                     f"(resolved mesh >> declared footprint): "
                     + ", ".join(_alias_paths[:8])
@@ -9328,9 +9341,9 @@ class _BuildingOverlayRun:
         )
         if self.smallest_asset_only:
             asset_sources_label += " (smallest asset per class)"
-        print(f"Building assets: {asset_sources_label}")
-        print(f"Building asset mode: {self.building_asset_mode}")
-        print(
+        verbose_print(f"Building assets: {asset_sources_label}")
+        verbose_print(f"Building asset mode: {self.building_asset_mode}")
+        verbose_print(
             "Optional building libraries: "
             + _describe_optional_library_diagnostics(
                 runtime_library_exports,
@@ -9341,11 +9354,11 @@ class _BuildingOverlayRun:
         )
         asset_pool_counts = _describe_asset_pool_counts(asset_pools)
         if asset_pool_counts:
-            print(f"Building asset pool counts: {asset_pool_counts}")
+            verbose_print(f"Building asset pool counts: {asset_pool_counts}")
         if roof_color_counts is None:
-            print("Roof-colour object matching: disabled (fit-only selection)")
+            verbose_print("Roof-colour object matching: disabled (fit-only selection)")
         else:
-            print(
+            verbose_print(
                 "Roof-colour object aliases: "
                 f"match-safe={roof_color_counts['safe']}  "
                 f"inconsistent={roof_color_counts['inconsistent']}  "
@@ -9408,7 +9421,7 @@ class _BuildingOverlayRun:
         self.mesh_water_index = _load_mesh_water_index(mesh_water_path, self.sidecar_cache_dir)
         self.timings['mesh_water'] += time.perf_counter() - self._t
         if self.mesh_water_index:
-            print(
+            verbose_print(
                 f"Mesh water: {len(self.mesh_water_index['tris'])} water triangles from "
                 f"{mesh_water_path}"
             )
@@ -9858,7 +9871,7 @@ class _BuildingOverlayRun:
                 self._dedup_fallback.pop(id(piece.placement), None)
             if piece.review is not None:
                 piece.review[0].set(piece.review[1], "dropped_seam_piece")
-        print(
+        verbose_print(
             f"[Bld] Biggest piece wins: removed {len(drop):,} smaller pieces of buildings split at a seam "
             f"(YOLO window edges {counts.get('window', 0):,}, texture edges {counts.get('texture', 0):,})"
         )
@@ -9896,12 +9909,12 @@ class _BuildingOverlayRun:
                 time.perf_counter() - self._t
             )
             if _seam_dropped:
-                print(
+                verbose_print(
                     f"[Bld] Cross-texture object dedup: dropped {_seam_dropped:,} "
                     f"overlapping objects ({_before:,} -> {len(self.placed_stock_objects):,})"
                 )
             if _replaced:
-                print(f"[Bld] Dedup fallback: {len(_replaced):,} placements kept with a smaller asset")
+                verbose_print(f"[Bld] Dedup fallback: {len(_replaced):,} placements kept with a smaller asset")
             if self._review_placements:
                 _kept_ids = {id(p) for p in self.placed_stock_objects}
                 for _pid, (_tracker, _det) in self._review_placements.items():
@@ -9914,7 +9927,7 @@ class _BuildingOverlayRun:
             self._dedup_fallback.clear()  # one context per placed object; done with them
         self._write_review_dumps()
 
-        total_time = time.time() - self.t_start
+        texture_time = time.time() - self.t_start
         total_placements = (
             len(self.placed_stock_objects) + len(self.placed_facades) + len(self.placed_draped)
         )
@@ -9923,13 +9936,13 @@ class _BuildingOverlayRun:
         # and the building-overlay tracks only the trained-YOLO subtotals
         # (direct_yolo_facade_placements). Stock-YOLO counts live in
         # file_counts['stock_yolo_detections'] per DDS file.
-        print(
-            f"\nTotal: {total_placements:,} placements  "
+        verbose_print(
+            f"\nPlacement statistics: {total_placements:,} placements  "
             f"({len(self.placed_stock_objects):,} stock-yolo objects, "
             f"{len(self.placed_facades):,} facades, "
             f"{len(self.placed_draped):,} draped polys)  "
             f"trained_yolo_facades={self.direct_yolo_facade_placements:,}  "
-            f"({total_time/60:.1f}min)"
+            f"texture processing={texture_time/60:.1f}min"
         )
 
         if self.debug_image_only:
@@ -9994,7 +10007,7 @@ class _BuildingOverlayRun:
                 f.write(f"OBJECT {idx} {o_lon:.7f} {o_lat:.7f} {heading:.1f}\n")
         self.timings['dsf_text'] += time.perf_counter() - self._t
 
-        print(f"DSF text → {txt_path}")
+        verbose_print(f"DSF text → {txt_path}")
 
         # Compile
         self._t = time.perf_counter()
@@ -10002,7 +10015,7 @@ class _BuildingOverlayRun:
         self.timings['dsf_compile'] += time.perf_counter() - self._t
         if ok:
             print(f"DSF compiled → {self.out_dsf}")
-            print(f"[debug] DSF text preserved at {txt_path}")
+            verbose_print(f"[debug] DSF text preserved at {txt_path}")
             # try: os.remove(txt_path)
             # except: pass
         else:
@@ -10021,7 +10034,7 @@ class _BuildingOverlayRun:
                     f"({self.composite.shape[1]}×{self.composite.shape[0]}px)"
                 )
 
-        print(
+        verbose_print(
             "[Bld timing] "
             f"simHeaven={self.timings['simheaven_parse']:.1f}s  "
             f"customScenery={self.timings['custom_scenery_parse']:.1f}s  "
@@ -10071,6 +10084,7 @@ class _TextureInference:
         self.local_timings[key] = self.local_timings.get(key, 0.0) + elapsed
         self.file_timings[key] = self.file_timings.get(key, 0.0) + elapsed
 
+    @with_verbose_logging
     def execute(self):
         """Inference phase for one DDS: veg class map, trained YOLO, stock YOLO.
 
@@ -10152,7 +10166,7 @@ class _TextureInference:
                                 os.remove(_bld_cache_file)
                             except OSError:
                                 pass
-                            print(
+                            verbose_print(
                                 f"  [{self.fi:3d}/{self.run.n_files}] {self.fname}  "
                                 "stale bld cache ignored: "
                                 f"{_bad_simheaven} unexported simHeaven object refs",
@@ -10651,6 +10665,7 @@ class _TexturePass:
         self.file_timings = file_timings
         self.file_counts = file_counts
 
+    @with_verbose_logging
     def execute(self):
         """Run the per-texture placement stages in order."""
         if self._reuse_cached_placements():
