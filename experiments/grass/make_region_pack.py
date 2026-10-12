@@ -37,6 +37,13 @@ ap.add_argument("--road-extra-m", type=float, default=0.0,
 ap.add_argument("--pave-buffer-m", type=float, default=2.0,
                 help="grow airport pavement by this much before removing it from the grass")
 ap.add_argument("--k", type=int, default=48)
+ap.add_argument("--fine-m", type=float, default=1.2,
+                help="grass mask resolution: finer textures are downsampled to about this")
+ap.add_argument("--coarse-m", type=float, default=4.0,
+                help="grid for the colour field, palette assignment and clean-up")
+ap.add_argument("--workers", type=int, default=0, help="threads (0 = min(8, cores))")
+ap.add_argument("--simplify-m", type=float, default=1.5,
+                help="Douglas-Peucker tolerance for grass outlines, metres")
 ap.add_argument("--green-chroma", type=float, default=10.0,
                 help="fused: Lab chroma a pixel needs (hue 95-170 deg) to count as clearly green")
 ap.add_argument("--sparse-density", type=float, default=0.25,
@@ -494,7 +501,21 @@ PAVEMENT = []
 if args.airports == "auto" and args.tile_dir:
     import apt_pavement
     xplane_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.tile_dir)))
-    PAVEMENT, used = apt_pavement.pavement_near(xplane_dir, lat0, lon0, radius_m)
+    # Parsing every apt.dat (the global one is ~380 MB) takes ~20 s; cache the
+    # result against scenery_packs.ini and the global file's size and mtime.
+    import pickle
+    gapt = os.path.join(xplane_dir, "Global Scenery", "Global Airports", "Earth nav data", "apt.dat")
+    ini = os.path.join(xplane_dir, "Custom Scenery", "scenery_packs.ini")
+    stamp = tuple((os.path.getsize(p), int(os.path.getmtime(p))) if os.path.exists(p) else None for p in (ini, gapt))
+    ckey = f"{lat0:.4f}_{lon0:.4f}_{radius_m:.0f}"
+    cpath = os.path.join(SPIKE, "_apt_cache", ckey + ".pkl")
+    cached = pickle.load(open(cpath, "rb")) if os.path.isfile(cpath) else None
+    if cached and cached["stamp"] == stamp:
+        PAVEMENT, used = cached["shapes"], cached["used"]
+    else:
+        PAVEMENT, used = apt_pavement.pavement_near(xplane_dir, lat0, lon0, radius_m)
+        os.makedirs(os.path.dirname(cpath), exist_ok=True)
+        pickle.dump({"stamp": stamp, "shapes": PAVEMENT, "used": used}, open(cpath, "wb"))
     print("airport pavement:", used or "none in the circle", flush=True)
 
 if args.mask == "fused":
@@ -514,35 +535,71 @@ if args.roads == "auto" and args.tile_dir:
         counts[r["type"]] = counts.get(r["type"], 0) + 1
     print("road/rail segments kept:", counts, flush=True)
 
-tex = []
-model = None
-for key, path, bbox, zl, excl in sources:
+# ── per texture, pass 1: masks at working resolution, colour on a coarse grid ─
+# Grass edges need about a metre; the colour is smoothed over --sigma-m (8 m)
+# anyway.  So the mask runs at --fine-m (textures finer than that are area-
+# downsampled first: ZL18 /2, ZL19 /4) and the colour field, the palette
+# assignment and the clean-up run on a --coarse-m grid.  Both passes run on a
+# thread pool: OpenCV and the heavy numpy calls release the GIL, and threads
+# avoid Windows' spawn re-running this script in every worker.
+import concurrent.futures as CF
+import threading
+import time
+
+GPU_LOCK = threading.Lock()
+_MODEL = {}
+T_START = time.time()
+
+
+def classes_for(key, img):
+    cls_path = os.path.join(SPIKE, "classmaps_tile" if args.tile_dir else "classmaps", key + "_cls.npy")
+    if not os.path.isfile(cls_path):
+        with GPU_LOCK:                    # one model, one GPU: inference stays serial
+            if not os.path.isfile(cls_path):
+                import O4_Landcover_Inference as SEG
+                if not _MODEL:
+                    _MODEL["m"] = SEG.load_vegetation_model()
+                model, proc, dev = _MODEL["m"]
+                os.makedirs(os.path.dirname(cls_path), exist_ok=True)
+                np.save(cls_path, SEG.run_inference(model, dev, img, proc).astype(np.uint8))
+    return np.load(cls_path)
+
+
+def block_sum(a, c, hc, wc):
+    """Sum c x c blocks of a (h, w[, ch]) array padded to (hc*c, wc*c)."""
+    h, w = a.shape[:2]
+    pad = [(0, hc * c - h), (0, wc * c - w)] + [(0, 0)] * (a.ndim - 2)
+    a = np.pad(a, pad)
+    return a.reshape(hc, c, wc, c, *a.shape[2:]).sum(axis=(1, 3))
+
+
+def pass1(src):
+    key, path, bbox, zl, excl = src
+    t0 = time.time()
     try:
         img = np.asarray(Image.open(path).convert("RGB"))
-    except Exception as exc:          # H: has bad sectors: skip, don't abort
-        print(f"SKIP {key}: {exc}")
-        continue
-    cls = None
-    if args.mask in ("segformer", "fused"):
-        cls_path = os.path.join(SPIKE, "classmaps_tile" if args.tile_dir else "classmaps", key + "_cls.npy")
-        os.makedirs(os.path.dirname(cls_path), exist_ok=True)
-        if not os.path.isfile(cls_path):
-            import O4_Landcover_Inference as SEG
-            if model is None:
-                model, proc, dev = SEG.load_vegetation_model()
-            np.save(cls_path, SEG.run_inference(model, dev, img, proc).astype(np.uint8))
-        cls = np.load(cls_path)
+    except Exception as exc:              # H: has bad sectors: skip, don't abort
+        print(f"SKIP {key}: {exc}", flush=True)
+        return None
+    cls = classes_for(key, img) if args.mask in ("segformer", "fused") else None
     lat_s, lon_w, lat_n, lon_e = bbox
+    mpp0 = (lon_e - lon_w) * 111320 * cos0 / img.shape[1]
+    f = 2 ** max(0, int(round(math.log2(max(1.0, args.fine_m / mpp0)))))
+    if f > 1:
+        img = cv2.resize(img, (img.shape[1] // f, img.shape[0] // f), interpolation=cv2.INTER_AREA)
+        if cls is not None:
+            cls = cls[f // 2::f, f // 2::f][:img.shape[0], :img.shape[1]]
     h, w = img.shape[:2]
-    mpp = (lon_e - lon_w) * 111320 * cos0 / w
+    mpp = mpp0 * f
     ym_n, ym_s = merc_y(lat_n), merc_y(lat_s)
     lons = lon_w + (np.arange(w) + 0.5) / w * (lon_e - lon_w)
-    lats = np.array([inv_merc(ym_n + (y + 0.5) / h * (ym_s - ym_n)) for y in range(h)])
-    dx = (lons - lon0) * 111320 * cos0
-    dy = (lats - lat0) * 110574
-    inside = (dy[:, None] ** 2 + dx[None, :] ** 2) <= radius_m ** 2
+    yy = ym_n + (np.arange(h) + 0.5) / h * (ym_s - ym_n)
+    lats = np.degrees(2 * np.arctan(np.exp(yy)) - np.pi / 2)
+    inside = (((lats - lat0) * 110574)[:, None] ** 2 + (((lons - lon0) * 111320 * cos0)[None, :]) ** 2) <= radius_m ** 2
+    if not inside.any():
+        return None
     owned = np.ones((h, w), bool)
-    for fx0, fy0, fx1, fy1 in excl:   # footprint parts another texture owns
+    for fx0, fy0, fx1, fy1 in excl:       # footprint parts another texture owns
         owned[int(round(fy0 * h)):int(round(fy1 * h)), int(round(fx0 * w)):int(round(fx1 * w))] = False
     L = cv2.cvtColor(img.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
     sparse = np.zeros((h, w), bool)
@@ -571,39 +628,61 @@ for key, path, bbox, zl, excl in sources:
         grass = cv2.morphologyEx((cls == RANGELAND).astype(np.uint8), cv2.MORPH_OPEN,
                                  np.ones((3, 3), np.uint8)).astype(bool)
     if PAVEMENT:
-        # Off the pavement before smoothing, so concrete never tints the
-        # grass colour field either.
+        # Off the pavement before the colour field, so concrete never tints it.
         grass &= ~pavement_mask(PAVEMENT, bbox, h, w, mpp)
     if ROADS:
         grass &= ~road_mask(ROADS, bbox, h, w)
-    S = smooth_masked(L, grass, args.sigma_m / mpp)   # smooth before the cuts: no edge bias
     sel = grass & inside & owned
-    paste(mosaic_img, img, bbox, None, keep_mask=owned)
-    paste(mosaic_excl, (inside & ~grass).astype(np.uint8), bbox, None, keep_mask=owned)
-    tex.append(dict(key=key, zl=zl, bbox=bbox, mpp=mpp, h=h, w=w, ym=(ym_n, ym_s), climate=climate,
-                    sel=np.packbits(sel), S_sel=S[sel], owned=np.packbits(owned),
-                    sparse=np.packbits(sparse & sel)))
-    print(f"{key} ZL{zl} {climate} grass in circle {sel.sum() * mpp * mpp / 1e6:.3f} km2"
-          f" (sparse {(sparse & sel).sum() * mpp * mpp / 1e6:.3f})", flush=True)
-    del img, L, S, cls
+
+    # Coarse colour field: grass-weighted block means, then a normalised
+    # Gaussian over grass only (smoothed before the circle/ownership cuts, so
+    # no edge bias).
+    c = max(1, int(round(args.coarse_m / mpp)))
+    hc, wc = -(-h // c), -(-w // c)
+    gm = grass.astype(np.float32)
+    lsum = block_sum(L * gm[..., None], c, hc, wc)
+    wsum = block_sum(gm, c, hc, wc)
+    sig = args.sigma_m / (mpp * c)
+    wb = cv2.GaussianBlur(wsum, (0, 0), sig)
+    S_c = np.stack([cv2.GaussianBlur(lsum[..., i], (0, 0), sig) for i in range(3)], -1) / np.maximum(wb, 1e-6)[..., None]
+    sel_c = block_sum(sel.astype(np.uint8), c, hc, wc) > 0
+    prev = cv2.resize(img, (wc, hc), interpolation=cv2.INTER_AREA)
+    excl_c = block_sum((inside & ~grass).astype(np.float32), c, hc, wc) > 0.5 * c * c
+    owned_c = block_sum(owned.astype(np.uint8), c, hc, wc) > 0
+    out = dict(key=key, zl=zl, bbox=bbox, mpp=mpp, h=h, w=w, c=c, hc=hc, wc=wc, ym=(ym_n, ym_s),
+               climate=climate, sel=np.packbits(sel), sparse=np.packbits(sparse & sel),
+               S_c=S_c.astype(np.float32), sel_c=sel_c, prev=prev, excl_c=excl_c, owned_c=owned_c,
+               grass_km2=float(sel.sum()) * mpp * mpp / 1e6,
+               sparse_km2=float((sparse & sel).sum()) * mpp * mpp / 1e6)
+    print(f"{key} ZL{zl} {climate} /{f} {w}x{h} coarse {wc}x{hc}: grass {out['grass_km2']:.3f} km2"
+          f" (sparse {out['sparse_km2']:.3f})  {time.time() - t0:.1f}s", flush=True)
+    return out
 
 
 def unpack(t, name):
     return np.unpackbits(t[name])[:t["h"] * t["w"]].reshape(t["h"], t["w"]).astype(bool)
 
 
+WORKERS = args.workers or min(8, os.cpu_count() or 4)
+with CF.ThreadPoolExecutor(WORKERS) as ex:
+    tex = [t for t in ex.map(pass1, sources) if t is not None]
+T_PASS1 = time.time()
+for t in tex:                              # mosaic preview, low ZL first so higher ZL paints over
+    paste(mosaic_img, t["prev"], t["bbox"], None, keep_mask=t["owned_c"])
+    paste(mosaic_excl, t["excl_c"].astype(np.uint8), t["bbox"], None, keep_mask=t["owned_c"])
+
 # ── shared palette ───────────────────────────────────────────────────────────
-pool = np.concatenate([t["S_sel"] for t in tex])
+pool = np.concatenate([t["S_c"][t["sel_c"]] for t in tex])
 rng = np.random.default_rng(0)
 samp = pool[rng.choice(len(pool), min(300000, len(pool)), replace=False)].astype(np.float32)
 cv2.setRNGSeed(0)
 _, _, centres = cv2.kmeans(samp, args.k, None,
                            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.05),
                            3, cv2.KMEANS_PP_CENTERS)
-# Colour mode assumes grass everywhere it plants: no palette-level veto.
 # Colour and fused modes decide where grass grows before the palette: no colour veto.
 keep = list(range(args.k)) if args.mask in ("colour", "fused") else \
-    [k for k, c in enumerate(centres) if is_grass_colour(*c)]
+    [k for k, cc in enumerate(centres) if is_grass_colour(*cc)]
+KEEP = set(keep)
 
 pack = os.path.join(args.out, PACK_NAME)
 if os.path.isdir(pack):
@@ -615,49 +694,72 @@ for k in keep:
     build_texture(centres[k], os.path.join(gdir, f"c{k:02d}.png"))
     write_for(os.path.join(gdir, f"c{k:02d}.for"), f"c{k:02d}.png", k)
 
-# ── per texture: labels -> polygons ──────────────────────────────────────────
-tiles, report = {}, []
-for t in tex:
+
+# ── per texture, pass 2: labels -> polygons ──────────────────────────────────
+def pass2(t):
+    sel_c = t["sel_c"]
+    lbl_c = np.full(sel_c.shape, -1, np.int32)
+    lbl_c[sel_c] = assign(t["S_c"][sel_c], centres)
+    win = int(round(args.win_m / (t["mpp"] * t["c"])))
+    if win >= 2:
+        lbl_c = mode_filter(lbl_c, sel_c, args.k, win | 1)
+    c, h, w = t["c"], t["h"], t["w"]
     sel = unpack(t, "sel")
-    lbl = np.full(sel.shape, -1, np.int32)
-    lbl[sel] = assign(t["S_sel"], centres)
-    win = max(3, int(round(args.win_m / t["mpp"])) | 1)
-    lbl = mode_filter(lbl, sel, args.k, win)
-    lat_s, lon_w, lat_n, lon_e = t["bbox"]; ym_n, ym_s = t["ym"]; h, w = t["h"], t["w"]
-    min_px = args.min_m2 / t["mpp"] ** 2
-
-    def to_ll(pt):
-        return (lon_w + float(pt[0]) / w * (lon_e - lon_w),
-                inv_merc(ym_n + float(pt[1]) / h * (ym_s - ym_n)))
-
-    tile = (math.floor(lat_s), math.floor(lon_w))
-    polys = []
     sparse = unpack(t, "sparse")
+    lbl = np.repeat(np.repeat(lbl_c, c, 0), c, 1)[:h, :w]
+    lat_s, lon_w, lat_n, lon_e = t["bbox"]; ym_n, ym_s = t["ym"]
+    min_px = args.min_m2 / t["mpp"] ** 2
+    eps = max(0.5, args.simplify_m / t["mpp"])   # outline simplification
     sparse_den = max(1, min(255, int(round(args.sparse_density * 255))))
-    for k, (den, part) in ((k, dp) for k in keep for dp in ((255, ~sparse), (sparse_den, sparse))):
-        m = ((lbl == k) & part).astype(np.uint8)
-        if not m.any():
+    xs_scale, ys_span = (lon_e - lon_w) / w, (ym_s - ym_n) / h
+
+    def to_ll(r):
+        p = r.reshape(-1, 2).astype(np.float64)
+        lo = lon_w + p[:, 0] * xs_scale
+        la = np.degrees(2 * np.arctan(np.exp(ym_n + p[:, 1] * ys_span)) - np.pi / 2)
+        return list(zip(lo.tolist(), la.tolist()))
+
+    polys = []
+    for k in np.unique(lbl_c[lbl_c >= 0]).tolist():
+        if k not in KEEP:
             continue
-        cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        for j, c in enumerate(cnts):
-            if hier[0][j][3] >= 0 or cv2.contourArea(c) < min_px:
+        ys, xs = np.nonzero(lbl_c == k)            # coarse bbox -> crop the fine grid
+        y0, y1 = ys.min() * c, min(h, (ys.max() + 1) * c)
+        x0, x1 = xs.min() * c, min(w, (xs.max() + 1) * c)
+        lk = (lbl[y0:y1, x0:x1] == k) & sel[y0:y1, x0:x1]
+        sp = sparse[y0:y1, x0:x1]
+        for den, part in ((255, lk & ~sp), (sparse_den, lk & sp)):
+            if not part.any():
                 continue
-            rings = [cv2.approxPolyDP(c, 2.0, True)]
-            ch = hier[0][j][2]
-            while ch >= 0:
-                if cv2.contourArea(cnts[ch]) >= min_px:
-                    rings.append(cv2.approxPolyDP(cnts[ch], 2.0, True))
-                ch = hier[0][ch][0]
-            rings = [[to_ll(p[0]) for p in r] for r in rings if len(r) >= 3]
-            if rings:
-                polys.append((f"grass/{args.name}/c{k:02d}.for", rings, den))
+            cnts, hier = cv2.findContours(part.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE,
+                                          offset=(int(x0), int(y0)))
+            for j, cn in enumerate(cnts):
+                if hier[0][j][3] >= 0 or cv2.contourArea(cn) < min_px:
+                    continue
+                rings = [cv2.approxPolyDP(cn, eps, True)]
+                ch = hier[0][j][2]
+                while ch >= 0:
+                    if cv2.contourArea(cnts[ch]) >= min_px:
+                        rings.append(cv2.approxPolyDP(cnts[ch], eps, True))
+                    ch = hier[0][ch][0]
+                rings = [to_ll(r) for r in rings if len(r) >= 3]
+                if rings:
+                    polys.append((f"grass/{args.name}/c{k:02d}.for", rings, den))
+    planted = np.where(np.isin(lbl_c, keep) & sel_c, lbl_c, -1).astype(np.int16)
+    rep = {"texture": t["key"], "zl": t["zl"], "climate": t["climate"], "polygons": len(polys),
+           "sparse_km2": round(t["sparse_km2"], 3), "grass_km2_in_circle": round(t["grass_km2"], 3)}
+    return (math.floor(lat_s), math.floor(lon_w)), polys, planted, rep
+
+
+tiles, report = {}, []
+with CF.ThreadPoolExecutor(WORKERS) as ex:
+    results = list(ex.map(pass2, tex))
+for t, (tile, polys, planted, rep) in zip(tex, results):
     tiles.setdefault(tile, []).extend(polys)
-    planted = np.isin(lbl, keep)
-    paste(mosaic_lbl, np.where(planted, lbl, -1).astype(np.int16), t["bbox"], None,
-          keep_mask=unpack(t, "owned"))
-    report.append({"texture": t["key"], "zl": t["zl"], "climate": t["climate"], "polygons": len(polys),
-                   "sparse_km2": round(float(sparse.sum()) * t["mpp"] ** 2 / 1e6, 3),
-                   "grass_km2_in_circle": round(float(sel.sum()) * t["mpp"] ** 2 / 1e6, 3)})
+    paste(mosaic_lbl, planted, t["bbox"], None, keep_mask=t["owned_c"])
+    report.append(rep)
+T_PASS2 = time.time()
+print(f"timing: pass1 {T_PASS1 - T_START:.1f}s, palette+pass2 {T_PASS2 - T_PASS1:.1f}s, workers {WORKERS}", flush=True)
 
 # Mosaic preview: ortho | ortho with planted grass in its palette colour, circle drawn.
 rgbc = lab2rgb(centres)
