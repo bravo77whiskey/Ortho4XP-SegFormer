@@ -33,6 +33,13 @@ _DDS_MAGIC = b"DDS "
 _DDS_FOURCC_BLOCK_BYTES = {"DXT1": 8, "DXT5": 16}
 _ORTHO_TEXTURE_SIZE = 4096
 
+# terrain_decal -> DECAL_LIB path.  o4xp is built and installed by
+# scripts/asset_pipeline/decals/build_decals.py (O4XP_Decal_Library).
+TERRAIN_DECALS = {
+    "o4xp": "o4xp/decals/ortho_detail.dcl",
+    "xplane": "lib/g10/decals/maquify_2_green_key.dcl",
+}
+
 ################################################################################
 def _dds_payload_size(width, height, block_bytes, mipmap_count):
     payload_size = 0
@@ -475,7 +482,7 @@ def create_terrain_file(
         # Should we use decals on ocean floor ? 
         #if (not tri_type) and (tile.use_decal_on_terrain):
         if (tri_type != 1) and (tile.use_decal_on_terrain):
-            f.write("DECAL_LIB lib/g10/decals/maquify_2_green_key.dcl\n")
+            f.write("DECAL_LIB " + TERRAIN_DECALS[tile.terrain_decal] + "\n")
 
         if tri_type in (1, 2):
             f.write("WET\n")

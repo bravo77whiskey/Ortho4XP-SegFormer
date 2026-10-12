@@ -349,7 +349,13 @@ cfg_tile_vars = {
     "use_decal_on_terrain": {
         "type": bool,
         "default": False,
-        "hint": "Terrain files for all but water triangles will contain the maquify_1_green_key.dcl decal directive. The effect is noticeable at very low altitude and helps to overcome the orthophoto blur at such levels. Can be slightly distracting at higher altitude.",
+        "hint": "Terrain files for all but water triangles will contain a detail decal directive (see terrain_decal). The effect is noticeable at very low altitude and helps to overcome the orthophoto blur at such levels. Can be slightly distracting at higher altitude.",
+    },
+    "terrain_decal": {
+        "type": str,
+        "default": "o4xp",
+        "values": ["o4xp", "xplane"],
+        "hint": "Decal used by use_decal_on_terrain. xplane is X-Plane's maquify_2_green_key.dcl, one 25 m texture whose repeat shows as a grid over fields. o4xp is the same shrub/dirt detail re-synthesised into two non-repeating layers (100 m and 161.8 m) so no grid forms; it needs the O4XP_Decal_Library scenery pack installed (scripts/asset_pipeline/decals).",
     },
     # Vegetation overlay (src/scripts/generate_veg_overlay.py)
     "veg_density": {
@@ -775,6 +781,7 @@ list_dsf_vars = [
     "normal_map_strength",
     "terrain_casts_shadows",
     "use_decal_on_terrain",
+    "terrain_decal",
 ]
 
 list_other_vars = ["custom_dem", "fill_nodata"]
