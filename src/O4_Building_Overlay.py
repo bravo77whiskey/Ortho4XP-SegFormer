@@ -8615,6 +8615,11 @@ class _BuildingOverlayRun:
         # had to mop up. Computed from the pre-filter kept set so debug/benchmark
         # file filters see the same per-texture behaviour as a full production run.
         _source_files, self._source_mode, self._orthophoto_dir = self._collect_source_files()
+        if self._source_mode == 'dds':
+            _stale, _n_stale = SEGFORMER.stale_dds_caches(self.tex_dir, _source_files, self._dds_cache_paths)
+            if _n_stale:
+                self._remove_cache_files(_stale)
+                print(f"Dropped the cached results of {_n_stale} texture(s) rebuilt since they were cached.")
         self.files, self._covered_fracs_by_file, _selection_report = TEXSEL.select_textures(
             _source_files, self.tex_dir, self.lat, self.lon
         )

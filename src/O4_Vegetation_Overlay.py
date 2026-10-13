@@ -1801,6 +1801,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     # texture instead, so they are blanked out of this one's mask; otherwise
     # the forests there are emitted twice (double density).
     _source_files, _source_mode, _orthophoto_dir = _collect_source_files()
+    if _source_mode == 'dds':
+        _stale, _n_stale = SEGFORMER.stale_dds_caches(tex_dir, _source_files, _dds_cache_paths)
+        if _n_stale:
+            _remove_cache_files(_stale)
+            print(f"Dropped the cached results of {_n_stale} texture(s) rebuilt since they were cached.")
     files, _covered_fracs_by_file, _selection_report = TEXSEL.select_textures(
         _source_files, tex_dir, lat, lon
     )

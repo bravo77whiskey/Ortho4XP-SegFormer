@@ -226,6 +226,30 @@ def orthophoto_tile_dir_for_tex_dir(tex_dir, lat, lon):
     )
 
 
+def stale_dds_caches(tex_dir, names, cache_paths):
+    """Cache files of textures whose DDS was rebuilt after they were cached.
+
+    The per-texture caches are keyed by texture name and settings, not by the
+    pixels, so a rebuilt DDS (colour correction, a different provider, cloud
+    fill) would otherwise be overlaid from detections on the old imagery.
+    Returns (paths to remove, number of textures concerned).
+    """
+    out, n = [], 0
+    for name in names:
+        try:
+            built = os.stat(os.path.join(tex_dir, name)).st_mtime_ns
+        except OSError:
+            continue
+        paths = [p for p in cache_paths(name) if os.path.exists(p)]
+        try:
+            if any(os.stat(p).st_mtime_ns < built for p in paths):
+                out.extend(paths)
+                n += 1
+        except OSError:
+            continue
+    return out, n
+
+
 def collect_source_texture_files(tex_dir, lat, lon):
     """
     Return source texture names for overlay inference.
