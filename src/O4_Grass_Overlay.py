@@ -300,7 +300,7 @@ def airport_zone(airports, bbox, hc, wc, mpp_c, buffer_m):
         else:
             c = _to_px(np.array([a.lon]), np.array([a.lat]), bbox, hc, wc)[0] + m
             cv2.circle(seed, (int(c[0]), int(c[1])), int(round(a.reach_m / mpp_c)), 1, -1)
-    if not hit:
+    if not hit or not seed.any():
         return np.zeros((hc, wc), bool)
     dist = cv2.distanceTransform((1 - seed).astype(np.uint8), cv2.DIST_L2, 5) * mpp_c
     return (dist <= buffer_m)[m:m + hc, m:m + wc]
