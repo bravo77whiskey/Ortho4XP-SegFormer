@@ -19,6 +19,7 @@ import O4_Geo_Utils as GEO
 import O4_Mask_Utils as MASK
 import O4_Mesh_Utils as MESH
 import O4_Overlay_Utils as OVL
+import O4_Terrain_Materials as TMAT
 import O4_UI_Utils as UI
 
 quad_init_level = 3
@@ -383,7 +384,7 @@ def zone_list_to_ortho_dico(tile):
     if tile.cover_airports_with_highres == "Existing":
         # what we find in the texture folder of the existing tile
         for f in os.listdir(os.path.join(tile.build_dir, "textures")):
-            if f[-4:] != ".dds":
+            if f[-4:] != ".dds" or TMAT.is_map_name(f):
                 continue
             items = f.split("_")
             (til_y_text, til_x_text) = [int(x) for x in items[:2]]
@@ -453,6 +454,13 @@ def create_terrain_file(
         )
 
         f.write("BASE_TEX_NOWRAP ../textures/" + texture_file_name + "\n")
+
+        # XP12 material map (gloss, F0, micro-relief), land terrain only.
+        # Step 3 makes the map itself (TMAT.finalize_tile).
+        if (not tri_type) and (not is_overlay) and (not use_test_texture) \
+                and TMAT.enabled(tile):
+            for line in TMAT.ter_lines(texture_file_name):
+                f.write(line + "\n")
 
         if tri_type in (1, 2) and (not is_overlay):  # XP12 water
             #pass

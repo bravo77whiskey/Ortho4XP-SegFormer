@@ -236,7 +236,10 @@ def reconstruct_zone_list(
     cfg = parse_cfg(cfg_path)
     textures_dir = tile_dir / "textures"
     if textures_dir.is_dir():
-        texture_count = len(list(textures_dir.glob("*.dds")))
+        texture_count = len(
+            # *_mat.dds are XP12 material maps (O4_Terrain_Materials), not textures
+            [path for path in textures_dir.glob("*.dds") if not path.name.lower().endswith("_mat.dds")]
+        )
         mask_count = len(
             [path for path in textures_dir.glob("*.png") if MASK_RE.match(path.name)]
         )

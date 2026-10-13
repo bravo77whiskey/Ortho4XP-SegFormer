@@ -18,6 +18,7 @@ import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
 import O4_Mask_Utils as MASK
 import O4_Mesh_Utils as MESH
+import O4_Terrain_Materials as TMAT
 import O4_OSM_Utils as OSM
 import O4_UI_Utils as UI
 import O4_Vector_Utils as VECT
@@ -2183,6 +2184,7 @@ def convert_texture(
     erase_tmp_png = False
     erase_tmp_tif = False
     dxt5 = False
+    big_image = None
     masked_texture = False
     if tile.imprint_masks_to_dds and type == "dds":
         masked_texture = os.path.exists(
@@ -2411,11 +2413,13 @@ def convert_texture(
                 os.path.join(FNAMES.Geotiff_dir, out_file_name),
             ]
     tentative = 0
+    converted = False
     while True:
         if not subprocess.call(
             conv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
             creationflags=_CREATE_NO_WINDOW
         ):
+            converted = True
             break
         tentative += 1
         if tentative == 10:
@@ -2432,6 +2436,15 @@ def convert_texture(
             os.path.join(tile.build_dir, "textures", out_file_name),
         )
         time.sleep(1)
+    if converted and type == "dds" and TMAT.enabled(tile):
+        # XP12 material map from the same pixels (in memory when we have them).
+        TMAT.write_map(
+            big_image if big_image is not None else file_to_convert,
+            os.path.join(tile.build_dir, "textures", TMAT.map_file_name(out_file_name)),
+            zoomlevel,
+            TMAT.relief_of(tile),
+            dds_convert_cmd,
+        )
     if erase_tmp_png:
         try:
             os.remove(os.path.join(FNAMES.resource_path("tmp"), png_file_name))

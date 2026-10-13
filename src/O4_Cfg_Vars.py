@@ -367,6 +367,16 @@ cfg_tile_vars = {
         "values": ["o4xp", "xplane"],
         "hint": "Decal used by use_decal_on_terrain. xplane is X-Plane's maquify_2_green_key.dcl, one 25 m texture whose repeat shows as a grid over fields. o4xp is the same shrub/dirt detail re-synthesised into two non-repeating layers (100 m and 161.8 m) so no grid forms; it needs the O4XP_Decal_Library scenery pack installed (scripts/asset_pipeline/decals).",
     },
+    "terrain_materials": {
+        "type": bool,
+        "default": True,
+        "hint": "X-Plane 12 material map for every land texture: a <texture>_mat.dds next to it (gloss, base reflectance and a faint micro-relief normal, estimated from the orthophoto colours: vegetation stays matte, asphalt, concrete and roofs get a little sheen) referenced from the texture's .ter file. Textures kept from an earlier build get theirs on the next Step 3. Costs about 2 s per ZL17+ texture (5.6 MB map) and under 1 s per ZL16 texture (1.4 MB map).",
+    },
+    "terrain_materials_relief": {
+        "type": float,
+        "default": 0.15,
+        "hint": "Strength of the micro-relief in the terrain material maps (terrain_materials), taken from the fine detail of the orthophoto: 0.15 tilts the surface by about 5 degrees on average, 0 keeps it flat. Changing it remakes the maps on the next Step 3.",
+    },
     # Vegetation overlay (src/scripts/generate_veg_overlay.py)
     "veg_density": {
         "type": float,
@@ -794,6 +804,8 @@ list_dsf_vars = [
     "terrain_casts_shadows",
     "use_decal_on_terrain",
     "terrain_decal",
+    "terrain_materials",
+    "terrain_materials_relief",
 ]
 
 list_other_vars = ["custom_dem", "fill_nodata"]

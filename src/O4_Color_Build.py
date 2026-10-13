@@ -23,6 +23,7 @@ import time
 
 import O4_File_Names as FNAMES
 import O4_Imagery_Utils as IMG
+import O4_Terrain_Materials as TMAT
 import O4_UI_Utils as UI
 
 REF_PROVIDER = "EOX"
@@ -225,6 +226,7 @@ def run(tile, texture_attrs, workers=4):
         res = _run_worker({"phase": "apply", "state_dir": work, "groups": jobs, "workers": workers,
                            "nvcompress": IMG.dds_convert_cmd, "tmp_dir": work,
                            "mark": [MARK.decode("ascii"), MARK_VERSION, _mark_flags(tile)],
+                           "materials": ({"relief": TMAT.relief_of(tile)} if TMAT.enabled(tile) else None),
                            "result": os.path.join(work, "apply.json")}, os.path.join(work, "apply_job.json"))
         if res is None:
             if not UI.red_flag:

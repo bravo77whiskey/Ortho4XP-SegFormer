@@ -974,6 +974,20 @@ def _convert(rgb, out_dds, mask_path, nvcompress, tmp_dir, mark=None):
     return ok
 
 
+def _material_map(rgb, out_dds, zl, job):
+    """XP12 material map from the corrected pixels (O4_Terrain_Materials).
+
+    Best effort: Step 3 makes any map missing here from the DDS afterwards.
+    """
+    try:
+        import O4_Terrain_Materials as TMAT
+        TMAT.write_map(rgb, os.path.join(os.path.dirname(out_dds),
+                                         TMAT.map_file_name(os.path.basename(out_dds))),
+                       zl, float(job["materials"]["relief"]), job["nvcompress"])
+    except Exception as e:
+        _log(f"material map for {os.path.basename(out_dds)} failed ({e})")
+
+
 def job_apply(job):
     """Correct (and fill) every texture and convert it to DDS."""
     done = []
@@ -1025,6 +1039,8 @@ def _apply_group(job, gj, workers):
                 res = (res.float() * (1 - wf) + cor_a.float() * wf + 0.5).to(torch.uint8)
             out = _np(res.permute(1, 2, 0))
         ok = _convert(out, out_dds, mask, job["nvcompress"], job["tmp_dir"], job.get("mark"))
+        if ok and job.get("materials"):
+            _material_map(out, out_dds, gj["zl"], job)
         return [tx, ty, gj["zl"], gj["provider"]] if ok else None
 
     t0 = time.time()

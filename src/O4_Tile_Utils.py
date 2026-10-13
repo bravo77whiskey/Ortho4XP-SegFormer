@@ -18,6 +18,7 @@ import O4_Overlay_Utils as OVL
 import O4_Overlay_Pipeline as PIPELINE
 import O4_Scenery_Links as SLINK
 import O4_Build_State as BSTATE
+import O4_Terrain_Materials as TMAT
 from O4_Parallel_Utils import parallel_launch, parallel_join
 
 max_download_slots = 1
@@ -153,6 +154,44 @@ def download_textures(
     return 1
 
 ################################################################################
+def _finalize_terrain_materials(tile):
+    """Make the land .ter files and their XP12 material maps agree.
+
+    Converted textures got their map during the conversion; this makes the
+    maps of the textures Step 3 kept (existing tiles), drops the lines of any
+    .ter whose map cannot be made, and deletes maps no .ter uses any more.
+    After a Stop it only drops the lines of the .ter files without a map, as
+    the DSF is activated all the same.
+    """
+    try:
+        if not TMAT.enabled(tile):
+            n = 0 if tile.grouped else TMAT.prune_tile(tile.build_dir)
+            if n:
+                UI.vprint(1, f"   Terrain material maps: removed {n} (terrain_materials is off).")
+            return
+        timer = time.time()
+        stats = TMAT.finalize_tile(
+            tile.build_dir,
+            TMAT.relief_of(tile),
+            IMG.dds_convert_cmd,
+            workers=max_convert_slots,
+            prune=not tile.grouped and not UI.red_flag,
+            make=not UI.red_flag,
+            should_stop=lambda: UI.red_flag,
+            log=lambda msg: UI.vprint(1, msg),
+        )
+        UI.vprint(
+            1,
+            f" *Terrain material maps: {stats['made']} made, {stats['kept']} up to date"
+            + (f", {stats['removed']} .ter left without one" if stats["removed"] else "")
+            + (f", {stats['failed']} could not be remade" if stats["failed"] else "")
+            + (f", {stats['pruned']} unused removed" if stats["pruned"] else "")
+            + f" ({time.time() - timer:.0f}s).",
+        )
+    except Exception as e:
+        UI.lvprint(1, f"WARNING: terrain material maps failed ({e}).")
+
+
 def build_tile(tile):
     if UI.is_working:
         return 0
@@ -304,6 +343,7 @@ def build_tile(tile):
                 UI.vprint(1, "DDS conversion process interrupted.")
             elif dico_conv_progress["done"] >= 1:
                 UI.vprint(1, " *DDS conversion of textures completed.")
+    _finalize_terrain_materials(tile)
     UI.vprint(1, " *Activating DSF file.")
     dsf_file_name = os.path.join(
         tile.build_dir,
@@ -691,7 +731,7 @@ def remove_unwanted_textures(tile):
         else:
             texture_list.append(f.replace(".ter", ".dds"))
     for f in os.listdir(os.path.join(tile.build_dir, "textures")):
-        if f[-4:] != ".dds":
+        if f[-4:] != ".dds" or TMAT.is_map_name(f):  # maps: TMAT.prune_tile
             continue
         if f not in texture_list:
             print("Removing obsolete texture", f)
