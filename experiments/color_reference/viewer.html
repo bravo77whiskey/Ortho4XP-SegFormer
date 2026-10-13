@@ -1,0 +1,79 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Colour Review</title>
+<style>
+:root{--bg:#1b1c1e;--panel:#26282b;--fg:#e6e6e6;--mute:#9aa0a6;--acc:#7cb7ff}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif;overflow:hidden}
+#bar{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;gap:10px;align-items:center;padding:8px 12px;background:var(--panel);flex-wrap:wrap}
+select,button{background:#33363a;color:var(--fg);border:1px solid #44484d;border-radius:4px;padding:4px 8px;font:inherit}
+button.on{border-color:var(--acc);color:var(--acc)}
+#state{font-weight:600;min-width:150px}
+#hint{color:var(--mute);margin-left:auto}
+#view{position:absolute;inset:44px 0 0 0;overflow:hidden;cursor:grab}
+#stage{position:absolute;left:0;top:0;transform-origin:0 0}
+#stage img{position:absolute;image-rendering:auto;user-select:none;-webkit-user-drag:none}
+.layer{position:absolute;left:0;top:0}
+#label{position:fixed;bottom:8px;left:12px;color:var(--mute)}
+</style></head><body>
+<div id="bar">
+ <select id="loc"></select><select id="prov"></select><select id="run"></select>
+ <button id="bRaw">Raw</button><button id="bCor">Corrected</button><button id="bRef">Reference</button>
+ <span id="state"></span>
+ <span id="hint">Space: raw ↔ corrected · R: reference · wheel: zoom · drag: pan · 1: 1:1 · F: fit</span>
+</div>
+<div id="view"><div id="stage"></div></div>
+<div id="label"></div>
+<script src="viewer_index.js"></script>
+<script>
+const IDX = window.COLOR_INDEX, $ = id => document.getElementById(id);
+const stage = $("stage"), view = $("view");
+let L, mode = "cor", z = 0.1, px = 0, py = 0, layers = {};
+function opt(sel, vals, lab) { sel.innerHTML = vals.map(v => `<option value="${v}">${lab ? lab(v) : v}</option>`).join(""); }
+opt($("loc"), IDX.map(l => l.key), k => IDX.find(l => l.key == k).label);
+function store(k, v) { try { localStorage.setItem("colrev_" + k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem("colrev_" + k); } catch (e) { return null; } }
+function build() {
+  L = IDX.find(l => l.key == $("loc").value);
+  const provs = Object.keys(L.providers);
+  if (!provs.includes($("prov").value)) opt($("prov"), provs);
+  const runs = L.runs.slice().reverse();
+  const keep = $("run").value; opt($("run"), runs); if (runs.includes(keep)) $("run").value = keep;
+  const pv = $("prov").value, run = $("run").value, T = L.providers[pv];
+  stage.innerHTML = ""; layers = {};
+  for (const m of ["raw", "cor", "ref"]) { const d = document.createElement("div"); d.className = "layer"; stage.appendChild(d); layers[m] = d; }
+  for (const t of T) {
+    const a = new Image(); a.src = t.raw; a.style.left = t.i * 4096 + "px"; a.style.top = t.j * 4096 + "px"; a.width = a.height = 4096; layers.raw.appendChild(a);
+    const b = new Image(); b.src = `runs/${run}/${L.key}/${pv}/${t.name}`; b.style.left = a.style.left; b.style.top = a.style.top; b.width = b.height = 4096; layers.cor.appendChild(b);
+  }
+  const r = new Image(); r.src = L.ref; r.style.left = -L.refMargin + "px"; r.style.top = -L.refMargin + "px";
+  r.onload = () => { r.width = r.naturalWidth * L.refScale; r.height = r.naturalHeight * L.refScale; };
+  layers.ref.appendChild(r);
+  store("loc", L.key); fit(); show();
+}
+function show() {
+  for (const m in layers) layers[m].style.visibility = m == mode ? "visible" : "hidden";
+  $("state").textContent = { raw: "RAW " + $("prov").value, cor: "CORRECTED " + $("run").value, ref: "REFERENCE (S2 cloudless)" }[mode];
+  for (const [b, m] of [["bRaw", "raw"], ["bCor", "cor"], ["bRef", "ref"]]) $(b).classList.toggle("on", m == mode);
+}
+function apply() { stage.style.transform = `translate(${px}px,${py}px) scale(${z})`; $("label").textContent = `zoom ${(z * 100).toFixed(1)}%`; }
+let fitted = false;
+function fit() { const s = 4096 * L.n, w = view.clientWidth, h = view.clientHeight;
+  fitted = w > 0 && h > 0; if (!fitted) return; z = Math.min(w, h) / s; px = (w - s * z) / 2; py = (h - s * z) / 2; apply(); }
+view.addEventListener("wheel", e => { e.preventDefault(); const f = Math.exp(-e.deltaY * 0.0015), r = view.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  const nz = Math.min(4, Math.max(0.02, z * f)); px = mx - (mx - px) * nz / z; py = my - (my - py) * nz / z; z = nz; apply(); }, { passive: false });
+let drag = null;
+view.addEventListener("mousedown", e => { drag = [e.clientX - px, e.clientY - py]; view.style.cursor = "grabbing"; });
+addEventListener("mouseup", () => { drag = null; view.style.cursor = "grab"; });
+addEventListener("mousemove", e => { if (drag) { px = e.clientX - drag[0]; py = e.clientY - drag[1]; apply(); } });
+addEventListener("keydown", e => {
+  if (e.target.tagName == "SELECT") return;
+  if (e.code == "Space") { e.preventDefault(); mode = mode == "cor" ? "raw" : "cor"; show(); }
+  else if (e.key == "r" || e.key == "R") { mode = mode == "ref" ? "cor" : "ref"; show(); }
+  else if (e.key == "1") { const w = view.clientWidth / 2, h = view.clientHeight / 2; px = w - (w - px) / z; py = h - (h - py) / z; z = 1; apply(); }
+  else if (e.key == "f" || e.key == "F") fit();
+});
+new ResizeObserver(() => { if (!fitted) fit(); }).observe(view);
+$("bRaw").onclick = () => { mode = "raw"; show(); }; $("bCor").onclick = () => { mode = "cor"; show(); }; $("bRef").onclick = () => { mode = "ref"; show(); };
+$("loc").onchange = build; $("prov").onchange = build; $("run").onchange = build;
+const saved = load("loc"); $("loc").value = IDX.some(l => l.key == saved) ? saved : "houston";
+build();
+</script></body></html>
