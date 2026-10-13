@@ -1274,6 +1274,8 @@ class Ortho4XP_Config(tk.Toplevel):
             (lat, lon) = self.parent.get_lat_lon()
         except:
             return 0
+        if not self.reference_year_ok("color_reference_year"):
+            return 0
         custom_build_dir = self.parent.custom_build_dir_entry.get()
         build_dir = FNAMES.build_dir(lat, lon, custom_build_dir)
         tile_cfg_file = os.path.join(
@@ -1487,6 +1489,8 @@ class Ortho4XP_Config(tk.Toplevel):
 
     def write_global_cfg(self):
         """Write global configuration settings to Ortho4XP.cfg."""
+        if not self.reference_year_ok(global_prefix + "color_reference_year"):
+            return
         self.apply_changes("global")
         try:
             # Make a copy of the existing global config file
@@ -1579,6 +1583,29 @@ class Ortho4XP_Config(tk.Toplevel):
                 "Could not write application settings to global config: %s", e
             )
         return
+
+    def reference_year_ok(self, var: str) -> bool:
+        """
+        Check a changed Sentinel-2 year against the EOX server before saving.
+
+        :param str var: color_reference_year, or its global_ variant
+        :return: False when the server doesn't have that year (field reverted)
+        """
+        old = globals().get(var, cfg_vars[var]["default"])
+        try:
+            year = int(self.v_[var].get())
+        except ValueError:
+            return True  # apply_changes resets wrong types and reports them
+        if year == old:
+            return True
+        import O4_Color_Build as CCB
+        ok, msg = CCB.check_year(year)
+        if ok is False:
+            self.v_[var].set(str(old))
+            self.popup("ERROR", msg + f"\n\nNot saved; the year is back to {old}.")
+            return False
+        self.popup("Sentinel-2 year" if ok else "WARNING", msg)
+        return True
 
     def apply_changes(self, tab: str) -> None:
         """

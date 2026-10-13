@@ -308,6 +308,11 @@ cfg_tile_vars = {
         "default": True,
         "hint": "With color_correction: find clouds against the reference and fill them, and any tiles that could not be downloaded, from the other provider (Bing <-> Google), colour-matched so the two blend without a visible join. Downloads the other provider only for the textures that need it.",
     },
+    "color_reference_year": {
+        "type": int,
+        "default": 2025,
+        "hint": "With color_correction: which yearly Sentinel-2 cloudless mosaic (EOX) the imagery is matched against. Years differ in season and haze per place, so if one looks wrong for a tile try another. Saving the config checks the year with the EOX server. Textures corrected against another year are redone on the next build.",
+    },
     "sea_texture_blur": {
         "type": float,
         "default": 0.0,
@@ -793,6 +798,7 @@ list_dsf_vars = [
     "cover_zl",
     "color_correction",
     "color_fill_clouds",
+    "color_reference_year",
     "water_tech",
     "ratio_bathy",
     "ratio_water",

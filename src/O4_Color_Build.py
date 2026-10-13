@@ -17,6 +17,7 @@ conversion, so a failure here never loses a texture.
 """
 import json
 import os
+import re
 import shutil
 import struct
 import time
@@ -26,7 +27,9 @@ import O4_Imagery_Utils as IMG
 import O4_Terrain_Materials as TMAT
 import O4_UI_Utils as UI
 
-REF_PROVIDER = "EOX"
+REF_PROVIDER = "EOX"      # base layer; the year comes from color_reference_year
+REF_CAPABILITIES = "https://tiles.maps.eox.at/wmts/1.0.0/WMTSCapabilities.xml"
+REF_DEFAULT_YEAR = 2025
 REF_ZL = 14
 MARGIN_TILES = 1
 FILL_PROVIDERS = {"BI": "GO2", "GO2": "BI"}
@@ -53,7 +56,58 @@ def enabled(tile):
 
 
 def _mark_flags(tile):
-    return 1 if getattr(tile, "color_fill_clouds", True) else 0
+    # bit 0: cloud fill; bits 16+: Sentinel-2 year, so another year redoes the texture
+    return (_reference_year(tile) << 16) | (1 if getattr(tile, "color_fill_clouds", True) else 0)
+
+
+def _reference_year(tile):
+    return int(getattr(tile, "color_reference_year", REF_DEFAULT_YEAR))
+
+
+_server_years = None
+
+
+def server_years():
+    """Sentinel-2 cloudless years the EOX server publishes, or None when it can't be reached."""
+    global _server_years
+    if _server_years is None:
+        try:
+            r = IMG.requests.get(REF_CAPABILITIES, headers=IMG.request_headers_generic, timeout=30)
+            r.raise_for_status()
+            _server_years = sorted({int(y) for y in re.findall(
+                r"<ows:Identifier>s2cloudless-(\d{4})_3857<", r.text)})
+        except Exception as e:
+            UI.vprint(1, f"   Could not read the Sentinel-2 years from the EOX server ({e}).")
+            return None
+    return _server_years
+
+
+def check_year(year):
+    """(ok, message) for a Sentinel-2 cloudless year; ok is None when the server can't be reached."""
+    years = server_years()
+    if years is None:
+        return None, f"Could not reach the EOX server to check Sentinel-2 cloudless {year}."
+    if year in years:
+        return True, f"Sentinel-2 cloudless {year} is available on the EOX server."
+    return False, (f"Sentinel-2 cloudless {year} is not on the EOX server.\n"
+                   f"Available years: {', '.join(map(str, years))}.")
+
+
+def _reference_provider(tile):
+    """Provider code of the configured yearly mosaic, registered on the fly from EOX.lay.
+
+    The year is in the code so the downloaded reference JPEGs of different
+    years never mix.
+    """
+    year = _reference_year(tile)
+    code = f"{REF_PROVIDER}{year}"
+    if code not in IMG.providers_dict:
+        base = IMG.providers_dict[REF_PROVIDER]
+        prov = dict(base)
+        prov["code"] = code
+        prov["url_template"] = re.sub(r"s2cloudless-\d{4}_", f"s2cloudless-{year}_", base["url_template"])
+        IMG.providers_dict[code] = prov
+    return code
 
 
 def dds_mark(path):
@@ -83,7 +137,9 @@ def rebuild_reason(tile, attrs, dds_path):
     if want and mark is None:
         reason = "not colour-corrected yet"
     elif want and mark != (MARK_VERSION, _mark_flags(tile)):
-        reason = "colour correction settings changed"
+        reason = ("corrected against another Sentinel-2 year"
+                  if mark[0] == MARK_VERSION and mark[1] >> 16 != _reference_year(tile)
+                  else "colour correction settings changed")
     elif not want and mark is not None and getattr(tile, "color_correction", True) is False:
         # Undoing the correction needs the original imagery: normal path.
         return "colour-corrected, but colour correction is off"
@@ -164,13 +220,21 @@ def run(tile, texture_attrs, workers=4):
     os.makedirs(work, exist_ok=True)
     try:
         # --- reference --------------------------------------------------
+        year = _reference_year(tile)
+        ok, msg = check_year(year)
+        if ok is False:
+            UI.lvprint(1, "   Colour correction skipped: " + msg.replace("\n", " ")
+                       + " Set color_reference_year to one of them.")
+            return set()
+        ref_prov = _reference_provider(tile)
+        UI.vprint(1, f"   Reference: Sentinel-2 cloudless {year}.")
         jobs = []
         for (prov, zl), tex in sorted(groups.items()):
             refs = []
             for (rtx, rty) in _reference_textures(zl, tex):
-                if not IMG.build_jpeg_ortho(tile, rtx, rty, REF_ZL, REF_PROVIDER):
+                if not IMG.build_jpeg_ortho(tile, rtx, rty, REF_ZL, ref_prov):
                     raise RuntimeError(f"could not download reference texture {rty}_{rtx}")
-                refs.append([rtx, rty, _jpeg_path(tile, rtx, rty, REF_ZL, REF_PROVIDER)])
+                refs.append([rtx, rty, _jpeg_path(tile, rtx, rty, REF_ZL, ref_prov)])
                 if UI.red_flag:
                     return set()
             alt = FILL_PROVIDERS.get(prov)
