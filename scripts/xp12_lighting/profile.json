@@ -1,0 +1,7 @@
+{
+ "_comment": "Kept XP12 lighting patches (2026-10-13). Apply with: python scripts/xp12_lighting/shader_patch.py profile",
+ "sky": {"gain": 1.22, "saturation": 1.16},
+ "haze": {"amount": 0.7},
+ "adapt": {"darker": 2.0, "brighter": 2.0},
+ "fusion": {"strength": 1.5}
+}

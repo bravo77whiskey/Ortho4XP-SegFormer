@@ -1,0 +1,3 @@
+# H3 milky atmosphere / lifted ambient: multiple-scattering contribution is
+# scaled 1.25x (physically 1.0). Default 1.25.
+scattering/multi_rat   1.0

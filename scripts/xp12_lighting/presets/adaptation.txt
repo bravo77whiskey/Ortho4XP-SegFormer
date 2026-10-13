@@ -1,0 +1,5 @@
+# H5 adaptation feel: eye-adaptation speeds doubled. Units unknown - if
+# transitions get SLOWER instead, the values are time constants; halve instead.
+# Defaults: speed_up 3, speed_down 5.
+exposure/speed_up     6
+exposure/speed_down   10

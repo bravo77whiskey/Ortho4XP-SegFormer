@@ -1,0 +1,4 @@
+# H6 shape under ambient light: stronger exterior SSAO + detail shadows.
+# Defaults: exterior_strength 1, detail_shadow_strength 0.
+ssao/exterior_strength        1.5
+ssao/detail_shadow_strength   0.5

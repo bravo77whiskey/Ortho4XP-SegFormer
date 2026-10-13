@@ -1,0 +1,6 @@
+# H1 flat look: XP's tone curve is a Reinhard-type rational curve with an ASC-CDL
+# step pivoted on mid-grey. CDL power >1 adds midtone contrast without moving
+# mid-grey (exposure unchanged). Default 1.0.
+color_management/sdr/power_red    1.2
+color_management/sdr/power_green  1.2
+color_management/sdr/power_blue   1.2

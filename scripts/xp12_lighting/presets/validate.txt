@@ -1,0 +1,5 @@
+# Mechanism check only: does a settings.txt override reach an art control
+# that settings.txt never referenced before?  Expect the whole image ~1 stop
+# brighter with a visibly warm (red) cast.  Restore right after.
+color_management/sdr/output_gain   2.0
+color_management/sdr/slope_red     1.3

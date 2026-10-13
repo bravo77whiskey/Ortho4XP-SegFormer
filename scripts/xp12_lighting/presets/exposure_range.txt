@@ -1,0 +1,4 @@
+# H2 washed out over bright ground: auto-exposure is capped at EV100 14.8, but
+# sunny-16 puts bright sun at EV 15 and sand/snow at EV 16. A cap below the
+# scene lets bright desert/snow/haze scenes stay ~1 stop overexposed. Default 14.8.
+photometric/ev100_max   16.0

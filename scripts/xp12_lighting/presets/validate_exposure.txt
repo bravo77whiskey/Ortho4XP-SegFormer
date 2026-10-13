@@ -1,0 +1,4 @@
+# Mechanism check 2: exposure bias of 2 stops. Unmistakable if it reaches the
+# engine: the whole frame ~4x brighter or darker (sign convention unknown).
+# Default 0.
+photometric/ev100_bias   2.0
