@@ -55,6 +55,7 @@ OVERLAY_MODULES = [
     "O4_Bounds_Index",
     "O4_Building_Overlay",
     "O4_Climate_Regions",
+    "O4_Color_Correction",
     "O4_DSF_Edit",
     "O4_Footprint_Polygons",
     "O4_Forest_Assets",

@@ -150,12 +150,23 @@ def _queue_texture_rebuild(download_queue, texture_attributes, texture_file_name
     download_queue.put(texture_attributes)
 
 
+def _colour_rebuild_reason(tile, texture_attributes, target_tex):
+    """An existing DDS that does not match the colour correction settings."""
+    import O4_Color_Build as CCB
+    try:
+        return CCB.rebuild_reason(tile, texture_attributes, target_tex)
+    except Exception:
+        return None
+
+
 def _queue_texture_if_needed(download_queue, texture_attributes, target_tex,
                              texture_file_name, expected_dxt5=False,
-                             target_mask=None):
+                             target_mask=None, tile=None):
     rebuild_reason = _texture_rebuild_reason(
         target_tex, expected_dxt5=expected_dxt5, target_mask=target_mask
     )
+    if not rebuild_reason and tile is not None:
+        rebuild_reason = _colour_rebuild_reason(tile, texture_attributes, target_tex)
     if rebuild_reason:
         _queue_texture_rebuild(
             download_queue, texture_attributes, texture_file_name, rebuild_reason
@@ -865,7 +876,7 @@ def build_dsf(tile, download_queue):
                         target_tex,
                         expected_dxt5=tile.imprint_masks_to_dds,
                         target_mask=target_mask,
-                    )
+                    ) or _colour_rebuild_reason(tile, texture_attributes, target_tex)
                     
                     if (rebuild_reason or not tile.imprint_masks_to_dds):
                         mask_im.save(os.path.join(
@@ -1053,6 +1064,7 @@ def build_dsf(tile, download_queue):
                     target_tex,
                     texture_file_name,
                     expected_dxt5=False,
+                    tile=tile,
                 )
                 treated_textures.add(texture_attributes)
             terrain_file_name = create_terrain_file(

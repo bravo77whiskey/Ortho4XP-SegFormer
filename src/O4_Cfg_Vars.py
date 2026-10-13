@@ -298,6 +298,16 @@ cfg_tile_vars = {
         "default": 18,
         "hint": "The zoomlevel with which to cover the airports zone when high_zl_airports is set. Note that if the cover_zl is lower than the zoomlevel which would otherwise be applied on a specific zone, the latter is used.",
     },
+    "color_correction": {
+        "type": bool,
+        "default": True,
+        "hint": "Colour-correct the imagery against the Sentinel-2 cloudless mosaic (EOX, downloaded at ZL14 as a reference): removes washed-out areas, oversaturation and hard-edged patches while keeping each place's real colours, and keeps neighbouring textures, tiles, zoom levels and providers consistent. Needs the overlay .venv (runs on the GPU when available). Conversion of the textures waits until all downloads of the tile are done.",
+    },
+    "color_fill_clouds": {
+        "type": bool,
+        "default": True,
+        "hint": "With color_correction: find clouds against the reference and fill them, and any tiles that could not be downloaded, from the other provider (Bing <-> Google), colour-matched so the two blend without a visible join. Downloads the other provider only for the textures that need it.",
+    },
     "sea_texture_blur": {
         "type": float,
         "default": 0.0,
@@ -771,6 +781,8 @@ list_dsf_vars = [
     "cover_airports_with_highres",
     "cover_extent",
     "cover_zl",
+    "color_correction",
+    "color_fill_clouds",
     "water_tech",
     "ratio_bathy",
     "ratio_water",

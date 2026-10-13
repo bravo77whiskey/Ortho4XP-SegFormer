@@ -9,6 +9,7 @@ import O4_UI_Utils as UI
 import O4_Cfg_Vars as CFGVARS
 import O4_File_Names as FNAMES
 import O4_Imagery_Utils as IMG
+import O4_Color_Build as CCB
 import O4_Vector_Map as VMAP
 import O4_Mesh_Utils as MESH
 import O4_Mask_Utils as MASK
@@ -65,7 +66,8 @@ def download_textures(
             _update_progress_locked()
 
         try:
-            ok = IMG.build_jpeg_ortho(tile, *attrs)
+            # A texture colour-corrected from its existing DDS needs no download.
+            ok = CCB.uses_existing_dds(tile, attrs) or IMG.build_jpeg_ortho(tile, *attrs)
         except Exception as err:
             UI.vprint(2, f"Download failed: {err}")
             ok = 0
@@ -241,11 +243,14 @@ def build_tile(tile):
             producer_done_event,
         ],
     )
+    # Colour correction fits the whole tile before anything is converted, so
+    # the converters wait for the downloads instead of overlapping with them.
+    color_correction = not skip_downloads and not skip_converts and CCB.enabled(tile)
     build_dsf_thread.start()
     if not skip_downloads:
         download_thread.start()
         download_launched = True
-        if not skip_converts:
+        if not skip_converts and not color_correction:
             UI.vprint(
                 1,
                 "-> Opening convert queue and",
@@ -264,6 +269,33 @@ def build_tile(tile):
     producer_done_event.set()
     if download_launched:
         download_thread.join()
+        if color_correction and not UI.red_flag:
+            pending = []
+            while True:
+                try:
+                    pending.append(convert_queue.get_nowait())
+                except queue.Empty:
+                    break
+            # Textures corrected from their existing DDS have no orthophoto for
+            # the normal converter: if the correction failed they keep their DDS.
+            keep_dds = {tuple(item[1:]) for item in pending
+                        if CCB.uses_existing_dds(tile, tuple(item[1:]))}
+            done = CCB.run(tile, [tuple(item[1:]) for item in pending], max_convert_slots)
+            pending = [item for item in pending
+                       if tuple(item[1:]) not in done and tuple(item[1:]) not in keep_dds]
+            if pending and not UI.red_flag:
+                UI.vprint(1, "-> Converting", len(pending), "remaining texture(s) with",
+                          max_convert_slots, "conversion workers.")
+                dico_conv_progress = {"done": 0, "bar": 3}
+                convert_workers = parallel_launch(
+                    IMG.convert_texture,
+                    convert_queue,
+                    max_convert_slots,
+                    progress=dico_conv_progress,
+                )
+                convert_launched = True
+                for item in pending:
+                    convert_queue.put(item)
         if convert_launched:
             for _ in range(max_convert_slots):
                 convert_queue.put("quit")
