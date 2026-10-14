@@ -190,52 +190,100 @@ class AirportTilesTest(unittest.TestCase):
             AZONE.tiles_reached(NEAR_EDGE, {19: 1600.0, 18: 0.0, 17: 0.0}), [(22, 120)]
         )
 
-    def test_prepare_batch_lists_the_airport_and_creates_missing_configs(self):
+    def _prepare(self, tmp, airports, icaos):
+        """Run prepare_airport_batch against a fake X-Plane and Tiles folder."""
         import O4_Config_Utils as CFG
         import O4_File_Names as FNAMES
         import O4_Tile_Utils as TILE
 
+        xp = _xplane(tmp, global_airports=airports)
+        base = str(Path(tmp) / "Tiles") + "/"
+        saved = (TILE._xplane_dir, FNAMES.Overlay_cache_dir, CFG.default_website)
+        TILE._xplane_dir = lambda: xp
+        FNAMES.Overlay_cache_dir = str(Path(tmp) / "cache")
+        CFG.default_website = "BI"
+        try:
+            return TILE.prepare_airport_batch(icaos, base)
+        finally:
+            TILE._xplane_dir, FNAMES.Overlay_cache_dir, CFG.default_website = saved
+
+    def _cfg(self, tmp, lat, lon):
+        import O4_File_Names as FNAMES
+
+        base = str(Path(tmp) / "Tiles") + "/"
+        return Path(FNAMES.build_dir(lat, lon, base)) / (
+            "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg"
+        )
+
+    def _write_cfg(self, tmp, lat, lon, text):
+        cfg = self._cfg(tmp, lat, lon)
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(text, encoding="utf-8")
+        return cfg
+
+    def test_prepare_batch_lists_the_airport_and_creates_missing_configs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            xp = _xplane(tmp, global_airports={"RCKH": NEAR_EDGE})
-            base = str(Path(tmp) / "Tiles") + "/"
-            home_dir = Path(FNAMES.build_dir(22, 120, base))
-            home_dir.mkdir(parents=True)
-            home_cfg = home_dir / "Ortho4XP_+22+120.cfg"
-            home_cfg.write_text(
-                "default_website=GO2\nairport_zone_icaos=RCAY\n", encoding="utf-8"
+            home_cfg = self._write_cfg(
+                tmp, 22, 120, "default_website=GO2\nairport_zone_icaos=RCAY\n"
             )
-            other_dir = Path(FNAMES.build_dir(23, 121, base))
-            other_dir.mkdir(parents=True)
-            other_cfg = other_dir / "Ortho4XP_+23+121.cfg"
-            other_cfg.write_text("default_website=EOX\n", encoding="utf-8")
+            other_cfg = self._write_cfg(tmp, 23, 121, "default_website=EOX\n")
+            result = self._prepare(tmp, {"RCKH": NEAR_EDGE}, " rckh ")
 
-            saved = (TILE._xplane_dir, FNAMES.Overlay_cache_dir, CFG.default_website)
-            TILE._xplane_dir = lambda: xp
-            FNAMES.Overlay_cache_dir = str(Path(tmp) / "cache")
-            CFG.default_website = "BI"
-            try:
-                result = TILE.prepare_airport_batch(" rckh ", base)
-                with self.assertRaises(ValueError):
-                    TILE.prepare_airport_batch("ZZZZ", base)
-            finally:
-                TILE._xplane_dir, FNAMES.Overlay_cache_dir, CFG.default_website = saved
-
-            self.assertEqual(result["icao"], "RCKH")
-            self.assertEqual(result["home"], (22, 120))
-            self.assertEqual(result["tiles"], [(22, 120), (22, 121), (23, 120), (23, 121)])
+            tiles = [(22, 120), (22, 121), (23, 120), (23, 121)]
+            self.assertEqual(
+                result["airports"], [{"icao": "RCKH", "home": (22, 120), "tiles": tiles}]
+            )
+            self.assertEqual(result["tiles"], tiles)
+            self.assertEqual(result["center"], (22, 120))
             self.assertEqual(result["created"], [(22, 121), (23, 120)])
-            self.assertTrue(result["listed"])
+            self.assertEqual(result["listed"], [("RCKH", (22, 120))])
             self.assertEqual(AZONE.read_tile_icaos(str(home_cfg)), ["RCAY", "RCKH"])
             self.assertIn("default_website=GO2\n", home_cfg.read_text(encoding="utf-8"))
             # Another tile's existing config is left as it was.
             self.assertEqual(other_cfg.read_text(encoding="utf-8"), "default_website=EOX\n")
             for lat, lon in result["created"]:
-                cfg = Path(FNAMES.build_dir(lat, lon, base)) / (
-                    "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg"
-                )
-                text = cfg.read_text(encoding="utf-8")
+                text = self._cfg(tmp, lat, lon).read_text(encoding="utf-8")
                 self.assertIn("default_website=BI\n", text)
                 self.assertIn("airport_zone_icaos=\n", text)
+
+    def test_prepare_batch_takes_several_airports(self):
+        kinmen = [(45.0, 24.43, 118.35, 24.43, 118.38)]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._prepare(
+                tmp,
+                {"RCKH": NEAR_EDGE, "RCAY": RCKH, "RCBS": kinmen},
+                "RCKH, rcay,RCBS",
+            )
+            self.assertEqual(
+                [(a["icao"], a["home"]) for a in result["airports"]],
+                [("RCKH", (22, 120)), ("RCAY", (22, 120)), ("RCBS", (24, 118))],
+            )
+            # Every reached tile once, in airport order.
+            self.assertEqual(
+                result["tiles"],
+                [(22, 120), (22, 121), (23, 120), (23, 121), (24, 118)],
+            )
+            self.assertEqual(result["center"], (23, 119))
+            self.assertEqual(
+                result["listed"],
+                [("RCKH", (22, 120)), ("RCAY", (22, 120)), ("RCBS", (24, 118))],
+            )
+            self.assertEqual(
+                AZONE.read_tile_icaos(str(self._cfg(tmp, 22, 120))), ["RCKH", "RCAY"]
+            )
+            self.assertEqual(
+                AZONE.read_tile_icaos(str(self._cfg(tmp, 24, 118))), ["RCBS"]
+            )
+            self.assertEqual(sorted(result["created"]), sorted(result["tiles"]))
+
+    def test_unknown_code_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home_cfg = self._write_cfg(tmp, 22, 120, "default_website=GO2\n")
+            with self.assertRaises(ValueError) as raised:
+                self._prepare(tmp, {"RCKH": NEAR_EDGE}, "RCKH,ZZZZ,YYYY")
+            self.assertIn("ZZZZ, YYYY have no land runway", str(raised.exception))
+            self.assertEqual(home_cfg.read_text(encoding="utf-8"), "default_website=GO2\n")
+            self.assertFalse(self._cfg(tmp, 22, 121).exists())
 
 
 class MergeTest(unittest.TestCase):

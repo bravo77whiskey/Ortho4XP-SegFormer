@@ -249,21 +249,26 @@ def plan_airport_zones(tile, list_lat_lon, settings_for):
         return {}
 
 
-def prepare_airport_batch(icao, custom_build_dir):
-    """The tiles an airport's zones reach, with configs ready to build them.
+def prepare_airport_batch(icaos, custom_build_dir):
+    """The tiles some airports' zones reach, with configs ready to build them.
 
-    The airport's own tile gets the code added to its airport_zone_icaos, so
-    its zones are drawn; every other reached tile without a config gets one
-    from the global settings. Configs other tiles already have are left as
-    they are. Returns {"icao", "home", "tiles", "created", "listed"}; raises
-    ValueError with a message for the user when nothing can be prepared.
+    icaos: one or more ICAO codes, comma- or space-separated. Each airport's
+    own tile gets its code added to airport_zone_icaos, so its zones are
+    drawn; every other reached tile without a config gets one from the global
+    settings. Configs other tiles already have are left as they are.
+
+    Every code is checked before anything is written: one that apt.dat does
+    not know raises ValueError (with a message for the user) and no config
+    changes. Returns {"airports": [{"icao", "home", "tiles"}], "tiles",
+    "center", "created", "listed"}: "tiles" is every reached tile once, in
+    airport order; "center" the tile in the middle of them; "listed" the
+    (icao, home tile) pairs newly added to a tile's airports.
     """
     import O4_Config_Utils as CFG
 
-    codes = AZONE.parse_icaos(icao)
+    codes = AZONE.parse_icaos(icaos)
     if not codes:
         raise ValueError("Type the ICAO code of an airport first.")
-    icao = codes[0]
     xplane_dir = _xplane_dir()
     if not xplane_dir:
         raise ValueError(
@@ -272,26 +277,41 @@ def prepare_airport_batch(icao, custom_build_dir):
         )
     runways = AZONE.runways_by_icao(
         xplane_dir,
-        [icao],
+        codes,
         cache_dir=os.path.join(FNAMES.Overlay_cache_dir, "_airports"),
         log=lambda msg: UI.vprint(1, "   " + msg),
-    ).get(icao)
-    if not runways:
-        raise ValueError(f"{icao} has no land runway in apt.dat.")
+    )
+    unknown = [code for code in codes if not runways.get(code)]
+    if unknown:
+        raise ValueError(
+            ", ".join(unknown)
+            + (" has" if len(unknown) == 1 else " have")
+            + " no land runway in apt.dat. Nothing was changed."
+        )
+
+    loaded = {}
 
     def load(lat, lon):
-        tile = CFG.Tile(lat, lon, custom_build_dir)
-        tile.read_from_config()
-        cfg = os.path.join(
-            tile.build_dir, "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg"
-        )
-        return tile, os.path.isfile(cfg)
+        if (lat, lon) not in loaded:
+            tile = CFG.Tile(lat, lon, custom_build_dir)
+            tile.read_from_config()
+            cfg = os.path.join(
+                tile.build_dir,
+                "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg",
+            )
+            loaded[(lat, lon)] = (tile, os.path.isfile(cfg))
+        return loaded[(lat, lon)]
 
-    home = AZONE.home_tile(runways)
-    loaded = {home: load(*home)}
-    tiles = AZONE.tiles_reached(runways, AZONE.distances_from(loaded[home][0]))
-    for lat, lon in tiles[1:]:
-        loaded[(lat, lon)] = load(lat, lon)
+    airports = []
+    tiles = []
+    for code in codes:
+        home = AZONE.home_tile(runways[code])
+        home_tile, _exists = load(*home)
+        reached = AZONE.tiles_reached(runways[code], AZONE.distances_from(home_tile))
+        for lat, lon in reached:
+            load(lat, lon)
+        airports.append({"icao": code, "home": home, "tiles": reached})
+        tiles += [tile for tile in reached if tile not in tiles]
     if any(not exists and not tile.default_website
            for tile, exists in loaded.values()):
         raise ValueError(
@@ -299,17 +319,18 @@ def prepare_airport_batch(icao, custom_build_dir):
             "tile configs need one."
         )
 
+    listed = []
+    for airport in airports:
+        tile, _exists = loaded[airport["home"]]
+        listed_here = AZONE.parse_icaos(tile.airport_zone_icaos)
+        if airport["icao"] not in listed_here:
+            tile.airport_zone_icaos = ",".join(listed_here + [airport["icao"]])
+            listed.append((airport["icao"], airport["home"]))
+    changed = {home for _icao, home in listed}
     created = []
-    listed = False
-    for (lat, lon), (tile, exists) in loaded.items():
-        if (lat, lon) == home:
-            icaos = AZONE.parse_icaos(tile.airport_zone_icaos)
-            if icao in icaos and exists:
-                continue
-            if icao not in icaos:
-                tile.airport_zone_icaos = ",".join(icaos + [icao])
-                listed = True
-        elif exists:
+    for (lat, lon) in tiles:
+        tile, exists = loaded[(lat, lon)]
+        if exists and (lat, lon) not in changed:
             continue
         tile.make_dirs()
         if not tile.write_to_config():
@@ -319,10 +340,12 @@ def prepare_airport_batch(icao, custom_build_dir):
             )
         if not exists:
             created.append((lat, lon))
+    lats = [lat for lat, _lon in tiles]
+    lons = [lon for _lat, lon in tiles]
     return {
-        "icao": icao,
-        "home": home,
+        "airports": airports,
         "tiles": tiles,
+        "center": ((min(lats) + max(lats)) // 2, (min(lons) + max(lons)) // 2),
         "created": created,
         "listed": listed,
     }

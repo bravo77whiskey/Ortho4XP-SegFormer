@@ -66,44 +66,82 @@ OsX = "dar" in sys.platform
 
 
 class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
-    """Choose an airport and optionally start its batch immediately."""
+    """Choose airports and optionally start their batch immediately.
+
+    result is (icaos, steps): steps is None to only select the tiles, or the
+    {step: bool} batch steps to build them with.
+    """
 
     def __init__(self, parent):
         super().__init__(parent, "Airport tiles")
 
+    @staticmethod
+    def step_labels():
+        return Ortho4XP_Earth_Preview.step_ckbtn
+
     def body(self, master):
         master.configure(**THEME.frame_options())
         tk.Label(
-            master, text="ICAO code of the airport:", **THEME.label_options()
+            master,
+            text="ICAO codes of the airports (comma-separated):",
+            **THEME.label_options(),
         ).grid(row=0, column=0, columnspan=2, sticky=W, pady=(0, 5))
-        self.icao_entry = tk.Entry(master, width=10, **THEME.entry_options())
+        self.icao_entry = tk.Entry(master, width=24, **THEME.entry_options())
         self.icao_entry.grid(row=1, column=0, sticky=W)
         self.start_batch = tk.BooleanVar(master=self, value=False)
         tk.Checkbutton(
             master,
             text="Start batch build",
             variable=self.start_batch,
+            command=self.update_step_state,
             **THEME.checkbutton_options(),
         ).grid(row=1, column=1, padx=(10, 0), sticky=W)
         tk.Label(
-            master,
-            text="Uses the batch window's selected steps. If none are selected,\n"
-                 "builds vector data, mesh, water masks and imagery/DSF.",
-            justify=LEFT,
-            **THEME.label_options(),
+            master, text="Batch steps:", **THEME.label_options()
         ).grid(row=2, column=0, columnspan=2, sticky=W, pady=(8, 0))
+        self.step_vars = {}
+        self.step_buttons = []
+        for index, (step, label) in enumerate(self.step_labels().items()):
+            self.step_vars[step] = tk.BooleanVar(master=self, value=True)
+            button = tk.Checkbutton(
+                master,
+                text=label,
+                anchor=W,
+                variable=self.step_vars[step],
+                **THEME.checkbutton_options(),
+            )
+            button.grid(row=3 + index // 2, column=index % 2, sticky=W)
+            self.step_buttons.append(button)
+        self.update_step_state()
         return self.icao_entry
+
+    def update_step_state(self):
+        """The steps only matter, and so are only editable, when building."""
+        state = "normal" if self.start_batch.get() else "disabled"
+        for button in self.step_buttons:
+            button.configure(state=state)
+
+    def chosen_steps(self):
+        return {step: var.get() for step, var in self.step_vars.items()}
 
     def validate(self):
         if not self.icao_entry.get().strip():
             messagebox.showwarning(
-                "Airport tiles", "Enter an airport ICAO code.", parent=self
+                "Airport tiles", "Enter at least one airport ICAO code.", parent=self
+            )
+            return False
+        if self.start_batch.get() and not any(self.chosen_steps().values()):
+            messagebox.showwarning(
+                "Airport tiles", "Tick at least one batch step to build.", parent=self
             )
             return False
         return True
 
     def apply(self):
-        self.result = (self.icao_entry.get().strip(), self.start_batch.get())
+        self.result = (
+            self.icao_entry.get().strip(),
+            self.chosen_steps() if self.start_batch.get() else None,
+        )
 
 
 ################################################################################
@@ -932,20 +970,20 @@ class Ortho4XP_GUI(tk.Tk):
             return 1
 
     def select_airport_tiles(self):
-        """Ask for an airport and open the batch window with its tiles selected.
+        """Ask for airports and open the batch window with their tiles selected.
 
-        The tiles are those its ZL19/18/17 airport zones reach; their configs
-        are prepared so a batch build draws the zones right away.
+        The tiles are those their ZL19/18/17 airport zones reach; their
+        configs are prepared so a batch build draws the zones right away.
         """
         choice = Ortho4XP_Airport_Tiles_Dialog(self).result
         if choice is None:
             return
-        icao, start_batch = choice
+        icaos, steps = choice
         self.config(cursor="watch")
         self.update_idletasks()
         try:
             result = TILE.prepare_airport_batch(
-                icao, self.custom_build_dir_entry.get()
+                icaos, self.custom_build_dir_entry.get()
             )
         except ValueError as e:
             messagebox.showwarning("Airport tiles", str(e), parent=self)
@@ -958,40 +996,41 @@ class Ortho4XP_GUI(tk.Tk):
             return
         finally:
             self.config(cursor="")
-        home = result["home"]
-        names = ", ".join(FNAMES.short_latlon(*tile) for tile in result["tiles"])
-        UI.vprint(
-            1,
-            f"Airport tiles for {result['icao']}: {names}"
-            + (
-                f"; {result['icao']} added to the airports of "
-                f"{FNAMES.short_latlon(*home)}"
-                if result["listed"] else ""
+        for airport in result["airports"]:
+            UI.vprint(
+                1,
+                f"Airport tiles for {airport['icao']} "
+                f"({FNAMES.short_latlon(*airport['home'])}): "
+                + ", ".join(FNAMES.short_latlon(*t) for t in airport["tiles"])
+                + ".",
             )
-            + (
-                "; new configs for "
+        for icao, home in result["listed"]:
+            UI.vprint(
+                1, f"   {icao} added to the airports of {FNAMES.short_latlon(*home)}."
+            )
+        if result["created"]:
+            UI.vprint(
+                1,
+                "   New configs for "
                 + ", ".join(FNAMES.short_latlon(*t) for t in result["created"])
-                if result["created"] else ""
+                + ".",
             )
-            + ".",
-        )
         # The active tile's settings are held in memory: reload what changed.
         active = self.get_lat_lon(check=False)
-        if active in result["created"] or (active == home and result["listed"]):
+        if active in result["created"] or active in {
+            home for _icao, home in result["listed"]
+        }:
             self.load_tile_cfg(*active)
+        center = result["center"]
         try:
             self.earth_window.lift()
         except Exception:
-            self.earth_window = Ortho4XP_Earth_Preview(self, *home)
-        self.earth_window.show_tiles(result["tiles"], home)
-        if start_batch:
-            # A new batch window starts with no steps selected. Use the
-            # All in one steps then; keep any existing step selection.
-            if not any(self.earth_window.selected_steps().values()):
-                for step in ("osm", "mesh", "mask", "dsf"):
-                    self.earth_window.v_[
-                        self.earth_window.step_ckbtn[step]
-                    ].set(1)
+            self.earth_window = Ortho4XP_Earth_Preview(self, *center)
+        self.earth_window.show_tiles(result["tiles"], center)
+        if steps is not None:
+            # Show the chosen steps in the batch window, which builds from them.
+            for step, label in self.earth_window.step_ckbtn.items():
+                self.earth_window.v_[label].set(1 if steps.get(step) else 0)
             self.earth_window.batch_build()
         return
 
