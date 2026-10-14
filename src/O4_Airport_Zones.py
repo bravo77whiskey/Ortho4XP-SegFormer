@@ -249,6 +249,29 @@ def _tile_box(lat, lon):
     return box(lon, lat, lon + 1, lat + 1)
 
 
+def home_tile(runways):
+    """The (lat, lon) tile an airport's runways are in."""
+    lat_c, lon_c = runway_centre(runways)
+    return math.floor(lat_c), math.floor(lon_c)
+
+
+def tiles_reached(runways, distances):
+    """Every tile the airport's zones touch, its own tile first."""
+    home = home_tile(runways)
+    rings = airport_rings(runways, distances)
+    if not rings:
+        return [home]
+    outer = max((_ring_polygon(coords) for coords, _zl in rings), key=lambda p: p.area)
+    lon0, lat0, lon1, lat1 = outer.bounds
+    reached = [
+        (lat, lon)
+        for lat in range(math.floor(lat0), math.floor(lat1) + 1)
+        for lon in range(math.floor(lon0), math.floor(lon1) + 1)
+        if (lat, lon) != home and outer.intersects(_tile_box(lat, lon))
+    ]
+    return [home] + reached
+
+
 # ── Batch plan ───────────────────────────────────────────────────────────────
 
 def plan_zones(tiles, settings_for, runway_lookup, log=print):

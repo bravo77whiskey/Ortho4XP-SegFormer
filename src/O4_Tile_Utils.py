@@ -249,6 +249,85 @@ def plan_airport_zones(tile, list_lat_lon, settings_for):
         return {}
 
 
+def prepare_airport_batch(icao, custom_build_dir):
+    """The tiles an airport's zones reach, with configs ready to build them.
+
+    The airport's own tile gets the code added to its airport_zone_icaos, so
+    its zones are drawn; every other reached tile without a config gets one
+    from the global settings. Configs other tiles already have are left as
+    they are. Returns {"icao", "home", "tiles", "created", "listed"}; raises
+    ValueError with a message for the user when nothing can be prepared.
+    """
+    import O4_Config_Utils as CFG
+
+    codes = AZONE.parse_icaos(icao)
+    if not codes:
+        raise ValueError("Type the ICAO code of an airport first.")
+    icao = codes[0]
+    xplane_dir = _xplane_dir()
+    if not xplane_dir:
+        raise ValueError(
+            "custom_scenery_dir is not set: the runways are read from "
+            "X-Plane's apt.dat."
+        )
+    runways = AZONE.runways_by_icao(
+        xplane_dir,
+        [icao],
+        cache_dir=os.path.join(FNAMES.Overlay_cache_dir, "_airports"),
+        log=lambda msg: UI.vprint(1, "   " + msg),
+    ).get(icao)
+    if not runways:
+        raise ValueError(f"{icao} has no land runway in apt.dat.")
+
+    def load(lat, lon):
+        tile = CFG.Tile(lat, lon, custom_build_dir)
+        tile.read_from_config()
+        cfg = os.path.join(
+            tile.build_dir, "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg"
+        )
+        return tile, os.path.isfile(cfg)
+
+    home = AZONE.home_tile(runways)
+    loaded = {home: load(*home)}
+    tiles = AZONE.tiles_reached(runways, AZONE.distances_from(loaded[home][0]))
+    for lat, lon in tiles[1:]:
+        loaded[(lat, lon)] = load(lat, lon)
+    if any(not exists and not tile.default_website
+           for tile, exists in loaded.values()):
+        raise ValueError(
+            "Choose an imagery provider in the main window first: the new "
+            "tile configs need one."
+        )
+
+    created = []
+    listed = False
+    for (lat, lon), (tile, exists) in loaded.items():
+        if (lat, lon) == home:
+            icaos = AZONE.parse_icaos(tile.airport_zone_icaos)
+            if icao in icaos and exists:
+                continue
+            if icao not in icaos:
+                tile.airport_zone_icaos = ",".join(icaos + [icao])
+                listed = True
+        elif exists:
+            continue
+        tile.make_dirs()
+        if not tile.write_to_config():
+            raise ValueError(
+                "Could not write the config of tile "
+                + FNAMES.short_latlon(lat, lon) + "."
+            )
+        if not exists:
+            created.append((lat, lon))
+    return {
+        "icao": icao,
+        "home": home,
+        "tiles": tiles,
+        "created": created,
+        "listed": listed,
+    }
+
+
 def _batch_airport_zone_plan(tile, list_lat_lon, override_cfg):
     """Airport zones for a whole batch, each tile's settings read as it will be built."""
     def settings_for(lat, lon):

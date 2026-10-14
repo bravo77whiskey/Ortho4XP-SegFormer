@@ -22,6 +22,7 @@ from tkinter import (
     HORIZONTAL,
     filedialog,
     messagebox,
+    simpledialog,
 )
 import tkinter.ttk as ttk
 from PIL import Image, ImageTk
@@ -235,38 +236,45 @@ class Ortho4XP_GUI(tk.Tk):
         ttk.Button(
             self.frame_tile,
             takefocus=False,
+            text="Airport",
+            command=self.select_airport_tiles,
+            style="Flat.TButton",
+        ).grid(row=0, column=8, rowspan=2, padx=5, pady=0)
+        ttk.Button(
+            self.frame_tile,
+            takefocus=False,
             text="OSM",
             command=self.open_osm_data_manager,
             style="Flat.TButton",
-        ).grid(row=0, column=8, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=9, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             text="Libraries",
             command=self.rescan_overlay_libraries,
             style="Flat.TButton",
-        ).grid(row=0, column=9, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=10, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.config_icon,
             command=self.open_config_window,
             style="Flat.TButton",
-        ).grid(row=0, column=10, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=11, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.loupe_icon,
             command=self.open_custom_zl_window,
             style="Flat.TButton",
-        ).grid(row=0, column=11, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=12, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.earth_icon,
             command=self.open_earth_window,
             style="Flat.TButton",
-        ).grid(row=0, column=12, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
         self.pause_button = ttk.Button(
             self.frame_tile,
             takefocus=False,
@@ -275,21 +283,21 @@ class Ortho4XP_GUI(tk.Tk):
             command=self.toggle_pause,
             style="Flat.TButton",
         )
-        self.pause_button.grid(row=0, column=13, rowspan=2, padx=5, pady=0)
+        self.pause_button.grid(row=0, column=14, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.stop_icon,
             command=self.set_red_flag,
             style="Flat.TButton",
-        ).grid(row=0, column=14, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=15, rowspan=2, padx=5, pady=0)
         ttk.Button(
             self.frame_tile,
             takefocus=False,
             image=self.exit_icon,
             command=self.exit_prg,
             style="Flat.TButton",
-        ).grid(row=0, column=15, rowspan=2, padx=5, pady=0)
+        ).grid(row=0, column=16, rowspan=2, padx=5, pady=0)
 
         # Third row (Steps)
         for i in range(7):
@@ -880,6 +888,64 @@ class Ortho4XP_GUI(tk.Tk):
                 return 0
             self.config_window = CFG.Ortho4XP_Config(self)
             return 1
+
+    def select_airport_tiles(self):
+        """Ask for an airport and open the batch window with its tiles selected.
+
+        The tiles are those its ZL19/18/17 airport zones reach; their configs
+        are prepared so a batch build draws the zones right away.
+        """
+        icao = simpledialog.askstring(
+            "Airport tiles",
+            "ICAO code of the airport:",
+            parent=self,
+        )
+        if not icao or not icao.strip():
+            return
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            result = TILE.prepare_airport_batch(
+                icao, self.custom_build_dir_entry.get()
+            )
+        except ValueError as e:
+            messagebox.showwarning("Airport tiles", str(e), parent=self)
+            return
+        except Exception as e:
+            _LOGGER.exception(e)
+            messagebox.showerror(
+                "Airport tiles", f"Could not prepare the tiles: {e}", parent=self
+            )
+            return
+        finally:
+            self.config(cursor="")
+        home = result["home"]
+        names = ", ".join(FNAMES.short_latlon(*tile) for tile in result["tiles"])
+        UI.vprint(
+            1,
+            f"Airport tiles for {result['icao']}: {names}"
+            + (
+                f"; {result['icao']} added to the airports of "
+                f"{FNAMES.short_latlon(*home)}"
+                if result["listed"] else ""
+            )
+            + (
+                "; new configs for "
+                + ", ".join(FNAMES.short_latlon(*t) for t in result["created"])
+                if result["created"] else ""
+            )
+            + ".",
+        )
+        # The active tile's settings are held in memory: reload what changed.
+        active = self.get_lat_lon(check=False)
+        if active in result["created"] or (active == home and result["listed"]):
+            self.load_tile_cfg(*active)
+        try:
+            self.earth_window.lift()
+        except Exception:
+            self.earth_window = Ortho4XP_Earth_Preview(self, *home)
+        self.earth_window.show_tiles(result["tiles"], home)
+        return
 
     def open_earth_window(self):
         try:
@@ -3101,6 +3167,20 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             return
         self.add_symlink(lat, lon)
         return
+
+    def show_tiles(self, tiles, center):
+        """Select tiles for the batch and scroll the map to center on one."""
+        lat, lon = center
+        (x0, y0) = GEO.wgs84_to_pix(lat + 0.5, lon + 0.5, self.earthzl)
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        width = width if width > 1 else self.canvas_min_x
+        height = height if height > 1 else self.canvas_min_y
+        self.canvas.xview_moveto(max(1, x0 - width / 2) / self.resolution)
+        self.canvas.yview_moveto(max(1, y0 - height / 2) / self.resolution)
+        self.redraw_canvas()
+        for tile in tiles:
+            self.mark_tile_todo(*tile)
 
     def mark_tile_todo(self, lat, lon):
         """Draw the red 'to do' square over a tile, if it has none yet."""
