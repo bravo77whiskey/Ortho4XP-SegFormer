@@ -208,8 +208,22 @@ def link_name_for(build_dir, lat, lon, grouped=False):
     return group_link_name(build_dir) if grouped else tile_link_name(lat, lon)
 
 
+def _is_tile_build(path, lat, lon):
+    """True when path is an Ortho4XP build of this tile, not some other pack.
+
+    Other scenery carries tile coordinates in its name too (VFR-Objects_GK_
+    +52+013_D_Berlin): only a directory with the tile's build name, or with
+    the tile config Ortho4XP writes into every build, is a second build.
+    """
+    if os.path.basename(os.path.normpath(path)) == FNAMES.tile_dir(lat, lon):
+        return True
+    return os.path.isfile(
+        os.path.join(path, "Ortho4XP_" + FNAMES.short_latlon(lat, lon) + ".cfg")
+    )
+
+
 def _duplicate_tile_links(custom_scenery_dir, lat, lon, target):
-    """Live links that look like the same tile but point somewhere else.
+    """Live links to another Ortho4XP build of the same tile.
 
     Same-tile links which dangle are cleared on the way: they name a build
     directory that no longer exists, so they are no reason to skip anything.
@@ -223,7 +237,8 @@ def _duplicate_tile_links(custom_scenery_dir, lat, lon, target):
             UI.vprint(1, "Removing broken link " + name + " from Custom Scenery.")
             remove_link(path)
             continue
-        duplicates.append(path)
+        if _is_tile_build(resolved, lat, lon):
+            duplicates.append(path)
     return duplicates
 
 

@@ -71,7 +71,8 @@ class BatchPipelineTest(unittest.TestCase):
             mock.patch.object(TILE, "build_color", build_color),
             mock.patch.object(TILE.PIPELINE, "process_overlays_tile", overlays),
             mock.patch.object(TILE.PIPELINE, "apply_tile_settings", lambda *a, **kw: None),
-            mock.patch.object(TILE.SLINK, "auto_link_tile", lambda *a, **kw: None),
+            mock.patch.object(TILE.SLINK, "auto_link_tile",
+                              lambda tile, *a, **kw: self.linked.append((tile.lat, tile.lon))),
             mock.patch.object(TILE, "_clear_todo_marker", lambda *a, **kw: None),
             mock.patch.object(TILE.BSTATE, "begin", lambda *a, **kw: None),
             mock.patch.object(TILE.BSTATE, "release", lambda *a, **kw: None),
@@ -90,6 +91,7 @@ class BatchPipelineTest(unittest.TestCase):
         UI.red_flag = False
         UI.is_working = 0
         self.logged = []
+        self.linked = []
         result = TILE.build_tile_list(
             _Tile(), self.TILES, False, False, False, True, False,
             do_bld_overlay=True, do_veg_overlay=True,
@@ -130,6 +132,14 @@ class BatchPipelineTest(unittest.TestCase):
         _, events, _ = self._run(pipelined=False)
         a, b = self.TILES[0], self.TILES[1]
         self.assertGreaterEqual(self._at(events, "dsf_start", b), self._at(events, "ovl_end", a))
+
+    def test_tiles_whose_step_3_did_not_run_are_linked_after_their_overlays(self):
+        # (10, 21) only redoes its vegetation overlay: Step 3, which links a
+        # tile, does not run for it, so the overlays link it. (10, 22) runs
+        # Step 3 (stubbed here), which links it itself.
+        self._run(pipelined=True, overlay_s=0.01,
+                  retry={(10, 21): {"veg_overlay"}, (10, 22): {"dsf"}})
+        self.assertEqual(self.linked, [(10, 21)])
 
     def test_a_retry_runs_only_the_steps_it_retries(self):
         result, events, done = self._run(

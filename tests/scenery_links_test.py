@@ -98,6 +98,24 @@ class SceneryLinksTest(unittest.TestCase):
         self.assertEqual(result.status, SLINK.DUPLICATE_TILE)
         self.assertEqual(len(list(SLINK.iter_links(str(self.scenery)))), 1)
 
+    def test_same_tile_under_a_renamed_build_dir_is_a_duplicate(self):
+        other = self.root / "OldTiles"
+        other.mkdir()
+        first = Path(_make_tile_dir(other, 50, 8, name="Frankfurt"))
+        (first / "Ortho4XP_+50+008.cfg").write_text("")
+        SLINK.make_link(str(self.scenery / "Frankfurt_+50+008"), str(first))
+        result = SLINK.ensure_tile_link(str(self.scenery), _make_tile_dir(self.tiles, 50, 8), 50, 8)
+        self.assertEqual(result.status, SLINK.DUPLICATE_TILE)
+
+    def test_other_scenery_named_after_the_tile_is_no_duplicate(self):
+        # A third-party pack linked into Custom Scenery, with the tile in its name.
+        vfr = Path(_make_tile_dir(self.root / "Addons", 52, 13, name="VFR-Objects_GK_+52+013_D_Berlin 3.1"))
+        SLINK.make_link(str(self.scenery / "VFR-Objects_GK_+52+013_D_Berlin 3.1"), str(vfr))
+        result = SLINK.ensure_tile_link(str(self.scenery), _make_tile_dir(self.tiles, 52, 13), 52, 13)
+        self.assertEqual(result.status, SLINK.CREATED)
+        self.assertTrue(SLINK.is_link(str(self.scenery / "zOrtho4XP_+52+013")))
+        self.assertTrue(SLINK.is_link(str(self.scenery / "VFR-Objects_GK_+52+013_D_Berlin 3.1")))
+
     def test_neighbouring_tiles_do_not_look_like_duplicates(self):
         SLINK.ensure_tile_link(
             str(self.scenery), _make_tile_dir(self.tiles, 50, 8), 50, 8

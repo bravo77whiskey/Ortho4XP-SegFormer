@@ -1013,7 +1013,10 @@ def _build_tiles(
         # texture is converted twice; the steps below finish what it could not.
         tile.color_correction = want_color or want_clouds
         tile.color_fill_clouds = want_clouds
-        if do_dsf and not BSTATE.is_done(lat, lon, "dsf"):
+        # Step 3 links the tile itself; when it did not run here (not asked
+        # for, or already done) the tile is linked once its other steps end.
+        dsf_ran = do_dsf and not BSTATE.is_done(lat, lon, "dsf")
+        if dsf_ran:
             UI.check_pause()
             done = _step(lat, lon, "dsf", _build_tile_retrying_white, tile)
             if UI.red_flag:
@@ -1061,9 +1064,9 @@ def _build_tiles(
             return 0
         if want_bld or want_veg:
             UI.check_pause()
-            overlays.start(tile, want_bld, want_veg, link=not do_dsf)
+            overlays.start(tile, want_bld, want_veg, link=not dsf_ran)
         else:
-            if not do_dsf:
+            if not dsf_ran:
                 SLINK.auto_link_tile(tile)
             _clear_todo_marker(lat, lon)
     overlays.wait()
