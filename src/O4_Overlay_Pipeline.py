@@ -21,6 +21,7 @@ import threading
 import time
 
 import O4_Persistent_Cache as PCACHE
+import O4_Progress as PROG
 
 # O4_File_Names is only available inside the main process (frozen or source).
 # Imported lazily in process_*_tile() so venv subprocesses are unaffected.
@@ -448,6 +449,8 @@ def _run_venv(code):
         filtered_prev.append(path)
     py_paths = [_root_dir, _src_dir]
     env['PYTHONPATH'] = os.pathsep.join(py_paths + filtered_prev)
+    # Progress and issues come back as event lines on stdout (O4_Progress).
+    env[PROG.EVENT_ENV] = "1"
     if sys.platform.startswith('win') and os.environ.get(
         "O4_OVERLAY_SELF_NOTHROTTLE", ""
     ).strip().lower() not in ("0", "false", "no", "off"):
@@ -480,6 +483,8 @@ def _run_venv(code):
 
     try:
         for line in proc.stdout:
+            if PROG.handle_line(line):
+                continue
             print(line, end='', flush=True)
         proc.wait()
     finally:
@@ -1023,7 +1028,8 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
             if not wanted:
                 continue
             try:
-                step(lat, lon, build_dir)
+                with PROG.step(lat, lon, f"{key}_overlay"):
+                    step(lat, lon, build_dir)
                 errors[key] = None
             except Exception as exc:
                 errors[key] = exc
@@ -1059,7 +1065,8 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
 
     def _bld():
         try:
-            process_bld_tile(lat, lon, build_dir)
+            with PROG.step(lat, lon, "bld_overlay"):
+                process_bld_tile(lat, lon, build_dir)
             errors["bld"] = None
         except Exception as exc:
             errors["bld"] = exc
@@ -1071,7 +1078,8 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
     bld_thread = threading.Thread(target=_bld, name="bld-overlay", daemon=True)
     bld_thread.start()
     try:
-        process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=done_flag)
+        with PROG.step(lat, lon, "veg_overlay"):
+            process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=done_flag)
         errors["veg"] = None
     except Exception as exc:
         errors["veg"] = exc

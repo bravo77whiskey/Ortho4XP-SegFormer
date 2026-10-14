@@ -6,6 +6,7 @@ import shutil
 from math import floor, cos, pi
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import (
     N,
@@ -50,6 +51,8 @@ import O4_Overlay_Pipeline as PIPELINE
 import O4_Remote_GPU as REMOTE_GPU
 import O4_Scenery_Links as SLINK
 import O4_Build_State as BSTATE
+import O4_Progress as PROG
+import O4_Progress_Panel as PANEL
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
@@ -136,10 +139,6 @@ class Ortho4XP_GUI(tk.Tk):
             self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
         )
         self.frame_steps.grid(row=2, column=0, sticky=N + S + W + E)
-        self.frame_bars = tk.Frame(
-            self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
-        )
-        self.frame_bars.grid(row=3, column=0, sticky=N + S + W + E)
         # Level 2
         self.frame_folder = tk.Frame(
             self.frame_tile, border=0, padx=0, pady=0, **THEME.frame_options()
@@ -351,45 +350,20 @@ class Ortho4XP_GUI(tk.Tk):
             **THEME.checkbutton_options(),
         ).grid(row=0, column=7, padx=5, pady=0)
 
-        # Fourth row (Progress bars and controls)
-        # Label(self.frame_left,anchor=W,text="DSF/Masks progress",
-        # Uses themed ttk styling.
-        self.pgrb1v = tk.IntVar()
-        self.pgrb2v = tk.IntVar()
-        self.pgrb3v = tk.IntVar()
-        self.pgrbv = {1: self.pgrb1v, 2: self.pgrb2v, 3: self.pgrb3v}
-        self.pgrb1 = ttk.Progressbar(
-            self.frame_bars,
-            mode="determinate",
-            orient=HORIZONTAL,
-            variable=self.pgrb1v,
-        )
-        self.pgrb1.grid(row=0, column=0, padx=5, pady=0)
-        self.pgrb2 = ttk.Progressbar(
-            self.frame_bars,
-            mode="determinate",
-            orient=HORIZONTAL,
-            variable=self.pgrb2v,
-        )
-        self.pgrb2.grid(row=0, column=1, padx=5, pady=0)
-        self.pgrb3 = ttk.Progressbar(
-            self.frame_bars,
-            mode="determinate",
-            orient=HORIZONTAL,
-            variable=self.pgrb3v,
-        )
-        self.pgrb3.grid(row=0, column=2, padx=5, pady=0)
-
-        # Console
-        self.console = tk.Text(self.frame_console, bd=0, **THEME.text_options())
-        self.console.grid(row=0, column=0, sticky=N + S + E + W)
+        # Progress tree with the log under it (O4_Progress_Panel)
+        self.panel = PANEL.ProgressPanel(self.frame_console, on_retry=self.retry_from_panel)
+        self.panel.paned.grid(row=0, column=0, sticky=N + S + E + W)
         self.frame_console.rowconfigure(0, weight=1)
         self.frame_console.columnconfigure(0, weight=1)
 
         # Update
+        # Output arrives from any thread, in pieces: each thread's text is
+        # held until its line is complete, then queued with the tile and step
+        # that thread works for.
         self.console_queue = queue.Queue()
+        self._partial_lines = {}
+        self._partial_lock = threading.Lock()
         self.console_update()
-        self.pgrb_queue = queue.Queue()
         self.pgrb_update()
 
         # Redirection
@@ -440,35 +414,95 @@ class Ortho4XP_GUI(tk.Tk):
         )
 
     # GUI methods
-    def write(self, line):
-        self.console_queue.put(line)
+    def write(self, text):
+        if text is None:
+            self.console_queue.put(None)
+            return
+        tile, step = PROG.current()
+        key = threading.get_ident()
+        with self._partial_lock:
+            held, _ctx, _t = self._partial_lines.get(key, ("", None, 0))
+            pieces = (held + str(text)).split("\n")
+            rest = pieces.pop()
+            if rest:
+                self._partial_lines[key] = (rest, (tile, step), time.time())
+            else:
+                self._partial_lines.pop(key, None)
+        for piece in pieces:
+            self.console_queue.put((tile, step, piece + "\n"))
 
     def flush(self):
         return
 
+    def _flush_stale_partials(self, age=1.0):
+        """Show a line a thread left unfinished for a while (a prompt, a dot trail)."""
+        now = time.time()
+        with self._partial_lock:
+            stale = [k for k, (_txt, _ctx, t) in self._partial_lines.items() if now - t > age]
+            for key in stale:
+                text, (tile, step), _t = self._partial_lines.pop(key)
+                self.console_queue.put((tile, step, text + "\n"))
+
     def console_update(self):
+        self._flush_stale_partials()
+        entries = []
         try:
-            while 1:
-                line = self.console_queue.get_nowait()
-                if line is None:
-                    self.console.delete(1.0, END)
+            while len(entries) < 5000:
+                entry = self.console_queue.get_nowait()
+                if entry is None:
+                    entries.clear()
+                    self.panel.clear_log()
                 else:
-                    self.console.insert(END, str(line))
-                self.console.see(END)
-                self.console.update_idletasks()
+                    entries.append(entry)
         except queue.Empty:
             pass
+        if entries:
+            self.panel.add_lines(entries)
+        try:
+            self.panel.refresh()
+        except Exception as e:
+            _LOGGER.exception(e)
         self.callback_console = self.after(100, self.console_update)
 
     def pgrb_update(self):
-        try:
-            while 1:
-                (nbr, value) = self.pgrb_queue.get_nowait()
-                self.pgrbv[nbr].set(value)
-        except queue.Empty:
-            pass
         self.refresh_pause_button()
         self.callback_pgrb = self.after(100, self.pgrb_update)
+
+    def retry_from_panel(self, targets, launch):
+        """Run again the steps the progress panel's right-click picked."""
+        if UI.is_working:
+            UI.vprint(0, "Wait for the running job to finish before retrying.")
+            return
+        list_lat_lon = sorted(targets)
+        wanted = {step for keys in targets.values() for step in keys}
+        steps = {step: step in wanted for step in BSTATE.STEPS}
+        custom_build_dir = launch.get("custom_build_dir", self.custom_build_dir.get())
+        try:
+            tile = CFG.Tile(list_lat_lon[0][0], list_lat_lon[0][1], custom_build_dir)
+        except Exception as e:
+            _LOGGER.exception(e)
+            return
+        self.working_thread = threading.Thread(
+            target=TILE.build_tile_list,
+            args=[
+                tile, list_lat_lon, steps["osm"], steps["mesh"], steps["mask"],
+                steps["dsf"], steps["ovl"], steps["bld_overlay"], steps["veg_overlay"],
+                bool(launch.get("override_cfg")), None, steps["color"], steps["clouds"],
+            ],
+            kwargs={"retry": {k: set(v) for k, v in targets.items()}},
+            daemon=True,
+        )
+        self.working_thread.start()
+
+    def _start_step(self, tile, key, target, *args):
+        """Run one step of one tile in the background, as a row of the progress panel."""
+
+        def job():
+            with PROG.step(tile.lat, tile.lon, key) as step:
+                step.result(target(*args))
+
+        self.working_thread = threading.Thread(target=job, daemon=True)
+        self.working_thread.start()
 
     def refresh_pause_button(self):
         """Label follows UI.paused, which Stop and window close also clear."""
@@ -647,10 +681,7 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, "Process aborted.\n")
             _LOGGER.exception(e)
             return 0
-        self.working_thread = threading.Thread(
-            target=VMAP.build_poly_file, args=[tile], daemon=True
-        )
-        self.working_thread.start()
+        self._start_step(tile, "osm", VMAP.build_poly_file, tile)
 
     def build_mesh(self, event):
         try:
@@ -663,10 +694,7 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, "Process aborted.\n")
             _LOGGER.exception("Exception on build_mesh")
             return 0
-        self.working_thread = threading.Thread(
-            target=MESH.build_mesh, args=[tile], daemon=True
-        )
-        self.working_thread.start()
+        self._start_step(tile, "mesh", MESH.build_mesh, tile)
 
     def sort_mesh(self, event):
         try:
@@ -712,10 +740,7 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, "Process aborted.\n")
             _LOGGER.exception(e)
             return 0
-        self.working_thread = threading.Thread(
-            target=MASK.build_masks, args=[tile, for_imagery], daemon=True
-        )
-        self.working_thread.start()
+        self._start_step(tile, "mask", MASK.build_masks, tile, for_imagery)
 
     def build_tile(self):
         try:
@@ -728,10 +753,7 @@ class Ortho4XP_GUI(tk.Tk):
             UI.vprint(1, "Process aborted.\n")
             _LOGGER.exception(e)
             return 0
-        self.working_thread = threading.Thread(
-            target=TILE.build_tile, args=[tile], daemon=True
-        )
-        self.working_thread.start()
+        self._start_step(tile, "dsf", TILE.build_tile, tile)
 
     def build_veg_overlay(self):
         try:
@@ -748,12 +770,7 @@ class Ortho4XP_GUI(tk.Tk):
         tile.read_from_config(use_global=True)
         tile.read_from_config()
         PIPELINE.apply_tile_settings(tile, CFGVARS.list_veg_pipeline_vars)
-        self.working_thread = threading.Thread(
-            target=PIPELINE.process_veg_tile,
-            args=[tile.lat, tile.lon, tile.build_dir],
-            daemon=True,
-        )
-        self.working_thread.start()
+        self._start_overlay(tile, do_bld=False, do_veg=True)
 
     def build_bld_overlay(self):
         try:
@@ -771,11 +788,21 @@ class Ortho4XP_GUI(tk.Tk):
         tile.read_from_config(use_global=True)
         tile.read_from_config()
         PIPELINE.apply_tile_settings(tile, CFGVARS.list_bld_pipeline_vars)
-        self.working_thread = threading.Thread(
-            target=PIPELINE.process_bld_tile,
-            args=[tile.lat, tile.lon, tile.build_dir],
-            daemon=True,
-        )
+        self._start_overlay(tile, do_bld=True, do_veg=False)
+
+    def _start_overlay(self, tile, do_bld, do_veg):
+        """One overlay of one tile in the background; process_overlays_tile makes it a panel row."""
+
+        def job():
+            errors = PIPELINE.process_overlays_tile(
+                tile.lat, tile.lon, tile.build_dir, do_bld=do_bld, do_veg=do_veg,
+            )
+            for key, error in errors.items():
+                if error is not None:
+                    name = "Building" if key == "bld" else "Vegetation"
+                    UI.lvprint(0, f"[Overlay] {name} overlay failed: {error}")
+
+        self.working_thread = threading.Thread(target=job, daemon=True)
         self.working_thread.start()
 
     def rescan_overlay_libraries(self):

@@ -1,5 +1,6 @@
 import threading
 import O4_UI_Utils as UI
+import O4_Progress as PROG
 
 ################################################################################
 class parallel_worker(threading.Thread):
@@ -9,8 +10,14 @@ class parallel_worker(threading.Thread):
         self._queue = queue
         self._progress = progress
         self._success = success
+        # Work for the same tile and step as the thread that started us.
+        self._context = PROG.current()
 
     def run(self):
+        with PROG.scope(*self._context):
+            return self._run()
+
+    def _run(self):
         while True:
             args = self._queue.get()
             # Park here rather than mid-task, so a pause never lands halfway

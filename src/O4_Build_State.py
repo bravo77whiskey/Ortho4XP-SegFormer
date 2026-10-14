@@ -545,6 +545,15 @@ def mark_done(lat, lon, step):
             _write_locked()
 
 
+def leave_out(lat, lon, step):
+    """Keep a step of a tile out of this run, as if it were built already.
+
+    A retry runs only the steps it retries; the journal says the rest are
+    done so that a resume of the retry does not run them either.
+    """
+    mark_done(lat, lon, step)
+
+
 def set_status(status):
     with _lock:
         if _state is None:

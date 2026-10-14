@@ -4,6 +4,7 @@ import threading
 import time
 
 import O4_File_Names as FNAMES
+import O4_Progress as PROG
 
 verbosity = 1
 red_flag = False
@@ -210,10 +211,12 @@ def stop_requested():
     check_pause()
     return bool(red_flag)
 
+PROG.is_stopped = lambda: bool(red_flag)
+
 ################################################################################
 def progress_bar(nbr, percentage, message=None):
-    if gui:
-        gui.pgrbv[nbr].set(percentage)
+    """Progress of the calling thread's step (see O4_Progress for which bar is what)."""
+    PROG.bar(nbr, percentage)
 
 
 ################################################################################

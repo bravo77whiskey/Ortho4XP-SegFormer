@@ -48,6 +48,7 @@ import O4_Climate_Regions as CLIMATE_REGIONS
 import O4_Leaf_Type as LEAF_TYPE
 import O4_Bounds_Index as BBOX
 import O4_Persistent_Cache as PCACHE
+import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
 import O4_Texture_Selection as TEXSEL
 from O4_Building_Overlay import (
@@ -2203,9 +2204,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         ):
             time.sleep(0.2)
         timings['bld_wait'] += time.perf_counter() - _t
+    n_textures = sum(1 for f in files if STD_RE.match(f))
+    n_started = 0
+    PROG.emit(ev="items", done=0, total=n_textures)
     for idx, fname in enumerate(files, 1):
         m = STD_RE.match(fname)
         if not m: continue
+        # Starting this one means the ones before it are done.
+        PROG.emit(ev="items", done=n_started)
+        n_started += 1
         _dds_cache_files = _dds_cache_paths(fname)
         if disable_cache:
             # Delete stale per-DDS cache before this DDS starts. Keep the
@@ -2761,6 +2768,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if disable_cache:
             _remove_cache_files(_dds_cache_files)
 
+    PROG.emit(ev="items", done=n_textures)
     verbose_print(f"Loaded {len(files)} DDS  ({time.time()-t_inf:.1f}s)  "
           f"climate={region}  "
           f"bld_excl: {n_bld_excl_used} used / {n_bld_excl_missing} missing  "

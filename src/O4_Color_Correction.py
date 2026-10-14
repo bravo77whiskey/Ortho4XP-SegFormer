@@ -46,6 +46,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+import O4_Progress as PROG
+
 try:
     import torch
     import torch.nn.functional as F
@@ -1045,9 +1047,12 @@ def _apply_group(job, gj, workers):
 
     t0 = time.time()
     n = 0
+    part = f"{gj['provider']} ZL{gj['zl']}"
+    PROG.emit(ev="items", part=part, done=0, total=len(items))
     with ThreadPoolExecutor(workers) as ex:
         for r in ex.map(one, items):
             n += 1
+            PROG.emit(ev="items", part=part, done=n)
             if r is not None:
                 done.append(r)
             if n % 10 == 0 or n == len(items):

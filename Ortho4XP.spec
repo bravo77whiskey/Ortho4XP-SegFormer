@@ -66,6 +66,7 @@ OVERLAY_MODULES = [
     "O4_Leaf_Type",
     "O4_Library_Catalog",
     "O4_Persistent_Cache",
+    "O4_Progress",
     "O4_Region_Boundaries",
     "O4_Remote_GPU",
     "O4_Roof_Color",

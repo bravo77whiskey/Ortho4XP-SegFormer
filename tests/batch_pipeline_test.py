@@ -35,8 +35,9 @@ class BatchPipelineTest(unittest.TestCase):
     TILES = [(10, 20), (10, 21), (10, 22)]
 
     def _run(self, pipelined, overlay_s=0.3, dsf_s=0.05, overlay_errors=None,
-             do_color=False, do_clouds=False):
+             do_color=False, do_clouds=False, retry=None):
         events = []
+        self.overlay_calls = []
         lock = threading.Lock()
         done = set()
         inline = []
@@ -60,6 +61,7 @@ class BatchPipelineTest(unittest.TestCase):
 
         def overlays(lat, lon, build_dir, do_bld=True, do_veg=True):
             log("ovl_start", lat, lon)
+            self.overlay_calls.append(((lat, lon), do_bld, do_veg))
             time.sleep(overlay_s)
             log("ovl_end", lat, lon)
             return dict(overlay_errors or {"bld": None, "veg": None})
@@ -90,7 +92,7 @@ class BatchPipelineTest(unittest.TestCase):
         result = TILE.build_tile_list(
             _Tile(), self.TILES, False, False, False, True, False,
             do_bld_overlay=True, do_veg_overlay=True,
-            do_color=do_color, do_clouds=do_clouds,
+            do_color=do_color, do_clouds=do_clouds, retry=retry,
         )
         self.inline = inline
         self.fills = fills
@@ -126,6 +128,20 @@ class BatchPipelineTest(unittest.TestCase):
         _, events, _ = self._run(pipelined=False)
         a, b = self.TILES[0], self.TILES[1]
         self.assertGreaterEqual(self._at(events, "dsf_start", b), self._at(events, "ovl_end", a))
+
+    def test_a_retry_runs_only_the_steps_it_retries(self):
+        result, events, done = self._run(
+            pipelined=True, overlay_s=0.01, retry={(10, 21): {"veg_overlay"}, (10, 22): {"dsf"}},
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual([tile for _t, kind, tile in events if kind == "dsf_start"], [(10, 22)])
+        self.assertEqual(self.overlay_calls, [((10, 21), False, True)])
+        snap = TILE.PROG.snapshot()["run"]
+        self.assertEqual(snap["title"], "Retry")
+        states = {(t["name"], s["key"]): s["state"] for t in snap["tiles"] for s in t["steps"]}
+        self.assertEqual(states[("+10+022", "dsf")], TILE.PROG.DONE)
+        self.assertEqual(states[("+10+020", "dsf")], TILE.PROG.SKIPPED)
+        self.assertEqual(states[("+10+021", "bld_overlay")], TILE.PROG.SKIPPED)
 
     def test_a_failed_overlay_is_not_journalled(self):
         _, _, done = self._run(

@@ -47,6 +47,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 import O4_Bounds_Index as BBOX
 import O4_Persistent_Cache as PCACHE
+import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
 import O4_Stock_Yolo_Objects as STOCKYOLO
 import O4_Asset_Inventory as ASSETINV
@@ -8294,6 +8295,10 @@ def _write_pickle_atomic(path, payload):
     os.replace(part, path)
 
 
+# Textures in a row the building overlay may skip before it gives the tile up.
+_MAX_TEXTURE_FAILURES_IN_A_ROW = 5
+
+
 class _TextureParallel:
     """Texture-parallel building pass: several processes share one tile's textures.
 
@@ -9643,6 +9648,9 @@ class _BuildingOverlayRun:
             )
 
         self.t_start = time.time()
+        self._failed_in_a_row = 0
+        if self._par is None or not self._par.helper:
+            PROG.emit(ev="items", done=0, total=sum(1 for f in self.files if _DDS_NAME_RE.match(f)))
         try:
             fi = self._next_texture(0)
             while fi:
@@ -9670,7 +9678,7 @@ class _BuildingOverlayRun:
         file_counts = {}
         file_t0 = time.perf_counter()
         nxt = 0
-        marks = self._texture_marks() if self._par is not None else None
+        marks = self._texture_marks()
         try:
             if self.verbose_log:
                 print(f"  [{fi:3d}/{self.n_files}] {fname}  (starting)", flush=True)
@@ -9695,14 +9703,20 @@ class _BuildingOverlayRun:
                 self.timings[_tk] = self.timings.get(_tk, 0.0) + _tv
 
             self._place_texture(fi, fname, m, _prep, file_timings, file_counts)
-            if marks is not None:
+            if self._par is not None:
                 self._par.store(self, fi, self._cut_texture_result(marks))
+            self._failed_in_a_row = 0
+        except Exception as exc:
+            try:
+                nxt = self._skip_failed_texture(fi, fname, marks, exc, nxt if nxt else claim_next)
+            except BaseException:
+                self._stop_prefetch()
+                raise
         except BaseException:
-            if self.prefetch_executor is not None:
-                self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
-                self.prefetch_executor = None
+            self._stop_prefetch()
             raise
         finally:
+            PROG.emit(ev="items", add=1)
             file_elapsed = time.perf_counter() - file_t0
             if self.detail_timing or (self.slow_timing_s > 0 and file_elapsed >= self.slow_timing_s):
                 _print_dds_timing(fname, file_timings, file_elapsed, file_counts)
@@ -9727,6 +9741,43 @@ class _BuildingOverlayRun:
             if self.keep_seg_for_veg and self.cache_dir:
                 _mark_bld_seg_skipped(self.cache_dir, fname)
         return nxt
+
+    def _stop_prefetch(self):
+        if self.prefetch_executor is not None:
+            self.prefetch_executor.shutdown(wait=True, cancel_futures=True)
+            self.prefetch_executor = None
+
+    def _skip_failed_texture(self, fi, fname, marks, exc, claim):
+        """Leave texture ``fi`` without buildings after an error; the tile carries on.
+
+        Whatever the texture placed before it failed is dropped, so the DSF
+        never holds half a texture. It is reported as an issue of the step,
+        and as it was never cached, the next build of the tile does it again.
+        A run of failures means something is broken for every texture (no GPU
+        memory, a bad model): the tile then fails as before.
+
+        ``claim``: the texture claimed next (when the failure came after the
+        claim), True to claim it now, or False. Returns the next texture.
+        """
+        self._cut_texture_result(marks)
+        self._failed_in_a_row += 1
+        if self._failed_in_a_row >= _MAX_TEXTURE_FAILURES_IN_A_ROW:
+            raise RuntimeError(
+                f"{self._failed_in_a_row} textures in a row failed, the last one "
+                f"{fname}: {type(exc).__name__}: {exc}"
+            ) from exc
+        PROG.report_issue(fname, "building overlay", f"{type(exc).__name__}: {exc}; texture left without buildings")
+        if self.verbose_log:
+            import traceback
+            traceback.print_exception(exc, file=sys.stdout)
+        if self._par is not None:
+            # An empty result, so the main run does not redo it.
+            self._par.store(self, fi, self._cut_texture_result(self._texture_marks()))
+        if claim is True:
+            nxt = self._next_texture(fi)
+            self._submit_prefetch(nxt)
+            return nxt
+        return claim or 0
 
     def _submit_prefetch(self, nfi):
         if self.prefetch_executor is None or not nfi or nfi in self._prefetch_futures:

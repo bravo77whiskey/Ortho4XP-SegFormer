@@ -19,12 +19,22 @@ import O4_Overlay_Pipeline as PIPELINE
 import O4_Scenery_Links as SLINK
 import O4_Build_State as BSTATE
 import O4_Terrain_Materials as TMAT
+import O4_Progress as PROG
 from O4_Parallel_Utils import parallel_launch, parallel_join
 
 max_download_slots = 1
 max_convert_slots = 4
 skip_downloads = False
 skip_converts = False
+
+################################################################################
+def _texture_name(attrs):
+    """The DDS name of a texture, for the progress panel; never raises."""
+    try:
+        return FNAMES.dds_file_name_from_attributes(*attrs)
+    except Exception:
+        return " ".join(str(a) for a in attrs)
+
 
 ################################################################################
 def download_textures(
@@ -51,7 +61,7 @@ def download_textures(
             + progress_state["pending"]
             + download_queue.qsize()
         )
-        UI.progress_bar(2, int(100 * completed / denom) if denom else 100)
+        PROG.items(part="Download", done=completed, total=denom)
 
     def _download_task(*attrs):
         nonlocal interrupted
@@ -86,6 +96,11 @@ def download_textures(
                 if not should_retry:
                     attempts.pop(attrs, None)
                     progress_state["failed"] += 1
+                    if not UI.red_flag:
+                        PROG.issue(
+                            _texture_name(attrs),
+                            "download", f"failed after {max_attempts} attempts",
+                        )
             _update_progress_locked()
 
         if ok:
@@ -117,7 +132,7 @@ def download_textures(
     workers_list = []
     for worker_idx in range(worker_count):
         worker = threading.Thread(
-            target=_download_worker,
+            target=PROG.bind(_download_worker),
             name=f"texture-download-{worker_idx + 1}",
         )
         worker.start()
@@ -268,12 +283,12 @@ def build_tile(tile):
     download_workers = max_download_slots
 
     build_dsf_thread = threading.Thread(
-        target=DSF.build_dsf, args=[tile, download_queue]
+        target=PROG.bind(DSF.build_dsf), args=[tile, download_queue]
     )
     producer_done_event = threading.Event()
 
     download_thread = threading.Thread(
-        target=download_textures,
+        target=PROG.bind(download_textures),
         args=[
             tile,
             download_queue,
@@ -430,50 +445,45 @@ def build_color(tile, fill):
         done = CCB.run(tile, attrs_list, max_convert_slots, fill=fill) if attrs_list else set()
         if UI.red_flag:
             return 0
-        left = len(todo) - len(done & set(attrs_list))
+        left = [attrs for attrs, _, _ in todo if attrs not in done]
         if left:
-            UI.lvprint(1, f"WARNING: {left} texture(s) could not be corrected and keep "
-                          "their current imagery; run the step again to retry.")
-            return 0
-        return 1
+            UI.lvprint(1, f"WARNING: {len(left)} texture(s) could not be corrected and keep "
+                          "their current imagery; retry them from the progress panel.")
+            for attrs in left:
+                PROG.issue(_texture_name(attrs),
+                           "cloud removal" if fill else "colour correction",
+                           "could not be corrected; keeps its current imagery")
+        # Done with issues while anything was corrected; failed when nothing was.
+        return 1 if len(left) < len(todo) else 0
     finally:
         CCB.forget(tile)
 
 ################################################################################
 def build_all(tile):
-    VMAP.build_poly_file(tile)
-    if UI.stop_requested():
-        UI.exit_message_and_bottom_line("")
-        return 0
-    MESH.build_mesh(tile)
-    if UI.stop_requested():
-        UI.exit_message_and_bottom_line("")
-        return 0
-    MASK.build_masks(tile)
-    if UI.stop_requested():
-        UI.exit_message_and_bottom_line("")
-        return 0
-    build_tile(tile)
-    tile_coords = FNAMES.short_latlon(tile.lat, tile.lon)
-    if tile_coords in IMG.incomplete_imgs:
-        UI.lvprint(
-            1,
-            f"Attempting to rebuild textures with white squares: "
-            f"{IMG.incomplete_imgs[tile_coords]}",
-        )
-        delete_incomplete_imgs(tile)
-        build_tile(tile)
-    if UI.red_flag:
-        UI.exit_message_and_bottom_line("")
-        return 0
-    UI.is_working = 0
-    if IMG.incomplete_imgs:
-        UI.lvprint(
-            0,
-            f"\nERROR: Parts of the following images could not be obtained "
-            f"and have been filled with white: {IMG.incomplete_imgs}",
-        )
-    return 1
+    lat, lon = tile.lat, tile.lon
+    PROG.begin_run([(lat, lon)], ["osm", "mesh", "mask", "dsf"], title="All in one")
+    try:
+        _step(lat, lon, "osm", VMAP.build_poly_file, tile)
+        if UI.stop_requested():
+            UI.exit_message_and_bottom_line("")
+            return 0
+        _step(lat, lon, "mesh", MESH.build_mesh, tile)
+        if UI.stop_requested():
+            UI.exit_message_and_bottom_line("")
+            return 0
+        _step(lat, lon, "mask", MASK.build_masks, tile)
+        if UI.stop_requested():
+            UI.exit_message_and_bottom_line("")
+            return 0
+        _step(lat, lon, "dsf", _build_tile_retrying_white, tile)
+        if UI.red_flag:
+            UI.exit_message_and_bottom_line("")
+            return 0
+        UI.is_working = 0
+        _print_summary()
+        return 1
+    finally:
+        PROG.end_run()
 
 ################################################################################
 def _clear_todo_marker(lat, lon):
@@ -494,6 +504,11 @@ def _batch_pipelining():
 
 def _build_tile_overlays(tile, do_bld, do_veg, link):
     """Building and/or vegetation overlays of one tile, then link and clear it."""
+    with PROG.scope(PROG.tile_name(tile.lat, tile.lon), None):
+        _build_tile_overlays_tagged(tile, do_bld, do_veg, link)
+
+
+def _build_tile_overlays_tagged(tile, do_bld, do_veg, link):
     lat, lon = tile.lat, tile.lon
     name = FNAMES.short_latlon(lat, lon)
     try:
@@ -577,25 +592,31 @@ def _end_journal_on_stop():
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
     do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None,
-    do_color=False, do_clouds=False,
+    do_color=False, do_clouds=False, retry=None,
 ):
+    """Build the steps asked for on every tile of the list.
+
+    retry: {(lat, lon): step keys} - only these steps of these tiles run (the
+    progress panel's Retry); the batch's other steps count as done already.
+    """
     try:
         return _build_tile_list(
             tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
             do_bld_overlay, do_veg_overlay, override_cfg, resume_path,
-            do_color, do_clouds,
+            do_color, do_clouds, retry,
         )
     finally:
         # However this ended - finished, stopped, or an error nobody caught -
         # the journal is no longer live work, so this instance (or another)
         # can offer to resume it.
         BSTATE.release()
+        PROG.end_run()
 
 ################################################################################
 def _build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
     do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None,
-    do_color=False, do_clouds=False,
+    do_color=False, do_clouds=False, retry=None,
 ):
     if UI.is_working:
         return 0
@@ -622,8 +643,21 @@ def _build_tile_list(
         override_cfg,
         resume_path=resume_path,
     )
+    if retry is not None:
+        for (lat, lon) in list_lat_lon:
+            redo = retry.get((lat, lon), ())
+            for step, wanted in steps.items():
+                if wanted and step not in redo:
+                    BSTATE.leave_out(lat, lon, step)
+    PROG.begin_run(
+        list_lat_lon,
+        [step for step in BSTATE.STEPS if steps[step]],
+        title="Retry" if retry is not None else "Batch",
+        launch={"custom_build_dir": tile.custom_build_dir, "override_cfg": bool(override_cfg)},
+    )
     UI.lvprint(
         0,
+        "Retry" if retry is not None else
         "Batch build" + (" resumed" if resume_path else " launched"),
         "for a number of",
         len(list_lat_lon),
@@ -664,8 +698,12 @@ def _build_tiles(
                 FNAMES.short_latlon(lat, lon),
                 "- already built by the batch being resumed.",
             )
+            PROG.tile_skipped(lat, lon)
             _clear_todo_marker(lat, lon)
             continue
+        for step, wanted in steps.items():
+            if wanted and BSTATE.is_done(lat, lon, step):
+                PROG.step_skipped(lat, lon, step)
         UI.vprint(
             1,
             "Dealing with tile ",
@@ -691,7 +729,7 @@ def _build_tiles(
             tile.make_dirs()
         if do_osm and not BSTATE.is_done(lat, lon, "osm"):
             UI.check_pause()
-            done = VMAP.build_poly_file(tile)
+            done = _step(lat, lon, "osm", VMAP.build_poly_file, tile)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -700,7 +738,7 @@ def _build_tiles(
                 BSTATE.mark_done(lat, lon, "osm")
         if do_mesh and not BSTATE.is_done(lat, lon, "mesh"):
             UI.check_pause()
-            done = MESH.build_mesh(tile)
+            done = _step(lat, lon, "mesh", MESH.build_mesh, tile)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -709,7 +747,7 @@ def _build_tiles(
                 BSTATE.mark_done(lat, lon, "mesh")
         if do_mask and not BSTATE.is_done(lat, lon, "mask"):
             UI.check_pause()
-            done = MASK.build_masks(tile)
+            done = _step(lat, lon, "mask", MASK.build_masks, tile)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -724,16 +762,7 @@ def _build_tiles(
         tile.color_fill_clouds = want_clouds
         if do_dsf and not BSTATE.is_done(lat, lon, "dsf"):
             UI.check_pause()
-            tile_coords = FNAMES.short_latlon(lat, lon)
-            done = build_tile(tile)
-            if tile_coords in IMG.incomplete_imgs:
-                UI.lvprint(
-                    1,
-                    f"Attempting to rebuild textures with white squares: "
-                    f"{IMG.incomplete_imgs[tile_coords]}",
-                )
-                delete_incomplete_imgs(tile)
-                done = build_tile(tile)
+            done = _step(lat, lon, "dsf", _build_tile_retrying_white, tile)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -743,7 +772,7 @@ def _build_tiles(
         if want_color:
             UI.check_pause()
             # With Cloud removal also selected, one pass does both.
-            done = build_color(tile, fill=want_clouds)
+            done = _step(lat, lon, "color", build_color, tile, want_clouds)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -752,7 +781,7 @@ def _build_tiles(
                 BSTATE.mark_done(lat, lon, "color")
         if want_clouds:
             UI.check_pause()
-            done = build_color(tile, fill=True)
+            done = _step(lat, lon, "clouds", build_color, tile, True)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -761,7 +790,7 @@ def _build_tiles(
                 BSTATE.mark_done(lat, lon, "clouds")
         if do_ovl and not BSTATE.is_done(lat, lon, "ovl"):
             UI.check_pause()
-            done = OVL.build_overlay(lat, lon)
+            done = _step(lat, lon, "ovl", OVL.build_overlay, lat, lon)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -793,13 +822,45 @@ def _build_tiles(
     UI.lvprint(
         0, "Batch process completed in", UI.nicer_timer(time.time() - timer)
     )
-    if IMG.incomplete_imgs:
-        UI.lvprint(
-            0,
-            f"\nERROR: Parts of the following images could not be obtained "
-            f"and have been filled with white: {IMG.incomplete_imgs}",
-        )
+    _print_summary()
     return 1
+
+
+def _print_summary():
+    summary = PROG.summary_lines()
+    if summary:
+        UI.lvprint(0, "\nIssues and failures (right-click them in the progress panel to retry):")
+        for line in summary:
+            UI.lvprint(0, line)
+
+
+def _step(lat, lon, key, function, *args):
+    """Run one step of a tile under the progress panel; returns its result."""
+    with PROG.step(lat, lon, key) as scope:
+        return scope.result(function(*args))
+
+
+def _build_tile_retrying_white(tile):
+    """Step 3, once more for textures that came back with white squares.
+
+    Textures left white by an earlier build of this session are redone up
+    front; any still white after the second build are the step's issues.
+    """
+    tile_coords = FNAMES.short_latlon(tile.lat, tile.lon)
+    delete_incomplete_imgs(tile)
+    done = build_tile(tile)
+    if tile_coords in IMG.incomplete_imgs and not UI.red_flag:
+        UI.lvprint(
+            1,
+            f"Attempting to rebuild textures with white squares: "
+            f"{IMG.incomplete_imgs[tile_coords]}",
+        )
+        delete_incomplete_imgs(tile)
+        done = build_tile(tile)
+    if not UI.red_flag:
+        for name in IMG.incomplete_imgs.get(tile_coords, []):
+            PROG.issue(name, "download", "parts could not be obtained; filled with white")
+    return done
 
 ################################################################################
 def remove_unwanted_textures(tile):
