@@ -162,6 +162,71 @@ class ThreadContextTest(unittest.TestCase):
         self.assertEqual(PROG.current(), (None, None))
 
 
+class AheadTest(unittest.TestCase):
+    """Step 3's inline colour correction is the Colour and Clouds steps' work."""
+
+    def setUp(self):
+        PROG.is_stopped = lambda: False
+
+    def test_steps_started_ahead_keep_their_start_and_what_they_reported(self):
+        clock = [1000.0]
+        with mock.patch.object(PROG.time, "time", lambda: clock[0]):
+            PROG.begin_run([(8, 38)], ["dsf", "color", "clouds"])
+            with PROG.step(8, 38, "dsf") as scope:
+                clock[0] += 60                       # downloads
+                with PROG.ahead(8, 38, ("color", "clouds")):
+                    self.assertEqual(PROG.current(), ("+08+038", "color"))
+                    PROG.items(part="BI ZL16", done=4, total=4)
+                    PROG.issue("a.dds", "colour correction", "kept its imagery")
+                    clock[0] += 300                  # the correction itself
+                    snap = PROG.snapshot()
+                    self.assertEqual(_step(snap, "+08+038", "color")["state"], PROG.RUNNING)
+                    self.assertEqual(_step(snap, "+08+038", "clouds")["state"], PROG.RUNNING)
+                self.assertEqual(PROG.current(), ("+08+038", "dsf"))
+                clock[0] += 20                       # rest of Step 3
+                scope.result(1)
+            for key in ("color", "clouds"):
+                with PROG.step(8, 38, key) as scope:
+                    clock[0] += 1                    # nothing left to do
+                    scope.result(1)
+            snap = PROG.snapshot()
+        self.assertEqual(_step(snap, "+08+038", "dsf")["elapsed"], 380)
+        color = _step(snap, "+08+038", "color")
+        self.assertEqual(color["elapsed"], 321)
+        self.assertEqual(color["state"], PROG.ISSUES)
+        self.assertEqual(color["parts"][0]["done"], 4)
+        self.assertEqual(_step(snap, "+08+038", "clouds")["elapsed"], 322)
+        self.assertEqual(_step(snap, "+08+038", "dsf")["issues"], [])
+
+    def test_only_queued_steps_of_this_run_start_ahead(self):
+        PROG.begin_run([(8, 38)], ["dsf", "clouds"])
+        with PROG.step(8, 38, "dsf"):
+            with PROG.ahead(8, 38, ("color", "clouds")):
+                self.assertEqual(PROG.current(), ("+08+038", "clouds"))
+        PROG.step_skipped(8, 38, "clouds")  # already running: not skipped
+        self.assertEqual(_step(PROG.snapshot(), "+08+038", "clouds")["state"], PROG.RUNNING)
+        PROG.begin_run([(8, 38)], ["dsf"])
+        with PROG.step(8, 38, "dsf"):
+            with PROG.ahead(8, 38, ("color",)):
+                self.assertEqual(PROG.current(), ("+08+038", "dsf"))
+
+    def test_a_step_started_ahead_and_never_reached_stops_with_the_run(self):
+        PROG.begin_run([(8, 38)], ["dsf", "color"])
+        with PROG.step(8, 38, "dsf"):
+            with PROG.ahead(8, 38, ("color",)):
+                pass
+        PROG.end_run()
+        self.assertEqual(_step(PROG.snapshot(), "+08+038", "color")["state"], PROG.STOPPED)
+
+    def test_a_step_run_twice_without_ahead_starts_over(self):
+        PROG.begin_run([(8, 38)], ["color"])
+        with PROG.step(8, 38, "color"):
+            PROG.issue("a.dds", "colour correction", "x")
+        with PROG.step(8, 38, "color"):
+            pass
+        self.assertEqual(_step(PROG.snapshot(), "+08+038", "color")["issues"], [])
+
+
 class WorkerEventsTest(unittest.TestCase):
     def setUp(self):
         PROG.is_stopped = lambda: False

@@ -113,6 +113,8 @@ class Step:
         self.note = ""
         self.parts = {}
         self.issues = []
+        # Started by ahead() inside an earlier step: step() carries on from it.
+        self.ahead = False
 
     def elapsed(self, now):
         if self.t0 is None:
@@ -281,13 +283,15 @@ def step(lat, lon, key):
             )
             _loose.clear()
         node = _run.tile(lat, lon).step(key)
-        node.state = RUNNING
-        node.t0 = time.time()
-        node.t1 = None
-        node.done = node.total = node.pct = None
-        node.note = ""
-        node.parts = {}
-        node.issues = []
+        if not (node.ahead and node.state == RUNNING):
+            node.state = RUNNING
+            node.t0 = time.time()
+            node.t1 = None
+            node.done = node.total = node.pct = None
+            node.note = ""
+            node.parts = {}
+            node.issues = []
+        node.ahead = False
         run = _run
         _changed()
     scope = _StepScope()
@@ -314,6 +318,38 @@ def step(lat, lon, key):
             _changed()
             if run.auto and run is _run:
                 end_run()
+
+
+@contextmanager
+def ahead(lat, lon, keys):
+    """Do the work of later steps ``keys`` inside the step running now.
+
+    Step 3 colour-corrects inline when the batch's Colour and Clouds steps
+    follow it. Those steps start here, so their clock runs while the work
+    does, and the calling thread reports to the first of them for the block.
+    They stay running afterwards: step() for them carries on from here and
+    ends them. Only steps this run still has queued for the tile take part.
+    """
+    started = []
+    with _lock:
+        if _run is not None and _run.t1 is None:
+            tile = _run.tiles.get(tile_name(lat, lon))
+            for key in keys:
+                node = None if tile is None else tile.steps.get(key)
+                if node is None or node.state != QUEUED:
+                    continue
+                node.state = RUNNING
+                node.t0 = time.time()
+                node.t1 = None
+                node.ahead = True
+                started.append(key)
+            if started:
+                _changed()
+    if not started:
+        yield
+        return
+    with scope(tile_name(lat, lon), started[0]):
+        yield
 
 
 ################################################################################

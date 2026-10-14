@@ -569,7 +569,12 @@ def build_tile(tile):
             # the normal converter: if the correction failed they keep their DDS.
             keep_dds = {tuple(item[1:]) for item in pending
                         if CCB.uses_existing_dds(tile, tuple(item[1:]))}
-            done = CCB.run(tile, [tuple(item[1:]) for item in pending], max_convert_slots)
+            # This is the work of the batch's Colour (and Clouds) steps: their
+            # rows run from here, and those steps finish whatever is left.
+            with PROG.ahead(tile.lat, tile.lon,
+                            ("color", "clouds") if getattr(tile, "color_fill_clouds", False)
+                            else ("color",)):
+                done = CCB.run(tile, [tuple(item[1:]) for item in pending], max_convert_slots)
             pending = [item for item in pending
                        if tuple(item[1:]) not in done and tuple(item[1:]) not in keep_dds]
             if pending and not UI.red_flag:
