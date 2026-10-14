@@ -3,6 +3,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,12 @@ def _quiet_ui(monkeypatch):
     monkeypatch.setattr(TILE.UI, "red_flag", False)
     monkeypatch.setattr(TILE.UI, "vprint", lambda *args, **kwargs: None)
     monkeypatch.setattr(TILE.UI, "progress_bar", lambda *args, **kwargs: None)
+
+
+def _tile():
+    # download_textures asks the colour correction whether a texture is
+    # corrected from its existing DDS, which is keyed by the tile's build_dir.
+    return SimpleNamespace(build_dir="build")
 
 
 def _completed_producer():
@@ -56,7 +63,7 @@ def test_download_queue_finishes_a_delayed_retry(monkeypatch):
     monkeypatch.setattr(TILE.IMG, "build_jpeg_ortho", fail_once)
     download_queue = DelayedRetryQueue()
     convert_queue = queue.Queue()
-    tile = object()
+    tile = _tile()
     download_queue.put((7,))
     download_queue.delay_retries = True
 
@@ -91,7 +98,7 @@ def test_download_queue_waits_for_late_producer_work(monkeypatch):
     thread = threading.Thread(
         target=lambda: result.append(
             TILE.download_textures(
-                object(),
+                _tile(),
                 download_queue,
                 convert_queue,
                 workers=2,
@@ -125,7 +132,7 @@ def test_permanent_failure_is_retried_three_times_and_reported(monkeypatch):
     download_queue.put((13,))
 
     result = TILE.download_textures(
-        object(),
+        _tile(),
         download_queue,
         convert_queue,
         workers=2,
@@ -153,7 +160,7 @@ def test_cancellation_drains_the_queue_without_downloading(monkeypatch):
     download_queue.put((2,))
 
     result = TILE.download_textures(
-        object(),
+        _tile(),
         download_queue,
         convert_queue,
         workers=2,

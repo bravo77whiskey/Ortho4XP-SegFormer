@@ -3,6 +3,7 @@ import sys
 import types
 from unittest import mock
 
+import pytest
 from shapely import geometry
 
 
@@ -13,6 +14,14 @@ if str(SRC) not in sys.path:
 
 import O4_OSM_Utils as OSM
 import O4_Overlay_Utils as OVL
+
+
+@pytest.fixture(autouse=True)
+def _no_local_planet():
+    # A local planet extract configured in Ortho4XP.cfg would be sliced for
+    # real instead of exercising the download failure fallbacks.
+    with mock.patch.object(OSM.PBF, "pbf_ready", return_value=False):
+        yield
 
 
 def test_max_osm_tentatives_is_reduced():
