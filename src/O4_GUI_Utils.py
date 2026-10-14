@@ -34,6 +34,7 @@ from O4_Cfg_Vars import (
     list_tile_vars,
 )
 import O4_Version
+import O4_Airport_Zones as AZONE
 import O4_Cfg_Vars as CFGVARS
 import O4_Imagery_Utils as IMG
 import O4_File_Names as FNAMES
@@ -66,18 +67,39 @@ OsX = "dar" in sys.platform
 
 
 class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
-    """Choose airports and optionally start their batch immediately.
+    """Choose airports, each with its colour reference year and batch steps.
 
-    result is (icaos, steps): steps is None to only select the tiles, or the
-    {step: bool} batch steps to build them with.
+    One table row per airport typed in the entry: its Sentinel-2 reference
+    year, and the batch steps its tiles build when Start batch build is
+    ticked. The "All" row sets a column for every airport at once. A row
+    keeps its settings while its code stays in the entry.
+
+    result is (icaos, years, steps): years {icao: year}; steps None to only
+    select the tiles, else {icao: {step: bool}}.
     """
 
-    def __init__(self, parent):
-        super().__init__(parent, "Airport tiles")
+    # Column headings; the batch window's labels are too long for a table.
+    step_headers = {
+        "osm": "Vector",
+        "mesh": "Mesh",
+        "mask": "Masks",
+        "dsf": "DSF",
+        "color": "Colour",
+        "clouds": "Clouds",
+        "ovl": "Overlays",
+        "bld_overlay": "Buildings",
+        "veg_overlay": "Vegetation",
+    }
 
-    @staticmethod
-    def step_labels():
-        return Ortho4XP_Earth_Preview.step_ckbtn
+    def __init__(self, parent, default_year=None):
+        self.default_year = str(
+            default_year if default_year is not None
+            else CFGVARS.cfg_tile_vars["color_reference_year"]["default"]
+        )
+        # Settings of every code typed so far, kept while it is retyped.
+        self.rows = {}
+        self.row_widgets = []
+        super().__init__(parent, "Airport tiles")
 
     def body(self, master):
         master.configure(**THEME.frame_options())
@@ -86,7 +108,10 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
             text="ICAO codes of the airports (comma-separated):",
             **THEME.label_options(),
         ).grid(row=0, column=0, columnspan=2, sticky=W, pady=(0, 5))
-        self.icao_entry = tk.Entry(master, width=24, **THEME.entry_options())
+        self.icao_var = tk.StringVar(master=self)
+        self.icao_entry = tk.Entry(
+            master, width=24, textvariable=self.icao_var, **THEME.entry_options()
+        )
         self.icao_entry.grid(row=1, column=0, sticky=W)
         self.start_batch = tk.BooleanVar(master=self, value=False)
         tk.Checkbutton(
@@ -96,24 +121,106 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
             command=self.update_step_state,
             **THEME.checkbutton_options(),
         ).grid(row=1, column=1, padx=(10, 0), sticky=W)
-        tk.Label(
-            master, text="Batch steps:", **THEME.label_options()
-        ).grid(row=2, column=0, columnspan=2, sticky=W, pady=(8, 0))
-        self.step_vars = {}
+
+        self.table = tk.Frame(master, **THEME.frame_options())
+        self.table.grid(row=2, column=0, columnspan=2, sticky=W, pady=(10, 0))
+        tk.Label(self.table, text="Airport", **THEME.label_options()).grid(
+            row=0, column=0, sticky=W, padx=(0, 6)
+        )
+        tk.Label(self.table, text="Year", **THEME.label_options()).grid(
+            row=0, column=1, sticky=W, padx=(0, 6)
+        )
+        for col, step in enumerate(self.step_headers, start=2):
+            tk.Label(
+                self.table, text=self.step_headers[step], **THEME.label_options()
+            ).grid(row=0, column=col, padx=2)
+        # The "All" row sets a whole column.
+        tk.Label(self.table, text="All", **THEME.label_options()).grid(
+            row=1, column=0, sticky=W
+        )
+        self.all_year = tk.StringVar(master=self, value=self.default_year)
+        all_year_entry = tk.Entry(
+            self.table, width=6, textvariable=self.all_year, **THEME.entry_options()
+        )
+        all_year_entry.grid(row=1, column=1, sticky=W)
+        all_year_entry.bind("<Return>", lambda _e: self.set_all_years())
+        all_year_entry.bind("<FocusOut>", lambda _e: self.set_all_years())
+        self.all_steps = {}
         self.step_buttons = []
-        for index, (step, label) in enumerate(self.step_labels().items()):
-            self.step_vars[step] = tk.BooleanVar(master=self, value=True)
+        for col, step in enumerate(self.step_headers, start=2):
+            self.all_steps[step] = tk.BooleanVar(master=self, value=True)
             button = tk.Checkbutton(
-                master,
-                text=label,
-                anchor=W,
-                variable=self.step_vars[step],
+                self.table,
+                variable=self.all_steps[step],
+                command=lambda step=step: self.set_all_steps(step),
                 **THEME.checkbutton_options(),
             )
-            button.grid(row=3 + index // 2, column=index % 2, sticky=W)
+            button.grid(row=1, column=col)
             self.step_buttons.append(button)
-        self.update_step_state()
+        self.hint = tk.Label(
+            self.table,
+            text="Type the airports above: each gets a row here.",
+            **THEME.label_options(),
+        )
+        self.icao_var.trace_add("write", lambda *_a: self.sync_rows())
+        self.sync_rows()
         return self.icao_entry
+
+    def codes(self):
+        return AZONE.parse_icaos(self.icao_var.get())
+
+    def row(self, icao):
+        """The settings of one airport, made with the All row's values."""
+        if icao not in self.rows:
+            self.rows[icao] = {
+                "year": tk.StringVar(master=self, value=self.all_year.get()),
+                "steps": {
+                    step: tk.BooleanVar(master=self, value=var.get())
+                    for step, var in self.all_steps.items()
+                },
+            }
+        return self.rows[icao]
+
+    def sync_rows(self):
+        """One table row per code in the entry, in the order typed."""
+        for widget in self.row_widgets:
+            widget.destroy()
+        self.row_widgets = []
+        self.step_buttons = self.step_buttons[: len(self.all_steps)]
+        codes = self.codes()
+        if not codes:
+            self.hint.grid(row=2, column=0, columnspan=2 + len(self.step_headers),
+                           sticky=W, pady=(4, 0))
+        else:
+            self.hint.grid_remove()
+        for index, icao in enumerate(codes, start=2):
+            settings = self.row(icao)
+            label = tk.Label(self.table, text=icao, **THEME.label_options())
+            label.grid(row=index, column=0, sticky=W)
+            year = tk.Entry(
+                self.table, width=6, textvariable=settings["year"],
+                **THEME.entry_options(),
+            )
+            year.grid(row=index, column=1, sticky=W)
+            self.row_widgets += [label, year]
+            for col, step in enumerate(self.step_headers, start=2):
+                button = tk.Checkbutton(
+                    self.table,
+                    variable=settings["steps"][step],
+                    **THEME.checkbutton_options(),
+                )
+                button.grid(row=index, column=col)
+                self.row_widgets.append(button)
+                self.step_buttons.append(button)
+        self.update_step_state()
+
+    def set_all_years(self):
+        for icao in self.codes():
+            self.row(icao)["year"].set(self.all_year.get())
+
+    def set_all_steps(self, step):
+        for icao in self.codes():
+            self.row(icao)["steps"][step].set(self.all_steps[step].get())
 
     def update_step_state(self):
         """The steps only matter, and so are only editable, when building."""
@@ -121,25 +228,58 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         for button in self.step_buttons:
             button.configure(state=state)
 
+    def chosen_years(self):
+        """{icao: year}; a year that is not a whole number raises ValueError."""
+        return {icao: int(self.row(icao)["year"].get()) for icao in self.codes()}
+
     def chosen_steps(self):
-        return {step: var.get() for step, var in self.step_vars.items()}
+        return {
+            icao: {step: var.get() for step, var in self.row(icao)["steps"].items()}
+            for icao in self.codes()
+        }
 
     def validate(self):
-        if not self.icao_entry.get().strip():
+        codes = self.codes()
+        if not codes:
             messagebox.showwarning(
                 "Airport tiles", "Enter at least one airport ICAO code.", parent=self
             )
             return False
-        if self.start_batch.get() and not any(self.chosen_steps().values()):
+        try:
+            years = self.chosen_years()
+        except ValueError:
+            messagebox.showwarning(
+                "Airport tiles", "Every year must be a number, like 2025.", parent=self
+            )
+            return False
+        if self.start_batch.get() and not any(
+            any(steps.values()) for steps in self.chosen_steps().values()
+        ):
             messagebox.showwarning(
                 "Airport tiles", "Tick at least one batch step to build.", parent=self
             )
             return False
+        return self.years_on_server(years)
+
+    def years_on_server(self, years):
+        """Check years other than the default against the EOX server."""
+        import O4_Color_Build as CCB
+
+        for year in sorted(set(years.values())):
+            if str(year) == self.default_year:
+                continue
+            ok, msg = CCB.check_year(year)
+            if ok is False:
+                messagebox.showwarning("Airport tiles", msg, parent=self)
+                return False
+            if ok is None:
+                UI.vprint(1, msg)
         return True
 
     def apply(self):
         self.result = (
-            self.icao_entry.get().strip(),
+            ", ".join(self.codes()),
+            self.chosen_years(),
             self.chosen_steps() if self.start_batch.get() else None,
         )
 
@@ -975,15 +1115,17 @@ class Ortho4XP_GUI(tk.Tk):
         The tiles are those their ZL19/18/17 airport zones reach; their
         configs are prepared so a batch build draws the zones right away.
         """
-        choice = Ortho4XP_Airport_Tiles_Dialog(self).result
+        choice = Ortho4XP_Airport_Tiles_Dialog(
+            self, getattr(CFG, "global_color_reference_year", None)
+        ).result
         if choice is None:
             return
-        icaos, steps = choice
+        icaos, years, steps = choice
         self.config(cursor="watch")
         self.update_idletasks()
         try:
             result = TILE.prepare_airport_batch(
-                icaos, self.custom_build_dir_entry.get()
+                icaos, self.custom_build_dir_entry.get(), years=years
             )
         except ValueError as e:
             messagebox.showwarning("Airport tiles", str(e), parent=self)
@@ -1015,11 +1157,15 @@ class Ortho4XP_GUI(tk.Tk):
                 + ", ".join(FNAMES.short_latlon(*t) for t in result["created"])
                 + ".",
             )
+        for tile, (icao, year), (other, other_year) in result["year_conflicts"]:
+            UI.vprint(
+                1,
+                f"   {FNAMES.short_latlon(*tile)} is reached by {icao} and {other}: "
+                f"it keeps {icao}'s reference year {year}, not {other_year}.",
+            )
         # The active tile's settings are held in memory: reload what changed.
         active = self.get_lat_lon(check=False)
-        if active in result["created"] or active in {
-            home for _icao, home in result["listed"]
-        }:
+        if active in result["written"]:
             self.load_tile_cfg(*active)
         center = result["center"]
         try:
@@ -1028,10 +1174,15 @@ class Ortho4XP_GUI(tk.Tk):
             self.earth_window = Ortho4XP_Earth_Preview(self, *center)
         self.earth_window.show_tiles(result["tiles"], center)
         if steps is not None:
-            # Show the chosen steps in the batch window, which builds from them.
-            for step, label in self.earth_window.step_ckbtn.items():
-                self.earth_window.v_[label].set(1 if steps.get(step) else 0)
-            self.earth_window.batch_build()
+            # Each tile builds the steps of every airport whose zones reach it.
+            tile_steps = {}
+            for airport in result["airports"]:
+                wanted = {
+                    step for step, on in steps.get(airport["icao"], {}).items() if on
+                }
+                for tile in airport["tiles"]:
+                    tile_steps.setdefault(tuple(tile), set()).update(wanted)
+            self.earth_window.batch_build(tile_steps=tile_steps)
         return
 
     def open_earth_window(self):
@@ -3365,7 +3516,12 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             )
         messagebox.showinfo("Vegetation replacement", "\n".join(lines))
 
-    def batch_build(self):
+    def batch_build(self, tile_steps=None):
+        """Build the selected tiles with the ticked steps.
+
+        tile_steps: {(lat, lon): steps} to build exactly those tiles, each with
+        its own steps (an airport batch); the step boxes then show them all.
+        """
         # Check if config window is open and if unsaved changes exist
         if (
             self.parent.config_window is not None
@@ -3375,7 +3531,13 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             if result == "cancel":
                 return
 
-        list_lat_lon = sorted(self.dico_tiles_todo.keys())
+        if tile_steps is not None:
+            list_lat_lon = sorted(tile_steps)
+            wanted = set().union(*tile_steps.values()) if tile_steps else set()
+            for step, label in self.step_ckbtn.items():
+                self.v_[label].set(1 if step in wanted else 0)
+        else:
+            list_lat_lon = sorted(self.dico_tiles_todo.keys())
         if not list_lat_lon:
             UI.vprint(1, "Unable to batch build: No tiles selected.")
             return
@@ -3383,10 +3545,14 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         override_cfg = bool(self.v_["Override tile configs"].get())
         if not self.confirm_no_live_overlap(list_lat_lon):
             return
-        resume_path = self.confirm_resume(list_lat_lon, steps, override_cfg)
+        resume_path = self.confirm_resume(
+            list_lat_lon, steps, override_cfg, tile_steps
+        )
         if resume_path is None:
             return
-        self.launch_batch(list_lat_lon, steps, override_cfg, resume_path)
+        self.launch_batch(
+            list_lat_lon, steps, override_cfg, resume_path, tile_steps
+        )
         return
 
     def confirm_no_live_overlap(self, list_lat_lon):
@@ -3420,7 +3586,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             for step, label in self.step_ckbtn.items()
         }
 
-    def confirm_resume(self, list_lat_lon, steps, override_cfg):
+    def confirm_resume(self, list_lat_lon, steps, override_cfg, tile_steps=None):
         """Decide what to do about a journal left behind by an earlier run.
 
         Returns the journal to resume, "" to build from scratch, or None when
@@ -3430,7 +3596,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         """
         for journal, state in BSTATE.resumable_all():
             if not BSTATE.matches(
-                state, list_lat_lon, steps, self.custom_build_dir, override_cfg
+                state, list_lat_lon, steps, self.custom_build_dir, override_cfg,
+                tile_steps,
             ):
                 continue
             answer = messagebox.askyesnocancel(
@@ -3458,7 +3625,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             return claimed
         return ""
 
-    def launch_batch(self, list_lat_lon, steps, override_cfg, resume_path):
+    def launch_batch(self, list_lat_lon, steps, override_cfg, resume_path,
+                     tile_steps=None):
         (lat, lon) = list_lat_lon[0]
         try:
             tile = CFG.Tile(lat, lon, self.custom_build_dir)
@@ -3481,7 +3649,10 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             steps["clouds"],
         ]
         threading.Thread(
-            target=TILE.build_tile_list, args=args, daemon=True
+            target=TILE.build_tile_list,
+            args=args,
+            kwargs={"tile_steps": tile_steps},
+            daemon=True,
         ).start()
         return
 
@@ -3577,7 +3748,9 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         # Repaint the map so what is about to run is visible.
         for lat, lon in BSTATE.pending_tiles(state):
             self.mark_tile_todo(lat, lon)
-        self.launch_batch(list_lat_lon, steps, override_cfg, claimed)
+        self.launch_batch(
+            list_lat_lon, steps, override_cfg, claimed, BSTATE.tile_steps_of(state)
+        )
         return
 
     def _zone_recovery_targets(self) -> list[tuple[int, int, object]]:

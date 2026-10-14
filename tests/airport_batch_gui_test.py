@@ -13,15 +13,16 @@ if str(SRC) not in sys.path:
 
 import O4_GUI_Utils as GUI
 
+STEPS = list(GUI.Ortho4XP_Earth_Preview.step_ckbtn)
+
+
+def steps(*wanted):
+    return {step: step in wanted for step in STEPS}
+
 
 class AirportBatchGuiTest(unittest.TestCase):
     def setUp(self):
         self.earth = mock.Mock()
-        self.earth.step_ckbtn = GUI.Ortho4XP_Earth_Preview.step_ckbtn
-        self.earth.v_ = {label: mock.Mock() for label in self.earth.step_ckbtn.values()}
-        self.earth.selected_steps.return_value = {
-            step: False for step in self.earth.step_ckbtn
-        }
         self.parent = SimpleNamespace(
             custom_build_dir_entry=mock.Mock(),
             config=mock.Mock(),
@@ -36,7 +37,7 @@ class AirportBatchGuiTest(unittest.TestCase):
                 {"icao": "RCKH", "home": (22, 120), "tiles": [(22, 120), (23, 120)]},
             ],
             "tiles": [(22, 120), (23, 120)], "center": (22, 120),
-            "created": [], "listed": [],
+            "created": [], "written": [], "listed": [], "year_conflicts": [],
         }
         for patch in (
             mock.patch.object(GUI, "Ortho4XP_Airport_Tiles_Dialog"),
@@ -58,25 +59,37 @@ class AirportBatchGuiTest(unittest.TestCase):
         self.earth.batch_build.assert_not_called()
 
     def test_unchecked_selects_tiles_without_building(self):
-        self.choose(("RCKH", None))
-        GUI.TILE.prepare_airport_batch.assert_called_once_with("RCKH", "test-tiles/")
+        self.choose(("RCKH", {"RCKH": 2024}, None))
+        GUI.TILE.prepare_airport_batch.assert_called_once_with(
+            "RCKH", "test-tiles/", years={"RCKH": 2024}
+        )
         self.earth.show_tiles.assert_called_once_with(self.result["tiles"], (22, 120))
         self.earth.batch_build.assert_not_called()
 
-    def steps(self, *wanted):
-        return {step: step in wanted for step in self.earth.step_ckbtn}
-
-    def test_checked_builds_the_chosen_steps_after_selecting_tiles(self):
-        self.choose(("RCKH", self.steps("dsf", "bld_overlay")))
+    def test_checked_builds_each_tile_its_airports_steps(self):
+        self.result.update({
+            "airports": [
+                {"icao": "RCKH", "home": (22, 120), "tiles": [(22, 120), (23, 120)]},
+                {"icao": "RCTP", "home": (25, 121), "tiles": [(25, 121), (23, 120)]},
+                {"icao": "RCBS", "home": (24, 118), "tiles": [(24, 118)]},
+            ],
+            "tiles": [(22, 120), (23, 120), (25, 121), (24, 118)],
+        })
+        self.choose((
+            "RCKH, RCTP, RCBS",
+            {"RCKH": 2025, "RCTP": 2025, "RCBS": 2025},
+            {"RCKH": steps("dsf"), "RCTP": steps("bld_overlay"), "RCBS": steps()},
+        ))
         calls = [call[0] for call in self.earth.mock_calls]
         self.assertLess(calls.index("show_tiles"), calls.index("batch_build"))
-        self.earth.batch_build.assert_called_once_with()
-        # The batch window shows exactly the chosen steps, unticking others.
-        for step, label in self.earth.step_ckbtn.items():
-            self.earth.v_[label].set.assert_called_once_with(
-                1 if step in ("dsf", "bld_overlay") else 0
-            )
-
+        # A tile two airports reach builds both their steps; an airport with
+        # no step still has its tiles in the batch, so its zones are planned.
+        self.earth.batch_build.assert_called_once_with(tile_steps={
+            (22, 120): {"dsf"},
+            (23, 120): {"dsf", "bld_overlay"},
+            (25, 121): {"bld_overlay"},
+            (24, 118): set(),
+        })
 
     def test_several_airports_are_selected_together(self):
         self.result.update({
@@ -86,21 +99,24 @@ class AirportBatchGuiTest(unittest.TestCase):
             ],
             "tiles": [(22, 120), (23, 120), (24, 118)],
             "center": (23, 119),
+            "written": [(22, 120), (24, 118)],
             "listed": [("RCKH", (22, 120)), ("RCBS", (24, 118))],
+            "year_conflicts": [((23, 120), ("RCKH", 2025), ("RCTP", 2023))],
         })
         self.parent.get_lat_lon.return_value = (24, 118)
-        self.choose(("RCKH, RCBS", None))
-        GUI.TILE.prepare_airport_batch.assert_called_once_with("RCKH, RCBS", "test-tiles/")
+        self.choose(("RCKH, RCBS", {"RCKH": 2025, "RCBS": 2025}, None))
         self.earth.show_tiles.assert_called_once_with(
             [(22, 120), (23, 120), (24, 118)], (23, 119)
         )
-        # The active tile just had an airport added: its settings are reloaded.
+        # The active tile's config was just written: its settings are reloaded.
         self.parent.load_tile_cfg.assert_called_once_with(24, 118)
         self.earth.batch_build.assert_not_called()
+        logged = " ".join(str(c) for c in GUI.UI.vprint.call_args_list)
+        self.assertIn("keeps RCKH's reference year 2025, not 2023", logged)
 
     def test_invalid_airport_never_launches(self):
         GUI.TILE.prepare_airport_batch.side_effect = ValueError("Unknown airport")
-        self.choose(("ZZZZ", self.steps("osm")))
+        self.choose(("ZZZZ", {"ZZZZ": 2025}, {"ZZZZ": steps("osm")}))
         GUI.messagebox.showwarning.assert_called_once()
         self.earth.show_tiles.assert_not_called()
         self.earth.batch_build.assert_not_called()
@@ -109,10 +125,46 @@ class AirportBatchGuiTest(unittest.TestCase):
     def test_new_batch_window_is_created_before_launch(self):
         self.earth.lift.side_effect = tk.TclError("destroyed window")
         with mock.patch.object(GUI, "Ortho4XP_Earth_Preview", return_value=self.earth) as preview:
-            self.choose(("RCKH", self.steps("osm")))
+            self.choose(("RCKH", {"RCKH": 2025}, {"RCKH": steps("osm")}))
         preview.assert_called_once_with(self.parent, 22, 120)
         self.earth.show_tiles.assert_called_once()
-        self.earth.batch_build.assert_called_once_with()
+        self.earth.batch_build.assert_called_once_with(
+            tile_steps={(22, 120): {"osm"}, (23, 120): {"osm"}}
+        )
+
+
+class BatchWindowTileStepsTest(unittest.TestCase):
+    """batch_build(tile_steps=...) builds exactly those tiles with their steps."""
+
+    def setUp(self):
+        self.window = SimpleNamespace(
+            parent=SimpleNamespace(config_window=None),
+            step_ckbtn=GUI.Ortho4XP_Earth_Preview.step_ckbtn,
+            v_={label: mock.Mock() for label in
+                list(GUI.Ortho4XP_Earth_Preview.step_ckbtn.values()) + ["Override tile configs"]},
+            dico_tiles_todo={(1, 1): None},
+            custom_build_dir="",
+            confirm_no_live_overlap=mock.Mock(return_value=True),
+            confirm_resume=mock.Mock(return_value=""),
+            launch_batch=mock.Mock(),
+        )
+        self.window.v_["Override tile configs"].get.return_value = 0
+        self.window.selected_steps = lambda: {
+            step: self.window.v_[label].set.call_args == mock.call(1)
+            for step, label in self.window.step_ckbtn.items()
+        }
+
+    def test_steps_union_is_shown_and_tiles_come_from_the_plan(self):
+        tile_steps = {(22, 120): {"dsf"}, (23, 120): {"dsf", "veg_overlay"}}
+        GUI.Ortho4XP_Earth_Preview.batch_build(self.window, tile_steps=tile_steps)
+        for step, label in self.window.step_ckbtn.items():
+            self.window.v_[label].set.assert_called_once_with(
+                1 if step in ("dsf", "veg_overlay") else 0
+            )
+        args = self.window.launch_batch.call_args[0]
+        self.assertEqual(args[0], [(22, 120), (23, 120)])  # not the map selection
+        self.assertEqual(args[4], tile_steps)
+        self.assertEqual(self.window.confirm_resume.call_args[0][3], tile_steps)
 
 
 class AirportDialogTest(unittest.TestCase):
@@ -128,7 +180,7 @@ class AirportDialogTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.root.destroy()
 
-    def run_dialog(self, act):
+    def run_dialog(self, act, default_year=2025):
         """Open the dialog, let act(dialog) inspect and fill it, return result."""
         captured = {}
 
@@ -141,7 +193,7 @@ class AirportDialogTest(unittest.TestCase):
             act(dialog, captured)
 
         self.root.after(100, step)
-        dialog = GUI.Ortho4XP_Airport_Tiles_Dialog(self.root)
+        dialog = GUI.Ortho4XP_Airport_Tiles_Dialog(self.root, default_year)
         return dialog.result, captured
 
     def test_checkbox_is_beside_entry_and_off_by_default(self):
@@ -162,54 +214,106 @@ class AirportDialogTest(unittest.TestCase):
         result, captured = self.run_dialog(act)
         self.assertFalse(captured["default"])
         self.assertTrue(captured["beside"])
-        self.assertEqual(result, ("rckh", None))
+        self.assertEqual(result, ("RCKH", {"RCKH": 2025}, None))
 
-    def test_all_steps_ticked_by_default_and_unlock_with_start(self):
+    def test_each_airport_gets_a_row_with_its_own_year_and_steps(self):
         def act(dialog, captured):
-            captured["initial"] = dialog.chosen_steps()
             captured["locked"] = {
                 str(button.cget("state")) for button in dialog.step_buttons
             }
+            dialog.icao_entry.insert(0, "RCKH, RCBS")
+            captured["rows"] = sorted(dialog.rows)
+            captured["initial"] = dialog.chosen_steps()
             dialog.start_batch.set(True)
             dialog.update_step_state()
             captured["unlocked"] = {
                 str(button.cget("state")) for button in dialog.step_buttons
             }
-            dialog.step_vars["mask"].set(False)
-            dialog.step_vars["clouds"].set(False)
-            dialog.icao_entry.insert(0, "RCKH, RCBS")
+            dialog.row("RCBS")["year"].set("2023")
+            dialog.row("RCBS")["steps"]["clouds"].set(False)
+            # The All column toggle reaches every airport.
+            dialog.all_steps["mask"].set(False)
+            dialog.set_all_steps("mask")
             dialog.ok()
 
         result, captured = self.run_dialog(act)
-        steps = GUI.Ortho4XP_Earth_Preview.step_ckbtn
-        self.assertEqual(captured["initial"], {step: True for step in steps})
         self.assertEqual(captured["locked"], {"disabled"})
         self.assertEqual(captured["unlocked"], {"normal"})
+        self.assertEqual(captured["rows"], ["RCBS", "RCKH"])
         self.assertEqual(
-            result,
-            ("RCKH, RCBS",
-             {step: step not in ("mask", "clouds") for step in steps}),
+            captured["initial"],
+            {"RCKH": steps(*STEPS), "RCBS": steps(*STEPS)},
         )
+        icaos, years, chosen = result
+        self.assertEqual(icaos, "RCKH, RCBS")
+        self.assertEqual(years, {"RCKH": 2025, "RCBS": 2023})
+        everything_but = lambda *off: steps(*(s for s in STEPS if s not in off))  # noqa: E731
+        self.assertEqual(chosen, {
+            "RCKH": everything_but("mask"),
+            "RCBS": everything_but("mask", "clouds"),
+        })
 
-    def _validate(self, icaos, start, steps):
+    def test_a_row_keeps_its_settings_while_the_code_is_retyped(self):
+        def act(dialog, captured):
+            dialog.icao_var.set("RCKH, RCBS")
+            dialog.row("RCBS")["year"].set("2022")
+            dialog.icao_var.set("RCKH")
+            dialog.icao_var.set("RCKH, RCBS")
+            captured["year"] = dialog.row("RCBS")["year"].get()
+            dialog.all_year.set("2024")
+            dialog.set_all_years()
+            captured["all"] = dialog.chosen_years()
+            dialog.cancel()
+
+        result, captured = self.run_dialog(act)
+        self.assertIsNone(result)
+        self.assertEqual(captured["year"], "2022")
+        self.assertEqual(captured["all"], {"RCKH": 2024, "RCBS": 2024})
+
+    def _validate(self, codes, start, chosen_steps, years=None):
         dialog = SimpleNamespace(
-            icao_entry=mock.Mock(),
+            codes=lambda: codes,
             start_batch=mock.Mock(),
-            chosen_steps=lambda: steps,
+            chosen_years=lambda: years if years is not None else {c: 2025 for c in codes},
+            chosen_steps=lambda: chosen_steps,
+            years_on_server=lambda _years: True,
         )
-        dialog.icao_entry.get.return_value = icaos
         dialog.start_batch.get.return_value = start
         with mock.patch.object(GUI.messagebox, "showwarning") as warning:
             ok = GUI.Ortho4XP_Airport_Tiles_Dialog.validate(dialog)
         return ok, warning.call_count
 
     def test_blank_code_keeps_dialog_open(self):
-        self.assertEqual(self._validate("   ", False, {}), (False, 1))
+        self.assertEqual(self._validate([], False, {}), (False, 1))
 
     def test_starting_without_any_step_keeps_dialog_open(self):
-        self.assertEqual(self._validate("RCKH", True, {"osm": False}), (False, 1))
-        self.assertEqual(self._validate("RCKH", False, {"osm": False}), (True, 0))
-        self.assertEqual(self._validate("RCKH", True, {"osm": True}), (True, 0))
+        none = {"RCKH": steps(), "RCBS": steps()}
+        self.assertEqual(self._validate(["RCKH", "RCBS"], True, none), (False, 1))
+        self.assertEqual(self._validate(["RCKH", "RCBS"], False, none), (True, 0))
+        some = {"RCKH": steps(), "RCBS": steps("dsf")}
+        self.assertEqual(self._validate(["RCKH", "RCBS"], True, some), (True, 0))
+
+    def test_a_year_that_is_not_a_number_keeps_dialog_open(self):
+        dialog = SimpleNamespace(
+            codes=lambda: ["RCKH"],
+            chosen_years=mock.Mock(side_effect=ValueError),
+        )
+        with mock.patch.object(GUI.messagebox, "showwarning") as warning:
+            self.assertFalse(GUI.Ortho4XP_Airport_Tiles_Dialog.validate(dialog))
+        warning.assert_called_once()
+
+    def test_years_other_than_the_default_are_checked_on_the_server(self):
+        import O4_Color_Build as CCB
+
+        dialog = SimpleNamespace(default_year="2025")
+        with mock.patch.object(CCB, "check_year", return_value=(False, "no 2015")) as check, \
+                mock.patch.object(GUI.messagebox, "showwarning") as warning:
+            ok = GUI.Ortho4XP_Airport_Tiles_Dialog.years_on_server(
+                dialog, {"RCKH": 2025, "RCBS": 2015}
+            )
+        self.assertFalse(ok)
+        check.assert_called_once_with(2015)
+        warning.assert_called_once()
 
 
 if __name__ == "__main__":

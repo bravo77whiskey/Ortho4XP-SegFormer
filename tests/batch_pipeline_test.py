@@ -35,7 +35,7 @@ class BatchPipelineTest(unittest.TestCase):
     TILES = [(10, 20), (10, 21), (10, 22)]
 
     def _run(self, pipelined, overlay_s=0.3, dsf_s=0.05, overlay_errors=None,
-             do_color=False, do_clouds=False, retry=None):
+             do_color=False, do_clouds=False, retry=None, tile_steps=None):
         events = []
         self.overlay_calls = []
         lock = threading.Lock()
@@ -79,7 +79,7 @@ class BatchPipelineTest(unittest.TestCase):
             mock.patch.object(TILE.BSTATE, "is_done", lambda lat, lon, step: (lat, lon, step) in done),
             mock.patch.object(TILE.BSTATE, "mark_done", lambda lat, lon, step: done.add((lat, lon, step))),
             mock.patch.object(TILE.FNAMES, "build_dir", lambda *a, **kw: ""),
-            mock.patch.object(UI, "lvprint", lambda *a, **kw: None),
+            mock.patch.object(UI, "lvprint", lambda *a, **kw: self.logged.append(a)),
             mock.patch.object(UI, "vprint", lambda *a, **kw: None),
             mock.patch.object(UI, "exit_message_and_bottom_line", lambda *a, **kw: None),
             mock.patch.dict(os.environ, {"O4_BATCH_PIPELINE": "1" if pipelined else "0"}),
@@ -89,10 +89,12 @@ class BatchPipelineTest(unittest.TestCase):
             self.addCleanup(p.stop)
         UI.red_flag = False
         UI.is_working = 0
+        self.logged = []
         result = TILE.build_tile_list(
             _Tile(), self.TILES, False, False, False, True, False,
             do_bld_overlay=True, do_veg_overlay=True,
             do_color=do_color, do_clouds=do_clouds, retry=retry,
+            tile_steps=tile_steps,
         )
         self.inline = inline
         self.fills = fills
@@ -142,6 +144,26 @@ class BatchPipelineTest(unittest.TestCase):
         self.assertEqual(states[("+10+022", "dsf")], TILE.PROG.DONE)
         self.assertEqual(states[("+10+020", "dsf")], TILE.PROG.SKIPPED)
         self.assertEqual(states[("+10+021", "bld_overlay")], TILE.PROG.SKIPPED)
+
+    def test_an_airport_batch_builds_each_tile_its_own_steps(self):
+        result, events, done = self._run(
+            pipelined=True, overlay_s=0.01,
+            tile_steps={(10, 20): {"dsf"}, (10, 21): {"veg_overlay"}, (10, 22): set()},
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual([tile for _t, kind, tile in events if kind == "dsf_start"], [(10, 20)])
+        self.assertEqual(self.overlay_calls, [((10, 21), False, True)])
+        snap = TILE.PROG.snapshot()["run"]
+        self.assertEqual(snap["title"], "Batch")
+        # The progress tree shows only the steps each tile builds.
+        shown = {t["name"]: [s["key"] for s in t["steps"]] for t in snap["tiles"]}
+        self.assertEqual(shown, {"+10+020": ["dsf"], "+10+021": ["veg_overlay"], "+10+022": []})
+        states = {(t["name"], s["key"]): s["state"] for t in snap["tiles"] for s in t["steps"]}
+        self.assertEqual(states[("+10+020", "dsf")], TILE.PROG.DONE)
+        # The log names the steps each tile builds.
+        lines = [" ".join(map(str, a[1:])) for a in self.logged]
+        self.assertIn("[Batch] Steps for this tile: DSF.", lines)
+        self.assertIn("[Batch] Steps for this tile: VEG.", lines)
 
     def test_a_failed_overlay_is_not_journalled(self):
         _, _, done = self._run(

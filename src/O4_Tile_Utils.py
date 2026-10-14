@@ -249,20 +249,48 @@ def plan_airport_zones(tile, list_lat_lon, settings_for):
         return {}
 
 
-def prepare_airport_batch(icaos, custom_build_dir):
+def airport_tile_years(airports, years):
+    """Which colour reference year each airport tile gets.
+
+    An airport's year goes to every tile its zones reach. Where two airports
+    with different years reach one tile, the airport the tile is home to
+    wins, then the one listed first. Returns ({tile: year}, conflicts) with
+    conflicts as (tile, (icao, year) used, (icao, year) not used).
+    """
+    owner = {}
+    conflicts = []
+    ordered = [(a, True) for a in airports] + [(a, False) for a in airports]
+    for airport, homes_only in ordered:
+        year = years.get(airport["icao"])
+        if year is None:
+            continue
+        tiles = [airport["home"]] if homes_only else airport["tiles"]
+        for tile in tiles:
+            held = owner.setdefault(tile, (airport["icao"], year))
+            if held[0] != airport["icao"] and held[1] != year:
+                conflict = (tile, held, (airport["icao"], year))
+                if conflict not in conflicts:
+                    conflicts.append(conflict)
+    return {tile: year for tile, (_icao, year) in owner.items()}, conflicts
+
+
+def prepare_airport_batch(icaos, custom_build_dir, years=None):
     """The tiles some airports' zones reach, with configs ready to build them.
 
     icaos: one or more ICAO codes, comma- or space-separated. Each airport's
     own tile gets its code added to airport_zone_icaos, so its zones are
     drawn; every other reached tile without a config gets one from the global
-    settings. Configs other tiles already have are left as they are.
+    settings. Configs other tiles already have are left as they are, except
+    for the colour reference year: years {icao: year} sets it on every tile an
+    airport reaches (see airport_tile_years for tiles two airports share).
 
     Every code is checked before anything is written: one that apt.dat does
     not know raises ValueError (with a message for the user) and no config
     changes. Returns {"airports": [{"icao", "home", "tiles"}], "tiles",
-    "center", "created", "listed"}: "tiles" is every reached tile once, in
-    airport order; "center" the tile in the middle of them; "listed" the
-    (icao, home tile) pairs newly added to a tile's airports.
+    "center", "created", "written", "listed", "year_conflicts"}: "tiles" is
+    every reached tile once, in airport order; "center" the tile in the middle
+    of them; "written" every tile whose config was created or changed;
+    "listed" the (icao, home tile) pairs newly added to a tile's airports.
     """
     import O4_Config_Utils as CFG
 
@@ -327,7 +355,14 @@ def prepare_airport_batch(icaos, custom_build_dir):
             tile.airport_zone_icaos = ",".join(listed_here + [airport["icao"]])
             listed.append((airport["icao"], airport["home"]))
     changed = {home for _icao, home in listed}
+    tile_years, year_conflicts = airport_tile_years(airports, years or {})
+    for key, year in tile_years.items():
+        tile, _exists = loaded[key]
+        if int(tile.color_reference_year) != int(year):
+            tile.color_reference_year = int(year)
+            changed.add(key)
     created = []
+    written = []
     for (lat, lon) in tiles:
         tile, exists = loaded[(lat, lon)]
         if exists and (lat, lon) not in changed:
@@ -338,6 +373,7 @@ def prepare_airport_batch(icaos, custom_build_dir):
                 "Could not write the config of tile "
                 + FNAMES.short_latlon(lat, lon) + "."
             )
+        written.append((lat, lon))
         if not exists:
             created.append((lat, lon))
     lats = [lat for lat, _lon in tiles]
@@ -347,7 +383,9 @@ def prepare_airport_batch(icaos, custom_build_dir):
         "tiles": tiles,
         "center": ((min(lats) + max(lats)) // 2, (min(lons) + max(lons)) // 2),
         "created": created,
+        "written": written,
         "listed": listed,
+        "year_conflicts": year_conflicts,
     }
 
 
@@ -789,18 +827,20 @@ def _end_journal_on_stop():
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
     do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None,
-    do_color=False, do_clouds=False, retry=None,
+    do_color=False, do_clouds=False, retry=None, tile_steps=None,
 ):
     """Build the steps asked for on every tile of the list.
 
     retry: {(lat, lon): step keys} - only these steps of these tiles run (the
     progress panel's Retry); the batch's other steps count as done already.
+    tile_steps: {(lat, lon): step keys} - each tile builds only its own steps
+    (an airport batch); the progress panel shows only those.
     """
     try:
         return _build_tile_list(
             tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
             do_bld_overlay, do_veg_overlay, override_cfg, resume_path,
-            do_color, do_clouds, retry,
+            do_color, do_clouds, retry, tile_steps,
         )
     finally:
         # However this ended - finished, stopped, or an error nobody caught -
@@ -813,7 +853,7 @@ def build_tile_list(
 def _build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
     do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None,
-    do_color=False, do_clouds=False, retry=None,
+    do_color=False, do_clouds=False, retry=None, tile_steps=None,
 ):
     if UI.is_working:
         return 0
@@ -839,10 +879,12 @@ def _build_tile_list(
         tile.custom_build_dir,
         override_cfg,
         resume_path=resume_path,
+        tile_steps=tile_steps,
     )
-    if retry is not None:
+    only = retry if retry is not None else tile_steps
+    if only is not None:
         for (lat, lon) in list_lat_lon:
-            redo = retry.get((lat, lon), ())
+            redo = only.get((lat, lon), ())
             for step, wanted in steps.items():
                 if wanted and step not in redo:
                     BSTATE.leave_out(lat, lon, step)
@@ -851,6 +893,7 @@ def _build_tile_list(
         [step for step in BSTATE.STEPS if steps[step]],
         title="Retry" if retry is not None else "Batch",
         launch={"custom_build_dir": tile.custom_build_dir, "override_cfg": bool(override_cfg)},
+        tile_steps=tile_steps,
     )
     UI.lvprint(
         0,
@@ -900,7 +943,7 @@ def _build_tiles(
                 1,
                 "Skipping tile",
                 FNAMES.short_latlon(lat, lon),
-                "- already built by the batch being resumed.",
+                "- nothing left to build for it in this batch.",
             )
             PROG.tile_skipped(lat, lon)
             _clear_todo_marker(lat, lon)
@@ -917,9 +960,10 @@ def _build_tiles(
             ":",
             FNAMES.short_latlon(lat, lon),
         )
-        UI.lvprint(1, f"[Batch] Steps: osm={do_osm} mesh={do_mesh} mask={do_mask} "
-                   f"dsf={do_dsf} color={do_color} clouds={do_clouds} ovl={do_ovl} "
-                   f"veg_overlay={do_veg_overlay} bld_overlay={do_bld_overlay}")
+        UI.lvprint(1, "[Batch] Steps for this tile: " + ", ".join(
+            PROG.STEP_NAMES[step] for step, wanted in steps.items()
+            if wanted and not BSTATE.is_done(lat, lon, step)
+        ) + ".")
         (tile.lat, tile.lon) = (lat, lon)
         tile.build_dir = FNAMES.build_dir(
             tile.lat, tile.lon, tile.custom_build_dir

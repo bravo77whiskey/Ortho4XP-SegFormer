@@ -183,7 +183,36 @@ def _new_journal_path():
     )
 
 
-def _blank(list_lat_lon, steps, custom_build_dir, override_cfg):
+def _tile_steps_entry(tile_steps):
+    """{(lat, lon): steps} as the journal keeps it, or None for one step set."""
+    if tile_steps is None:
+        return None
+    return {
+        _key(lat, lon): [step for step in STEPS if step in wanted]
+        for (lat, lon), wanted in tile_steps.items()
+    }
+
+
+def tile_steps_of(state):
+    """{(lat, lon): set of steps} of a batch that builds each tile its own
+    steps (an airport batch), or None when every tile runs the batch's steps."""
+    entry = (state or {}).get("tile_steps")
+    if entry is None:
+        return None
+    return {
+        (int(lat), int(lon)): set(entry.get(_key(lat, lon), ()))
+        for lat, lon in state.get("tiles", [])
+    }
+
+
+def _steps_for(state, lat, lon):
+    entry = state.get("tile_steps")
+    if entry is None:
+        return state.get("steps", [])
+    return entry.get(_key(lat, lon), [])
+
+
+def _blank(list_lat_lon, steps, custom_build_dir, override_cfg, tile_steps=None):
     return {
         "version": VERSION,
         "started": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -194,6 +223,7 @@ def _blank(list_lat_lon, steps, custom_build_dir, override_cfg):
         "override_cfg": bool(override_cfg),
         "steps": [step for step in STEPS if steps.get(step)],
         "tiles": [[int(lat), int(lon)] for (lat, lon) in list_lat_lon],
+        "tile_steps": _tile_steps_entry(tile_steps),
         "progress": {},
     }
 
@@ -431,13 +461,15 @@ def summarize(state):
     )
 
 
-def matches(state, list_lat_lon, steps, custom_build_dir, override_cfg):
+def matches(state, list_lat_lon, steps, custom_build_dir, override_cfg,
+            tile_steps=None):
     """True when a journal was written for exactly this batch."""
     if state is None:
         return False
     wanted = [step for step in STEPS if steps.get(step)]
     return (
         state.get("steps") == wanted
+        and state.get("tile_steps") == _tile_steps_entry(tile_steps)
         and [tuple(t) for t in state.get("tiles", [])]
         == [(int(lat), int(lon)) for (lat, lon) in list_lat_lon]
         and (state.get("custom_build_dir") or "") == (custom_build_dir or "")
@@ -447,8 +479,12 @@ def matches(state, list_lat_lon, steps, custom_build_dir, override_cfg):
 
 ################################################################################
 def begin(list_lat_lon, steps, custom_build_dir="", override_cfg=False,
-          resume_path=None):
-    """Open this run's journal, keeping earlier progress when resuming."""
+          resume_path=None, tile_steps=None):
+    """Open this run's journal, keeping earlier progress when resuming.
+
+    tile_steps: {(lat, lon): steps} when each tile builds only its own steps
+    (an airport batch); the journal keeps it so a resume does the same.
+    """
     global _state, _state_path
     with _lock:
         _stop_heartbeat_locked()
@@ -457,7 +493,8 @@ def begin(list_lat_lon, steps, custom_build_dir="", override_cfg=False,
         if resume_path:
             state = _read(resume_path)
             if state is not None and not matches(
-                state, list_lat_lon, steps, custom_build_dir, override_cfg
+                state, list_lat_lon, steps, custom_build_dir, override_cfg,
+                tile_steps,
             ):
                 # The journal describes a different batch - resuming against it
                 # would skip steps that were never run for these tiles.
@@ -470,7 +507,9 @@ def begin(list_lat_lon, steps, custom_build_dir="", override_cfg=False,
             if state is not None:
                 path = resume_path
         if state is None:
-            state = _blank(list_lat_lon, steps, custom_build_dir, override_cfg)
+            state = _blank(
+                list_lat_lon, steps, custom_build_dir, override_cfg, tile_steps
+            )
             path = _new_journal_path()
         state["owner"] = _owner_block()
         state["status"] = "running"
@@ -497,6 +536,10 @@ def _take_over_abandoned_locked():
     """
     ours = set(_state.get("steps", []))
     tiles = {(int(lat), int(lon)) for lat, lon in _state.get("tiles", [])}
+    # In an airport batch a tile answers only for its own steps.
+    ours_by_tile = {
+        tile: set(_steps_for(_state, *tile)) for tile in tiles
+    }
     folder = _state.get("custom_build_dir") or ""
     for path, state in abandoned_all():
         if (state.get("custom_build_dir") or "") != folder:
@@ -516,9 +559,11 @@ def _take_over_abandoned_locked():
         for lat, lon in state.get("tiles", []):
             if (int(lat), int(lon)) not in tiles:
                 continue
+            ours_here = ours_by_tile[(int(lat), int(lon))]
             done = progress.setdefault(_key(lat, lon), [])
             done.extend(step for step in state["steps"]
-                        if step in overlap and step not in done)
+                        if step in overlap and step in ours_here
+                        and step not in done)
         if not pending_tiles(state):
             _remove(claimed)
             continue

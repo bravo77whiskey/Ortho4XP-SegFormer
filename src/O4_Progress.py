@@ -165,7 +165,7 @@ class Tile:
 
 
 class Run:
-    def __init__(self, title, tiles, steps, launch, auto):
+    def __init__(self, title, tiles, steps, launch, auto, tile_steps=None):
         self.title = title
         self.t0 = time.time()
         self.t1 = None
@@ -174,7 +174,13 @@ class Run:
         self.tiles = {}
         for lat, lon in tiles:
             tile = Tile(lat, lon)
-            for key in self.steps:
+            # An airport batch builds each tile its own steps: show only those.
+            wanted = (
+                self.steps if tile_steps is None
+                else [key for key in self.steps
+                      if key in tile_steps.get((int(lat), int(lon)), ())]
+            )
+            for key in wanted:
                 tile.step(key)
             self.tiles[tile.name] = tile
         # What the GUI needs to launch a retry of this run's issues.
@@ -198,11 +204,14 @@ def _changed():
 ################################################################################
 # Runs.
 
-def begin_run(tiles, steps, title="Batch", launch=None):
-    """Start showing a new run; the previous one is dropped from the panel."""
+def begin_run(tiles, steps, title="Batch", launch=None, tile_steps=None):
+    """Start showing a new run; the previous one is dropped from the panel.
+
+    tile_steps: {(lat, lon): steps} when each tile builds only its own steps.
+    """
     global _run
     with _lock:
-        _run = Run(title, tiles, steps, launch, auto=False)
+        _run = Run(title, tiles, steps, launch, auto=False, tile_steps=tile_steps)
         _loose.clear()
         _changed()
 
@@ -239,8 +248,8 @@ def step_skipped(lat, lon, key):
     with _lock:
         if _run is None:
             return
-        node = _run.tile(lat, lon).step(key)
-        if node.state == QUEUED:
+        node = _run.tile(lat, lon).steps.get(key)
+        if node is not None and node.state == QUEUED:
             node.state = SKIPPED
             _changed()
 

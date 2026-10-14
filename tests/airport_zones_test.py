@@ -190,7 +190,7 @@ class AirportTilesTest(unittest.TestCase):
             AZONE.tiles_reached(NEAR_EDGE, {19: 1600.0, 18: 0.0, 17: 0.0}), [(22, 120)]
         )
 
-    def _prepare(self, tmp, airports, icaos):
+    def _prepare(self, tmp, airports, icaos, years=None):
         """Run prepare_airport_batch against a fake X-Plane and Tiles folder."""
         import O4_Config_Utils as CFG
         import O4_File_Names as FNAMES
@@ -203,7 +203,7 @@ class AirportTilesTest(unittest.TestCase):
         FNAMES.Overlay_cache_dir = str(Path(tmp) / "cache")
         CFG.default_website = "BI"
         try:
-            return TILE.prepare_airport_batch(icaos, base)
+            return TILE.prepare_airport_batch(icaos, base, years=years)
         finally:
             TILE._xplane_dir, FNAMES.Overlay_cache_dir, CFG.default_website = saved
 
@@ -276,6 +276,23 @@ class AirportTilesTest(unittest.TestCase):
             )
             self.assertEqual(sorted(result["created"]), sorted(result["tiles"]))
 
+    def test_each_airport_sets_its_reference_year_on_its_tiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            other_cfg = self._write_cfg(
+                tmp, 23, 121, "default_website=EOX\ncolor_reference_year=2025\n"
+            )
+            untouched = self._write_cfg(tmp, 23, 120, "default_website=EOX\n")
+            result = self._prepare(
+                tmp, {"RCKH": NEAR_EDGE}, "RCKH", years={"RCKH": 2023},
+            )
+            for lat, lon in result["tiles"]:
+                text = self._cfg(tmp, lat, lon).read_text(encoding="utf-8")
+                self.assertIn("color_reference_year=2023\n", text)
+            # A config other than the year is otherwise kept.
+            self.assertIn("default_website=EOX\n", other_cfg.read_text(encoding="utf-8"))
+            self.assertIn("default_website=EOX\n", untouched.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(result["written"]), sorted(result["tiles"]))
+
     def test_unknown_code_changes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             home_cfg = self._write_cfg(tmp, 22, 120, "default_website=GO2\n")
@@ -284,6 +301,34 @@ class AirportTilesTest(unittest.TestCase):
             self.assertIn("ZZZZ, YYYY have no land runway", str(raised.exception))
             self.assertEqual(home_cfg.read_text(encoding="utf-8"), "default_website=GO2\n")
             self.assertFalse(self._cfg(tmp, 22, 121).exists())
+
+
+class TileYearsTest(unittest.TestCase):
+    def test_home_airport_then_first_listed_wins_a_shared_tile(self):
+        import O4_Tile_Utils as TILE
+
+        airports = [
+            {"icao": "AAAA", "home": (1, 1), "tiles": [(1, 1), (1, 2), (2, 2)]},
+            {"icao": "BBBB", "home": (1, 2), "tiles": [(1, 2), (2, 2)]},
+            {"icao": "CCCC", "home": (3, 3), "tiles": [(3, 3), (2, 2)]},
+        ]
+        years, conflicts = TILE.airport_tile_years(
+            airports, {"AAAA": 2025, "BBBB": 2023, "CCCC": 2025}
+        )
+        # (1, 2) is BBBB's home; (2, 2) is nobody's, so AAAA (listed first).
+        self.assertEqual(
+            years, {(1, 1): 2025, (1, 2): 2023, (2, 2): 2025, (3, 3): 2025}
+        )
+        self.assertEqual(conflicts, [
+            ((1, 2), ("BBBB", 2023), ("AAAA", 2025)),
+            ((2, 2), ("AAAA", 2025), ("BBBB", 2023)),
+        ])
+
+    def test_airports_without_a_year_leave_their_tiles_alone(self):
+        import O4_Tile_Utils as TILE
+
+        airports = [{"icao": "AAAA", "home": (1, 1), "tiles": [(1, 1)]}]
+        self.assertEqual(TILE.airport_tile_years(airports, {}), ({}, []))
 
 
 class MergeTest(unittest.TestCase):

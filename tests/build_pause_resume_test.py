@@ -293,6 +293,47 @@ class BuildJournalTest(JournalTestCase):
         self.assertFalse(legacy.exists())
 
 
+class AirportBatchJournalTest(JournalTestCase):
+    """An airport batch builds each tile its own steps; its journal says so."""
+
+    tile_steps = {(45, 5): {"dsf"}, (45, 6): {"osm", "dsf"}}
+
+    def test_the_journal_keeps_each_tiles_steps(self):
+        state = BSTATE.begin(self.tiles, self.steps, "", False, tile_steps=self.tile_steps)
+        self.assertEqual(state["tile_steps"], {"+45+005": ["dsf"], "+45+006": ["osm", "dsf"]})
+        self.assertEqual(BSTATE.tile_steps_of(state), self.tile_steps)
+        BSTATE.close()
+        _path, reread = BSTATE.resumable()
+        self.assertEqual(BSTATE.tile_steps_of(reread), self.tile_steps)
+
+    def test_an_ordinary_batch_has_no_tile_steps(self):
+        self.assertIsNone(BSTATE.tile_steps_of(self._begin()))
+
+    def test_matches_compares_each_tiles_steps(self):
+        state = BSTATE.begin(self.tiles, self.steps, "", False, tile_steps=self.tile_steps)
+        self.assertTrue(
+            BSTATE.matches(state, self.tiles, self.steps, "", False, self.tile_steps)
+        )
+        self.assertFalse(BSTATE.matches(state, self.tiles, self.steps, "", False))
+        self.assertFalse(BSTATE.matches(
+            state, self.tiles, self.steps, "", False,
+            {(45, 5): {"dsf"}, (45, 6): {"dsf"}},
+        ))
+
+    def test_it_only_strikes_its_own_steps_off_stopped_batches(self):
+        BSTATE.begin(self.tiles, {"osm": True, "dsf": True}, "", False)
+        BSTATE.set_status("stopped")
+        BSTATE.close()
+        BSTATE.begin(
+            self.tiles, {"osm": True, "dsf": True}, "", False,
+            tile_steps={(45, 5): {"dsf"}, (45, 6): {"osm"}},
+        )
+        BSTATE.complete()
+        _path, state = BSTATE.resumable()
+        self.assertEqual(state["progress"], {"+45+005": ["dsf"], "+45+006": ["osm"]})
+        self.assertEqual(BSTATE.pending_tiles(state), [(45, 5), (45, 6)])
+
+
 class ParallelInstanceTest(JournalTestCase):
     """Several copies of Ortho4XP run at once; journals must not collide."""
 
@@ -468,6 +509,127 @@ class StopEndsTheBatchTest(JournalTestCase):
             body.count("if UI.red_flag:"), body.count("_end_journal_on_stop()")
         )
         self.assertIn("UI.user_stopped = False", body)
+
+
+class AirportBatchResumeTest(JournalTestCase):
+    """An airport batch cut short resumes with each tile's own steps."""
+
+    tiles = [(45, 5), (45, 6), (45, 7)]
+    tile_steps = {(45, 5): {"dsf", "veg_overlay"}, (45, 6): {"dsf"}, (45, 7): {"osm"}}
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        import O4_Tile_Utils as TILE
+
+        self.TILE = TILE
+        self.ran = []
+        self.interrupt_at = None
+
+        def step(key):
+            def run(tile, *_args):
+                self.ran.append((tile.lat, tile.lon, key))
+                if key == "dsf" and (tile.lat, tile.lon) == self.interrupt_at:
+                    UI.red_flag = True  # the window closed during this DSF
+                    return 0
+                return 1
+            return run
+
+        def overlays(lat, lon, build_dir, do_bld=True, do_veg=True):
+            errors = {}
+            if do_bld:
+                self.ran.append((lat, lon, "bld_overlay"))
+                errors["bld"] = None
+            if do_veg:
+                self.ran.append((lat, lon, "veg_overlay"))
+                errors["veg"] = None
+            return errors
+
+        class FakeTile:
+            lat = lon = None
+            custom_build_dir = ""
+            build_dir = ""
+            dem = None
+
+            def read_from_config(self, *a, **kw):
+                return 1
+
+            def make_dirs(self):
+                pass
+
+        self.tile = FakeTile()
+        for patch in (
+            mock.patch.object(TILE.VMAP, "build_poly_file", step("osm")),
+            mock.patch.object(TILE.MESH, "build_mesh", step("mesh")),
+            mock.patch.object(TILE.MASK, "build_masks", step("mask")),
+            mock.patch.object(TILE, "_build_tile_retrying_white", step("dsf")),
+            mock.patch.object(TILE, "_batch_airport_zone_plan", lambda *a: {}),
+            mock.patch.object(TILE.PIPELINE, "process_overlays_tile", overlays),
+            mock.patch.object(TILE.PIPELINE, "apply_tile_settings", lambda *a, **kw: None),
+            mock.patch.object(TILE.SLINK, "auto_link_tile", lambda *a, **kw: None),
+            mock.patch.object(TILE, "_clear_todo_marker", lambda *a, **kw: None),
+            mock.patch.object(TILE.FNAMES, "build_dir", lambda *a, **kw: ""),
+            mock.patch.object(UI, "lvprint", lambda *a, **kw: None),
+            mock.patch.object(UI, "vprint", lambda *a, **kw: None),
+            mock.patch.object(UI, "exit_message_and_bottom_line", lambda *a, **kw: None),
+            mock.patch.dict(os.environ, {"O4_BATCH_PIPELINE": "0"}),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        UI.red_flag = False
+        UI.user_stopped = False
+        UI.is_working = 0
+        self.addCleanup(setattr, UI, "red_flag", False)
+
+    def _build(self, steps, tile_steps, resume_path=None):
+        return self.TILE.build_tile_list(
+            self.tile, self.tiles,
+            steps.get("osm"), steps.get("mesh"), steps.get("mask"), steps.get("dsf"),
+            steps.get("ovl"), steps.get("bld_overlay"), steps.get("veg_overlay"),
+            False, resume_path, steps.get("color"), steps.get("clouds"),
+            tile_steps=tile_steps,
+        )
+
+    def test_resume_runs_only_what_each_tile_still_owes(self):
+        steps = {"osm": True, "dsf": True, "veg_overlay": True}
+        self.interrupt_at = (45, 6)
+        self.assertEqual(self._build(steps, self.tile_steps), 0)
+        self.assertEqual(self.ran, [
+            (45, 5, "dsf"), (45, 5, "veg_overlay"), (45, 6, "dsf"),
+        ])
+
+        # Resume Build: the journal brings back each tile's steps.
+        path, state = BSTATE.resumable()
+        self.assertEqual(BSTATE.pending_tiles(state), [(45, 6), (45, 7)])
+        tile_steps = BSTATE.tile_steps_of(state)
+        self.assertEqual(tile_steps, self.tile_steps)
+        claimed = BSTATE.claim(path)
+        self.ran.clear()
+        UI.red_flag = False
+        self.interrupt_at = None
+        resumed = {step: step in state["steps"] for step in BSTATE.STEPS}
+        self.assertEqual(self._build(resumed, tile_steps, claimed), 1)
+        # The interrupted DSF is redone; nothing already built or never asked
+        # for runs - no OSM on +45+006, no DSF or VEG on +45+007.
+        self.assertEqual(self.ran, [(45, 6, "dsf"), (45, 7, "osm")])
+        self.assertIsNone(BSTATE.resumable())
+
+        snap = self.TILE.PROG.snapshot()["run"]
+        shown = {t["name"]: {s["key"]: s["state"] for s in t["steps"]} for t in snap["tiles"]}
+        self.assertEqual(shown["+45+005"], {"dsf": "skipped", "veg_overlay": "skipped"})
+        self.assertEqual(shown["+45+006"], {"dsf": "done"})
+        self.assertEqual(shown["+45+007"], {"osm": "done"})
+
+    def test_rerunning_the_same_airport_batch_offers_its_journal(self):
+        steps = {"osm": True, "dsf": True, "veg_overlay": True}
+        self.interrupt_at = (45, 6)
+        self._build(steps, self.tile_steps)
+        _path, state = BSTATE.resumable()
+        # The batch window's "resume this exact batch?" check.
+        self.assertTrue(BSTATE.matches(state, self.tiles, steps, "", False, self.tile_steps))
+        other = {**self.tile_steps, (45, 7): {"osm", "dsf"}}
+        self.assertFalse(BSTATE.matches(state, self.tiles, steps, "", False, other))
 
 
 class BuildTileListWiringTest(unittest.TestCase):
