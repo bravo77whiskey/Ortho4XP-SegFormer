@@ -2,9 +2,12 @@ import os
 import struct
 import sys
 import tempfile
+import io
 import unittest
+import zipfile
 import zlib
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -214,6 +217,94 @@ class TileLeafTypesTests(unittest.TestCase):
                                grid_sources=(("HRL-DLT-2018", boom),
                                              ("GLC_FCS30D", lambda *a, **k: glc)))
         self.assertEqual(r.chain, ["GLC_FCS30D"])
+
+
+    def test_source_download_messages_print_when_quiet(self):
+        heard, quiet = [], []
+
+        def downloading(cache_dir, lat, lon, log, online):
+            log("  [LeafType] GLC_FCS30D: downloading block E35N10")
+            return None
+
+        LEAF.TileLeafTypes(8, 38, "unused", log=quiet.append, warning_log=heard.append,
+                           grid_sources=(("GLC_FCS30D", downloading),))
+        self.assertIn("  [LeafType] GLC_FCS30D: downloading block E35N10", heard)
+        self.assertNotIn("  [LeafType] GLC_FCS30D: downloading block E35N10", quiet)
+
+
+class _Response:
+    def __init__(self, body, status, fail_after=None):
+        self.content, self.status_code, self.fail_after = body, status, fail_after
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, size):
+        import requests
+
+        if self.fail_after is None:
+            yield self.content
+            return
+        yield self.content[:self.fail_after]
+        raise requests.ConnectionError("read timed out")
+
+
+class _RangeSession:
+    """Serves byte ranges of ``blob``; the first ``stalls`` streamed reads break early."""
+
+    def __init__(self, blob, stalls, cut=1000):
+        self.blob, self.stalls, self.cut = blob, list(stalls), cut
+        self.ranges = []
+
+    def get(self, url, headers=None, stream=False, timeout=None):
+        a, b = headers["Range"][len("bytes="):].split("-")
+        a, b = int(a), int(b)
+        self.ranges.append((a, b))
+        body = self.blob[a:b + 1]
+        if stream and self.stalls:
+            got = self.stalls.pop(0)
+            return _Response(body, 206, fail_after=min(got, len(body)))
+        return _Response(body, 206)
+
+
+class StreamZipMemberTests(unittest.TestCase):
+    def _zip(self):
+        rng = np.random.default_rng(0)
+        payload = bytes(rng.integers(0, 4, 200_000, dtype=np.uint8))  # compressible, not trivial
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("pad.txt", b"x" * 500)
+            z.writestr("block.tif", payload)
+        blob = buf.getvalue()
+        return blob, zipfile.ZipFile(io.BytesIO(blob)).getinfo("block.tif"), payload
+
+    def test_resumes_from_where_a_stalled_read_stopped(self):
+        blob, info, payload = self._zip()
+        session = _RangeSession(blob, stalls=[3000, 0, 5000])
+        logs = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(LEAF.time, "sleep"):
+            dst = os.path.join(tmp, "out.tif")
+            LEAF._stream_zip_member("u", info, dst, session, log=logs.append)
+            self.assertEqual(Path(dst).read_bytes(), payload)
+        streamed = session.ranges[1:]
+        self.assertEqual(streamed[1][0], streamed[0][0] + 3000)
+        self.assertEqual(streamed[2][0], streamed[1][0])          # got nothing: same byte
+        self.assertEqual(streamed[3][0], streamed[2][0] + 5000)
+        self.assertEqual(sum("resuming" in line for line in logs), 3)
+
+    def test_gives_up_after_resumes_that_get_nothing(self):
+        blob, info, _ = self._zip()
+        session = _RangeSession(blob, stalls=[2000] + [0] * (LEAF.STREAM_RESUMES + 1))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(LEAF.time, "sleep"):
+            with self.assertRaisesRegex(IOError, "stalled"):
+                LEAF._stream_zip_member("u", info, os.path.join(tmp, "out.tif"), session,
+                                        log=lambda *a: None)
 
 
 class XPForestTests(unittest.TestCase):

@@ -56,6 +56,10 @@ TILE_MARGIN_DEG = 0.03
 
 USER_AGENT = "Ortho4XP-SegFormer leaf-type (+https://github.com/bravo77whiskey/Ortho4XP-SegFormer)"
 HTTP_TIMEOUT = 120
+# A big download that stops delivering for this long is resumed from the byte
+# it reached; it gives up after this many resumes in a row that got nothing.
+STREAM_STALL_S = 30
+STREAM_RESUMES = 5
 
 # ── Unified code look-up tables ──────────────────────────────────────────────
 # GLC_FCS30D fine classes: 51/52 evergreen broadleaf, 61/62 deciduous broadleaf,
@@ -434,19 +438,49 @@ class _HttpRangeFile(io.RawIOBase):
         return len(d)
 
 
-def _stream_zip_member(url, info, dst_path, session):
-    """Download one deflated zip member with a single ranged GET."""
+def _stream_zip_member(url, info, dst_path, session, log=_log_default):
+    """Download one deflated zip member with ranged GETs, resuming after a stall.
+
+    The inflater keeps its state across requests, so a resumed request just
+    feeds it the compressed bytes from where the previous one stopped.
+    """
+    import requests
+
     hdr = _http_get(session, url, headers={
         "Range": f"bytes={info.header_offset}-{info.header_offset + 29}"}).content
     name_len, extra_len = struct.unpack("<HH", hdr[26:30])
     start = info.header_offset + 30 + name_len + extra_len
     end = start + info.compress_size - 1
     dec = zlib.decompressobj(-15) if info.compress_type == zipfile.ZIP_DEFLATED else None
-    with session.get(url, headers={"Range": f"bytes={start}-{end}"}, stream=True,
-                     timeout=HTTP_TIMEOUT) as r, open(dst_path, "wb") as dst:
-        r.raise_for_status()
-        for chunk in r.iter_content(1 << 20):
-            dst.write(dec.decompress(chunk) if dec else chunk)
+    pos = start
+    fruitless = 0
+    with open(dst_path, "wb") as dst:
+        while pos <= end:
+            before = pos
+            problem = None
+            try:
+                with session.get(url, headers={"Range": f"bytes={pos}-{end}"}, stream=True,
+                                 timeout=(HTTP_TIMEOUT, STREAM_STALL_S)) as r:
+                    r.raise_for_status()
+                    if r.status_code != 206:
+                        raise IOError(f"server ignored the byte range (HTTP {r.status_code})")
+                    for chunk in r.iter_content(1 << 20):
+                        dst.write(dec.decompress(chunk) if dec else chunk)
+                        pos += len(chunk)
+            except (requests.RequestException, ConnectionError, TimeoutError) as exc:
+                problem = exc.__class__.__name__
+            if pos > end:
+                break
+            if problem is None:
+                problem = "connection closed early"
+            fruitless = 0 if pos > before else fruitless + 1
+            if fruitless > STREAM_RESUMES:
+                raise IOError(f"download of {info.filename} stalled at "
+                              f"{(pos - start) / 1e6:.0f} of {info.compress_size / 1e6:.0f} MB")
+            log(f"  [LeafType] download stopped at {(pos - start) / 1e6:.0f} of "
+                f"{info.compress_size / 1e6:.0f} MB ({problem}); resuming")
+            if fruitless:
+                time.sleep(min(30, 2 ** fruitless))
         if dec:
             dst.write(dec.flush())
     if os.path.getsize(dst_path) != info.file_size:
@@ -481,7 +515,7 @@ def _prepare_glc_block(cache_dir, lat, lon, log):
     log(f"  [LeafType] GLC_FCS30D: downloading block {label} "
         f"({info.compress_size / 1e6:.0f} MB, once per 5x5 degrees) ...")
     try:
-        _stream_zip_member(url, info, raw, session)
+        _stream_zip_member(url, info, raw, session, log)
         src = _FileBytes(raw)
         try:
             tif = GeoTiffTiles(src)
@@ -653,11 +687,14 @@ class TileLeafTypes:
         self.lat, self.lon = int(math.floor(lat)), int(math.floor(lon))
         self.log = log
         self.grids = {}
+        # A source's own messages are about downloads: rare, and slow enough
+        # that a quiet log would look hung, so they print like warnings.
+        fetch_log = warning_log or log
         t0 = time.time()
         for name, fn in grid_sources:
             t = time.time()
             try:
-                grid = fn(cache_dir, self.lat, self.lon, log=log, online=online)
+                grid = fn(cache_dir, self.lat, self.lon, log=fetch_log, online=online)
             except Exception as exc:
                 (warning_log or log)(f"  [LeafType] {name}: unavailable ({exc})")
                 grid = None
