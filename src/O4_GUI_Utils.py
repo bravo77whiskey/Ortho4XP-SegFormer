@@ -2250,6 +2250,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "Triangulate 3D mesh",
         "Draw water masks",
         "Build imagery/DSF",
+        "Colour correction",
+        "Cloud removal",
         "Extract overlays",
         "Building overlay",
         "Vegetation overlay",
@@ -2261,6 +2263,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
         "mesh": "Triangulate 3D mesh",
         "mask": "Draw water masks",
         "dsf": "Build imagery/DSF",
+        "color": "Colour correction",
+        "clouds": "Cloud removal",
         "ovl": "Extract overlays",
         "bld_overlay": "Building overlay",
         "veg_overlay": "Vegetation overlay",
@@ -3276,6 +3280,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             steps["veg_overlay"],
             override_cfg,
             resume_path,
+            steps["color"],
+            steps["clouds"],
         ]
         threading.Thread(
             target=TILE.build_tile_list, args=args, daemon=True

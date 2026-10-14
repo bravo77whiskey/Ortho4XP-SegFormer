@@ -34,10 +34,13 @@ class _Tile:
 class BatchPipelineTest(unittest.TestCase):
     TILES = [(10, 20), (10, 21), (10, 22)]
 
-    def _run(self, pipelined, overlay_s=0.3, dsf_s=0.05, overlay_errors=None):
+    def _run(self, pipelined, overlay_s=0.3, dsf_s=0.05, overlay_errors=None,
+             do_color=False, do_clouds=False):
         events = []
         lock = threading.Lock()
         done = set()
+        inline = []
+        fills = []
 
         def log(kind, lat, lon):
             with lock:
@@ -45,8 +48,14 @@ class BatchPipelineTest(unittest.TestCase):
 
         def build_tile(tile):
             log("dsf_start", tile.lat, tile.lon)
+            inline.append((tile.color_correction, tile.color_fill_clouds))
             time.sleep(dsf_s)
             log("dsf_end", tile.lat, tile.lon)
+            return 1
+
+        def build_color(tile, fill):
+            log("color", tile.lat, tile.lon)
+            fills.append(fill)
             return 1
 
         def overlays(lat, lon, build_dir, do_bld=True, do_veg=True):
@@ -57,6 +66,7 @@ class BatchPipelineTest(unittest.TestCase):
 
         patches = [
             mock.patch.object(TILE, "build_tile", build_tile),
+            mock.patch.object(TILE, "build_color", build_color),
             mock.patch.object(TILE.PIPELINE, "process_overlays_tile", overlays),
             mock.patch.object(TILE.PIPELINE, "apply_tile_settings", lambda *a, **kw: None),
             mock.patch.object(TILE.SLINK, "auto_link_tile", lambda *a, **kw: None),
@@ -80,7 +90,10 @@ class BatchPipelineTest(unittest.TestCase):
         result = TILE.build_tile_list(
             _Tile(), self.TILES, False, False, False, True, False,
             do_bld_overlay=True, do_veg_overlay=True,
+            do_color=do_color, do_clouds=do_clouds,
         )
+        self.inline = inline
+        self.fills = fills
         return result, events, done
 
     @staticmethod
@@ -121,6 +134,32 @@ class BatchPipelineTest(unittest.TestCase):
         for lat, lon in self.TILES:
             self.assertNotIn((lat, lon, "bld_overlay"), done)
             self.assertIn((lat, lon, "veg_overlay"), done)
+    def test_colour_steps_run_after_dsf_and_before_the_overlays(self):
+        _, events, done = self._run(pipelined=True, do_color=True, do_clouds=True)
+        for tile in self.TILES:
+            steps = [t for t, k, tl in events if k == "color" and tl == tile]
+            self.assertEqual(len(steps), 2)
+            self.assertLessEqual(self._at(events, "dsf_end", tile), min(steps))
+            self.assertLessEqual(max(steps), self._at(events, "ovl_start", tile))
+            self.assertIn((*tile, "color"), done)
+            self.assertIn((*tile, "clouds"), done)
+        # With both selected the colour step fills clouds too; the cloud step
+        # then only checks.
+        self.assertEqual(self.fills, [True, True] * len(self.TILES))
+        # Step 3 corrects inline when the colour steps follow it.
+        self.assertEqual(self.inline, [(True, True)] * len(self.TILES))
+
+    def test_without_colour_steps_step_3_does_not_correct(self):
+        _, events, _ = self._run(pipelined=True)
+        self.assertEqual(self.inline, [(False, False)] * len(self.TILES))
+        self.assertFalse([e for e in events if e[1] == "color"])
+
+    def test_colour_step_alone_does_not_fill(self):
+        _, _, done = self._run(pipelined=True, do_color=True)
+        self.assertEqual(self.fills, [False] * len(self.TILES))
+        self.assertEqual(self.inline, [(True, False)] * len(self.TILES))
+        self.assertNotIn((10, 20, "clouds"), done)
+
 
 if __name__ == "__main__":
     unittest.main()

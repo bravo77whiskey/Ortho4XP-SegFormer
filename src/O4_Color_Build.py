@@ -1,4 +1,10 @@
-"""Step 3 driver for the reference-anchored colour correction (main process).
+"""Driver for the reference-anchored colour correction (main process).
+
+Colour correction and cloud removal are batch steps, run after Step 3 and
+before the overlays (O4_Tile_Utils.build_color).  When the batch builds the
+tile's Step 3 too, Step 3 does the correction inline (tile.color_correction /
+tile.color_fill_clouds, set by the batch) so no texture is converted twice;
+the step afterwards then only finds what the inline pass could not do.
 
 The correction itself (O4_Color_Correction.py) needs torch, which is not
 bundled into the exe, so it runs in the overlay .venv python like the
@@ -44,20 +50,30 @@ MARK_VERSION = 1
 _MARK_OFFSET = 32
 
 
-def enabled(tile):
-    if not getattr(tile, "color_correction", True):
-        return False
+def unavailable_reason():
+    """Why colour correction cannot run on this install, or None."""
     if not os.path.basename(IMG.dds_convert_cmd).lower().startswith("nvcompress"):
-        return False          # the worker drives nvcompress directly
+        return "it needs nvcompress"          # the worker drives nvcompress directly
     if REF_PROVIDER not in IMG.providers_dict:
-        return False
+        return f"the {REF_PROVIDER} provider is missing"
     import O4_Overlay_Pipeline as PIPELINE
-    return PIPELINE._venv_exists()
+    if not PIPELINE._venv_exists():
+        return "the overlay .venv is not set up"
+    return None
 
 
-def _mark_flags(tile):
+def enabled(tile):
+    """True when Step 3 should correct inline (the batch's colour steps follow it)."""
+    return bool(getattr(tile, "color_correction", False)) and unavailable_reason() is None
+
+
+def _fill(tile):
+    return bool(getattr(tile, "color_fill_clouds", False))
+
+
+def _mark_flags(tile, fill):
     # bit 0: cloud fill; bits 16+: Sentinel-2 year, so another year redoes the texture
-    return (_reference_year(tile) << 16) | (1 if getattr(tile, "color_fill_clouds", True) else 0)
+    return (_reference_year(tile) << 16) | (1 if fill else 0)
 
 
 def _reference_year(tile):
@@ -129,29 +145,100 @@ def dds_mark(path):
 _from_dds = {}
 
 
-def rebuild_reason(tile, attrs, dds_path):
-    """Why an otherwise reusable DDS must be redone for the colour settings, or None."""
-    want = enabled(tile) and _eligible(attrs)
+def correction_reason(tile, attrs, dds_path, fill):
+    """Why a texture still needs the colour step (with cloud removal when fill), or None.
+
+    A texture already filled is not redone by a colour step without cloud
+    removal: not running a step never undoes it.
+    """
+    if not _eligible(attrs):
+        return None
     mark = dds_mark(dds_path)
-    reason = None
-    if want and mark is None:
-        reason = "not colour-corrected yet"
-    elif want and mark != (MARK_VERSION, _mark_flags(tile)):
-        reason = ("corrected against another Sentinel-2 year"
-                  if mark[0] == MARK_VERSION and mark[1] >> 16 != _reference_year(tile)
-                  else "colour correction settings changed")
-    elif not want and mark is not None and getattr(tile, "color_correction", True) is False:
-        # Undoing the correction needs the original imagery: normal path.
-        return "colour-corrected, but colour correction is off"
-    if reason and mark is None and not os.path.isfile(_jpeg_path(tile, *attrs)):
+    if mark is None:
+        return "not colour-corrected yet"
+    version, flags = mark
+    if version != MARK_VERSION:
+        return "colour correction changed"
+    if flags >> 16 != _reference_year(tile):
+        return "corrected against another Sentinel-2 year"
+    if fill and not flags & 1:
+        return "clouds not removed yet"
+    return None
+
+
+def _use_existing_dds_if_needed(tile, attrs, dds_path):
+    """Correct from the DDS when the orthophoto is gone and the DDS is still uncorrected."""
+    if dds_mark(dds_path) is None and not os.path.isfile(_jpeg_path(tile, *attrs)):
         _from_dds[(tile.build_dir, tuple(attrs))] = dds_path
+        return True
+    return False
+
+
+def rebuild_reason(tile, attrs, dds_path):
+    """Why Step 3 must redo an otherwise reusable DDS for its inline correction, or None."""
+    if not enabled(tile):
+        return None
+    reason = correction_reason(tile, attrs, dds_path, _fill(tile))
+    if reason and _use_existing_dds_if_needed(tile, attrs, dds_path):
         reason += ", correcting the existing texture"
     return reason
 
 
 def uses_existing_dds(tile, attrs):
     """True when this texture is corrected from its DDS: nothing to download or convert normally."""
-    return (tile.build_dir, tuple(attrs)) in _from_dds
+    return bool(_from_dds) and (tile.build_dir, tuple(attrs)) in _from_dds
+
+
+def has_source(tile, attrs):
+    """True when there is imagery to correct the texture from."""
+    return uses_existing_dds(tile, attrs) or os.path.isfile(_jpeg_path(tile, *attrs))
+
+
+def forget(tile):
+    """Drop the tile's correct-from-DDS records."""
+    for key in [k for k in _from_dds if k[0] == tile.build_dir]:
+        del _from_dds[key]
+
+
+def tile_textures(tile):
+    """(attrs, dds path) of the orthophoto textures the tile's terrain files use.
+
+    None when the tile has no terrain folder (Step 3 never ran).
+    """
+    ter_dir = os.path.join(tile.build_dir, "terrain")
+    if not os.path.isdir(ter_dir):
+        return None
+    found = {}
+    prefix = "BASE_TEX_NOWRAP ../textures/"
+    for name in os.listdir(ter_dir):
+        if not name.endswith(".ter"):
+            continue
+        try:
+            with open(os.path.join(ter_dir, name)) as f:
+                tex = next((ln[len(prefix):].strip() for ln in f if ln.startswith(prefix)), None)
+        except OSError:
+            continue
+        m = re.fullmatch(r"(\d+)_(\d+)_(.+)(\d\d)\.dds", tex or "")
+        if not m:
+            continue
+        ty, tx, prov, zl = int(m[1]), int(m[2]), m[3], int(m[4])
+        if prov not in IMG.providers_dict or prov in IMG.combined_providers_dict:
+            continue
+        found[(tx, ty, zl, prov)] = os.path.join(tile.build_dir, "textures", tex)
+    return sorted(found.items())
+
+
+def plan_tile(tile, fill):
+    """Textures of a built tile the colour step must do: [(attrs, reason, needs_download)]."""
+    todo = []
+    for attrs, dds in tile_textures(tile) or []:
+        if not os.path.isfile(dds):
+            continue
+        reason = correction_reason(tile, attrs, dds, fill)
+        if reason:
+            from_dds = _use_existing_dds_if_needed(tile, attrs, dds)
+            todo.append((attrs, reason, not from_dds and not os.path.isfile(_jpeg_path(tile, *attrs))))
+    return todo
 
 
 def _eligible(attrs):
@@ -200,10 +287,14 @@ def _run_worker(job, job_path):
         return json.load(f)
 
 
-def run(tile, texture_attrs, workers=4):
-    """Colour-correct and convert what it can; return the set of converted texture attrs."""
+def run(tile, texture_attrs, workers=4, fill=None):
+    """Colour-correct and convert what it can; return the set of converted texture attrs.
+
+    fill: remove clouds too; None takes the tile's inline setting.
+    """
     import O4_Overlay_Pipeline as PIPELINE
     timer = time.time()
+    fill = _fill(tile) if fill is None else bool(fill)
     groups = {}
     for attrs in texture_attrs:
         if _eligible(attrs):
@@ -243,7 +334,7 @@ def run(tile, texture_attrs, workers=4):
                 "textures": [[tx, ty, _from_dds.get((tile.build_dir, (tx, ty, zl, prov)))
                               or _jpeg_path(tile, tx, ty, zl, prov)] for (tx, ty) in sorted(tex)],
                 "reference": refs,
-                "clouds": bool(getattr(tile, "color_fill_clouds", True)) and alt in IMG.providers_dict,
+                "clouds": fill and alt in IMG.providers_dict,
             })
         # --- fit ----------------------------------------------------------
         fit = _run_worker({"phase": "fit", "state_dir": work, "groups": jobs,
@@ -289,7 +380,7 @@ def run(tile, texture_attrs, workers=4):
             gj["targets"] = targets
         res = _run_worker({"phase": "apply", "state_dir": work, "groups": jobs, "workers": workers,
                            "nvcompress": IMG.dds_convert_cmd, "tmp_dir": work,
-                           "mark": [MARK.decode("ascii"), MARK_VERSION, _mark_flags(tile)],
+                           "mark": [MARK.decode("ascii"), MARK_VERSION, _mark_flags(tile, fill)],
                            "materials": ({"relief": TMAT.relief_of(tile)} if TMAT.enabled(tile) else None),
                            "result": os.path.join(work, "apply.json")}, os.path.join(work, "apply_job.json"))
         if res is None:
@@ -305,5 +396,4 @@ def run(tile, texture_attrs, workers=4):
         return set()
     finally:
         shutil.rmtree(work, ignore_errors=True)
-        for key in [k for k in _from_dds if k[0] == tile.build_dir]:
-            del _from_dds[key]
+        forget(tile)

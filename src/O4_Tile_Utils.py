@@ -389,6 +389,57 @@ def build_tile(tile):
     return 1
 
 ################################################################################
+def build_color(tile, fill):
+    """Batch step Colour correction (fill=False) or Cloud removal (fill=True).
+
+    Works on the textures of a tile Step 3 has built: corrects every one not
+    yet corrected to these settings, from its orthophoto, or from its DDS when
+    the orthophoto was cleared. Cloud removal includes the correction, as the
+    fill is colour-matched through the same fit. Returns 1 when every texture
+    is done.
+    """
+    name = FNAMES.short_latlon(tile.lat, tile.lon)
+    UI.vprint(0, f"\n{'Cloud removal' if fill else 'Colour correction'} for tile {name} :\n--------\n")
+    why_not = CCB.unavailable_reason()
+    if why_not:
+        UI.lvprint(0, f"ERROR: Colour correction is not available: {why_not}.")
+        return 0
+    if CCB.tile_textures(tile) is None:
+        UI.lvprint(0, "ERROR: Build imagery/DSF must first be run for the tile!")
+        return 0
+    try:
+        todo = CCB.plan_tile(tile, fill)
+        if not todo:
+            UI.vprint(1, " *Every texture is already done.")
+            return 1
+        reasons = defaultdict(int)
+        for _, reason, _ in todo:
+            reasons[reason] += 1
+        UI.vprint(1, f"-> {len(todo)} texture(s) to do: "
+                     + ", ".join(f"{n} {r}" for r, n in sorted(reasons.items())) + ".")
+        fetch = [attrs for attrs, _, download in todo if download]
+        if fetch:
+            # Already-corrected textures are redone from their orthophoto.
+            download_queue = queue.Queue()
+            for attrs in fetch:
+                download_queue.put(attrs)
+            download_textures(tile, download_queue, queue.Queue(), max_download_slots)
+            if UI.red_flag:
+                return 0
+        attrs_list = [attrs for attrs, _, _ in todo if CCB.has_source(tile, attrs)]
+        done = CCB.run(tile, attrs_list, max_convert_slots, fill=fill) if attrs_list else set()
+        if UI.red_flag:
+            return 0
+        left = len(todo) - len(done & set(attrs_list))
+        if left:
+            UI.lvprint(1, f"WARNING: {left} texture(s) could not be corrected and keep "
+                          "their current imagery; run the step again to retry.")
+            return 0
+        return 1
+    finally:
+        CCB.forget(tile)
+
+################################################################################
 def build_all(tile):
     VMAP.build_poly_file(tile)
     if UI.stop_requested():
@@ -525,12 +576,14 @@ def _end_journal_on_stop():
 ################################################################################
 def build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-    do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None
+    do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None,
+    do_color=False, do_clouds=False,
 ):
     try:
         return _build_tile_list(
             tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
             do_bld_overlay, do_veg_overlay, override_cfg, resume_path,
+            do_color, do_clouds,
         )
     finally:
         # However this ended - finished, stopped, or an error nobody caught -
@@ -541,7 +594,8 @@ def build_tile_list(
 ################################################################################
 def _build_tile_list(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
-    do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None
+    do_bld_overlay=False, do_veg_overlay=False, override_cfg=False, resume_path=None,
+    do_color=False, do_clouds=False,
 ):
     if UI.is_working:
         return 0
@@ -555,6 +609,8 @@ def _build_tile_list(
         "mesh": bool(do_mesh),
         "mask": bool(do_mask),
         "dsf": bool(do_dsf),
+        "color": bool(do_color),
+        "clouds": bool(do_clouds),
         "ovl": bool(do_ovl),
         "bld_overlay": bool(do_bld_overlay),
         "veg_overlay": bool(do_veg_overlay),
@@ -578,6 +634,7 @@ def _build_tile_list(
         return _build_tiles(
             tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
             do_bld_overlay, do_veg_overlay, override_cfg, steps, timer, overlays,
+            do_color, do_clouds,
         )
     finally:
         overlays.wait()
@@ -586,6 +643,7 @@ def _build_tile_list(
 def _build_tiles(
     tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
     do_bld_overlay, do_veg_overlay, override_cfg, steps, timer, overlays,
+    do_color=False, do_clouds=False,
 ):
     k = 0
     for (lat, lon) in list_lat_lon:
@@ -618,7 +676,7 @@ def _build_tiles(
             FNAMES.short_latlon(lat, lon),
         )
         UI.lvprint(1, f"[Batch] Steps: osm={do_osm} mesh={do_mesh} mask={do_mask} "
-                   f"dsf={do_dsf} ovl={do_ovl} "
+                   f"dsf={do_dsf} color={do_color} clouds={do_clouds} ovl={do_ovl} "
                    f"veg_overlay={do_veg_overlay} bld_overlay={do_bld_overlay}")
         (tile.lat, tile.lon) = (lat, lon)
         tile.build_dir = FNAMES.build_dir(
@@ -658,6 +716,12 @@ def _build_tiles(
                 return 0
             if done:
                 BSTATE.mark_done(lat, lon, "mask")
+        want_color = do_color and not BSTATE.is_done(lat, lon, "color")
+        want_clouds = do_clouds and not BSTATE.is_done(lat, lon, "clouds")
+        # Step 3 corrects inline when the colour steps follow it, so no
+        # texture is converted twice; the steps below finish what it could not.
+        tile.color_correction = want_color or want_clouds
+        tile.color_fill_clouds = want_clouds
         if do_dsf and not BSTATE.is_done(lat, lon, "dsf"):
             UI.check_pause()
             tile_coords = FNAMES.short_latlon(lat, lon)
@@ -676,6 +740,25 @@ def _build_tiles(
                 return 0
             if done:
                 BSTATE.mark_done(lat, lon, "dsf")
+        if want_color:
+            UI.check_pause()
+            # With Cloud removal also selected, one pass does both.
+            done = build_color(tile, fill=want_clouds)
+            if UI.red_flag:
+                _end_journal_on_stop()
+                UI.exit_message_and_bottom_line()
+                return 0
+            if done:
+                BSTATE.mark_done(lat, lon, "color")
+        if want_clouds:
+            UI.check_pause()
+            done = build_color(tile, fill=True)
+            if UI.red_flag:
+                _end_journal_on_stop()
+                UI.exit_message_and_bottom_line()
+                return 0
+            if done:
+                BSTATE.mark_done(lat, lon, "clouds")
         if do_ovl and not BSTATE.is_done(lat, lon, "ovl"):
             UI.check_pause()
             done = OVL.build_overlay(lat, lon)
