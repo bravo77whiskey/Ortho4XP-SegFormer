@@ -64,6 +64,48 @@ _LOGGER.addHandler(handler)
 # are on Linux or Windows.
 OsX = "dar" in sys.platform
 
+
+class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
+    """Choose an airport and optionally start its batch immediately."""
+
+    def __init__(self, parent):
+        super().__init__(parent, "Airport tiles")
+
+    def body(self, master):
+        master.configure(**THEME.frame_options())
+        tk.Label(
+            master, text="ICAO code of the airport:", **THEME.label_options()
+        ).grid(row=0, column=0, columnspan=2, sticky=W, pady=(0, 5))
+        self.icao_entry = tk.Entry(master, width=10, **THEME.entry_options())
+        self.icao_entry.grid(row=1, column=0, sticky=W)
+        self.start_batch = tk.BooleanVar(master=self, value=False)
+        tk.Checkbutton(
+            master,
+            text="Start batch build",
+            variable=self.start_batch,
+            **THEME.checkbutton_options(),
+        ).grid(row=1, column=1, padx=(10, 0), sticky=W)
+        tk.Label(
+            master,
+            text="Uses the batch window's selected steps. If none are selected,\n"
+                 "builds vector data, mesh, water masks and imagery/DSF.",
+            justify=LEFT,
+            **THEME.label_options(),
+        ).grid(row=2, column=0, columnspan=2, sticky=W, pady=(8, 0))
+        return self.icao_entry
+
+    def validate(self):
+        if not self.icao_entry.get().strip():
+            messagebox.showwarning(
+                "Airport tiles", "Enter an airport ICAO code.", parent=self
+            )
+            return False
+        return True
+
+    def apply(self):
+        self.result = (self.icao_entry.get().strip(), self.start_batch.get())
+
+
 ################################################################################
 class Ortho4XP_GUI(tk.Tk):
 
@@ -895,13 +937,10 @@ class Ortho4XP_GUI(tk.Tk):
         The tiles are those its ZL19/18/17 airport zones reach; their configs
         are prepared so a batch build draws the zones right away.
         """
-        icao = simpledialog.askstring(
-            "Airport tiles",
-            "ICAO code of the airport:",
-            parent=self,
-        )
-        if not icao or not icao.strip():
+        choice = Ortho4XP_Airport_Tiles_Dialog(self).result
+        if choice is None:
             return
+        icao, start_batch = choice
         self.config(cursor="watch")
         self.update_idletasks()
         try:
@@ -945,6 +984,15 @@ class Ortho4XP_GUI(tk.Tk):
         except Exception:
             self.earth_window = Ortho4XP_Earth_Preview(self, *home)
         self.earth_window.show_tiles(result["tiles"], home)
+        if start_batch:
+            # A new batch window starts with no steps selected. Use the
+            # All in one steps then; keep any existing step selection.
+            if not any(self.earth_window.selected_steps().values()):
+                for step in ("osm", "mesh", "mask", "dsf"):
+                    self.earth_window.v_[
+                        self.earth_window.step_ckbtn[step]
+                    ].set(1)
+            self.earth_window.batch_build()
         return
 
     def open_earth_window(self):
