@@ -62,6 +62,8 @@ from typing import Optional
 
 import numpy as np
 
+import O4_GPU_Budget as GPUB
+
 
 # ── Stock YOLO checkpoint location ───────────────────────────────────────────
 # yolo26x-obb.pt (DOTAv1-trained Ultralytics OBB) lives in the repository root,
@@ -657,9 +659,14 @@ def run_stock_yolo_pass(
                     del results, crops, offsets
         return res
 
+    def _detect_admitted(effective_batch):
+        if str(device) == "cpu" or not torch.cuda.is_available():
+            return _detect(effective_batch)
+        return GPUB.call(f"stock-yolo b{effective_batch}", _detect, effective_batch)
+
     batch_size = max(1, int(batch_size or 1))
     try:
-        res = _detect(batch_size)
+        res = _detect_admitted(batch_size)
     except RuntimeError as exc:
         if batch_size > 1 and _is_cuda_oom(exc):
             # Discard the partial batched results and restart from scratch so
@@ -673,7 +680,7 @@ def run_stock_yolo_pass(
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            res = _detect(1)
+            res = _detect_admitted(1)
         else:
             raise
 

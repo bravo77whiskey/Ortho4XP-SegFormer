@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+import O4_GPU_Budget as GPUB
 import O4_Progress as PROG
 
 try:
@@ -901,6 +902,11 @@ def _load_group(g, state_dir, gid):
         g.alpha = {tuple(int(v) for v in k.split("_")): z[k] for k in z.files}
 
 
+def _fit(g, fetch_reference, **kw):
+    with torch.no_grad():
+        g.fit(fetch_reference, **kw)
+
+
 def job_fit(job):
     """Fit every group; report the textures that need a fill source."""
     result = {}
@@ -909,8 +915,7 @@ def job_fit(job):
         t0 = time.time()
         try:
             g, fetch_reference = _group_from_job(gj)
-            with torch.no_grad():
-                g.fit(fetch_reference, clouds=bool(gj.get("clouds", True)))
+            GPUB.call("colour fit", _fit, g, fetch_reference, clouds=bool(gj.get("clouds", True)))
             _save_group(g, job["state_dir"], gid)
         except Exception as e:      # one group failing must not cost the others
             import traceback
@@ -1016,8 +1021,7 @@ def _apply_group(job, gj, workers):
     if gj.get("fill") and gj["fill"]["textures"]:
         t0 = time.time()
         ga, fetch_reference = _group_from_job(gj, "fill")
-        with torch.no_grad():
-            ga.fit(fetch_reference, clouds=True, mode=TV)
+        GPUB.call("colour fit", _fit, ga, fetch_reference, clouds=True, mode=TV)
         fill_tex = set(ga.textures)
         alt_paths = {(t[0], t[1]): t[2] for t in gj["fill"]["textures"]}
         _log(f"{gj['provider']} ZL{gj['zl']}: fitted {len(fill_tex)} {ga.provider} textures "
@@ -1030,16 +1034,20 @@ def _apply_group(job, gj, workers):
         alt = None
         if (tx, ty) in fill_tex and os.path.isfile(alt_paths.get((tx, ty), "")):
             alt = np.array(Image.open(alt_paths[(tx, ty)]).convert("RGB"))
-        with _lock, torch.no_grad():
-            res, miss = g.correct(rgb, tx, ty)
-            if alt is not None:
-                cor_a, miss_a = ga.correct(alt, tx, ty)
-                pad = 12
-                wm = (g.grown_alpha(tx, ty, pad) * (1 - ga.grown_alpha(tx, ty, pad)))[None]
-                wf = _upsample_crop(wm, pad, pad, g.cm, g.km)[0]
-                wf = torch.maximum(wf, miss.float()).clamp(0, 1) * (~miss_a).float()
-                res = (res.float() * (1 - wf) + cor_a.float() * wf + 0.5).to(torch.uint8)
-            out = _np(res.permute(1, 2, 0))
+        def on_gpu():
+            with torch.no_grad():
+                res, miss = g.correct(rgb, tx, ty)
+                if alt is not None:
+                    cor_a, miss_a = ga.correct(alt, tx, ty)
+                    pad = 12
+                    wm = (g.grown_alpha(tx, ty, pad) * (1 - ga.grown_alpha(tx, ty, pad)))[None]
+                    wf = _upsample_crop(wm, pad, pad, g.cm, g.km)[0]
+                    wf = torch.maximum(wf, miss.float()).clamp(0, 1) * (~miss_a).float()
+                    res = (res.float() * (1 - wf) + cor_a.float() * wf + 0.5).to(torch.uint8)
+                return _np(res.permute(1, 2, 0))
+
+        with _lock:
+            out = GPUB.call("colour", on_gpu)
         ok = _convert(out, out_dds, mask, job["nvcompress"], job["tmp_dir"], job.get("mark"))
         if ok and job.get("materials"):
             _material_map(out, out_dds, gj["zl"], job)

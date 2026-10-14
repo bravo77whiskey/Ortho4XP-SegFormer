@@ -46,6 +46,7 @@ from PIL import Image, ImageDraw, ImageFont
 Image.MAX_IMAGE_PIXELS = None
 
 import O4_Bounds_Index as BBOX
+import O4_GPU_Budget as GPUB
 import O4_Persistent_Cache as PCACHE
 import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
@@ -6348,11 +6349,16 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                     del results, crops, offsets
         return detections
 
+    def _detect_admitted(effective_batch):
+        if str(device) == "cpu" or not torch.cuda.is_available():
+            return _detect(effective_batch)
+        return GPUB.call(f"yolo b{effective_batch}", _detect, effective_batch)
+
     batch_size = max(1, int(batch_size or 1))
     effective_batch_size = batch_size
     fell_back = False
     try:
-        detections = _detect(batch_size)
+        detections = _detect_admitted(batch_size)
     except RuntimeError as exc:
         if batch_size > 1 and SEGFORMER.is_cuda_oom(exc):
             # Discard any partial batched results and restart from scratch so
@@ -6366,7 +6372,7 @@ def _run_yolo_obb_inference(model, image, *, imgsz, stride, conf, iou, max_det,
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            detections = _detect(1)
+            detections = _detect_admitted(1)
             effective_batch_size = 1
             fell_back = True
         else:

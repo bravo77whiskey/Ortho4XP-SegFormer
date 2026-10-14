@@ -35,6 +35,8 @@ from collections.abc import Mapping
 
 import numpy as np
 
+import O4_GPU_Budget as GPUB
+
 WINDOW_M = 64.0
 CROP_PX = 96
 DEFAULT_HEIGHT_CHECKPOINT = r"I:\building-models\heightnet.pt"
@@ -255,7 +257,11 @@ def load_height_model(checkpoint_path=None, device=None):
     model.load_state_dict(state_dict, strict=True)
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
+    if str(device).startswith("cuda"):
+        with GPUB.step("load heightnet"):
+            model.to(device)
+    else:
+        model.to(device)
     model.eval()
     model._o4_device = device
     model._o4_heightnet_arch = arch
@@ -325,7 +331,8 @@ def predict_detection_heights(model, image, detections, m_per_px,
 
     device = getattr(model, "_o4_device", "cpu")
     if str(device).startswith("cuda"):
-        return _predict_heights_cuda(
+        return GPUB.call(
+            "heightnet", _predict_heights_cuda,
             model, image, detections, m_per_px, batch_size, out,
             half_px, crop_px, scalar_layout, device,
         )

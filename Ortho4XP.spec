@@ -59,6 +59,7 @@ OVERLAY_MODULES = [
     "O4_DSF_Edit",
     "O4_Footprint_Polygons",
     "O4_Forest_Assets",
+    "O4_GPU_Budget",
     "O4_Grass_Overlay",
     "O4_Height_Model",
     "O4_Height_Priors",

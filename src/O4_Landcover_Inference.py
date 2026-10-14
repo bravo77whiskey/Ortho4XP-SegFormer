@@ -7,6 +7,7 @@ through ``remote_client`` (see O4_Remote_GPU).
 """
 
 from O4_Overlay_Logging import verbose_print
+import O4_GPU_Budget as GPUB
 import os
 import re
 import sys
@@ -333,13 +334,14 @@ def _apply_vram_limit(device):
         return
 
     if limit_bytes is None:
+        GPUB.set_process_limit(None)
         _applied_vram_limit_bytes = None
         return
 
     try:
         total_bytes = torch.cuda.get_device_properties(device).total_memory
         fraction = max(1e-3, min(1.0, float(limit_bytes) / float(total_bytes)))
-        torch.cuda.set_per_process_memory_fraction(fraction, device=device)
+        GPUB.set_process_limit(total_bytes * fraction)
         effective_limit_gb = total_bytes * fraction / (1024 ** 3)
         verbose_print(
             f"[SegFormer] VRAM cap: {effective_limit_gb:.2f} GB "
@@ -418,7 +420,8 @@ def load_vegetation_model(device=None):
     _model_veg = SegformerForSemanticSegmentation.from_pretrained(_MODEL_VEG_REPO)
     if device.type == 'cuda':
         _model_veg = _model_veg.half()
-    _model_veg = _optimize_model_for_inference(_model_veg, device)
+    with GPUB.step("load segformer"):
+        _model_veg = _optimize_model_for_inference(_model_veg, device)
     print("[SegFormer] Inference model ready.")
     return _model_veg, _processor_veg, device
 
@@ -497,6 +500,13 @@ def run_inference(model, device, img_rgb, processor=None, tree_support=False):
     if remote_client is not None and isinstance(model, RemoteModelHandle):
         cls_map = remote_client.segformer_infer(model.kind, img_rgb)
         return (cls_map, None) if tree_support else cls_map
+    if getattr(device, 'type', None) != 'cuda':
+        return _run_inference(model, device, img_rgb, processor, tree_support)
+    return GPUB.call("segformer", _run_inference, model, device, img_rgb,
+                     processor, tree_support)
+
+
+def _run_inference(model, device, img_rgb, processor, tree_support):
     import torch
     import torch.nn.functional as F
     from PIL import Image as _Image
