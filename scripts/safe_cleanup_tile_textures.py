@@ -5,12 +5,20 @@ import ast
 import json
 import math
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from PIL import Image, ImageDraw
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import O4_Airport_Zones as AZONE  # noqa: E402
 
 
 TILE_RE = re.compile(r"^zOrtho4XP_(?P<lat>[+-]\d{2})(?P<lon>[+-]\d{3})$")
@@ -87,6 +95,11 @@ def parse_cfg(cfg_path: Path) -> TileConfig:
         zone_list = ast.literal_eval(zone_list_raw)
     except (SyntaxError, ValueError):
         zone_list = []
+    try:
+        airport_zones = ast.literal_eval(values.get("airport_zone_list", "[]"))
+    except (SyntaxError, ValueError):
+        airport_zones = []
+    zone_list = AZONE.merge_zone_lists(zone_list, airport_zones)
     return TileConfig(
         default_website=values.get("default_website", ""),
         default_zl=int(values.get("default_zl", "16")),

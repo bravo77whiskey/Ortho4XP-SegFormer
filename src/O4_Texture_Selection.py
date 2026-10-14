@@ -7,7 +7,8 @@ behind, so the same footprint and zoomlevel can exist several times over; and a
 textures for it, each owning only the part of the footprint on its side of the
 boundary.
 
-The tile config is the source of truth for both cases. It is the input that
+The tile config (its drawn ``zone_list`` and the ``airport_zone_list`` Step 3
+drew around listed airports) is the source of truth for both cases. It is the input that
 ``O4_DSF_Utils.zone_list_to_ortho_dico`` turned into the per-mesh-cell texture
 assignment when the tile was built, so replaying that same rasterisation here
 tells us exactly which DDS files the DSF references and which sub-region of its
@@ -28,6 +29,8 @@ import re
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+import O4_Airport_Zones as AZONE
 
 
 TEXTURE_NAME_RE = re.compile(
@@ -122,9 +125,9 @@ def _cfg_float(values, key, default):
         return default
 
 
-def _cfg_zone_list(values):
+def _cfg_zone_list(values, key="zone_list"):
     try:
-        zone_list = ast.literal_eval(values.get("zone_list", "[]"))
+        zone_list = ast.literal_eval(values.get(key, "[]"))
     except (SyntaxError, ValueError):
         return []
     if not isinstance(zone_list, list):
@@ -289,7 +292,9 @@ def cfg_texture_assignment(tex_dir, lat, lon, cfg_path=None):
     cover_zl = _cfg_int(values, "cover_zl", 18)
     cover_extent = _cfg_float(values, "cover_extent", 1.0)
     cover_mode = values.get("cover_airports_with_highres", "False")
-    zone_list = _cfg_zone_list(values)
+    zone_list = AZONE.merge_zone_lists(
+        _cfg_zone_list(values), _cfg_zone_list(values, "airport_zone_list")
+    )
 
     masks_im, dico_tmp = _zone_mask(
         lat, lon, default_zl, default_website, zone_list

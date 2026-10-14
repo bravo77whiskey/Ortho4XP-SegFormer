@@ -546,6 +546,9 @@ class Ortho4XP_GUI(tk.Tk):
                 setattr(CFG, tile_var, value)
             else:
                 setattr(CFG, tile_var, cfg_global_tile_vars[var]["type"](value))
+        # Tile-only settings start empty, not with the previous tile's value.
+        CFG.airport_zone_icaos = CFGVARS.cfg_tile_vars["airport_zone_icaos"]["default"]
+        CFG.airport_zone_list = []
 
         if os.path.exists(tile_cfg_file):
             f = open(tile_cfg_file, "r")

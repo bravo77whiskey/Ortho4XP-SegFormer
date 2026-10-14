@@ -9,6 +9,7 @@ import tkinter as tk
 import tkinter.ttk as ttk
 from tkinter import E, N, S, W, filedialog, messagebox
 
+import O4_Airport_Zones as AZONE
 import O4_DEM_Utils as DEM
 import O4_File_Names as FNAMES
 import O4_UI_Utils as UI
@@ -46,6 +47,7 @@ from O4_Cfg_Vars import (
     list_bld_vars,
     list_veg_vars,
     list_tile_vars,
+    tile_only_vars,
     list_vector_vars,
 )
 
@@ -327,6 +329,12 @@ class Tile:
                         "CFG error: Could not read global config file.",
                     )
                     return 0
+
+            # The airport list and the zones last drawn from it are the tile's
+            # own, overridden configs or not, and a tile without them must not
+            # keep the previous tile's.
+            self.airport_zone_icaos = ",".join(AZONE.read_tile_icaos(tile_config))
+            self.airport_zone_list = AZONE.read_tile_zones(tile_config)
 
             if tile_exists and not use_global:
                 config_file = tile_config
@@ -1146,6 +1154,9 @@ class Ortho4XP_Config(tk.Toplevel):
             if var == "default_zl":
                 self.v_["zone_list"].set(self.parent.default_zl.get())
                 continue
+            # Tile-only settings have no global value to reset to
+            if var in tile_only_vars:
+                continue
             # Since we're looping through list_tile_vars, we need to prefix the key for getting
             # the value from the global config tab
             _global_var = global_prefix + var
@@ -1219,6 +1230,9 @@ class Ortho4XP_Config(tk.Toplevel):
                 continue
             if var == "default_zl":
                 self.v_[var].set(self.parent.default_zl.get())
+                continue
+            if var in tile_only_vars:
+                self.v_[var].set(str(cfg_tile_vars[var]["default"]))
                 continue
             self.v_[var].set(self.v_[global_prefix + var].get())
 

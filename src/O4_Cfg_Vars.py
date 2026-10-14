@@ -298,6 +298,35 @@ cfg_tile_vars = {
         "default": 18,
         "hint": "The zoomlevel with which to cover the airports zone when high_zl_airports is set. Note that if the cover_zl is lower than the zoomlevel which would otherwise be applied on a specific zone, the latter is used.",
     },
+    "airport_zone_icaos": {
+        "type": str,
+        "default": "",
+        "hint": "Comma-separated ICAO codes of airports (e.g. RCKH,RCAY) that get ZL19, ZL18 and ZL17 zones drawn automatically around their runways, at the distances set by airport_zone_zl19_m / _zl18_m / _zl17_m. An airport only counts for the tile its runways are in; listed in another tile it is skipped. Where its zones reach into neighbouring tiles of the same batch build, those tiles get them too. Drawn zones of a higher zoomlevel still win over them. Runways come from apt.dat, so custom_scenery_dir must be set. Tile setting only.",
+        "short_name": "apt_zone_icaos",
+    },
+    "airport_zone_list": {
+        "type": list,
+        "default": [],
+        "hint": "The zones Step 3 last drew from airport_zone_icaos, kept apart from the hand-drawn zone_list. Rewritten on every Step 3; not edited by hand.",
+    },
+    "airport_zone_zl19_m": {
+        "type": float,
+        "default": 1600.0,
+        "hint": "Distance (m) from the polygon spanning all runways of each airport in airport_zone_icaos to the edge of its ZL19 zone. 0 leaves the ZL19 zone out.",
+        "short_name": "apt_zone_zl19_m",
+    },
+    "airport_zone_zl18_m": {
+        "type": float,
+        "default": 4350.0,
+        "hint": "Distance (m) from the polygon spanning all runways of each airport in airport_zone_icaos to the edge of its ZL18 zone. 0 leaves the ZL18 zone out.",
+        "short_name": "apt_zone_zl18_m",
+    },
+    "airport_zone_zl17_m": {
+        "type": float,
+        "default": 14550.0,
+        "hint": "Distance (m) from the polygon spanning all runways of each airport in airport_zone_icaos to the edge of its ZL17 zone. 0 leaves the ZL17 zone out.",
+        "short_name": "apt_zone_zl17_m",
+    },
     "color_reference_year": {
         "type": int,
         "default": 2025,
@@ -710,11 +739,17 @@ cfg_tile_vars = {
     },
 }
 
+# Settings that only exist per tile: the global config has no global_ copy.
+tile_only_vars = [
+    "default_website", "default_zl", "zone_list", "airport_zone_icaos",
+    "airport_zone_list",
+]
+
 # Create dictionary from cfg_tile_vars with prefix and remove keys not in global config
 cfg_global_tile_vars = {
     f"{global_prefix}{key}": value
     for key, value in cfg_tile_vars.items()
-    if key not in ["default_website", "default_zl", "zone_list"]
+    if key not in tile_only_vars
 }
 
 cfg_vars = {**cfg_app_vars, **cfg_tile_vars, **cfg_global_tile_vars}
@@ -786,6 +821,10 @@ list_dsf_vars = [
     "cover_airports_with_highres",
     "cover_extent",
     "cover_zl",
+    "airport_zone_icaos",
+    "airport_zone_zl19_m",
+    "airport_zone_zl18_m",
+    "airport_zone_zl17_m",
     "color_reference_year",
     "water_tech",
     "ratio_bathy",
@@ -878,7 +917,7 @@ list_tile_vars = (
     + list_overlay_vars
     + list_veg_legacy_vars
     + list_other_vars
-    + ["default_website", "default_zl", "zone_list"]
+    + ["default_website", "default_zl", "zone_list", "airport_zone_list"]
 )
 
 list_global_tile_vars = [
@@ -892,13 +931,16 @@ list_global_tile_vars = [
         + list_veg_legacy_vars
         + list_other_vars
     )
+    if item not in tile_only_vars
 ]
 
 list_global_vector_vars = [global_prefix + item for item in list_vector_vars]
 
 list_global_mesh_vars = [global_prefix + item for item in list_mesh_vars]
 
-list_global_dsf_vars = [global_prefix + item for item in list_dsf_vars]
+list_global_dsf_vars = [
+    global_prefix + item for item in list_dsf_vars if item not in tile_only_vars
+]
 
 list_global_mask_vars = [global_prefix + item for item in list_mask_vars]
 

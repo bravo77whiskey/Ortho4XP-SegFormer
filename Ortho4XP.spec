@@ -48,6 +48,7 @@ added_datas = [
 # listed module must be listed too (tests/spec_bundles_modules_test.py).
 OVERLAY_MODULES = [
     "O4_Agri_Structures",
+    "O4_Airport_Zones",
     "O4_Apt_Pavement",
     "O4_Asset_Inventory",
     "O4_Bld_Overlap_Facades",

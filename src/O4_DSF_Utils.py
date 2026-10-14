@@ -11,6 +11,7 @@ from math import ceil, floor
 from PIL import Image, ImageDraw
 import subprocess
 import sys
+import O4_Airport_Zones as AZONE
 import O4_Bathymetry as BATHY
 
 _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -349,7 +350,10 @@ def zone_list_to_ortho_dico(tile):
         tile.default_zl,
         tile.default_website,
     )
-    for region in [base_zone] + tile.zone_list[::-1]:
+    zone_list = AZONE.merge_zone_lists(
+        tile.zone_list, getattr(tile, "airport_zone_list", [])
+    )
+    for region in [base_zone] + zone_list[::-1]:
         dico_tmp[i] = (region[1], region[2])
         pol = [
             (round((x - tile.lon) * 4095), round((tile.lat + 1 - y) * 4095))

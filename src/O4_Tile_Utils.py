@@ -6,6 +6,7 @@ import queue
 import threading
 from collections import defaultdict
 import O4_UI_Utils as UI
+import O4_Airport_Zones as AZONE
 import O4_Cfg_Vars as CFGVARS
 import O4_File_Names as FNAMES
 import O4_Imagery_Utils as IMG
@@ -207,6 +208,99 @@ def _finalize_terrain_materials(tile):
         UI.lvprint(1, f"WARNING: terrain material maps failed ({e}).")
 
 
+def _xplane_dir():
+    import O4_Config_Utils as CFG
+    from O4_Scenery_Packs import resolve_custom_scenery_dir
+
+    custom_scenery_dir = resolve_custom_scenery_dir(CFG.custom_scenery_dir)
+    return os.path.dirname(custom_scenery_dir) if custom_scenery_dir else ""
+
+
+def plan_airport_zones(tile, list_lat_lon, settings_for):
+    """Airport zones of every tile in list_lat_lon, {} when none are asked for.
+
+    settings_for(lat, lon) -> (icaos, {zl: metres}) for a tile of the list.
+    """
+    xplane_dir = _xplane_dir()
+
+    def runway_lookup(icaos):
+        if not xplane_dir:
+            UI.lvprint(
+                1,
+                "WARNING: custom_scenery_dir is not set: airport zones need the "
+                "runways in X-Plane's apt.dat, none drawn for",
+                ", ".join(icaos) + ".",
+            )
+            return {}
+        return AZONE.runways_by_icao(
+            xplane_dir,
+            icaos,
+            cache_dir=os.path.join(FNAMES.Overlay_cache_dir, "_airports"),
+            log=lambda msg: UI.vprint(1, "   " + msg),
+        )
+
+    try:
+        return AZONE.plan_zones(
+            list_lat_lon, settings_for, runway_lookup,
+            log=lambda msg: UI.vprint(1, msg),
+        )
+    except Exception as e:
+        UI.lvprint(1, f"WARNING: airport zones could not be drawn ({e}).")
+        return {}
+
+
+def _batch_airport_zone_plan(tile, list_lat_lon, override_cfg):
+    """Airport zones for a whole batch, each tile's settings read as it will be built."""
+    def settings_for(lat, lon):
+        other = copy.copy(tile)
+        (other.lat, other.lon) = (lat, lon)
+        other.build_dir = FNAMES.build_dir(lat, lon, tile.custom_build_dir)
+        other.read_from_config(use_global=override_cfg)
+        return AZONE.parse_icaos(other.airport_zone_icaos), AZONE.distances_from(other)
+
+    return plan_airport_zones(tile, list_lat_lon, settings_for)
+
+
+def _airport_zones(tile):
+    """This tile's airport zones as zone_list entries.
+
+    Step 3 saves them in the tile config as airport_zone_list, which the
+    overlays replay to know which textures the DSF uses.
+
+    A batch plans them for all its tiles up front (tile.airport_zone_plan), so
+    zones reach across tile edges; a tile built on its own only gets those of
+    its own airports.
+    """
+    plan = getattr(tile, "airport_zone_plan", None)
+    if plan is None:
+        plan = plan_airport_zones(
+            tile,
+            [(tile.lat, tile.lon)],
+            lambda lat, lon: (
+                AZONE.parse_icaos(tile.airport_zone_icaos),
+                AZONE.distances_from(tile),
+            ),
+        )
+    zones = []
+    by_icao = defaultdict(list)
+    for coords, zl, icao in plan.get((tile.lat, tile.lon), []):
+        if zl > tile.mesh_zl:
+            UI.vprint(
+                1,
+                f"   Airport zones: {icao} ZL{zl} lowered to mesh_zl={tile.mesh_zl}.",
+            )
+            zl = tile.mesh_zl
+        zones.append([coords, zl, tile.default_website])
+        by_icao[icao].append(zl)
+    for icao, zls in by_icao.items():
+        UI.vprint(
+            1,
+            f"-> Airport zones from {icao}: "
+            + ", ".join(f"ZL{zl}" for zl in zls) + ".",
+        )
+    return zones
+
+
 def build_tile(tile):
     if UI.is_working:
         return 0
@@ -231,6 +325,7 @@ def build_tile(tile):
 
     timer = time.time()
 
+    tile.airport_zone_list = _airport_zones(tile)
     tile.write_to_config()
 
     if not IMG.initialize_local_combined_providers_dict(tile):
@@ -664,6 +759,12 @@ def _build_tile_list(
         "tiles.",
     )
     overlays = _TileOverlays()
+    if do_dsf:
+        # Zones of an airport near a tile edge reach into the neighbouring
+        # tiles of the batch, so they are planned for all tiles at once.
+        tile.airport_zone_plan = _batch_airport_zone_plan(
+            tile, list_lat_lon, override_cfg
+        )
     try:
         return _build_tiles(
             tile, list_lat_lon, do_osm, do_mesh, do_mask, do_dsf, do_ovl,
@@ -671,6 +772,7 @@ def _build_tile_list(
             do_color, do_clouds,
         )
     finally:
+        tile.__dict__.pop("airport_zone_plan", None)
         overlays.wait()
 
 
