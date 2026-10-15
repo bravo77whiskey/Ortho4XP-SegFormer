@@ -228,7 +228,7 @@ class AirportTilesTest(unittest.TestCase):
             AZONE.tiles_reached(NEAR_EDGE, {19: 1600.0, 18: 0.0, 17: 0.0}), [(22, 120)]
         )
 
-    def _prepare(self, tmp, airports, icaos, years=None):
+    def _prepare(self, tmp, airports, icaos, years=None, providers=None):
         """Run prepare_airport_batch against a fake X-Plane and Tiles folder."""
         import O4_Config_Utils as CFG
         import O4_File_Names as FNAMES
@@ -241,7 +241,7 @@ class AirportTilesTest(unittest.TestCase):
         FNAMES.Overlay_cache_dir = str(Path(tmp) / "cache")
         CFG.default_website = "BI"
         try:
-            return TILE.prepare_airport_batch(icaos, base, years=years)
+            return TILE.prepare_airport_batch(icaos, base, years=years, providers=providers)
         finally:
             TILE._xplane_dir, FNAMES.Overlay_cache_dir, CFG.default_website = saved
 
@@ -331,6 +331,20 @@ class AirportTilesTest(unittest.TestCase):
             self.assertIn("default_website=EOX\n", untouched.read_text(encoding="utf-8"))
             self.assertEqual(sorted(result["written"]), sorted(result["tiles"]))
 
+    def test_each_airport_sets_its_imagery_provider_on_its_tiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home_cfg = self._write_cfg(
+                tmp, 22, 120, "default_website=EOX\ncolor_reference_year=2025\n"
+            )
+            result = self._prepare(
+                tmp, {"RCKH": NEAR_EDGE}, "RCKH", providers={"RCKH": "GO2"},
+            )
+            for lat, lon in result["tiles"]:
+                text = self._cfg(tmp, lat, lon).read_text(encoding="utf-8")
+                self.assertIn("default_website=GO2\n", text)
+            self.assertIn("color_reference_year=2025\n", home_cfg.read_text(encoding="utf-8"))
+            self.assertEqual(result["provider_conflicts"], [])
+
     def test_unknown_code_changes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             home_cfg = self._write_cfg(tmp, 22, 120, "default_website=GO2\n")
@@ -350,7 +364,7 @@ class TileYearsTest(unittest.TestCase):
             {"icao": "BBBB", "home": (1, 2), "tiles": [(1, 2), (2, 2)]},
             {"icao": "CCCC", "home": (3, 3), "tiles": [(3, 3), (2, 2)]},
         ]
-        years, conflicts = TILE.airport_tile_years(
+        years, conflicts = TILE.airport_tile_values(
             airports, {"AAAA": 2025, "BBBB": 2023, "CCCC": 2025}
         )
         # (1, 2) is BBBB's home; (2, 2) is nobody's, so AAAA (listed first).
@@ -366,7 +380,7 @@ class TileYearsTest(unittest.TestCase):
         import O4_Tile_Utils as TILE
 
         airports = [{"icao": "AAAA", "home": (1, 1), "tiles": [(1, 1)]}]
-        self.assertEqual(TILE.airport_tile_years(airports, {}), ({}, []))
+        self.assertEqual(TILE.airport_tile_values(airports, {}), ({}, []))
 
 
 class MergeTest(unittest.TestCase):

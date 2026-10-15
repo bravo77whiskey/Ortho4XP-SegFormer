@@ -30,7 +30,10 @@ class AirportBatchGuiTest(unittest.TestCase):
             get_lat_lon=mock.Mock(return_value=(0, 0)),
             load_tile_cfg=mock.Mock(),
             earth_window=self.earth,
+            map_list=["BI", "GO2"],
+            default_website=mock.Mock(),
         )
+        self.parent.default_website.get.return_value = "BI"
         self.parent.custom_build_dir_entry.get.return_value = "test-tiles/"
         self.result = {
             "airports": [
@@ -59,9 +62,12 @@ class AirportBatchGuiTest(unittest.TestCase):
         self.earth.batch_build.assert_not_called()
 
     def test_unchecked_selects_tiles_without_building(self):
-        self.choose(("RCKH", {"RCKH": 2024}, None))
+        self.choose(("RCKH", {"RCKH": 2024}, {"RCKH": "GO2"}, None))
+        GUI.Ortho4XP_Airport_Tiles_Dialog.assert_called_once_with(
+            self.parent, mock.ANY, ["BI", "GO2"], "BI"
+        )
         GUI.TILE.prepare_airport_batch.assert_called_once_with(
-            "RCKH", "test-tiles/", years={"RCKH": 2024}
+            "RCKH", "test-tiles/", years={"RCKH": 2024}, providers={"RCKH": "GO2"}
         )
         self.earth.show_tiles.assert_called_once_with(self.result["tiles"], (22, 120))
         self.earth.batch_build.assert_not_called()
@@ -78,6 +84,7 @@ class AirportBatchGuiTest(unittest.TestCase):
         self.choose((
             "RCKH, RCTP, RCBS",
             {"RCKH": 2025, "RCTP": 2025, "RCBS": 2025},
+            {"RCKH": "BI", "RCTP": "BI", "RCBS": "BI"},
             {"RCKH": steps("dsf"), "RCTP": steps("bld_overlay"), "RCBS": steps()},
         ))
         calls = [call[0] for call in self.earth.mock_calls]
@@ -102,9 +109,10 @@ class AirportBatchGuiTest(unittest.TestCase):
             "written": [(22, 120), (24, 118)],
             "listed": [("RCKH", (22, 120)), ("RCBS", (24, 118))],
             "year_conflicts": [((23, 120), ("RCKH", 2025), ("RCTP", 2023))],
+            "provider_conflicts": [((23, 120), ("RCKH", "BI"), ("RCTP", "GO2"))],
         })
         self.parent.get_lat_lon.return_value = (24, 118)
-        self.choose(("RCKH, RCBS", {"RCKH": 2025, "RCBS": 2025}, None))
+        self.choose(("RCKH, RCBS", {"RCKH": 2025, "RCBS": 2025}, {"RCKH": "BI", "RCBS": "BI"}, None))
         self.earth.show_tiles.assert_called_once_with(
             [(22, 120), (23, 120), (24, 118)], (23, 119)
         )
@@ -113,10 +121,11 @@ class AirportBatchGuiTest(unittest.TestCase):
         self.earth.batch_build.assert_not_called()
         logged = " ".join(str(c) for c in GUI.UI.vprint.call_args_list)
         self.assertIn("keeps RCKH's reference year 2025, not 2023", logged)
+        self.assertIn("keeps RCKH's imagery BI, not GO2", logged)
 
     def test_invalid_airport_never_launches(self):
         GUI.TILE.prepare_airport_batch.side_effect = ValueError("Unknown airport")
-        self.choose(("ZZZZ", {"ZZZZ": 2025}, {"ZZZZ": steps("osm")}))
+        self.choose(("ZZZZ", {"ZZZZ": 2025}, {"ZZZZ": "BI"}, {"ZZZZ": steps("osm")}))
         GUI.messagebox.showwarning.assert_called_once()
         self.earth.show_tiles.assert_not_called()
         self.earth.batch_build.assert_not_called()
@@ -125,7 +134,7 @@ class AirportBatchGuiTest(unittest.TestCase):
     def test_new_batch_window_is_created_before_launch(self):
         self.earth.lift.side_effect = tk.TclError("destroyed window")
         with mock.patch.object(GUI, "Ortho4XP_Earth_Preview", return_value=self.earth) as preview:
-            self.choose(("RCKH", {"RCKH": 2025}, {"RCKH": steps("osm")}))
+            self.choose(("RCKH", {"RCKH": 2025}, {"RCKH": "BI"}, {"RCKH": steps("osm")}))
         preview.assert_called_once_with(self.parent, 22, 120)
         self.earth.show_tiles.assert_called_once()
         self.earth.batch_build.assert_called_once_with(
@@ -193,7 +202,9 @@ class AirportDialogTest(unittest.TestCase):
             act(dialog, captured)
 
         self.root.after(100, step)
-        dialog = GUI.Ortho4XP_Airport_Tiles_Dialog(self.root, default_year)
+        dialog = GUI.Ortho4XP_Airport_Tiles_Dialog(
+            self.root, default_year, ["BI", "GO2", "EOX"], "BI"
+        )
         return dialog.result, captured
 
     def test_checkbox_is_beside_entry_and_off_by_default(self):
@@ -214,7 +225,7 @@ class AirportDialogTest(unittest.TestCase):
         result, captured = self.run_dialog(act)
         self.assertFalse(captured["default"])
         self.assertTrue(captured["beside"])
-        self.assertEqual(result, ("RCKH", {"RCKH": 2025}, None))
+        self.assertEqual(result, ("RCKH", {"RCKH": 2025}, {"RCKH": "BI"}, None))
 
     def test_each_airport_gets_a_row_with_its_own_year_and_steps(self):
         def act(dialog, captured):
@@ -231,6 +242,10 @@ class AirportDialogTest(unittest.TestCase):
             }
             dialog.row("RCBS")["year"].set("2023")
             dialog.row("RCBS")["steps"]["clouds"].set(False)
+            # The All imagery reaches every airport; a row can then differ.
+            dialog.all_provider.set("GO2")
+            dialog.set_all_providers()
+            dialog.row("RCBS")["provider"].set("EOX")
             # The All column toggle reaches every airport.
             dialog.all_steps["mask"].set(False)
             dialog.set_all_steps("mask")
@@ -244,9 +259,10 @@ class AirportDialogTest(unittest.TestCase):
             captured["initial"],
             {"RCKH": steps(*STEPS), "RCBS": steps(*STEPS)},
         )
-        icaos, years, chosen = result
+        icaos, years, providers, chosen = result
         self.assertEqual(icaos, "RCKH, RCBS")
         self.assertEqual(years, {"RCKH": 2025, "RCBS": 2023})
+        self.assertEqual(providers, {"RCKH": "GO2", "RCBS": "EOX"})
         everything_but = lambda *off: steps(*(s for s in STEPS if s not in off))  # noqa: E731
         self.assertEqual(chosen, {
             "RCKH": everything_but("mask"),
@@ -270,11 +286,14 @@ class AirportDialogTest(unittest.TestCase):
         self.assertEqual(captured["year"], "2022")
         self.assertEqual(captured["all"], {"RCKH": 2024, "RCBS": 2024})
 
-    def _validate(self, codes, start, chosen_steps, years=None):
+    def _validate(self, codes, start, chosen_steps, years=None, providers=None):
         dialog = SimpleNamespace(
             codes=lambda: codes,
             start_batch=mock.Mock(),
             chosen_years=lambda: years if years is not None else {c: 2025 for c in codes},
+            chosen_providers=lambda: (
+                providers if providers is not None else {c: "BI" for c in codes}
+            ),
             chosen_steps=lambda: chosen_steps,
             years_on_server=lambda _years: True,
         )
@@ -292,6 +311,12 @@ class AirportDialogTest(unittest.TestCase):
         self.assertEqual(self._validate(["RCKH", "RCBS"], False, none), (True, 0))
         some = {"RCKH": steps(), "RCBS": steps("dsf")}
         self.assertEqual(self._validate(["RCKH", "RCBS"], True, some), (True, 0))
+
+    def test_an_airport_without_imagery_keeps_dialog_open(self):
+        some = {"RCKH": steps("dsf")}
+        self.assertEqual(
+            self._validate(["RCKH"], True, some, providers={"RCKH": ""}), (False, 1)
+        )
 
     def test_a_year_that_is_not_a_number_keeps_dialog_open(self):
         dialog = SimpleNamespace(

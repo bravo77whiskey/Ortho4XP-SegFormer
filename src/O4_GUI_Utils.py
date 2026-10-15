@@ -67,15 +67,17 @@ OsX = "dar" in sys.platform
 
 
 class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
-    """Choose airports, each with its colour reference year and batch steps.
+    """Choose airports, each with its colour reference year, imagery and steps.
 
     One table row per airport typed in the entry: its Sentinel-2 reference
-    year, and the batch steps its tiles build when Start batch build is
-    ticked. The "All" row sets a column for every airport at once. A row
-    keeps its settings while its code stays in the entry.
+    year, the imagery provider its tiles are built from, and the batch steps
+    its tiles build when Start batch build is ticked. The "All" row sets a
+    column for every airport at once. A row keeps its settings while its
+    code stays in the entry.
 
-    result is (icaos, years, steps): years {icao: year}; steps None to only
-    select the tiles, else {icao: {step: bool}}.
+    result is (icaos, years, providers, steps): years {icao: year};
+    providers {icao: provider code}; steps None to only select the tiles,
+    else {icao: {step: bool}}.
     """
 
     # Column headings; the batch window's labels are too long for a table.
@@ -91,11 +93,13 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         "veg_overlay": "Vegetation",
     }
 
-    def __init__(self, parent, default_year=None):
+    def __init__(self, parent, default_year=None, providers=(), default_provider=""):
         self.default_year = str(
             default_year if default_year is not None
             else CFGVARS.cfg_tile_vars["color_reference_year"]["default"]
         )
+        self.providers = list(providers)
+        self.default_provider = default_provider or ""
         # Settings of every code typed so far, kept while it is retyped.
         self.rows = {}
         self.row_widgets = []
@@ -130,7 +134,10 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         tk.Label(self.table, text="Year", **THEME.label_options()).grid(
             row=0, column=1, sticky=W, padx=(0, 6)
         )
-        for col, step in enumerate(self.step_headers, start=2):
+        tk.Label(self.table, text="Imagery", **THEME.label_options()).grid(
+            row=0, column=2, sticky=W, padx=(0, 6)
+        )
+        for col, step in enumerate(self.step_headers, start=3):
             tk.Label(
                 self.table, text=self.step_headers[step], **THEME.label_options()
             ).grid(row=0, column=col, padx=2)
@@ -145,9 +152,15 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         all_year_entry.grid(row=1, column=1, sticky=W)
         all_year_entry.bind("<Return>", lambda _e: self.set_all_years())
         all_year_entry.bind("<FocusOut>", lambda _e: self.set_all_years())
+        self.all_provider = tk.StringVar(master=self, value=self.default_provider)
+        all_provider_combo = self.provider_combo(self.all_provider)
+        all_provider_combo.grid(row=1, column=2, sticky=W, padx=(0, 6))
+        all_provider_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self.set_all_providers()
+        )
         self.all_steps = {}
         self.step_buttons = []
-        for col, step in enumerate(self.step_headers, start=2):
+        for col, step in enumerate(self.step_headers, start=3):
             self.all_steps[step] = tk.BooleanVar(master=self, value=True)
             button = tk.Checkbutton(
                 self.table,
@@ -169,11 +182,22 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
     def codes(self):
         return AZONE.parse_icaos(self.icao_var.get())
 
+    def provider_combo(self, variable):
+        return ttk.Combobox(
+            self.table,
+            values=self.providers,
+            textvariable=variable,
+            state="readonly",
+            width=10,
+            style="O4.TCombobox",
+        )
+
     def row(self, icao):
         """The settings of one airport, made with the All row's values."""
         if icao not in self.rows:
             self.rows[icao] = {
                 "year": tk.StringVar(master=self, value=self.all_year.get()),
+                "provider": tk.StringVar(master=self, value=self.all_provider.get()),
                 "steps": {
                     step: tk.BooleanVar(master=self, value=var.get())
                     for step, var in self.all_steps.items()
@@ -189,7 +213,7 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         self.step_buttons = self.step_buttons[: len(self.all_steps)]
         codes = self.codes()
         if not codes:
-            self.hint.grid(row=2, column=0, columnspan=2 + len(self.step_headers),
+            self.hint.grid(row=2, column=0, columnspan=3 + len(self.step_headers),
                            sticky=W, pady=(4, 0))
         else:
             self.hint.grid_remove()
@@ -202,8 +226,10 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
                 **THEME.entry_options(),
             )
             year.grid(row=index, column=1, sticky=W)
-            self.row_widgets += [label, year]
-            for col, step in enumerate(self.step_headers, start=2):
+            provider = self.provider_combo(settings["provider"])
+            provider.grid(row=index, column=2, sticky=W, padx=(0, 6))
+            self.row_widgets += [label, year, provider]
+            for col, step in enumerate(self.step_headers, start=3):
                 button = tk.Checkbutton(
                     self.table,
                     variable=settings["steps"][step],
@@ -218,6 +244,10 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         for icao in self.codes():
             self.row(icao)["year"].set(self.all_year.get())
 
+    def set_all_providers(self):
+        for icao in self.codes():
+            self.row(icao)["provider"].set(self.all_provider.get())
+
     def set_all_steps(self, step):
         for icao in self.codes():
             self.row(icao)["steps"][step].set(self.all_steps[step].get())
@@ -231,6 +261,9 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
     def chosen_years(self):
         """{icao: year}; a year that is not a whole number raises ValueError."""
         return {icao: int(self.row(icao)["year"].get()) for icao in self.codes()}
+
+    def chosen_providers(self):
+        return {icao: self.row(icao)["provider"].get() for icao in self.codes()}
 
     def chosen_steps(self):
         return {
@@ -250,6 +283,11 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         except ValueError:
             messagebox.showwarning(
                 "Airport tiles", "Every year must be a number, like 2025.", parent=self
+            )
+            return False
+        if not all(self.chosen_providers().values()):
+            messagebox.showwarning(
+                "Airport tiles", "Choose the imagery of every airport.", parent=self
             )
             return False
         if self.start_batch.get() and not any(
@@ -280,6 +318,7 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         self.result = (
             ", ".join(self.codes()),
             self.chosen_years(),
+            self.chosen_providers(),
             self.chosen_steps() if self.start_batch.get() else None,
         )
 
@@ -1116,16 +1155,20 @@ class Ortho4XP_GUI(tk.Tk):
         configs are prepared so a batch build draws the zones right away.
         """
         choice = Ortho4XP_Airport_Tiles_Dialog(
-            self, getattr(CFG, "global_color_reference_year", None)
+            self,
+            getattr(CFG, "global_color_reference_year", None),
+            self.map_list,
+            self.default_website.get(),
         ).result
         if choice is None:
             return
-        icaos, years, steps = choice
+        icaos, years, providers, steps = choice
         self.config(cursor="watch")
         self.update_idletasks()
         try:
             result = TILE.prepare_airport_batch(
-                icaos, self.custom_build_dir_entry.get(), years=years
+                icaos, self.custom_build_dir_entry.get(), years=years,
+                providers=providers,
             )
         except ValueError as e:
             messagebox.showwarning("Airport tiles", str(e), parent=self)
@@ -1162,6 +1205,14 @@ class Ortho4XP_GUI(tk.Tk):
                 1,
                 f"   {FNAMES.short_latlon(*tile)} is reached by {icao} and {other}: "
                 f"it keeps {icao}'s reference year {year}, not {other_year}.",
+            )
+        for tile, (icao, provider), (other, other_provider) in result.get(
+            "provider_conflicts", []
+        ):
+            UI.vprint(
+                1,
+                f"   {FNAMES.short_latlon(*tile)} is reached by {icao} and {other}: "
+                f"it keeps {icao}'s imagery {provider}, not {other_provider}.",
             )
         # The active tile's settings are held in memory: reload what changed.
         active = self.get_lat_lon(check=False)

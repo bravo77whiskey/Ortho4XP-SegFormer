@@ -249,45 +249,49 @@ def plan_airport_zones(tile, list_lat_lon, settings_for):
         return {}
 
 
-def airport_tile_years(airports, years):
-    """Which colour reference year each airport tile gets.
+def airport_tile_values(airports, values):
+    """Which of the airports' values (a reference year, a provider) each tile gets.
 
-    An airport's year goes to every tile its zones reach. Where two airports
-    with different years reach one tile, the airport the tile is home to
-    wins, then the one listed first. Returns ({tile: year}, conflicts) with
-    conflicts as (tile, (icao, year) used, (icao, year) not used).
+    An airport's value goes to every tile its zones reach. Where two airports
+    with different values reach one tile, the airport the tile is home to
+    wins, then the one listed first. Returns ({tile: value}, conflicts) with
+    conflicts as (tile, (icao, value) used, (icao, value) not used).
     """
     owner = {}
     conflicts = []
     ordered = [(a, True) for a in airports] + [(a, False) for a in airports]
     for airport, homes_only in ordered:
-        year = years.get(airport["icao"])
-        if year is None:
+        value = values.get(airport["icao"])
+        if value is None:
             continue
         tiles = [airport["home"]] if homes_only else airport["tiles"]
         for tile in tiles:
-            held = owner.setdefault(tile, (airport["icao"], year))
-            if held[0] != airport["icao"] and held[1] != year:
-                conflict = (tile, held, (airport["icao"], year))
+            held = owner.setdefault(tile, (airport["icao"], value))
+            if held[0] != airport["icao"] and held[1] != value:
+                conflict = (tile, held, (airport["icao"], value))
                 if conflict not in conflicts:
                     conflicts.append(conflict)
-    return {tile: year for tile, (_icao, year) in owner.items()}, conflicts
+    return {tile: value for tile, (_icao, value) in owner.items()}, conflicts
 
 
-def prepare_airport_batch(icaos, custom_build_dir, years=None):
+def prepare_airport_batch(icaos, custom_build_dir, years=None, providers=None):
     """The tiles some airports' zones reach, with configs ready to build them.
 
     icaos: one or more ICAO codes, comma- or space-separated. Each airport's
     own tile gets its code added to airport_zone_icaos, so its zones are
     drawn; every other reached tile without a config gets one from the global
     settings. Configs other tiles already have are left as they are, except
-    for the colour reference year: years {icao: year} sets it on every tile an
-    airport reaches (see airport_tile_years for tiles two airports share).
+    for the colour reference year and the imagery provider: years
+    {icao: year} and providers {icao: provider code} set them on every tile
+    an airport reaches (see airport_tile_values for tiles two airports
+    share). The provider is the tile's default_website, which its airport
+    zones are drawn with too.
 
     Every code is checked before anything is written: one that apt.dat does
     not know raises ValueError (with a message for the user) and no config
     changes. Returns {"airports": [{"icao", "home", "tiles"}], "tiles",
-    "center", "created", "written", "listed", "year_conflicts"}: "tiles" is
+    "center", "created", "written", "listed", "year_conflicts",
+    "provider_conflicts"}: "tiles" is
     every reached tile once, in airport order; "center" the tile in the middle
     of them; "written" every tile whose config was created or changed;
     "listed" the (icao, home tile) pairs newly added to a tile's airports.
@@ -340,11 +344,13 @@ def prepare_airport_batch(icaos, custom_build_dir, years=None):
             load(lat, lon)
         airports.append({"icao": code, "home": home, "tiles": reached})
         tiles += [tile for tile in reached if tile not in tiles]
-    if any(not exists and not tile.default_website
-           for tile, exists in loaded.values()):
+    tile_providers, provider_conflicts = airport_tile_values(
+        airports, {icao: p for icao, p in (providers or {}).items() if p}
+    )
+    if any(not exists and not tile.default_website and key not in tile_providers
+           for key, (tile, exists) in loaded.items()):
         raise ValueError(
-            "Choose an imagery provider in the main window first: the new "
-            "tile configs need one."
+            "Choose an imagery provider first: the new tile configs need one."
         )
 
     listed = []
@@ -355,11 +361,16 @@ def prepare_airport_batch(icaos, custom_build_dir, years=None):
             tile.airport_zone_icaos = ",".join(listed_here + [airport["icao"]])
             listed.append((airport["icao"], airport["home"]))
     changed = {home for _icao, home in listed}
-    tile_years, year_conflicts = airport_tile_years(airports, years or {})
+    tile_years, year_conflicts = airport_tile_values(airports, years or {})
     for key, year in tile_years.items():
         tile, _exists = loaded[key]
         if int(tile.color_reference_year) != int(year):
             tile.color_reference_year = int(year)
+            changed.add(key)
+    for key, provider in tile_providers.items():
+        tile, _exists = loaded[key]
+        if tile.default_website != provider:
+            tile.default_website = provider
             changed.add(key)
     created = []
     written = []
@@ -386,6 +397,7 @@ def prepare_airport_batch(icaos, custom_build_dir, years=None):
         "written": written,
         "listed": listed,
         "year_conflicts": year_conflicts,
+        "provider_conflicts": provider_conflicts,
     }
 
 
