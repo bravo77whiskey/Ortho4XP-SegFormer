@@ -1,8 +1,10 @@
 """Imagery zones drawn automatically around the airports a tile lists.
 
 A tile's ``airport_zone_icaos`` names airports by ICAO code. For each one the
-runways are read from apt.dat (the highest-priority scenery pack that defines
-the airport, as X-Plane draws it), wrapped in their convex hull, and that hull
+runways are read from apt.dat: the highest-priority scenery pack that defines
+the airport, as X-Plane draws it, with Custom Scenery packs scenery_packs.ini
+does not enable searched last. Airports are matched by their ICAO code, not
+their apt.dat id. The runways are wrapped in their convex hull, and that hull
 is grown by ``airport_zone_zl19_m``, ``airport_zone_zl18_m`` and
 ``airport_zone_zl17_m`` metres into three nested zones at ZL19, ZL18 and ZL17.
 A distance of 0 leaves that zone out.
@@ -30,7 +32,7 @@ DISTANCE_VARS = {zl: f"airport_zone_zl{zl}_m" for zl in ZONE_ZLS}
 ICAO_VAR = "airport_zone_icaos"
 ZONES_VAR = "airport_zone_list"
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 _BUFFER_RESOLUTION = 16  # segments per quarter circle on the rounded corners
 
 
@@ -90,52 +92,116 @@ def read_tile_zones(cfg_path):
 
 # ── Runways from apt.dat ─────────────────────────────────────────────────────
 
+def _global_apt(xplane_dir):
+    return os.path.join(xplane_dir, "Global Scenery", "Global Airports", "Earth nav data", "apt.dat")
+
+
+def _apt_sources(xplane_dir):
+    """(pack name, apt.dat path) to search, highest priority first.
+
+    The enabled packs of scenery_packs.ini come first, in its order, as the
+    sim reads them, then Global Airports if the ini leaves it out. After them
+    come the Custom Scenery packs the ini does not enable (disabled, or added
+    since X-Plane last ran), by name, so an airport only they define is still
+    found. Generated lazily: the directory is only listed when needed.
+    """
+    try:
+        listed = APT._apt_sources(xplane_dir)
+    except OSError:
+        listed = []
+    gapt = _global_apt(xplane_dir)
+    seen = set()
+
+    def key(path):
+        return os.path.normcase(os.path.realpath(path))
+
+    for name, apt in listed:
+        seen.add(key(apt))
+        yield name, apt
+    if key(gapt) not in seen:
+        seen.add(key(gapt))
+        yield "Global Airports", gapt
+    custom = os.path.join(xplane_dir, "Custom Scenery")
+    try:
+        names = sorted(os.listdir(custom), key=str.lower)
+    except OSError:
+        return
+    for name in names:
+        apt = os.path.join(custom, name, "Earth nav data", "apt.dat")
+        try:
+            if not os.path.isfile(apt) or key(apt) in seen:
+                continue
+        except OSError:  # unreadable directory entry: skip it
+            continue
+        seen.add(key(apt))
+        yield name, apt
+
+
 def _scan_runways(xplane_dir, wanted, log):
     """{icao: [(width, lat1, lon1, lat2, lon2), ...]} for the wanted codes.
 
-    Scenery packs are read in scenery_packs.ini order and the first definition
-    of an airport wins, as in the sim. An airport defined with no land runway
-    maps to [].
+    Airports are matched by ICAO code: their ``1302 icao_code`` row, which
+    can differ from the airport id on the header row (custom packs often use
+    their own ids). Only an airport without an icao_code row (older apt.dat
+    files) is matched by its id instead. apt.dat files are read in the order
+    of _apt_sources and the first definition of an airport wins. An airport
+    defined with no land runway maps to [].
     """
-    try:
-        sources = APT._apt_sources(xplane_dir)
-    except OSError:
-        sources = [("Global Airports", os.path.join(
-            xplane_dir, "Global Scenery", "Global Airports", "Earth nav data", "apt.dat"))]
     found = {}
     remaining = set(wanted)
-    for _name, apt in sources:
+    for name, apt in _apt_sources(xplane_dir):
         if not remaining:
             break
-        if not os.path.isfile(apt):
+        try:
+            if not os.path.isfile(apt):
+                continue
+        except OSError:
             continue
-        current = None
+        ident = icao = None
+        runway_rows = []
+
+        def finish():
+            code = icao or ident
+            if code not in remaining:
+                return
+            rows = []
+            for row in runway_rows:
+                parts = row.split()
+                try:
+                    rows.append((
+                        float(parts[1]),
+                        float(parts[9]), float(parts[10]),
+                        float(parts[18]), float(parts[19]),
+                    ))
+                except (IndexError, ValueError):
+                    pass
+            found[code] = rows
+            remaining.discard(code)
+            if ident != code or name != "Global Airports":
+                log(f"Airport {code}: runways from {name} (airport id {ident}).")
+
         try:
             with open(apt, "r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     head = line[:4]
                     if head.startswith(("1 ", "16 ", "17 ", "99")):
+                        finish()
+                        if not remaining:
+                            break
                         parts = line.split(None, 5)
-                        code = parts[4] if len(parts) > 4 and parts[0] != "99" else None
-                        if code in remaining:
-                            current = code
-                            found[code] = []
-                            remaining.discard(code)
-                        else:
-                            current = None
-                            if not remaining:
-                                break
+                        ident = parts[4].upper() if len(parts) > 4 and parts[0] != "99" else None
+                        icao = None
+                        runway_rows = []
                         continue
-                    if current is not None and head == "100 ":
+                    if ident is None:
+                        continue
+                    if head == "100 ":
+                        runway_rows.append(line)
+                    elif head == "1302" and line.startswith("1302 icao_code"):
                         parts = line.split()
-                        try:
-                            found[current].append((
-                                float(parts[1]),
-                                float(parts[9]), float(parts[10]),
-                                float(parts[18]), float(parts[19]),
-                            ))
-                        except (IndexError, ValueError):
-                            pass
+                        icao = parts[2].upper() if len(parts) > 2 else None
+                else:
+                    finish()
         except OSError as exc:  # unreadable disk sectors: skip, don't abort
             log(f"apt.dat unreadable, skipped: {apt}: {exc}")
     return found
@@ -145,16 +211,17 @@ def runways_by_icao(xplane_dir, icaos, cache_dir=None, log=print):
     """Runways of each listed airport; airports apt.dat lacks are left out.
 
     Reading the global apt.dat takes several seconds, so results (misses
-    included) are cached against scenery_packs.ini and the global apt.dat.
+    included) are cached against scenery_packs.ini, the global apt.dat and
+    the Custom Scenery directory (a pack added or removed changes its mtime).
     """
     icaos = list(icaos)
     if not icaos or not xplane_dir:
         return {}
-    gapt = os.path.join(xplane_dir, "Global Scenery", "Global Airports", "Earth nav data", "apt.dat")
-    ini = os.path.join(xplane_dir, "Custom Scenery", "scenery_packs.ini")
+    custom = os.path.join(xplane_dir, "Custom Scenery")
+    ini = os.path.join(custom, "scenery_packs.ini")
     stamp = (_CACHE_VERSION,) + tuple(
         (os.path.getsize(p), int(os.path.getmtime(p))) if os.path.exists(p) else None
-        for p in (ini, gapt)
+        for p in (ini, _global_apt(xplane_dir), custom)
     )
     cpath = os.path.join(cache_dir, "airport_runways.pkl") if cache_dir else None
     known = {}
@@ -296,7 +363,7 @@ def plan_zones(tiles, settings_for, runway_lookup, log=print):
         icaos, distances = settings[home]
         for icao in icaos:
             if not runways.get(icao):
-                log(f"   Airport zones: {icao} has no runway in apt.dat, skipped.")
+                log(f"   Airport zones: no airport with ICAO code {icao} and a land runway in apt.dat, skipped.")
                 continue
             lat_c, lon_c = runway_centre(runways[icao])
             if not (home[0] <= lat_c < home[0] + 1 and home[1] <= lon_c < home[1] + 1):

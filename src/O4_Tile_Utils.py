@@ -312,9 +312,9 @@ def prepare_airport_batch(icaos, custom_build_dir, years=None):
     unknown = [code for code in codes if not runways.get(code)]
     if unknown:
         raise ValueError(
-            ", ".join(unknown)
-            + (" has" if len(unknown) == 1 else " have")
-            + " no land runway in apt.dat. Nothing was changed."
+            "No airport with ICAO code " + ", ".join(unknown)
+            + " and a land runway was found in Global Airports or Custom"
+            + " Scenery. Nothing was changed."
         )
 
     loaded = {}

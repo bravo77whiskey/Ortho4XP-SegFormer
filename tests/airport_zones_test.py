@@ -115,6 +115,44 @@ class RunwayLookupTest(unittest.TestCase):
             self.assertAlmostEqual(again["RCKH"][0][0], 45.0)
             self.assertNotIn("ZZZZ", again)
 
+    def test_airports_are_matched_by_icao_code_not_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            xp = _xplane(tmp, custom={"XRC0001": RCKH}, global_airports={"RCAY": RCKH})
+            capt = Path(xp) / "Custom Scenery" / "Airport_Custom" / "Earth nav data" / "apt.dat"
+            capt.write_text(
+                capt.read_text(encoding="utf-8").replace(
+                    "Test airport XRC0001\n", "Test airport XRC0001\n1302 icao_code RCKH\n"),
+                encoding="utf-8",
+            )
+            gapt = Path(xp) / "Global Scenery" / "Global Airports" / "Earth nav data" / "apt.dat"
+            gapt.write_text(
+                gapt.read_text(encoding="utf-8").replace(
+                    "Test airport RCAY\n", "Test airport RCAY\n1302 icao_code RCBS\n"),
+                encoding="utf-8",
+            )
+            found = AZONE.runways_by_icao(xp, ["RCKH", "XRC0001", "RCAY", "RCBS"])
+            self.assertEqual(set(found), {"RCKH", "RCBS"})
+
+    def test_custom_packs_the_ini_does_not_enable_are_searched_last(self):
+        moved = [(45.0, 22.6, 120.3, 22.6, 120.33)]
+        with tempfile.TemporaryDirectory() as tmp:
+            xp = _xplane(tmp, global_airports={"RCKH": RCKH})
+            cs = Path(xp) / "Custom Scenery"
+            for pack, airports in (("New_Pack", {"RCKH": moved, "RCAY": moved}),
+                                   ("Off_Pack", {"RCBS": moved})):
+                pdir = cs / pack / "Earth nav data"
+                pdir.mkdir(parents=True)
+                (pdir / "apt.dat").write_text(_apt_dat(airports), encoding="utf-8")
+            ini = cs / "scenery_packs.ini"
+            ini.write_text(
+                ini.read_text(encoding="utf-8") + "SCENERY_PACK_DISABLED Custom Scenery/Off_Pack/\n",
+                encoding="utf-8",
+            )
+            found = AZONE.runways_by_icao(xp, ["RCKH", "RCAY", "RCBS"])
+            self.assertEqual(set(found), {"RCKH", "RCAY", "RCBS"})
+            self.assertAlmostEqual(found["RCKH"][0][0], 60.0)  # Global Airports first
+            self.assertAlmostEqual(found["RCAY"][0][0], 45.0)
+
 
 class RingGeometryTest(unittest.TestCase):
     def test_rings_sit_at_the_configured_distance(self):
@@ -298,7 +336,7 @@ class AirportTilesTest(unittest.TestCase):
             home_cfg = self._write_cfg(tmp, 22, 120, "default_website=GO2\n")
             with self.assertRaises(ValueError) as raised:
                 self._prepare(tmp, {"RCKH": NEAR_EDGE}, "RCKH,ZZZZ,YYYY")
-            self.assertIn("ZZZZ, YYYY have no land runway", str(raised.exception))
+            self.assertIn("ICAO code ZZZZ, YYYY and a land runway", str(raised.exception))
             self.assertEqual(home_cfg.read_text(encoding="utf-8"), "default_website=GO2\n")
             self.assertFalse(self._cfg(tmp, 22, 121).exists())
 
