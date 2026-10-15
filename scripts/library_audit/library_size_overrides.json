@@ -1,0 +1,36 @@
+{
+  "_doc": [
+    "Size overrides for library aliases of simHeaven paths; read by build_library_overrides.py.",
+    "A (region, path) is overridden when any target-pack export of it draws a mesh at least",
+    "max_area_ratio times the area its name gives (house_09x08x1 = 9 m x 8 m).",
+    "Replacement: simHeaven's own mesh for that region where one fits, else the largest",
+    "building mesh from the source packs that fits inside the named footprint (the region's",
+    "own style wins while it covers same_style_within of the best fit's area); failing that,",
+    "the mesh overshooting the named sides least, up to closest_max_overshoot.",
+    "manual entries win over both: mesh = '<pack folder>/<path in pack>' (a list for several",
+    "variants), or mesh = 'keep' to leave the target pack's exports alone; region omitted =",
+    "every region the path is overridden in."
+  ],
+  "pack_name": "O4XP_Library_Overrides",
+  "target_pack": "SFD Global Autogen",
+  "max_area_ratio": 1.5,
+  "fit_slack": 1.1,
+  "min_fill": 0.45,
+  "same_style_within": 0.6,
+  "closest_max_overshoot": 1.3,
+  "simheaven_packs_by_region": {
+    "africa": ["Africa"],
+    "asia": ["Asia"],
+    "asia_south": ["Asia"],
+    "asia_LHD": ["Asia"],
+    "australia": ["Australia-Oceania"],
+    "south_america": ["America"],
+    "west_coast": ["America"],
+    "new_england": ["America"],
+    "caribbean": ["America"],
+    "scandinavia": ["Europe"],
+    "mediterranean": ["Europe"],
+    "mediterranean_north": ["Europe"]
+  },
+  "manual": []
+}
