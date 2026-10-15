@@ -145,6 +145,50 @@ class CrossTextureDedupTests(unittest.TestCase):
         finally:
             b._bounds_for_object_path = orig
 
+    def test_placed_facades_block_objects(self):
+        # A facade is fixed: an object covering 25% of itself with it drops,
+        # one grazing its concave notch is kept, and a fallback that clears
+        # the facade replaces the dropped one.
+        import O4_Building_Overlay as b
+        import math
+        orig = b._bounds_for_object_path
+        sizes = {"house.obj": 5.0, "tiny.obj": 1.0}
+        b._bounds_for_object_path = lambda p: (-sizes[p], sizes[p], -sizes[p], sizes[p])
+        try:
+            mlat = 110540.0
+            mlon = 111320.0 * math.cos(math.radians(24.5))
+
+            def ll(x, y):
+                return (118.0 + 0.0010 + x / mlon, 24.0 + 0.0010 + y / mlat)
+
+            # L-shaped facade: 40x40 m square minus its 20x20 m north-east quarter
+            ring = [ll(0, 0), ll(40, 0), ll(40, 20), ll(20, 20), ll(20, 40), ll(0, 40), ll(0, 0)]
+            inside = self._obj(0.0010 + 33.0 / mlon, 0.0010 + 13.0 / mlat, path="house.obj")
+            notch = self._obj(0.0010 + 30.0 / mlon, 0.0010 + 30.0 / mlat, path="house.obj")
+            kept, dropped = b._dedupe_overlapping_placements(
+                [inside, notch], 24, 118, fixed_rings=[ring])
+            self.assertEqual(dropped, 1)
+            self.assertEqual(kept, [notch])
+
+            replaced = {}
+            kept, dropped = b._dedupe_overlapping_placements(
+                [inside], 24, 118, fixed_rings=[ring],
+                fallback=lambda p: [("tiny.obj", 0.0)], replaced_out=replaced)
+            self.assertEqual(dropped, 1)  # 2x2 at the same spot is still inside
+            kept, dropped = b._dedupe_overlapping_placements([inside], 24, 118)
+            self.assertEqual(dropped, 0)
+        finally:
+            b._bounds_for_object_path = orig
+
+    def test_clipped_area_handles_concave_subject(self):
+        import O4_Building_Overlay as b
+        ell = [(0, 0), (4, 0), (4, 2), (2, 2), (2, 4), (0, 4)]
+        self.assertAlmostEqual(b._clipped_area(ell, [(0, 0), (4, 0), (4, 4), (0, 4)]), 12.0)
+        self.assertAlmostEqual(b._clipped_area(ell, [(3, 3), (5, 3), (5, 5), (3, 5)]), 0.0)
+        self.assertAlmostEqual(b._clipped_area(ell, [(1, 1), (3, 1), (3, 3), (1, 3)]), 3.0)
+        # clockwise clip window
+        self.assertAlmostEqual(b._clipped_area(ell, [(1, 1), (1, 3), (3, 3), (3, 1)]), 3.0)
+
     def test_fallback_keeps_blocked_placement_with_smaller_asset(self):
         # A 20x20 asset overlapping a kept 10x10 neighbour is dropped without
         # a fallback; with one, its 4x4 alternative clears the neighbour and

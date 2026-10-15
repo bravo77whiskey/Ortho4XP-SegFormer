@@ -270,6 +270,9 @@ class CustomSceneryAvoidanceTests(unittest.TestCase):
         self.assertFalse(BLD._scenery_object_blocks(obj("simheaven/misc/fire_hydrant.obj", 1, 1)))
         self.assertFalse(BLD._scenery_object_blocks(obj("lib/props/unknown_prop.obj", 3, 5)))
         self.assertTrue(BLD._scenery_object_blocks(obj("simheaven/houses/house_09x09x1.obj", 9, 9)))
+        # simHeaven's small houses are buildings, not props
+        self.assertTrue(BLD._scenery_object_blocks(obj("simheaven/houses/house_06x04x2.obj", 6, 4)))
+        self.assertFalse(BLD._scenery_object_blocks(obj("simheaven/sheds/shed_02x03x1.obj", 2, 3)))
         self.assertTrue(BLD._scenery_object_blocks(obj("simheaven/industrial/industrial_30x84.obj", 30, 84)))
 
     def test_generic_custom_dsf_parser_skips_street_light_clutter(self):

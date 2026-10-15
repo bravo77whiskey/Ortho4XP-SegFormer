@@ -1062,7 +1062,9 @@ NONBLOCKING_CLUTTER_NAME_TOKENS = (
     "vending",
 )
 # Anything smaller than this (its own footprint, before the clearance margin)
-# is a prop, not a building, and never blocks placement.
+# is a prop, not a building, and never blocks placement. simHeaven houses are
+# exempt: its 6x4 m houses are real buildings (115k of them on +08+038), and
+# SFD draws them as 12x14 m Suburban houses in Africa. Sheds stay props.
 SCENERY_BLOCKER_MIN_M2 = 25.0
 
 
@@ -1083,6 +1085,8 @@ def _scenery_object_blocks(obj):
     """True when an existing scenery object should block building placement."""
     if _is_nonblocking_clutter_object(obj.get('path')):
         return False
+    if (obj.get('path') or '').replace('\\', '/').lower().startswith('simheaven/houses/'):
+        return True
     try:
         return float(obj['w_m']) * float(obj['h_m']) >= SCENERY_BLOCKER_MIN_M2
     except (KeyError, TypeError, ValueError):
@@ -7712,9 +7716,49 @@ def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg):
     return pts
 
 
+def _clipped_area(subject, convex):
+    """Area of ``subject`` (any simple ring) inside the convex polygon ``convex``.
+
+    Sutherland-Hodgman: clipping against a convex window is exact for area
+    even when the subject is concave (the cut leaves only zero-area seams).
+    """
+    def _signed(ring):
+        return 0.5 * sum(
+            ring[k - 1][0] * ring[k][1] - ring[k][0] * ring[k - 1][1]
+            for k in range(len(ring))
+        )
+
+    clip = [(float(x), float(y)) for x, y in convex]
+    if _signed(clip) < 0.0:
+        clip.reverse()
+    out = [(float(x), float(y)) for x, y in subject]
+    for k in range(len(clip)):
+        if not out:
+            return 0.0
+        ax, ay = clip[k - 1]
+        bx, by = clip[k]
+        ex, ey = bx - ax, by - ay
+        ring, out = out, []
+        prev = ring[-1]
+        prev_in = ex * (prev[1] - ay) - ey * (prev[0] - ax) >= 0.0
+        for cur in ring:
+            cur_in = ex * (cur[1] - ay) - ey * (cur[0] - ax) >= 0.0
+            if cur_in != prev_in:
+                dx, dy = cur[0] - prev[0], cur[1] - prev[1]
+                den = ex * dy - ey * dx
+                if den != 0.0:
+                    t = (ey * (prev[0] - ax) - ex * (prev[1] - ay)) / den
+                    out.append((prev[0] + t * dx, prev[1] + t * dy))
+            if cur_in:
+                out.append(cur)
+            prev, prev_in = cur, cur_in
+    return abs(_signed(out)) if len(out) >= 3 else 0.0
+
+
 def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
                                    debug_path=None, overlap_frac=0.20,
-                                   fallback=None, replaced_out=None):
+                                   fallback=None, replaced_out=None,
+                                   fixed_rings=None):
     """Drop object placements whose footprints overlap an already-kept one.
 
     Overlap removal during placement is scoped per DDS texture (each texture
@@ -7739,6 +7783,10 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
     alternatives for a placement about to be dropped; the first that clears
     every kept neighbour replaces it in place (recorded in ``replaced_out``
     as ``{id(original): new_tuple}``) instead of the building being lost.
+
+    ``fixed_rings`` are ``(lon, lat)`` rings of placed facades: always kept,
+    they block objects by the same rule. Per-texture placement does not test
+    objects against facades unless O4_BLD_OBJECT_SELF_AVOID is on.
     """
     overlap_frac = max(0.0, float(overlap_frac))
     if not placements:
@@ -7746,6 +7794,47 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
     mlat = 110540.0
     mlon = 111320.0 * math.cos(math.radians(float(lat) + 0.5))
     bounds_cache = {}
+
+    fixed = []
+    fixed_grid = {}
+    for ring in fixed_rings or ():
+        pts = [((float(r_lon) - float(lon)) * mlon, (float(r_lat) - float(lat)) * mlat)
+               for r_lon, r_lat in ring]
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts.pop()
+        if len(pts) < 3:
+            continue
+        f_area = abs(0.5 * sum(
+            pts[k - 1][0] * pts[k][1] - pts[k][0] * pts[k - 1][1] for k in range(len(pts))
+        ))
+        if f_area <= 0.0:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        f_bbox = (min(xs), min(ys), max(xs), max(ys))
+        k = len(fixed)
+        fixed.append((pts, f_bbox, f_area))
+        for cxx in range(int(math.floor(f_bbox[0] / cell_m)), int(math.floor(f_bbox[2] / cell_m)) + 1):
+            for cyy in range(int(math.floor(f_bbox[1] / cell_m)), int(math.floor(f_bbox[3] / cell_m)) + 1):
+                fixed_grid.setdefault((cxx, cyy), []).append(k)
+
+    def _fixed_blocked(poly, bbox, area):
+        if not fixed_grid:
+            return False
+        x1, y1, x2, y2 = bbox
+        seen = set()
+        for cxx in range(int(math.floor(x1 / cell_m)), int(math.floor(x2 / cell_m)) + 1):
+            for cyy in range(int(math.floor(y1 / cell_m)), int(math.floor(y2 / cell_m)) + 1):
+                for k in fixed_grid.get((cxx, cyy), ()):
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    pts, fb, f_area = fixed[k]
+                    if x2 < fb[0] or fb[2] < x1 or y2 < fb[1] or fb[3] < y1:
+                        continue
+                    if _clipped_area(pts, poly) > overlap_frac * max(1e-6, min(area, f_area)):
+                        return True
+        return False
 
     def _bounds(path):
         if path in bounds_cache:
@@ -7795,7 +7884,7 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
                         1e-6, min(area, areas[j])
                     ):
                         return True
-        return False
+        return _fixed_blocked(poly, bbox, area)
     dropped = 0
     dbg_pairs = [] if debug_path else None
     for i in order:
@@ -7829,6 +7918,9 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
                     break
             if blocked:
                 break
+        if not blocked and _fixed_blocked(poly, bboxes[i], areas[i]):
+            blocked = True
+            blocker = -1
         if blocked and fallback is not None:
             o_lon, o_lat = float(placements[i][0]), float(placements[i][1])
             x = (o_lon - float(lon)) * mlon
@@ -9620,6 +9712,10 @@ class _BuildingOverlayRun:
             # v80: boxes grazing existing building scenery are trimmed back
             #      from it (O4_BLD_TRIM_EXISTING, on by default).
             ("trim-existing",) if _env_flag("O4_BLD_TRIM_EXISTING", True) else ()
+        ) + (
+            # v81: placed objects always mark the spacing mask, so the facade
+            #      fallback stops covering them.
+            "objects-mark-spacing",
         )
 
     def _prepare_dds_inference(self, fi, fname, m):
@@ -9966,6 +10062,7 @@ class _BuildingOverlayRun:
                 overlap_frac=_env_float("O4_BLD_DEDUP_OVERLAP_FRAC", 0.20),
                 fallback=self._dedup_alternatives if self._dedup_fallback else None,
                 replaced_out=_replaced,
+                fixed_rings=[ring for ring, _path, _h in self.placed_facades],
             )
             self.timings['global_dedup'] = self.timings.get('global_dedup', 0.0) + (
                 time.perf_counter() - self._t
@@ -11775,11 +11872,12 @@ class _TexturePass:
                     roof_viz_status,
                     _asset_roof_viz_rgb(asset),
                 ))
-                # Spacing marks only feed per-candidate self-avoidance;
-                # skip them when relying on tile-wide dedup.
+                # The facade fallback of a later (bigger) detection must see
+                # this object; the tile-wide dedup only drops objects. The
+                # incremental marks feed per-candidate self-avoidance only.
+                _mark_poly(self.building_spacing_mask, footprint_poly)
                 if self.run._obj_avoid:
                     _t_pf = time.perf_counter() if self._pf else 0.0
-                    _mark_poly(self.building_spacing_mask, footprint_poly)
                     cv2.fillPoly(self.recent_spacing_mask, [np.int32(footprint_poly)], 1)
                     if self._pf:
                         self._pf_maskfill += time.perf_counter() - _t_pf
