@@ -16,7 +16,7 @@ hard class edges): vegetation (green excess), asphalt (dark grey), concrete
 (everything else).
 
 The map is <texture stem>_mat.dds next to the texture (BC3, so the gloss in
-alpha survives), 2048 px for ZL17 and up, 1024 px below.  The land .ter gets,
+alpha survives), 1024 px at every ZL.  The land .ter gets,
 right after its BASE_TEX_NOWRAP line:
 
     TEXTURE_NORMAL 1 ../textures/<texture stem>_mat.dds
@@ -85,7 +85,9 @@ def relief_of(tile):
 
 
 def map_size(zoomlevel):
-    return 2048 if int(zoomlevel) >= 17 else 1024
+    # 1024 at every ZL: 2048 cost +50% of the ortho's VRAM at ZL17+ for an
+    # effect barely visible in the sim (1024 = +12.5%).
+    return 1024
 
 
 def map_file_name(texture_file_name):
@@ -213,6 +215,16 @@ def map_mark(path):
     return struct.unpack_from("<II", head, _MARK_OFFSET + 4)
 
 
+def map_width(path):
+    """Width in px from a DDS header (dwWidth), or None."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return None
+    return struct.unpack_from("<I", head, 16)[0] if len(head) == 20 else None
+
+
 def _stamp(path, relief):
     with open(path, "r+b") as f:
         f.seek(_MARK_OFFSET)
@@ -266,9 +278,11 @@ def write_map(source, out_dds, zoomlevel, relief, converter):
 
 
 def map_is_current(map_path, texture_path, relief):
-    """True when the map exists, matches the settings and is not older than its texture."""
+    """True when the map exists, matches the settings and size and is not older than its texture."""
     if map_mark(map_path) != (MARK_VERSION, _relief_code(relief)):
         return False
+    if map_width(map_path) != map_size(_zoomlevel(texture_path)):
+        return False                                 # e.g. a 2048 px map from before
     try:
         return os.path.getmtime(map_path) >= os.path.getmtime(texture_path)
     except OSError:

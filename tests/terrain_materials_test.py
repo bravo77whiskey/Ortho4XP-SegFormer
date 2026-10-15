@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -29,8 +30,9 @@ def _rgb(colour, size=64):
 
 def _fake_encode(rgba, out_dds, converter, relief):
     """encode_dds without nvcompress: a stamped stand-in file."""
+    width = rgba.shape[1] if rgba is not None else 1024
     with open(out_dds, "wb") as f:
-        f.write(b"DDS " + bytes(124))
+        f.write(b"DDS " + bytes(12) + struct.pack("<I", width) + bytes(108))
     TMAT._stamp(out_dds, relief)
     return True
 
@@ -80,8 +82,8 @@ class MapTests(unittest.TestCase):
         self.assertTrue(TMAT.is_map_name("27456_54768_BI16_mat.dds"))
         self.assertFalse(TMAT.is_map_name(TEX))
         self.assertEqual(TMAT.map_size(16), 1024)
-        self.assertEqual(TMAT.map_size(17), 2048)
-        self.assertEqual(TMAT.map_size(19), 2048)
+        self.assertEqual(TMAT.map_size(17), 1024)
+        self.assertEqual(TMAT.map_size(19), 1024)
         self.assertEqual(TMAT.ter_lines(TEX), [
             "TEXTURE_NORMAL 1 ../textures/27456_54768_BI16_mat.dds",
             "GLOBAL_specular 1.0",
@@ -198,6 +200,15 @@ class FinalizeTileTests(unittest.TestCase):
         s = TMAT.finalize_tile(self.dir, 0.3, "nvcompress.exe")
         self.assertEqual(s["made"], 1)
 
+    def test_build_remakes_old_2048_map(self):
+        self._texture(TEX17)
+        self._write_ter("54912_109536_BI17.ter", TMAT.add_ter_lines(_land_ter(TEX17), TEX17))
+        old = os.path.join(self.tex_dir, TMAT.map_file_name(TEX17))
+        _fake_encode(np.zeros((2048, 2048, 4), np.uint8), old, None, 0.15)
+        s = TMAT.finalize_tile(self.dir, 0.15, "nvcompress.exe")
+        self.assertEqual((s["made"], s["kept"]), (1, 0))
+        self.assertEqual(TMAT.map_width(old), 1024)
+
     def test_build_drops_lines_without_texture_and_leaves_plain_ter(self):
         patched = TMAT.add_ter_lines(_land_ter(TEX), TEX)
         self._write_ter("27456_54768_BI16.ter", patched)
@@ -236,7 +247,7 @@ class FinalizeTileTests(unittest.TestCase):
         self.assertEqual(self._read_ter("27456_54768_BI16_water_overlay.ter"), water)
         self.assertEqual(self._read_ter("27456_54784_BI16.ter"), proto)
         sizes = sorted(call.args[0].shape[0] for call in self.encode.call_args_list)
-        self.assertEqual(sizes, [1024, 2048])
+        self.assertEqual(sizes, [1024, 1024])
         s = TMAT.retrofit_tile(self.dir, 0.15, "nvcompress.exe")
         self.assertEqual((s["made"], s["added"], s["kept"]), (0, 0, 2))
 
@@ -269,9 +280,10 @@ class EncodeTests(unittest.TestCase):
             self.assertTrue(TMAT.write_map(src, out, 17, 0.15, str(NVCOMPRESS)))
             self.assertEqual(TMAT.map_mark(out), (TMAT.MARK_VERSION, 1500))
             dec = np.asarray(Image.open(out).convert("RGBA"))
-            self.assertEqual(dec.shape, (2048, 2048, 4))
-            self.assertAlmostEqual(dec[200:800, :, 3].mean(), 0.05 * 255, delta=2)
-            self.assertAlmostEqual(dec[1200:1900, :, 3].mean(), 0.30 * 255, delta=2)
+            self.assertEqual(dec.shape, (1024, 1024, 4))
+            self.assertEqual(TMAT.map_width(out), 1024)
+            self.assertAlmostEqual(dec[100:400, :, 3].mean(), 0.05 * 255, delta=2)
+            self.assertAlmostEqual(dec[600:950, :, 3].mean(), 0.30 * 255, delta=2)
             self.assertEqual(sorted(os.listdir(tmp)), sorted([os.path.basename(src),
                                                               os.path.basename(out)]))
 
