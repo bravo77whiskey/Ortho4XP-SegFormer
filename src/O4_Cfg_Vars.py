@@ -301,13 +301,8 @@ cfg_tile_vars = {
     "airport_zone_icaos": {
         "type": str,
         "default": "",
-        "hint": "Comma-separated ICAO codes of airports (e.g. RCKH,RCAY) that get ZL19, ZL18 and ZL17 zones drawn automatically around their runways, at the distances set by airport_zone_zl19_m / _zl18_m / _zl17_m. An airport only counts for the tile its runways are in; listed in another tile it is skipped. Where its zones reach into neighbouring tiles of the same batch build, those tiles get them too. Drawn zones of a higher zoomlevel still win over them. Runways come from apt.dat, so custom_scenery_dir must be set. Tile setting only.",
+        "hint": "Comma-separated ICAO codes of airports (e.g. RCKH,RCAY) that get ZL19, ZL18 and ZL17 zones added to zone_list automatically around their runways, at the distances set by airport_zone_zl19_m / _zl18_m / _zl17_m. An airport only counts for the tile its runways are in; listed in another tile it is skipped. Where its zones reach into neighbouring tiles of the same batch build, those tiles get them too. Drawn zones of a higher zoomlevel still win over them. Runways come from apt.dat, so custom_scenery_dir must be set. Tile setting only.",
         "short_name": "apt_zone_icaos",
-    },
-    "airport_zone_list": {
-        "type": list,
-        "default": [],
-        "hint": "The zones Step 3 last drew from airport_zone_icaos, kept apart from the hand-drawn zone_list. Rewritten on every Step 3; not edited by hand.",
     },
     "airport_zone_zl19_m": {
         "type": float,
@@ -742,7 +737,6 @@ cfg_tile_vars = {
 # Settings that only exist per tile: the global config has no global_ copy.
 tile_only_vars = [
     "default_website", "default_zl", "zone_list", "airport_zone_icaos",
-    "airport_zone_list",
 ]
 
 # Create dictionary from cfg_tile_vars with prefix and remove keys not in global config
@@ -917,7 +911,7 @@ list_tile_vars = (
     + list_overlay_vars
     + list_veg_legacy_vars
     + list_other_vars
-    + ["default_website", "default_zl", "zone_list", "airport_zone_list"]
+    + ["default_website", "default_zl", "zone_list"]
 )
 
 list_global_tile_vars = [

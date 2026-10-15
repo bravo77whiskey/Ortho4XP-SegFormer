@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -396,6 +397,50 @@ class MergeTest(unittest.TestCase):
         drawn = [[[1], 16, "D"], [[2], 18, "D"]]
         self.assertEqual(AZONE.merge_zone_lists(drawn, []), drawn)
 
+    def test_repeated_generation_does_not_duplicate_zones(self):
+        drawn = [[[1], 20, "D"], [[2], 16, "D"]]
+        airport = [[[3], 19, "BI"], [[4], 18, "BI"]]
+        merged = AZONE.merge_zone_lists(drawn, airport)
+        self.assertEqual(AZONE.merge_zone_lists(merged, airport), merged)
+
+
+class Step3ZonesTest(unittest.TestCase):
+    def test_generated_zones_are_saved_as_ordinary_zones_before_provider_setup(self):
+        import O4_Config_Utils as CFG
+        import O4_File_Names as FNAMES
+        import O4_Tile_Utils as TILE
+
+        # The outer ring encloses this neighbouring tile without any vertex
+        # inside it, so saving must consider the polygon's extent.
+        enclosing = [22.9, 119.9, 24.1, 119.9, 24.1, 121.1, 22.9, 121.1, 22.9, 119.9]
+        drawn = [[23.2, 120.2, 23.3, 120.2, 23.3, 120.3, 23.2, 120.2], 20, "GO2"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tile = CFG.Tile(23, 120, "")
+            tile.build_dir = tmp
+            tile.default_website = "BI"
+            tile.mesh_zl = 19
+            tile.zone_list = [drawn]
+            tile.airport_zone_plan = {(23, 120): [(enclosing, 17, "RCKH")]}
+            Path(FNAMES.mesh_file(tmp, tile.lat, tile.lon)).touch()
+            cfg = Path(tmp) / "Ortho4XP_+23+120.cfg"
+            expected = [drawn, [enclosing, 17, "BI"]]
+            with (
+                mock.patch.object(TILE.UI, "is_working", 0),
+                mock.patch.object(TILE.UI, "logprint"),
+                mock.patch.object(TILE.UI, "exit_message_and_bottom_line"),
+                mock.patch.object(TILE.IMG, "initialize_local_combined_providers_dict", return_value=False) as setup,
+            ):
+                for _ in range(2):
+                    TILE.UI.is_working = 0
+                    TILE.build_tile(tile)
+                    self.assertEqual(tile.zone_list, expected)
+                    self.assertEqual(AZONE.read_tile_zones(str(cfg)), expected)
+                    self.assertNotIn("airport_zone_list=", cfg.read_text())
+                self.assertEqual(setup.call_count, 2)
+            reloaded = CFG.Tile(23, 120, "")
+            self.assertEqual(reloaded.read_from_config(config_file=str(cfg)), 1)
+            self.assertEqual(reloaded.zone_list, expected)
+
 
 class TextureReplayTest(unittest.TestCase):
     def test_overlays_replay_the_saved_airport_zones(self):
@@ -412,13 +457,33 @@ class TextureReplayTest(unittest.TestCase):
             self.assertEqual(AZONE.read_tile_zones(str(cfg)), [])
 
             zones = [[c, zl, "BI"] for c, zl in AZONE.airport_rings(RCKH, DISTANCES)]
-            cfg.write_text(base + f"airport_zone_list={zones}\n", encoding="utf-8")
+            cfg.write_text(base.replace("zone_list=[]", f"zone_list={zones}"), encoding="utf-8")
             self.assertEqual(AZONE.read_tile_zones(str(cfg)), zones)
             assignment, _zl, _notes = TEXSEL.cfg_texture_assignment(str(tex_dir), lat, lon)
             self.assertEqual({key[3] for key in assignment}, {16, 17, 18, 19})
 
-    def test_zones_are_saved_in_the_tile_config_apart_from_drawn_zones(self):
-        self.assertIn("airport_zone_list", CFGVARS.list_tile_vars)
+            import O4_Config_Utils as CFG
+            import O4_DSF_Utils as DSF
+
+            tile = CFG.Tile(lat, lon, "")
+            self.assertEqual(tile.read_from_config(config_file=str(cfg)), 1)
+            tile.cover_airports_with_highres = "False"
+            actual = DSF.zone_list_to_ortho_dico(tile)
+            replayed = {
+                cell: (x, y, zl, provider)
+                for (y, x, provider, zl), cells in assignment.items()
+                for cell in cells
+            }
+            self.assertEqual(actual, replayed)
+
+            # Existing configs still replay identically until next saved.
+            cfg.write_text(base + f"airport_zone_list={zones}\n", encoding="utf-8")
+            legacy, _zl, _notes = TEXSEL.cfg_texture_assignment(str(tex_dir), lat, lon)
+            self.assertEqual(legacy, assignment)
+
+    def test_airport_zone_list_is_no_longer_a_setting(self):
+        self.assertNotIn("airport_zone_list", CFGVARS.cfg_tile_vars)
+        self.assertNotIn("airport_zone_list", CFGVARS.list_tile_vars)
         self.assertNotIn("global_airport_zone_list", CFGVARS.cfg_global_tile_vars)
         self.assertNotIn("airport_zone_list", CFGVARS.list_dsf_vars)
 

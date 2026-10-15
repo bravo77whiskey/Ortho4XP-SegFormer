@@ -47,6 +47,7 @@ import O4_Tile_Utils as TILE
 import O4_UI_Utils as UI
 import O4_GUI_Theme as THEME
 import O4_Config_Utils as CFG
+import O4_Airport_Zones as AZONE
 import O4_Zone_Utils as ZONE
 import O4_PBF_Utils as PBF
 import O4_Overlay_Pipeline as PIPELINE
@@ -815,7 +816,6 @@ class Ortho4XP_GUI(tk.Tk):
                 setattr(CFG, tile_var, cfg_global_tile_vars[var]["type"](value))
         # Tile-only settings start empty, not with the previous tile's value.
         CFG.airport_zone_icaos = CFGVARS.cfg_tile_vars["airport_zone_icaos"]["default"]
-        CFG.airport_zone_list = []
 
         if os.path.exists(tile_cfg_file):
             f = open(tile_cfg_file, "r")
@@ -824,7 +824,9 @@ class Ortho4XP_GUI(tk.Tk):
                 if not line or line[0] == "#":
                     continue
                 try:
-                    (var, value) = line.split("=")
+                    (var, value) = line.split("=", 1)
+                    if var == "airport_zone_list":
+                        continue  # Read old airport zones into the ordinary list below.
                     value = CFG.config_compatibility(value)
                     var, value = CFG.normalize_config_entry(var, value)
                     if CFG.is_missing_model_path(var, value):
@@ -860,6 +862,9 @@ class Ortho4XP_GUI(tk.Tk):
                 # Update main window GUI values
                 self.default_website.set(CFG.default_website)
                 self.default_zl.set(CFG.default_zl)
+            CFG.zone_list = AZONE.merge_zone_lists(
+                CFG.zone_list, AZONE.read_tile_zones(tile_cfg_file)
+            )
             self.tile_cfg_exists.set(True)
             UI.vprint(1, f"Configuration loaded for tile at {lat} {lon}")
             f.close()

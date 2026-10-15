@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import math
 import re
@@ -90,16 +89,7 @@ def parse_cfg(cfg_path: Path) -> TileConfig:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
-    zone_list_raw = values.get("zone_list", "[]")
-    try:
-        zone_list = ast.literal_eval(zone_list_raw)
-    except (SyntaxError, ValueError):
-        zone_list = []
-    try:
-        airport_zones = ast.literal_eval(values.get("airport_zone_list", "[]"))
-    except (SyntaxError, ValueError):
-        airport_zones = []
-    zone_list = AZONE.merge_zone_lists(zone_list, airport_zones)
+    zone_list = AZONE.config_zones(values)
     return TileConfig(
         default_website=values.get("default_website", ""),
         default_zl=int(values.get("default_zl", "16")),

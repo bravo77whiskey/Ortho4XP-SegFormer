@@ -13,11 +13,9 @@ An airport only counts for the tile its runways sit in; listed elsewhere it is
 skipped. Its zones reach into neighbouring tiles of the same batch, so the
 zoomlevel does not drop at a tile edge that cuts through them.
 
-Step 3 saves a tile's zones in its config as ``airport_zone_list``, apart from
-the hand-drawn ``zone_list``, and rewrites them on every build. The overlays
-replay the zone assignment from the config to decide which textures to read,
-and the batch that decided which neighbours contributed zones is gone by then,
-so that line is the record of what the DSF was actually built with.
+Step 3 adds these zones to the ordinary ``zone_list`` and saves it in the tile
+config. They can be viewed and edited like drawn zones. The overlays replay
+that same list to decide which textures to read.
 """
 
 import ast
@@ -30,7 +28,6 @@ import O4_Apt_Pavement as APT
 ZONE_ZLS = (19, 18, 17)
 DISTANCE_VARS = {zl: f"airport_zone_zl{zl}_m" for zl in ZONE_ZLS}
 ICAO_VAR = "airport_zone_icaos"
-ZONES_VAR = "airport_zone_list"
 
 _CACHE_VERSION = 2
 _BUFFER_RESOLUTION = 16  # segments per quarter circle on the rounded corners
@@ -77,17 +74,28 @@ def read_tile_icaos(cfg_path):
 
 
 def read_tile_zones(cfg_path):
-    """The airport_zone_list a tile config was last built with, or []."""
-    try:
-        zones = ast.literal_eval(_tile_cfg_value(cfg_path, ZONES_VAR) or "[]")
-    except (SyntaxError, ValueError):
-        return []
-    if not isinstance(zones, list):
-        return []
-    return [
-        zone for zone in zones
-        if isinstance(zone, (list, tuple)) and len(zone) >= 3 and zone[0]
-    ]
+    """Saved zone_list, including zones from the retired airport_zone_list key."""
+    return config_zones({
+        key: _tile_cfg_value(cfg_path, key)
+        for key in ("zone_list", "airport_zone_list")
+    })
+
+
+def config_zones(values):
+    """Read zones from config values, folding the legacy key into zone_list."""
+    def zones_for(key):
+        try:
+            zones = ast.literal_eval(values.get(key) or "[]")
+        except (SyntaxError, ValueError):
+            return []
+        if not isinstance(zones, list):
+            return []
+        return [
+            zone for zone in zones
+            if isinstance(zone, (list, tuple)) and len(zone) >= 3 and zone[0]
+        ]
+
+    return merge_zone_lists(zones_for("zone_list"), zones_for("airport_zone_list"))
 
 
 # ── Runways from apt.dat ─────────────────────────────────────────────────────
@@ -395,10 +403,13 @@ def merge_zone_lists(zone_list, airport_zones):
     The first zone of a zone_list wins where zones overlap. Drawn zones keep
     their order among themselves; each airport zone goes ahead of the first
     drawn zone with a lower zoomlevel, so it is never undercut by a coarser
-    drawn zone yet never overrides a finer one.
+    drawn zone yet never overrides a finer one. Zones already in the list
+    keep their position and are not duplicated on subsequent builds.
     """
     merged = [(zone, False) for zone in zone_list]
     for zone in sorted(airport_zones, key=lambda z: -int(z[1])):
+        if any(zone == other for other, _ in merged):
+            continue
         index = next(
             (i for i, (other, drawn) in enumerate(merged)
              if drawn is False and int(other[1]) < int(zone[1])),

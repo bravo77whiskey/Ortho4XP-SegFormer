@@ -266,6 +266,8 @@ class Tile:
                     continue
                 try:
                     (var, value) = line.split("=", 1)
+                    if var == "airport_zone_list":
+                        continue  # Fold the legacy key into zone_list after reading.
                     value = config_compatibility(value)
                     var, value = normalize_config_entry(var, value)
                     if keep_missing_model_paths and is_missing_model_path(var, value):
@@ -289,6 +291,9 @@ class Tile:
                             pass
                     else:
                         UI.vprint(2, e)
+        self.zone_list = AZONE.merge_zone_lists(
+            self.zone_list, AZONE.read_tile_zones(config_file)
+        )
 
     def read_from_config(self, config_file=None, use_global=False):
         """
@@ -330,11 +335,8 @@ class Tile:
                     )
                     return 0
 
-            # The airport list and the zones last drawn from it are the tile's
-            # own, overridden configs or not, and a tile without them must not
-            # keep the previous tile's.
+            # The airport list is the tile's own, overridden configs or not.
             self.airport_zone_icaos = ",".join(AZONE.read_tile_icaos(tile_config))
-            self.airport_zone_list = AZONE.read_tile_zones(tile_config)
 
             if tile_exists and not use_global:
                 config_file = tile_config
@@ -371,11 +373,7 @@ class Tile:
         zone_source = getattr(self, "zone_list", globals()["zone_list"])
         if not zone_source and os.path.isfile(config_file):
             try:
-                with open(config_file, "r") as existing_config:
-                    for line in existing_config:
-                        if line.startswith("zone_list="):
-                            zone_source = ast.literal_eval(line.split("=", 1)[1].strip())
-                            break
+                zone_source = AZONE.read_tile_zones(config_file)
             except Exception:
                 zone_source = []
         try:
@@ -384,22 +382,12 @@ class Tile:
             pass
         try:
             f = open(config_file, "w")
+            # Rings can surround a tile without having a vertex inside it.
+            tile_zones = [
+                zone for zone in zone_source
+                if ZONE.zone_intersects_tile(zone, self.lat, self.lon)
+            ]
             for var in list_tile_vars:
-                tile_zones = []
-                lat = self.lat
-                lon = self.lon
-                if lat < 0:
-                    lat = lat + 1
-                if lon < 0:
-                    lon = lon + 1
-                # Batch builds load each tile config into this Tile instance
-                # without mutating the GUI/module-level zone_list.
-                for zone in zone_source:
-                    _zone_list = [int(coord) for coord in zone[0]]
-                    _zone_list = set(_zone_list)
-                    if lat in _zone_list and lon in _zone_list:
-                        tile_zones.append(zone)
-                        _LOGGER.debug("Zones in tile found: %s", tile_zones)
                 if var == "zone_list":
                     f.write(var + "=" + str(tile_zones) + "\n")
                 else:
@@ -1122,16 +1110,10 @@ class Ortho4XP_Config(tk.Toplevel):
         except:
             return 0
         # Find all the zones for the active tile
-        tile_zones = []
-        if lat < 0:
-            lat = lat + 1
-        if lon < 0:
-            lon = lon + 1
-        for zone in globals()["zone_list"]:
-            _zone_list = [int(coord) for coord in zone[0]]
-            _zone_list = set(_zone_list)
-            if lat in _zone_list and lon in _zone_list:
-                tile_zones.append(zone)
+        tile_zones = [
+            zone for zone in globals()["zone_list"]
+            if ZONE.zone_intersects_tile(zone, lat, lon)
+        ]
         if tile_zones:
             response = messagebox.askyesnocancel("Confirmation", "Save tile zones?", parent=self)
             if response is None:
@@ -1189,6 +1171,8 @@ class Ortho4XP_Config(tk.Toplevel):
                 continue
             try:
                 (var, value) = line.split("=", 1)
+                if var == "airport_zone_list":
+                    continue
                 value = config_compatibility(value)
                 var, value = normalize_config_entry(var, value)
                 if is_missing_model_path(var, value):
@@ -1205,6 +1189,10 @@ class Ortho4XP_Config(tk.Toplevel):
                 else:
                     UI.vprint(2, e)
                     pass
+        self.v_["zone_list"].set(str(AZONE.merge_zone_lists(
+            AZONE.config_zones({"zone_list": self.v_["zone_list"].get()}),
+            AZONE.read_tile_zones(f.name),
+        )))
         # Apply changes to update global variables
         self.apply_changes("tile")
         UI.vprint(0, f"Backup configuration loaded for tile at {lat} {lon}")
@@ -1258,6 +1246,8 @@ class Ortho4XP_Config(tk.Toplevel):
                 continue
             try:
                 (var, value) = line.split("=", 1)
+                if var == "airport_zone_list":
+                    continue
                 value = config_compatibility(value)
                 var, value = normalize_config_entry(var, value)
                 if is_missing_model_path(var, value):
@@ -1276,6 +1266,10 @@ class Ortho4XP_Config(tk.Toplevel):
                     pass
         if not self.v_["zone_list"].get():
             self.v_["zone_list"].set(str(zone_list))
+        self.v_["zone_list"].set(str(AZONE.merge_zone_lists(
+            AZONE.config_zones({"zone_list": self.v_["zone_list"].get()}),
+            AZONE.read_tile_zones(f.name),
+        )))
         self.parent.tile_cfg_exists.set(True)
         # Apply changes to update global variables
         self.apply_changes("tile")
@@ -1314,17 +1308,10 @@ class Ortho4XP_Config(tk.Toplevel):
             # Apply changes to update global variables
             self.apply_changes("tile")
             # Get zones only for the tile
-            tile_zones = []
-            if lat < 0:
-                lat = lat + 1
-            if lon < 0:
-                lon = lon + 1
-            for zone in globals()["zone_list"]:
-                _zone_list = [int(coord) for coord in zone[0]]
-                _zone_list = set(_zone_list)
-                if lat in _zone_list and lon in _zone_list:
-                    tile_zones.append(zone)
-                    _LOGGER.debug("Zones saved for tile at %s %s: %s", lat, lon, tile_zones)
+            tile_zones = [
+                zone for zone in globals()["zone_list"]
+                if ZONE.zone_intersects_tile(zone, lat, lon)
+            ]
             for var in list_tile_vars:
                 if var == "zone_list":
                     f.write(var + "=" + str(tile_zones) + "\n")

@@ -416,7 +416,7 @@ def _batch_airport_zone_plan(tile, list_lat_lon, override_cfg):
 def _airport_zones(tile):
     """This tile's airport zones as zone_list entries.
 
-    Step 3 saves them in the tile config as airport_zone_list, which the
+    Step 3 adds them to zone_list and saves it in the tile config, which the
     overlays replay to know which textures the DSF uses.
 
     A batch plans them for all its tiles up front (tile.airport_zone_plan), so
@@ -477,7 +477,7 @@ def build_tile(tile):
 
     timer = time.time()
 
-    tile.airport_zone_list = _airport_zones(tile)
+    tile.zone_list = AZONE.merge_zone_lists(tile.zone_list, _airport_zones(tile))
     tile.write_to_config()
 
     if not IMG.initialize_local_combined_providers_dict(tile):

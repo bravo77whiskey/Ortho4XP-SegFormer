@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,83 @@ import O4_Config_Utils as CFG
 
 
 class ConfigZoneListTests(unittest.TestCase):
+    def test_gui_load_and_save_fold_legacy_zones_into_the_editable_list(self):
+        import O4_File_Names as FNAMES
+        import O4_GUI_Utils as GUI
+
+        def value(initial):
+            var = mock.Mock()
+            var.get.return_value = str(initial)
+            var.set.side_effect = lambda new: setattr(var.get, "return_value", str(new))
+            return var
+
+        enclosing = [[35.9, 116.9, 37.1, 116.9, 37.1, 118.1, 35.9, 118.1, 35.9, 116.9], 19, "BI"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = tmpdir + "/"
+            build_dir = Path(FNAMES.build_dir(36, 117, base))
+            build_dir.mkdir(parents=True)
+            cfg = build_dir / "Ortho4XP_+36+117.cfg"
+            cfg.write_text(f"airport_zone_list={[enclosing]}\nzone_list=[]\n")
+            parent = mock.Mock()
+            parent.custom_build_dir_entry = value(base)
+            parent.get_lat_lon.return_value = (36, 117)
+            parent.lat = value(36)
+            parent.lon = value(117)
+            parent.default_website = value("BI")
+            parent.default_zl = value(16)
+            window = mock.Mock()
+            window.parent = parent
+            window.v_ = {key: value(str(info["default"])) for key, info in CFG.cfg_vars.items()}
+            window.reference_year_ok.return_value = True
+            snapshot = {key: getattr(CFG, key) for key in CFG.list_tile_vars}
+            with mock.patch.multiple(CFG, **snapshot), mock.patch.object(CFG, "zone_list", []):
+                GUI.Ortho4XP_GUI.load_tile_cfg(parent, 36, 117)
+                self.assertEqual(CFG.zone_list, [enclosing])
+                CFG.Ortho4XP_Config.load_tile_cfg(window)
+                self.assertEqual(ast.literal_eval(window.v_["zone_list"].get()), [enclosing])
+                backup = Path(str(cfg) + ".bak")
+                backup.write_text(cfg.read_text())
+                window.v_["zone_list"].set("[]")
+                CFG.Ortho4XP_Config.load_backup_tile_cfg(window)
+                self.assertEqual(ast.literal_eval(window.v_["zone_list"].get()), [enclosing])
+                CFG.Ortho4XP_Config.write_tile_cfg(window)
+                values = dict(line.split("=", 1) for line in cfg.read_text().splitlines())
+                self.assertEqual(ast.literal_eval(values["zone_list"]), [enclosing])
+                self.assertNotIn("airport_zone_list", values)
+
+    def test_legacy_airport_zones_migrate_to_zone_list_in_either_key_order(self):
+        drawn = [[36.2, 117.2, 36.4, 117.2, 36.4, 117.4, 36.2, 117.2], 18, "GO2"]
+        airport = [[36.1, 117.1, 36.5, 117.1, 36.5, 117.5, 36.1, 117.1], 19, "BI"]
+        entries = [f"zone_list={[drawn]}\n", f"airport_zone_list={[airport]}\n"]
+        for lines in (entries, entries[::-1]):
+            with self.subTest(lines=lines), tempfile.TemporaryDirectory() as tmpdir:
+                cfg = Path(tmpdir) / "Ortho4XP_+36+117.cfg"
+                cfg.write_text("".join(lines), encoding="utf-8")
+                tile = CFG.Tile(36, 117, "")
+                tile.build_dir = tmpdir
+                self.assertEqual(tile.read_from_config(config_file=str(cfg)), 1)
+                self.assertEqual(tile.zone_list, [airport, drawn])
+                self.assertFalse(hasattr(tile, "airport_zone_list"))
+                self.assertEqual(tile.write_to_config(), 1)
+                self.assertNotIn("airport_zone_list=", cfg.read_text())
+                self.assertEqual(tile.read_from_config(config_file=str(cfg)), 1)
+                self.assertEqual(tile.zone_list, [airport, drawn])
+
+    def test_save_keeps_zones_enclosing_a_tile_in_all_hemispheres(self):
+        for lat, lon in ((23, 120), (-23, 120), (23, -120), (-23, -120)):
+            with self.subTest(lat=lat, lon=lon), tempfile.TemporaryDirectory() as tmpdir:
+                coords = [lat - .1, lon - .1, lat + 1.1, lon - .1,
+                          lat + 1.1, lon + 1.1, lat - .1, lon + 1.1, lat - .1, lon - .1]
+                enclosing = [coords, 17, "BI"]
+                elsewhere = [[value + 10 for value in coords], 18, "BI"]
+                tile = CFG.Tile(lat, lon, "")
+                tile.build_dir = tmpdir
+                tile.zone_list = [enclosing, elsewhere]
+                self.assertEqual(tile.write_to_config(), 1)
+                cfg = Path(tmpdir) / f"Ortho4XP_{lat:+03d}{lon:+04d}.cfg"
+                values = dict(line.split("=", 1) for line in cfg.read_text().splitlines())
+                self.assertEqual(ast.literal_eval(values["zone_list"]), [enclosing])
+
     def test_write_to_config_uses_tile_zone_list_when_global_zone_list_is_empty(self):
         original_zone_list = CFG.zone_list
         tile_zone = [[36.25, 117.25, 36.25, 117.5, 36.5, 117.5, 36.5, 117.25, 36.25, 117.25], 18, "BI"]
