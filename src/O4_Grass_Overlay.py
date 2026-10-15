@@ -2,10 +2,11 @@
 
 Runs inside the vegetation overlay (O4_Vegetation_Overlay.run): GrassHook
 collects the SegFormer class maps the overlay already has for the textures an
-airport zone reaches, then builds the grass and hands its polygons back, so
-they go into the same DSF as the trees -- one DSFTool compile, one validation,
-and the overlay's tile-wide forest exclusion (which applies only to lower
-packs) can never hide them.
+airport zone reaches, then builds the grass and hands its polygons back.  The
+overlay writes them to a DSF of their own in yOrtho4XP_Grass_Overlays, a pack
+apart from the trees: placed above exclusion zones meant for trees (and above
+the tree pack, whose tile-wide forest exclusion would otherwise remove it),
+the grass stays when the trees go.
 
 Where grass grows, per pixel:
   * SegFormer vegetation (rangeland, tree, agriculture) unless the ortho looks

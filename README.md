@@ -13,6 +13,11 @@ orthophotos with machine-learning models and generates two extra overlays:
   from the imagery become X-Plane 12 forests, picked by climate and by
   broadleaf/conifer leaf-type maps, kept clear of existing buildings and
   (optionally) replacing the forests of lower-priority scenery.
+- **Grass overlay** (`yOrtho4XP_Grass_Overlays`): 3-d grass around airports,
+  coloured from the ortho, built during the vegetation overlay. It is a pack of
+  its own so it can sit above exclusion zones meant for trees: put it above
+  `yOrtho4XP_Veg_Overlays` and above any pack whose tree exclusions should
+  leave the grass alone.
 
 The project started as a SegFormer experiment, hence the name. The overlays now
 combine several models:

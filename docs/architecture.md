@@ -112,7 +112,7 @@ else (caching, placement, DSF writing) stays local.
 | `Overlay_cache/<grid>/<tile>/` | Per-texture inference and placement caches (`*_veg.npy`, `*_yolo_obb.pkl`, `*_bld.pkl`, ...) plus parsed OSM/DSF sidecars. Installs from before the rename keep using `SFR_cache/`. |
 | `Overlay_cache/_libraries/library_catalog.pkl` | Scan of the installed scenery libraries (Libraries button) |
 | `Overlay_cache/_leaf_type/` | Downloaded leaf-type map tiles |
-| `yOrtho4XP_Bld_Overlays/`, `yOrtho4XP_Veg_Overlays/` | Generated overlay scenery packs |
+| `yOrtho4XP_Bld_Overlays/`, `yOrtho4XP_Veg_Overlays/`, `yOrtho4XP_Grass_Overlays/` | Generated overlay scenery packs |
 | `yOrtho4XP_Veg_Replacement/` | Originals and journal of tile vegetation replacement; the only copy of edited DSFs |
 | `build_state/` | Journals of unfinished batch builds |
 

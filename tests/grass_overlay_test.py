@@ -198,6 +198,13 @@ class PipelineWiringTest(unittest.TestCase):
         code = self._code(True)
         self.assertIn("GrassSettings(airport_buffer_m=750.0)", code)
         self.assertIn("grass_settings   = _grass", code)
+        self.assertRegex(code, r"grass_out_dsf    = '[^']*yOrtho4XP_Grass_Overlays[^']*\+10\+020\.dsf'")
+
+    def test_grass_pack_sits_beside_the_tree_pack(self):
+        import O4_Vegetation_Overlay as VEG
+        veg = os.path.join("X", "yOrtho4XP_Veg_Overlays", "Earth nav data", "+20+120", "+22+120.dsf")
+        self.assertEqual(VEG.grass_dsf_path_beside(veg), os.path.abspath(
+            os.path.join("X", "yOrtho4XP_Grass_Overlays", "Earth nav data", "+20+120", "+22+120.dsf")))
 
     def test_grass_off_passes_none(self):
         code = self._code(False)

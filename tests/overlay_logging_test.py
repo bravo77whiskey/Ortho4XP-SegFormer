@@ -136,10 +136,20 @@ class OverlayLoggingTests(unittest.TestCase):
                                 avoid_simheaven_buildings=False, avoid_simheaven_forests=False,
                                 use_leaf_type_maps=False, use_xp_forests=False, bld_excl_m=0,
                                 grass_settings=GRASS.GrassSettings() if grass_count else None)
-            if trees or grass_count:
-                self.assertEqual(output.read_bytes(), b"compiled fixture")
-            else:
-                self.assertFalse(output.exists())
+            # Trees and grass are separate packs side by side.
+            grass_output = (Path(tmp) / VEG.GRASS_PACK_NAME / "Earth nav data"
+                            / "+40+000" / "+47+008.dsf")
+            for path, wanted in ((output, trees), (grass_output, grass_count > 0)):
+                if wanted:
+                    self.assertEqual(path.read_bytes(), b"compiled fixture")
+                else:
+                    self.assertFalse(path.exists())
+            grass_sources = [source for source in text if "grass/" in source]
+            self.assertEqual(len(grass_sources), int(grass_count > 0))
+            self.assertEqual(len(text) - len(grass_sources), int(trees))
+            for source in grass_sources:
+                self.assertNotIn("sim/exclude", source)
+                self.assertEqual(source.count("BEGIN_POLYGON 0 230 2"), grass_count)
             return count, text, out.getvalue()
 
     def test_complete_vegetation_tile_summary_and_output_in_both_modes(self):
@@ -151,11 +161,12 @@ class OverlayLoggingTests(unittest.TestCase):
                     self.assertEqual(count > 0, trees)
                     self.assertIn(f"[Veg] Tile +47+008: tree polygons={count:,}; grass polygons={grass_count};", log)
                     self.assertEqual(log.count("[Veg] Tile +47+008:"), 1)
-                    elapsed = 180.0 if trees or grass_count else 60.0
+                    elapsed = 60.0 + 120.0 * trees + 120.0 * (grass_count > 0)
                     self.assertIn(f"total generation time={elapsed:.1f}s", log)
                     self.assertIn("(cached)", log)
-                    self.assertEqual("DSF compiled" in log, trees or grass_count > 0)
-                    self.assertEqual("[Veg timing]" in log, verbose and (trees or grass_count > 0))
+                    self.assertEqual(f"DSF compiled → " in log.replace("Grass DSF compiled", ""), trees)
+                    self.assertEqual("Grass DSF compiled" in log, grass_count > 0)
+                    self.assertEqual("[Veg timing]" in log, verbose and trees)
                     self.assertEqual("vegetation context:" in log, verbose)
                     generated.append((count, text))
             self.assertEqual(generated[0], generated[1])

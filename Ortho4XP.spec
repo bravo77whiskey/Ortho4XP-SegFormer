@@ -15,7 +15,8 @@ lets users install the CUDA torch wheel that matches their GPU.
 
 User data preserved on rebuild (never overwritten by build.py):
     Tiles, OSM_data, Orthophotos, Masks, yOrtho4XP_Overlays,
-    yOrtho4XP_Veg_Overlays, yOrtho4XP_Bld_Overlays, Elevation_data, Geotiffs, tmp,
+    yOrtho4XP_Veg_Overlays, yOrtho4XP_Grass_Overlays, yOrtho4XP_Bld_Overlays,
+    Elevation_data, Geotiffs, tmp,
     Overlay_cache, Ortho4XP.cfg, .last_gui_params.txt, .venv/
 """
 

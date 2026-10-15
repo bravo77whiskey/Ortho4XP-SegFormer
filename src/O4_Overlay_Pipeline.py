@@ -281,7 +281,7 @@ veg_use_gfv2_asset_proximity = False
 veg_res_m         = 0.0     # 0 = native DDS resolution
 veg_disable_cache = False
 veg_verbose_log = False
-grass_enabled     = True    # 3-d grass around airports, inside the veg overlay
+grass_enabled     = True    # 3-d grass around airports, built by the veg overlay into its own pack
 grass_airport_buffer_m = 500.0
 
 bld_spacing_m     = 0.0
@@ -777,6 +777,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
     res_m            = None if veg_res_m <= 0 else veg_res_m
     dsftool          = _dsftool_path()
     out_dsf          = _dsf_output_path(lat, lon, 'yOrtho4XP_Veg_Overlays')
+    grass_out_dsf    = _dsf_output_path(lat, lon, 'yOrtho4XP_Grass_Overlays')
     custom_scenery_dir = _scenery_paths()
     remote_host      = _resolve_remote_host()
     status_path      = os.path.join(cache_dir, 'veg_overlay_status.json')
@@ -857,6 +858,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         f"    dsftool_path     = {dsftool!r},\n"
         f"    custom_scenery_dir = {custom_scenery_dir!r},\n"
         f"    grass_settings   = _grass,\n"
+        f"    grass_out_dsf    = {grass_out_dsf!r},\n"
         f")\n"
     )
     ret = None

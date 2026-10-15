@@ -1012,6 +1012,90 @@ def write_generation_status(status_path, payload):
         print(f"[Veg] could not write status file {status_path}: {exc}")
 
 
+# Grass has a scenery pack of its own, beside the trees' one, so it can sit
+# above exclusion zones meant for trees -- and above this overlay's own
+# tile-wide exclusion, which would otherwise remove it.
+GRASS_PACK_NAME = "yOrtho4XP_Grass_Overlays"
+
+
+def _pack_dir_of(dsf_path):
+    """<pack>/Earth nav data/<grid>/<tile>.dsf -> <pack>."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(dsf_path))))
+
+
+def grass_dsf_path_beside(out_dsf):
+    """The grass DSF for the tile whose tree DSF is out_dsf."""
+    veg_pack = _pack_dir_of(out_dsf)
+    return os.path.join(os.path.dirname(veg_pack), GRASS_PACK_NAME,
+                        os.path.relpath(os.path.abspath(out_dsf), veg_pack))
+
+
+def _remove_grass_overlay(grass_out_dsf, lat, lon):
+    import O4_Grass_Overlay as GRASS
+    try:
+        if os.path.exists(grass_out_dsf):
+            os.remove(grass_out_dsf)
+            print(f"Removed stale grass overlay {grass_out_dsf}")
+    except OSError as exc:
+        print(f"Could not remove stale grass overlay {grass_out_dsf}: {exc}")
+        return  # its forest files stay, so the old DSF still loads
+    GRASS.remove_tile_assets(_pack_dir_of(grass_out_dsf), lat, lon)
+
+
+def write_grass_overlay(grass_out_dsf, lat, lon, grass_result):
+    """Compile the tile's grass DSF, or remove it when there is no grass.
+
+    grass_result is GrassHook.build(0)'s (polygon_def_paths, text, stats).
+    A failed compile drops the tile's grass rather than keeping an old DSF
+    next to forest files the build has already rewritten. True when written.
+    """
+    if not grass_result:
+        _remove_grass_overlay(grass_out_dsf, lat, lon)
+        return False
+    defs, body, _stats = grass_result
+    os.makedirs(os.path.dirname(os.path.abspath(grass_out_dsf)), exist_ok=True)
+    txt_path = grass_out_dsf.replace('.dsf', '_grass.txt')
+    tmp_dsf = grass_out_dsf + '.tmp'
+    lat_i = int(math.floor(lat)); lon_i = int(math.floor(lon))
+    with open(txt_path, 'w') as f:
+        f.write("PROPERTY sim/planet earth\n")
+        f.write("PROPERTY sim/overlay 1\n")
+        f.write(f"PROPERTY sim/west  {lon_i}\n")
+        f.write(f"PROPERTY sim/east  {lon_i + 1}\n")
+        f.write(f"PROPERTY sim/south {lat_i}\n")
+        f.write(f"PROPERTY sim/north {lat_i + 1}\n")
+        f.write("\n")
+        for p in defs:
+            f.write(f"POLYGON_DEF {p}\n")
+        f.write("\n")
+        f.write(body)
+    try:
+        if os.path.exists(tmp_dsf):
+            os.remove(tmp_dsf)
+    except OSError:
+        pass
+    ok = SEGFORMER.compile_dsf(txt_path, tmp_dsf)
+    if ok:
+        problem = validate_compiled_overlay(tmp_dsf)
+        if problem:
+            ok = False
+            print(f"Compiled grass DSF rejected: {problem}")
+    if ok:
+        os.replace(tmp_dsf, grass_out_dsf)
+        print(f"Grass DSF compiled → {grass_out_dsf}")
+        try: os.remove(txt_path)
+        except OSError: pass
+        return True
+    print(f"[Grass] DSFTool failed — text file kept at {txt_path}; no grass for this tile")
+    try:
+        if os.path.exists(tmp_dsf):
+            os.remove(tmp_dsf)
+    except OSError:
+        pass
+    _remove_grass_overlay(grass_out_dsf, lat, lon)
+    return False
+
+
 def _read_dsf_binary_properties(dsf_path):
     """Read the header key/value properties straight out of a binary DSF.
 
@@ -1674,7 +1758,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         avoid_gfv2=False, gfv2_buffer_m=0.0,
         use_gfv2_asset_proximity=False,
         use_leaf_type_maps=True, leaf_type_cache_dir=None,
-        use_xp_forests=True, grass_settings=None, verbose_log=False):
+        use_xp_forests=True, grass_settings=None, grass_out_dsf=None,
+        verbose_log=False):
 
     started = time.perf_counter()
 
@@ -1820,9 +1905,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         print(_line)
     # Grass around airports (O4_Grass_Overlay) rides along: it collects the
     # class maps of the textures its airport zones reach as this loop goes,
-    # and its polygons are merged into this DSF below. A grass failure never
-    # costs the trees.
-    grass_pack_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(out_dsf))))
+    # and its polygons go into a DSF of their own in the grass pack. A grass
+    # failure never costs the trees.
+    if grass_out_dsf is None:
+        grass_out_dsf = grass_dsf_path_beside(out_dsf)
+    grass_pack_dir = _pack_dir_of(grass_out_dsf)
     grass_hook = None
     if grass_settings is not None:
         try:
@@ -1833,16 +1920,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             )
             if not grass_hook.sources:
                 grass_hook = None
-                GRASS.remove_tile_assets(grass_pack_dir, lat, lon)
         except Exception as exc:
             print(f"[Grass] disabled for this tile: {exc!r}")
             grass_hook = None
-    else:
-        try:
-            import O4_Grass_Overlay as GRASS
-            GRASS.remove_tile_assets(grass_pack_dir, lat, lon)
-        except Exception:
-            pass
     _used_zls = sorted(set(int(STD_RE.match(_f).group(4)) for _f in files))
     _zl_str = f"ZL{_used_zls[0]}" if len(_used_zls) == 1 else f"mixed ZL {_used_zls}"
 
@@ -2779,37 +2859,46 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         summary = ", ".join(f"{name}={count}" for name, count in ordered)
         verbose_print(f"Tree types: {summary}")
 
-    # Grass polygons for this same DSF, their POLYGON_DEFs numbered after the
-    # tree ones.
+    # Grass goes to its own DSF in the grass pack, written (or removed) here.
     grass_result = None
     if grass_hook is not None:
         try:
-            grass_result = grass_hook.build(len(set(p for p, _, _ in polygons)))
+            grass_result = grass_hook.build(0)
         except Exception as exc:
             import traceback
             traceback.print_exc()
             print(f"[Grass] failed, writing trees only: {exc!r}")
-            try:
-                GRASS.remove_tile_assets(grass_pack_dir, lat, lon)
-            except Exception:
-                pass
         finally:
             grass_hook.cleanup()
+    try:
+        if not write_grass_overlay(grass_out_dsf, lat, lon, grass_result):
+            grass_result = None
+    except Exception as exc:
+        print(f"[Grass] could not write the grass overlay: {exc!r}")
+        grass_result = None
     if grass_result:
         status['grass'] = grass_result[2]
+        status['grass_dsf'] = os.path.abspath(grass_out_dsf)
     n_grass = int(grass_result[2]['polygons']) if grass_result else 0
-    if not polygons and grass_result:
-        # Grass but no trees of our own: the DSF carries the grass, but never
-        # the tile-wide exclusion -- nothing of ours would replace the lower
-        # forests it removes.
-        exclude_lower_forests = False
 
-    if not polygons and not grass_result:
+    def _drop_legacy_grass():
+        # Builds before the grass pack existed kept grass in the tree pack;
+        # its files go once the tree DSF that referenced them is replaced.
+        veg_pack_dir = _pack_dir_of(out_dsf)
+        if os.path.normcase(veg_pack_dir) == os.path.normcase(grass_pack_dir):
+            return
+        try:
+            import O4_Grass_Overlay as GRASS
+            GRASS.remove_tile_assets(veg_pack_dir, lat, lon)
+        except Exception:
+            pass
+
+    if not polygons:
         # A processed tile with nothing to plant must not keep a tile-wide
         # exclusion alive: with no generated trees of our own, excluding the
         # lower layers would leave the tile bare. Drop any managed overlay we
         # wrote earlier and tell the caller to undo the rest of the workflow.
-        print("No vegetation polygons — skipping DSF write.")
+        print("No tree polygons — skipping tree DSF write.")
         status['outcome'] = 'empty'
         status['needs_reconcile'] = True
         if out_dsf and os.path.exists(out_dsf):
@@ -2821,6 +2910,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 print(f"Could not remove stale generated overlay {out_dsf}: {exc}")
                 status['outcome'] = 'failed'
                 status['error'] = f"stale overlay not removable: {exc}"
+        if status['outcome'] == 'empty':
+            _drop_legacy_grass()
         write_generation_status(status_path, status)
         _print_tile_summary(n_tree, n_grass)
         return 0
@@ -2855,9 +2946,6 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f.write("\n")
         for p in for_paths:
             f.write(f"POLYGON_DEF {p}\n")
-        if grass_result:
-            for p in grass_result[0]:
-                f.write(f"POLYGON_DEF {p}\n")
         f.write("\n")
         for fpath, dsf_den, ring in polygons:
             f.write(f"BEGIN_POLYGON {for_idx[fpath]} {dsf_den} 2\n")
@@ -2866,12 +2954,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             else:
                 _write_winding(f, ring)
             f.write("END_POLYGON\n")
-        if grass_result:
-            f.write(grass_result[1])
     timings['dsf_text'] += time.perf_counter() - _t
 
-    verbose_print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs"
-          + (f" + {len(grass_result[0])} grass" if grass_result else "") + ")")
+    verbose_print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs)")
 
     _t = time.perf_counter()
     try:
@@ -2891,6 +2976,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     if ok:
         os.replace(tmp_dsf, out_dsf)
         print(f"DSF compiled → {out_dsf}")
+        _drop_legacy_grass()
         if exclude_lower_forests:
             verbose_print(f"Tile forest replacement installed: "
                   f"{FOREST_EXCLUSION_PROPERTY_KEYS[0]} {exclusion_value}")
