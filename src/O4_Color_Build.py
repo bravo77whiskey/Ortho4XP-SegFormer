@@ -1,10 +1,12 @@
 """Driver for the reference-anchored colour correction (main process).
 
 Colour correction and cloud removal are batch steps, run after Step 3 and
-before the overlays (O4_Tile_Utils.build_color).  When the batch builds the
-tile's Step 3 too, Step 3 does the correction inline (tile.color_correction /
+before the overlays (O4_Tile_Utils.build_color).  Each runs without the
+other: cloud removal alone keeps the provider's colours and only replaces the
+cloud, with the fill matched to the texture around it.  When the batch builds
+the tile's Step 3 too, Step 3 does the work inline (tile.color_correction /
 tile.color_fill_clouds, set by the batch) so no texture is converted twice;
-the step afterwards then only finds what the inline pass could not do.
+the steps afterwards then only find what the inline pass could not do.
 
 The correction itself (O4_Color_Correction.py) needs torch, which is not
 bundled into the exe, so it runs in the overlay .venv python like the
@@ -46,8 +48,10 @@ FILL_PROVIDERS = {"BI": "GO2", "GO2": "BI"}
 # existing texture already matches the colour settings.  Bump MARK_VERSION when
 # the correction changes enough that existing textures should be redone.
 MARK = b"O4CC"
-MARK_VERSION = 1
+MARK_VERSION = 2          # 2: per-year white point (no yellow cast)
 _MARK_OFFSET = 32
+FLAG_FILL = 1             # clouds removed
+FLAG_KEPT = 2             # colours kept: cloud removal without colour correction
 
 
 def unavailable_reason():
@@ -63,17 +67,36 @@ def unavailable_reason():
 
 
 def enabled(tile):
-    """True when Step 3 should correct inline (the batch's colour steps follow it)."""
-    return bool(getattr(tile, "color_correction", False)) and unavailable_reason() is None
+    """True when Step 3 should correct or fill inline (the batch's colour steps follow it)."""
+    return (_correct(tile) or _fill(tile)) and unavailable_reason() is None
+
+
+def _correct(tile):
+    return bool(getattr(tile, "color_correction", False))
 
 
 def _fill(tile):
     return bool(getattr(tile, "color_fill_clouds", False))
 
 
-def _mark_flags(tile, fill):
-    # bit 0: cloud fill; bits 16+: Sentinel-2 year, so another year redoes the texture
-    return (_reference_year(tile) << 16) | (1 if fill else 0)
+def _mark_flags(tile, correct, fill):
+    # bits 16+: Sentinel-2 year, so another year redoes a corrected texture
+    return ((_reference_year(tile) << 16) | (FLAG_FILL if fill else 0)
+            | (0 if correct else FLAG_KEPT))
+
+
+def texture_mode(dds_path, correct, fill):
+    """(correct, fill) to do a texture with: what is asked plus what it already has.
+
+    Not running a step never undoes it, so a corrected texture redone for
+    cloud removal is corrected again, and a filled one is filled again.
+    """
+    mark = dds_mark(dds_path)
+    if mark is not None:
+        flags = mark[1]
+        correct = correct or not flags & FLAG_KEPT
+        fill = fill or bool(flags & FLAG_FILL)
+    return correct, fill
 
 
 def _reference_year(tile):
@@ -145,30 +168,40 @@ def dds_mark(path):
 _from_dds = {}
 
 
-def correction_reason(tile, attrs, dds_path, fill):
-    """Why a texture still needs the colour step (with cloud removal when fill), or None.
+def correction_reason(tile, attrs, dds_path, correct, fill):
+    """Why a texture still needs colour correction (correct) or cloud removal (fill), or None.
 
-    A texture already filled is not redone by a colour step without cloud
-    removal: not running a step never undoes it.
+    A step never undoes another: a filled texture is not redone by colour
+    correction alone, nor a corrected one by cloud removal alone.  A texture
+    with its colours kept does not depend on the correction's version or year.
     """
     if not _eligible(attrs):
         return None
     mark = dds_mark(dds_path)
     if mark is None:
-        return "not colour-corrected yet"
+        return "not colour-corrected yet" if correct else "clouds not removed yet"
     version, flags = mark
-    if version != MARK_VERSION:
-        return "colour correction changed"
-    if flags >> 16 != _reference_year(tile):
-        return "corrected against another Sentinel-2 year"
-    if fill and not flags & 1:
+    if not flags & FLAG_KEPT:
+        if version != MARK_VERSION:
+            return "colour correction changed"
+        if flags >> 16 != _reference_year(tile):
+            return "corrected against another Sentinel-2 year"
+    elif correct:
+        return "not colour-corrected yet"
+    if fill and not flags & FLAG_FILL:
         return "clouds not removed yet"
     return None
 
 
+def _provider_colours(dds_path):
+    """True when a DDS still has the provider's colours (never corrected)."""
+    mark = dds_mark(dds_path)
+    return mark is None or bool(mark[1] & FLAG_KEPT)
+
+
 def _use_existing_dds_if_needed(tile, attrs, dds_path):
-    """Correct from the DDS when the orthophoto is gone and the DDS is still uncorrected."""
-    if dds_mark(dds_path) is None and not os.path.isfile(_jpeg_path(tile, *attrs)):
+    """Work from the DDS when the orthophoto is gone and the DDS still has the provider's colours."""
+    if _provider_colours(dds_path) and not os.path.isfile(_jpeg_path(tile, *attrs)):
         _from_dds[(tile.build_dir, tuple(attrs))] = dds_path
         return True
     return False
@@ -178,7 +211,7 @@ def rebuild_reason(tile, attrs, dds_path):
     """Why Step 3 must redo an otherwise reusable DDS for its inline correction, or None."""
     if not enabled(tile):
         return None
-    reason = correction_reason(tile, attrs, dds_path, _fill(tile))
+    reason = correction_reason(tile, attrs, dds_path, _correct(tile), _fill(tile))
     if reason and _use_existing_dds_if_needed(tile, attrs, dds_path):
         reason += ", correcting the existing texture"
     return reason
@@ -228,13 +261,13 @@ def tile_textures(tile):
     return sorted(found.items())
 
 
-def plan_tile(tile, fill):
-    """Textures of a built tile the colour step must do: [(attrs, reason, needs_download)]."""
+def plan_tile(tile, correct, fill):
+    """Textures of a built tile the colour steps must do: [(attrs, reason, needs_download)]."""
     todo = []
     for attrs, dds in tile_textures(tile) or []:
         if not os.path.isfile(dds):
             continue
-        reason = correction_reason(tile, attrs, dds, fill)
+        reason = correction_reason(tile, attrs, dds, correct, fill)
         if reason:
             from_dds = _use_existing_dds_if_needed(tile, attrs, dds)
             todo.append((attrs, reason, not from_dds and not os.path.isfile(_jpeg_path(tile, *attrs))))
@@ -247,6 +280,11 @@ def _eligible(attrs):
             and prov not in IMG.local_combined_providers_dict
             and IMG.providers_dict[prov].get("color_filters", "none") == "none"
             and prov != REF_PROVIDER)
+
+
+def _dds_path(tile, tx, ty, zl, prov):
+    return os.path.join(tile.build_dir, "textures",
+                        FNAMES.dds_file_name_from_attributes(tx, ty, zl, prov))
 
 
 def _jpeg_path(tile, tx, ty, zl, prov):
@@ -287,25 +325,34 @@ def _run_worker(job, job_path):
         return json.load(f)
 
 
-def run(tile, texture_attrs, workers=4, fill=None):
-    """Colour-correct and convert what it can; return the set of converted texture attrs.
+def run(tile, texture_attrs, workers=4, correct=None, fill=None, dds_current=False):
+    """Colour-correct and/or remove clouds and convert what it can; return the converted attrs.
 
-    fill: remove clouds too; None takes the tile's inline setting.
+    correct / fill: None takes the tile's inline setting; a texture already
+    corrected or filled stays so (texture_mode).  dds_current: the textures'
+    DDS are the tile's current imagery (the batch steps), so one with its
+    colours kept and no cloud found is only stamped, not encoded again.
     """
     import O4_Overlay_Pipeline as PIPELINE
     timer = time.time()
+    correct = _correct(tile) if correct is None else bool(correct)
     fill = _fill(tile) if fill is None else bool(fill)
     groups = {}
+    modes = {}
     for attrs in texture_attrs:
         if _eligible(attrs):
             groups.setdefault((attrs[3], attrs[2]), set()).add((attrs[0], attrs[1]))
+            modes[tuple(attrs)] = texture_mode(_dds_path(tile, *attrs), correct, fill)
     if not groups:
         return set()
     if not PIPELINE._venv_exists():
         UI.vprint(1, "   Colour correction skipped: the overlay .venv is not set up.")
         return set()
-    UI.vprint(1, "-> Colour correction against the Sentinel-2 reference "
-                 f"({sum(len(v) for v in groups.values())} textures).")
+    n_correct = sum(c for c, _ in modes.values())
+    what = ("Colour correction" if n_correct == len(modes)
+            else "Cloud removal (colours kept)" if not n_correct
+            else "Colour correction and cloud removal")
+    UI.vprint(1, f"-> {what} against the Sentinel-2 reference ({len(modes)} textures).")
     work = os.path.join(FNAMES.resource_path("tmp"), "colour_" + FNAMES.short_latlon(tile.lat, tile.lon))
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work, exist_ok=True)
@@ -331,10 +378,12 @@ def run(tile, texture_attrs, workers=4, fill=None):
             alt = FILL_PROVIDERS.get(prov)
             jobs.append({
                 "id": f"{prov}_{zl}", "provider": prov, "zl": zl, "lat": tile.lat + 0.5,
+                "year": year,
                 "textures": [[tx, ty, _from_dds.get((tile.build_dir, (tx, ty, zl, prov)))
                               or _jpeg_path(tile, tx, ty, zl, prov)] for (tx, ty) in sorted(tex)],
                 "reference": refs,
-                "clouds": fill and alt in IMG.providers_dict,
+                "clouds": alt in IMG.providers_dict and any(
+                    modes[(tx, ty, zl, prov)][1] for (tx, ty) in tex),
             })
         # --- fit ----------------------------------------------------------
         fit = _run_worker({"phase": "fit", "state_dir": work, "groups": jobs,
@@ -356,7 +405,7 @@ def run(tile, texture_attrs, workers=4, fill=None):
             alt = FILL_PROVIDERS.get(gj["provider"])
             if not (need and gj["clouds"]):
                 continue
-            UI.vprint(1, f"   Colour correction: {len(fit[gj['id']]['cloudy'])} {gj['provider']} "
+            UI.vprint(1, f"   Cloud removal: {len(fit[gj['id']]['cloudy'])} {gj['provider']} "
                          f"ZL{gj['zl']} texture(s) with cloud or missing tiles, fetching {len(need)} "
                          f"{alt} texture(s) to fill them.")
             got = []
@@ -370,17 +419,21 @@ def run(tile, texture_attrs, workers=4, fill=None):
         for gj in jobs:
             targets = []
             for tx, ty, src in gj["textures"]:
-                dds = FNAMES.dds_file_name_from_attributes(tx, ty, gj["zl"], gj["provider"])
                 mask = None
                 if tile.imprint_masks_to_dds:
                     mpath = os.path.join(tile.build_dir, "textures",
                                          FNAMES.mask_file(tx, ty, gj["zl"], gj["provider"]))
                     mask = mpath if os.path.exists(mpath) else None
-                targets.append([tx, ty, src, os.path.join(tile.build_dir, "textures", dds), mask])
+                c, f = modes[(tx, ty, gj["zl"], gj["provider"])]
+                targets.append({"tx": tx, "ty": ty, "src": src,
+                                "dds": _dds_path(tile, tx, ty, gj["zl"], gj["provider"]),
+                                "mask": mask, "correct": c, "fill": f,
+                                "flags": _mark_flags(tile, c, f),
+                                "stamp_only": bool(dds_current) and not c})
             gj["targets"] = targets
         res = _run_worker({"phase": "apply", "state_dir": work, "groups": jobs, "workers": workers,
                            "nvcompress": IMG.dds_convert_cmd, "tmp_dir": work,
-                           "mark": [MARK.decode("ascii"), MARK_VERSION, _mark_flags(tile, fill)],
+                           "mark": [MARK.decode("ascii"), MARK_VERSION],
                            "materials": ({"relief": TMAT.relief_of(tile)} if TMAT.enabled(tile) else None),
                            "result": os.path.join(work, "apply.json")}, os.path.join(work, "apply_job.json"))
         if res is None:
@@ -388,8 +441,7 @@ def run(tile, texture_attrs, workers=4, fill=None):
                 UI.lvprint(1, "   Colour correction failed (apply); converting the rest without it.")
             return set()
         done = {tuple(d) for d in res.get("done", [])}
-        UI.vprint(1, f" *Colour correction: {len(done)} textures corrected and converted in "
-                     f"{time.time() - timer:.0f}s.")
+        UI.vprint(1, f" *{what}: {len(done)} textures done in {time.time() - timer:.0f}s.")
         return done
     except Exception as e:
         UI.lvprint(1, f"   Colour correction failed ({e}); converting without it.")

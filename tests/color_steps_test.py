@@ -72,16 +72,42 @@ class ColorStepsTest(unittest.TestCase):
         self._texture("3_3_BI16.dds", (CCB.MARK_VERSION, year | 1))         # corrected and filled
         self._texture("4_4_BI16.dds", (CCB.MARK_VERSION, (2023 << 16) | 1))  # another year
         self._texture("5_5_BI12.dds")                                       # below the reference ZL
-        color = {a: r for a, r, _ in CCB.plan_tile(self.tile, fill=False)}
-        clouds = {a: r for a, r, _ in CCB.plan_tile(self.tile, fill=True)}
+        color = {a: r for a, r, _ in CCB.plan_tile(self.tile, True, False)}
+        clouds = {a: r for a, r, _ in CCB.plan_tile(self.tile, False, True)}
+        both = {a: r for a, r, _ in CCB.plan_tile(self.tile, True, True)}
         self.assertEqual(sorted(color), [(1, 1, 16, "BI"), (4, 4, 16, "BI")])
         self.assertEqual(sorted(clouds), [(1, 1, 16, "BI"), (2, 2, 16, "BI"), (4, 4, 16, "BI")])
+        self.assertEqual(sorted(both), sorted(clouds))
+        self.assertEqual(clouds[(1, 1, 16, "BI")], "clouds not removed yet")
         CCB.forget(self.tile)
+
+    def test_cloud_removal_alone_keeps_colours(self):
+        year = 2025 << 16
+        kept = (CCB.MARK_VERSION, year | CCB.FLAG_FILL | CCB.FLAG_KEPT)
+        self._texture("1_1_BI16.dds", kept)                                  # filled, colours kept
+        self._texture("2_2_BI16.dds", (CCB.MARK_VERSION - 1, (2023 << 16) | 3))  # old version and year
+        self.assertEqual(CCB.plan_tile(self.tile, False, True), [])
+        color = {a: r for a, r, _ in CCB.plan_tile(self.tile, True, False)}
+        self.assertEqual(color, {(1, 1, 16, "BI"): "not colour-corrected yet",
+                                 (2, 2, 16, "BI"): "not colour-corrected yet"})
+        # Their DDS still has the provider's colours: corrected in place, no download.
+        self.assertTrue(all(CCB.uses_existing_dds(self.tile, a) for a in color))
+        CCB.forget(self.tile)
+
+    def test_a_step_never_undoes_another(self):
+        year = 2025 << 16
+        corrected = self._texture("1_1_BI16.dds", (CCB.MARK_VERSION, year))
+        kept = self._texture("2_2_BI16.dds", (CCB.MARK_VERSION, year | CCB.FLAG_FILL | CCB.FLAG_KEPT))
+        fresh = self._texture("3_3_BI16.dds")
+        self.assertEqual(CCB.texture_mode(corrected, False, True), (True, True))
+        self.assertEqual(CCB.texture_mode(kept, True, False), (True, True))
+        self.assertEqual(CCB.texture_mode(fresh, False, True), (False, True))
+        self.assertEqual(CCB.texture_mode(fresh, True, False), (True, False))
 
     def test_only_an_uncorrected_dds_is_corrected_in_place(self):
         self._texture("1_1_BI16.dds")
         self._texture("4_4_BI16.dds", (CCB.MARK_VERSION, (2023 << 16)))
-        plan = {a: download for a, _, download in CCB.plan_tile(self.tile, fill=False)}
+        plan = {a: download for a, _, download in CCB.plan_tile(self.tile, True, False)}
         self.assertEqual(plan, {(1, 1, 16, "BI"): False, (4, 4, 16, "BI"): True})
         self.assertTrue(CCB.uses_existing_dds(self.tile, (1, 1, 16, "BI")))
         CCB.forget(self.tile)

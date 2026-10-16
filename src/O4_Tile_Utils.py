@@ -584,8 +584,9 @@ def build_tile(tile):
             # This is the work of the batch's Colour (and Clouds) steps: their
             # rows run from here, and those steps finish whatever is left.
             with PROG.ahead(tile.lat, tile.lon,
-                            ("color", "clouds") if getattr(tile, "color_fill_clouds", False)
-                            else ("color",)):
+                            tuple(step for step, on in
+                                  (("color", getattr(tile, "color_correction", False)),
+                                   ("clouds", getattr(tile, "color_fill_clouds", False))) if on)):
                 done = CCB.run(tile, [tuple(item[1:]) for item in pending], max_convert_slots)
             pending = [item for item in pending
                        if tuple(item[1:]) not in done and tuple(item[1:]) not in keep_dds]
@@ -656,17 +657,20 @@ def build_tile(tile):
     return 1
 
 ################################################################################
-def build_color(tile, fill):
-    """Batch step Colour correction (fill=False) or Cloud removal (fill=True).
+def build_color(tile, correct, fill):
+    """Batch steps Colour correction (correct) and Cloud removal (fill), alone or together.
 
-    Works on the textures of a tile Step 3 has built: corrects every one not
-    yet corrected to these settings, from its orthophoto, or from its DDS when
-    the orthophoto was cleared. Cloud removal includes the correction, as the
-    fill is colour-matched through the same fit. Returns 1 when every texture
-    is done.
+    Works on the textures of a tile Step 3 has built: does every one not yet
+    done to these settings, from its orthophoto, or from its DDS when the
+    orthophoto was cleared and the DDS still has the provider's colours.
+    Cloud removal alone keeps each texture's colours and replaces only the
+    cloud, with the fill matched to the texture.  Returns 1 when every
+    texture is done.
     """
     name = FNAMES.short_latlon(tile.lat, tile.lon)
-    UI.vprint(0, f"\n{'Cloud removal' if fill else 'Colour correction'} for tile {name} :\n--------\n")
+    what = ("Colour correction and cloud removal" if correct and fill
+            else "Colour correction" if correct else "Cloud removal")
+    UI.vprint(0, f"\n{what} for tile {name} :\n--------\n")
     why_not = CCB.unavailable_reason()
     if why_not:
         UI.lvprint(0, f"ERROR: Colour correction is not available: {why_not}.")
@@ -675,7 +679,7 @@ def build_color(tile, fill):
         UI.lvprint(0, "ERROR: Build imagery/DSF must first be run for the tile!")
         return 0
     try:
-        todo = CCB.plan_tile(tile, fill)
+        todo = CCB.plan_tile(tile, correct, fill)
         if not todo:
             UI.vprint(1, " *Every texture is already done.")
             return 1
@@ -694,17 +698,17 @@ def build_color(tile, fill):
             if UI.red_flag:
                 return 0
         attrs_list = [attrs for attrs, _, _ in todo if CCB.has_source(tile, attrs)]
-        done = CCB.run(tile, attrs_list, max_convert_slots, fill=fill) if attrs_list else set()
+        done = (CCB.run(tile, attrs_list, max_convert_slots, correct=correct, fill=fill, dds_current=True)
+                if attrs_list else set())
         if UI.red_flag:
             return 0
         left = [attrs for attrs, _, _ in todo if attrs not in done]
         if left:
-            UI.lvprint(1, f"WARNING: {len(left)} texture(s) could not be corrected and keep "
+            UI.lvprint(1, f"WARNING: {len(left)} texture(s) could not be done and keep "
                           "their current imagery; retry them from the progress panel.")
             for attrs in left:
-                PROG.issue(_texture_name(attrs),
-                           "cloud removal" if fill else "colour correction",
-                           "could not be corrected; keeps its current imagery")
+                PROG.issue(_texture_name(attrs), what.lower(),
+                           "could not be done; keeps its current imagery")
         # Done with issues while anything was corrected; failed when nothing was.
         return 1 if len(left) < len(todo) else 0
     finally:
@@ -1023,7 +1027,7 @@ def _build_tiles(
         want_clouds = do_clouds and not BSTATE.is_done(lat, lon, "clouds")
         # Step 3 corrects inline when the colour steps follow it, so no
         # texture is converted twice; the steps below finish what it could not.
-        tile.color_correction = want_color or want_clouds
+        tile.color_correction = want_color
         tile.color_fill_clouds = want_clouds
         # Step 3 links the tile itself; when it did not run here (not asked
         # for, or already done) the tile is linked once its other steps end.
@@ -1040,7 +1044,7 @@ def _build_tiles(
         if want_color:
             UI.check_pause()
             # With Cloud removal also selected, one pass does both.
-            done = _step(lat, lon, "color", build_color, tile, want_clouds)
+            done = _step(lat, lon, "color", build_color, tile, True, want_clouds)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()
@@ -1049,7 +1053,7 @@ def _build_tiles(
                 BSTATE.mark_done(lat, lon, "color")
         if want_clouds:
             UI.check_pause()
-            done = _step(lat, lon, "clouds", build_color, tile, True)
+            done = _step(lat, lon, "clouds", build_color, tile, False, True)
             if UI.red_flag:
                 _end_journal_on_stop()
                 UI.exit_message_and_bottom_line()

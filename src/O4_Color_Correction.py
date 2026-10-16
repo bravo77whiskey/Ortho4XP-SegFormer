@@ -16,12 +16,17 @@ other, across climates, tiles and providers.  So, per (tile, provider, ZL):
      a patch is corrected as a unit.  Water, cloud, and haze inside the
      reference itself are kept out of the fit and take their surroundings'
      correction.
-  3. One constant "look" maps reference colours to a provider-like rendering.
+  3. One constant "look" maps reference colours to a provider-like rendering;
+     it first takes out the reference's warm cast on near-grey colours
+     (Sentinel-2 cloudless renders streets and roofs beige to orange).
   4. Clouds are found against the reference (a cloud is much brighter and
      greyer than the reference says the ground is, so bright sand and roofs
      do not count) and filled from a second provider, corrected the same way
      so the two blend without a visible join.  Tiles Ortho4XP could not
-     download (white squares) are filled the same way.
+     download (white squares) are filled the same way.  Without colour
+     correction (cloud removal alone) the texture keeps its pixels and the
+     fill is mapped into its colours instead: through the reference, then
+     back through the inverse of the texture's own fit.
 
 The correction is smooth and only rescales pixels, so a texture keeps all its
 detail at any zoom level.  Everything heavy runs on the GPU (PyTorch, which
@@ -60,9 +65,42 @@ REF_ZL = 14
 COARSE_ZL = 12           # fit grid
 MARGIN_TILES = 1         # ZL14 reference tiles of context around a group
 FILL_PROVIDERS = {"BI": "GO2", "GO2": "BI"}
-# reference space -> provider-like rendering, pooled over Bing and Google
-# around the world (constant, so it cannot create seams)
-LOOK = (0.86555, 15.6366, 1.34055, (2.83361, -9.64584))
+# Reference space -> provider-like rendering, constant so it cannot create
+# seams.  Contrast, exposure and saturation pooled over Bing and Google
+# around the world: (G, O, S) in L' = G L + O, ab' = S ab + T.
+LOOK = (0.86555, 15.6366, 1.34055)
+# T sends each Sentinel-2 year's grey to the providers' grey.  A year's grey is
+# the reference colour where Bing and Google both show grey (asphalt, concrete,
+# roofs), averaged over the colour test set's 11 places; the years differ.
+PROVIDER_GREY = (-0.82, 0.88)
+REF_GREY = {2018: (-5.39, 6.24), 2019: (-5.30, 8.00), 2020: (-5.52, 8.50), 2021: (-5.75, 8.63),
+            2022: (-6.50, 7.34), 2023: (-3.37, 9.28), 2024: (-4.53, 7.74), 2025: (-3.46, 8.21)}
+REF_GREY_OTHER = (-4.98, 8.00)       # mean of the above, for a year not measured
+# Near-grey reference colours are warmer than the providers' (streets beige,
+# roofs orange); the warm component (hue WARM_HUE from the year's grey) is
+# reduced by up to WARM_SHARE, fading out with chroma from that grey, so
+# vegetation, water and saturated roofs or soil keep their colour.
+WARM_HUE = 50.0
+WARM_SHARE = 0.85
+WARM_CHROMA = 14.0
+
+
+def look(year):
+    """(G, O, S, T, grey) of the constant look for a Sentinel-2 year."""
+    G, O_, S = LOOK
+    grey = REF_GREY.get(int(year), REF_GREY_OTHER) if year else REF_GREY_OTHER
+    return G, O_, S, tuple(PROVIDER_GREY[i] - S * grey[i] for i in range(2)), grey
+
+
+def dewarm(ab, grey):
+    """(2, H, W) reference-space ab -> the warm component of near-grey colours reduced."""
+    g = torch.tensor(grey, dtype=ab.dtype, device=ab.device)[:, None, None]
+    u = torch.tensor([np.cos(np.radians(WARM_HUE)), np.sin(np.radians(WARM_HUE))],
+                     dtype=ab.dtype, device=ab.device)[:, None, None]
+    d = ab - g
+    du = (d * u).sum(0).clamp_min(0)
+    k = WARM_SHARE * torch.exp(-(d * d).sum(0) / (2 * WARM_CHROMA ** 2))
+    return ab - k * du * u
 
 
 class P:
@@ -533,8 +571,9 @@ def reference_textures(zl, x0, y0, nx, ny):
 class Group(object):
     """All textures of one (tile, provider, zoomlevel) and their fitted correction."""
 
-    def __init__(self, lat, zl, provider, textures, loader):
+    def __init__(self, lat, zl, provider, textures, loader, year=None):
         self.zl, self.provider = zl, provider
+        self.look = look(year)
         self.textures = sorted(textures)
         self.loader = loader
         self.k = 2 ** (zl - COARSE_ZL)              # texture px per coarse cell
@@ -775,10 +814,11 @@ class Group(object):
             cl = torch.from_numpy(self._coarse_of(self.alpha)).to(_dev())
             near = torch.clamp(gblur((cl > 0.05).float()[None], CP.near_m / self.px_m)[0] * 4.0, 0, 1)
             fields = tuple(near * a + (1 - near) * b for a, b in zip(tv, fields))
-        G, O_, S, T = LOOK
+        # L with the look folded in; ab stays in reference space (the look's
+        # ab part is not affine: correct() applies it).
+        G, O_ = self.look[:2]
         g, o, s, t = fields
-        T = torch.tensor(T, dtype=torch.float32, device=_dev())[:, None, None]
-        self.fields = torch.cat([(G * g)[None], (G * o + O_)[None], (S * s)[None], S * t + T])
+        self.fields = torch.cat([(G * g)[None], (G * o + O_)[None], s[None], t])
         self.has_missing = {key for key, (a, v) in self.medium.items() if not v.all()}
         self.ref = None          # free the big arrays
         self.O = self.R = None
@@ -789,13 +829,32 @@ class Group(object):
         return [key for key, a in self.alpha.items() if a.max() > 0.02]
 
     # --- applying ---------------------------------------------------------
-    def correct(self, rgb, tx, ty):
-        """(H, W, 3) uint8 numpy -> corrected uint8 tensor (3, H, W) on the device."""
-        img = torch.from_numpy(rgb).to(_dev()).permute(2, 0, 1)
+    def _fields_at(self, tx, ty):
         i, j = self.ij(tx, ty)
-        up = _upsample_crop(self.fields, self.m + j * self.c, self.m + i * self.c, self.c, self.k)
+        return _upsample_crop(self.fields, self.m + j * self.c, self.m + i * self.c, self.c, self.k)
+
+    def correct(self, rgb, tx, ty, into=None):
+        """(H, W, 3) uint8 numpy -> corrected uint8 tensor (3, H, W) on the device.
+
+        into: another group's fit (the texture being filled): map into that
+        texture's own colours instead of the look, for cloud removal without
+        colour correction.  Both fits map to the reference, so this one
+        followed by the inverse of that one takes these pixels to the colours
+        the other texture shows the same ground in.
+        """
+        img = torch.from_numpy(rgb).to(_dev()).permute(2, 0, 1)
+        up = self._fields_at(tx, ty)
         lab = srgb_to_lab(img.float() / 255.0)
-        out = torch.stack([up[0] * lab[0] + up[1], up[2] * lab[1] + up[3], up[2] * lab[2] + up[4]])
+        L = up[0] * lab[0] + up[1]
+        ab = up[2] * lab[1:] + up[3:5]
+        if into is None:
+            _, _, S, T, grey = self.look
+            ab = S * dewarm(ab, grey) + torch.tensor(T, dtype=ab.dtype, device=ab.device)[:, None, None]
+        else:
+            ui = into._fields_at(tx, ty)
+            L = (L - ui[1]) / ui[0].clamp_min(1e-3)
+            ab = (ab - ui[3:5]) / ui[2].clamp_min(1e-3)
+        out = torch.cat([L[None], ab])
         res = (lab_to_srgb(out) * 255.0 + 0.5).clamp(0, 255).to(torch.uint8)
         miss = missing_mask(img)
         res[:, miss] = 255
@@ -887,7 +946,7 @@ def _group_from_job(gj, which="textures"):
         p = refs.get((tx, ty))
         return np.asarray(Image.open(p).convert("RGB")) if p and os.path.isfile(p) else None
     prov = gj["provider"] if which == "textures" else gj["fill"]["provider"]
-    return Group(gj["lat"], gj["zl"], prov, paths.keys(), loader), fetch_reference
+    return Group(gj["lat"], gj["zl"], prov, paths.keys(), loader, gj.get("year")), fetch_reference
 
 
 def _save_group(g, state_dir, gid):
@@ -936,7 +995,7 @@ def job_fit(job):
 
 
 def _stamp(dds_path, mark):
-    """Write the colour-correction stamp into DDS_HEADER.dwReserved1[0..2]."""
+    """Write the colour-correction stamp (tag, version, flags) into DDS_HEADER.dwReserved1[0..2]."""
     import struct
     tag, version, flags = mark
     with open(dds_path, "r+b") as f:
@@ -1027,18 +1086,29 @@ def _apply_group(job, gj, workers):
         _log(f"{gj['provider']} ZL{gj['zl']}: fitted {len(fill_tex)} {ga.provider} textures "
              f"for the cloud fill in {time.time() - t0:.0f}s")
     items = gj["targets"]
+    tag, version = job["mark"]
 
     def one(item):
-        tx, ty, src, out_dds, mask = item[:5]
+        tx, ty, src, out_dds = item["tx"], item["ty"], item["src"], item["dds"]
+        mark = (tag, version, item["flags"])
         rgb = np.array(Image.open(src).convert("RGB"))
         alt = None
-        if (tx, ty) in fill_tex and os.path.isfile(alt_paths.get((tx, ty), "")):
+        if item["fill"] and (tx, ty) in fill_tex and os.path.isfile(alt_paths.get((tx, ty), "")):
             alt = np.array(Image.open(alt_paths[(tx, ty)]).convert("RGB"))
+        if not item["correct"] and alt is None and item["stamp_only"] and os.path.isfile(out_dds):
+            # Colours kept and nothing to fill: the DDS already is the result.
+            _stamp(out_dds, mark)
+            return [tx, ty, gj["zl"], gj["provider"]]
+
         def on_gpu():
             with torch.no_grad():
-                res, miss = g.correct(rgb, tx, ty)
+                if item["correct"]:
+                    res, miss = g.correct(rgb, tx, ty)
+                else:
+                    res = torch.from_numpy(rgb).to(_dev()).permute(2, 0, 1)
+                    miss = missing_mask(res)
                 if alt is not None:
-                    cor_a, miss_a = ga.correct(alt, tx, ty)
+                    cor_a, miss_a = ga.correct(alt, tx, ty, into=None if item["correct"] else g)
                     pad = 12
                     wm = (g.grown_alpha(tx, ty, pad) * (1 - ga.grown_alpha(tx, ty, pad)))[None]
                     wf = _upsample_crop(wm, pad, pad, g.cm, g.km)[0]
@@ -1048,7 +1118,7 @@ def _apply_group(job, gj, workers):
 
         with _lock:
             out = GPUB.call("colour", on_gpu)
-        ok = _convert(out, out_dds, mask, job["nvcompress"], job["tmp_dir"], job.get("mark"))
+        ok = _convert(out, out_dds, item["mask"], job["nvcompress"], job["tmp_dir"], mark)
         if ok and job.get("materials"):
             _material_map(out, out_dds, gj["zl"], job)
         return [tx, ty, gj["zl"], gj["provider"]] if ok else None

@@ -54,9 +54,9 @@ class BatchPipelineTest(unittest.TestCase):
             log("dsf_end", tile.lat, tile.lon)
             return 1
 
-        def build_color(tile, fill):
+        def build_color(tile, correct, fill):
             log("color", tile.lat, tile.lon)
-            fills.append(fill)
+            fills.append((correct, fill))
             return 1
 
         def overlays(lat, lon, build_dir, do_bld=True, do_veg=True):
@@ -193,7 +193,7 @@ class BatchPipelineTest(unittest.TestCase):
             self.assertIn((*tile, "clouds"), done)
         # With both selected the colour step fills clouds too; the cloud step
         # then only checks.
-        self.assertEqual(self.fills, [True, True] * len(self.TILES))
+        self.assertEqual(self.fills, [(True, True), (False, True)] * len(self.TILES))
         # Step 3 corrects inline when the colour steps follow it.
         self.assertEqual(self.inline, [(True, True)] * len(self.TILES))
 
@@ -204,9 +204,15 @@ class BatchPipelineTest(unittest.TestCase):
 
     def test_colour_step_alone_does_not_fill(self):
         _, _, done = self._run(pipelined=True, do_color=True)
-        self.assertEqual(self.fills, [False] * len(self.TILES))
+        self.assertEqual(self.fills, [(True, False)] * len(self.TILES))
         self.assertEqual(self.inline, [(True, False)] * len(self.TILES))
         self.assertNotIn((10, 20, "clouds"), done)
+
+    def test_cloud_step_alone_does_not_correct(self):
+        _, _, done = self._run(pipelined=True, do_clouds=True)
+        self.assertEqual(self.fills, [(False, True)] * len(self.TILES))
+        self.assertEqual(self.inline, [(False, True)] * len(self.TILES))
+        self.assertNotIn((10, 20, "color"), done)
 
 
 if __name__ == "__main__":
