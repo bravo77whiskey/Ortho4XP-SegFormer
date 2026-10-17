@@ -85,6 +85,7 @@ TREELINE_RATIO= 5.0    # perimeter² / (4π × area) ≥ this → candidate tree
 TREELINE_MAX_WIDTH_M = 30.0  # max inscribed width — wider cores stay filled forest
 TREELINE_MIN_ASPECT  = 3.0   # min length/width — compact patches stay filled forest
 MAX_RING_PTS  = 8000   # hard vertex cap per DSF winding
+MAX_POLYGON_WINDINGS = 255   # DSFTool: "too many intervals in polygon" above this
 EXCL_BUFFER_M = 5.0    # dilation buffer around SegFormer buildings/roads before exclusion
 
 # Per-type road exclusion half-widths in metres (one side from centre).
@@ -1934,6 +1935,19 @@ def _write_point_windings(f, pts):
         f.write("END_WINDING\n")
 
 
+def _capped_holes(holes):
+    """The largest holes that fit beside the outline in one DSF polygon.
+
+    The smallest clearings past the cap stay forest; returns (holes, dropped).
+    """
+    holes = list(holes)
+    keep = MAX_POLYGON_WINDINGS - 1
+    if len(holes) <= keep:
+        return holes, 0
+    holes.sort(key=lambda h: abs(_signed_area(h[:-1])), reverse=True)
+    return holes[:keep], len(holes) - keep
+
+
 def _write_winding(f, ring_pts):
     pts = ring_pts
     if len(pts) > MAX_RING_PTS + 1:
@@ -3446,16 +3460,24 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         for p in for_paths:
             f.write(f"POLYGON_DEF {p}\n")
         f.write("\n")
+        n_capped = n_dropped = 0
         for fpath, dsf_den, ring in polygons:
             f.write(f"BEGIN_POLYGON {for_idx[fpath]} {dsf_den} 2\n")
             if dsf_den >= POINT_MODE:
                 _write_point_windings(f, ring)
             else:
                 _write_winding(f, list(ring))
-                for hole in getattr(ring, 'holes', ()):
+                holes, dropped = _capped_holes(getattr(ring, 'holes', ()))
+                if dropped:
+                    n_capped += 1
+                    n_dropped += dropped
+                for hole in holes:
                     _write_winding(f, list(hole))
             f.write("END_POLYGON\n")
     timings['dsf_text'] += time.perf_counter() - _t
+    if n_capped:
+        print(f"  [Veg] {n_capped} forest(s) had more clearings than a DSF polygon holds; "
+              f"{n_dropped} smallest left as forest", flush=True)
 
     verbose_print(f"DSF text → {txt_path}  ({len(for_paths)} unique .for defs)")
 
