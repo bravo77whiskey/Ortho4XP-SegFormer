@@ -65,7 +65,8 @@ class TreeSettingsTests(unittest.TestCase):
         env = self._env_for(veg_canopy=True, veg_canopy_min_conf=0.15,
                             veg_canopy_seg_min_h_m=0.5, veg_forest_holes=True,
                             veg_point_tree_max_cells=3.0, veg_hole_certain_cells=0.5,
-                            veg_hole_unsure_cells=4.0)
+                            veg_hole_unsure_cells=4.0, veg_tree_sizes=True,
+                            veg_forest_heights=True)
         with mock.patch.dict(os.environ, env):
             self.assertTrue(VEG._canopy_enabled())
             self.assertEqual(VEG._canopy_rule(), (2.0, 0.15))

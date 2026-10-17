@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -172,11 +173,24 @@ class OverlayHookTests(unittest.TestCase):
         mask = self._blob_mask()
         hmap = np.zeros(mask.shape, np.float32)
         hmap[mask > 0] = 9.5
-        polys = self._run(mask, hmap)
+        with mock.patch.dict(os.environ, {"O4_VEG_TREE_SIZES": "1"}):
+            polys = self._run(mask, hmap)
         self.assertTrue(polys)
         for path, den, _pts in polys:
             self.assertGreaterEqual(den, VEG.POINT_MODE)
             self.assertIn(path, TREE_SIZES.SIZED_TREE_PATHS)
+
+    def test_sized_trees_and_shorter_forests_are_off_by_default(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("O4_VEG_TREE_SIZES", "O4_VEG_FOREST_HEIGHTS")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertFalse(VEG._tree_sizes_enabled())
+            self.assertFalse(VEG._forest_heights_enabled())
+            mask = self._blob_mask()
+            hmap = np.zeros(mask.shape, np.float32)
+            hmap[mask > 0] = 9.5
+            polys = self._run(mask, hmap)
+        self.assertEqual({p for p, _d, _r in polys}, {"lib/g8/broad_tmp_wet.for"})
 
     def test_point_trees_without_canopy_height_keep_the_forest(self):
         mask = self._blob_mask()

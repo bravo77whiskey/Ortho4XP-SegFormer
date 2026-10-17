@@ -592,21 +592,24 @@ cfg_tile_vars = {
     },
     "veg_tree_sizes": {
         "type": bool,
-        "default": True,
+        "default": False,
         "short_name": "veg_tree_sizes",
         "hint": "ZL18/19: plant single trees as X-Plane's sized single-species "
                 "trees (small to tall oak, pine, kapok... as X-Plane plants in "
                 "that climate), sized to the canopy height measured at each "
-                "crown, instead of the full-height climate forest.",
+                "crown, instead of the full-height climate forest. Off by default: "
+                "X-Plane fades small trees out much nearer the camera, so "
+                "shorter trees thin out the view from a distance.",
     },
     "veg_forest_heights": {
         "type": bool,
-        "default": True,
+        "default": False,
         "short_name": "veg_forest_h",
         "hint": "ZL18/19: give forests whose measured canopy is well under "
                 "X-Plane's climate forest a copy of that forest with shorter "
                 "canopy trees (6, 9, 12 or 15 m). The copies are written into "
-                "the O4XP_Forest_Heights library pack in Custom Scenery.",
+                "the O4XP_Forest_Heights library pack in Custom Scenery. Off by "
+                "default for the same reason as veg_tree_sizes.",
     },
     "veg_avoid_gfv2": {
         "type": bool,

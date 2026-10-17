@@ -137,10 +137,12 @@ POINT_MODE = 512
 LINE_MODE = 256
 
 
-def _veg_flag(name):
-    """Vegetation experiment switches: on unless the env var says 0/off."""
+def _veg_flag(name, default=True):
+    """Vegetation experiment switches: ``default`` unless the env var says on/off."""
     value = os.environ.get(name)
-    return value is None or value.strip().lower() not in {"0", "false", "no", "off"}
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _road_widths_enabled():
@@ -181,9 +183,12 @@ CROWN_RADIUS_M = 3.0
 CROWN_HEIGHT_OFFSET_M = 1.5
 
 
+# Sized single trees and shorter forests are off unless asked for: X-Plane
+# fades small trees out much nearer the camera than full-height ones, so in
+# the sim they read as trees vanishing in the distance (ZHHH, 2026-10-17).
 def _tree_sizes_enabled():
-    """O4_VEG_TREE_SIZES=0: single trees keep their polygon's climate forest."""
-    return _veg_flag("O4_VEG_TREE_SIZES")
+    """O4_VEG_TREE_SIZES=1: single trees sized from canopy height (default off)."""
+    return _veg_flag("O4_VEG_TREE_SIZES", default=False)
 
 
 # Forest polygons on canopy textures take a copy of their climate forest with
@@ -203,8 +208,8 @@ FOREST_ZONE_MIN_M2 = 2000.0
 
 
 def _forest_heights_enabled():
-    """O4_VEG_FOREST_HEIGHTS=0: forests keep X-Plane's own canopy height."""
-    return _veg_flag("O4_VEG_FOREST_HEIGHTS")
+    """O4_VEG_FOREST_HEIGHTS=1: shorter forest copies from canopy height (default off)."""
+    return _veg_flag("O4_VEG_FOREST_HEIGHTS", default=False)
 
 
 def _forest_height_map(canopy_height, tree_mask, m_per_px):
