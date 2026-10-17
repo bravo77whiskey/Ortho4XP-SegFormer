@@ -172,6 +172,44 @@ class ForestFileTest(unittest.TestCase):
         self.assertEqual(sum(l.startswith("MESH_3D") for l in lines), 9)
 
 
+class FullTileTest(unittest.TestCase):
+    """Grass away from any airport only with full_tile set."""
+
+    def _pass1(self, full_tile, tmp):
+        from PIL import Image
+        bbox = GRASS.footprint_bbox(28176, 54800, 16)  # a ZL16 footprint near Taiwan
+        lat, lon = math.floor(bbox[0]), math.floor(bbox[1])
+        img = np.zeros((256, 256, 3), np.uint8)
+        img[...] = (70, 120, 40)                                  # meadow green
+        Image.fromarray(img).save(os.path.join(tmp, "t.png"))
+        np.save(os.path.join(tmp, "t_cls.npy"), np.full((256, 256), 2, np.uint8))
+        GRASS._worker_init(dict(lat=lat, lon=lon, settings=GRASS.GrassSettings(full_tile=full_tile),
+                                airports=[], pavement=[], roads_raw=[], spill_dir=tmp))
+        return GRASS._pass1(("t", os.path.join(tmp, "t.png"), bbox, (), os.path.join(tmp, "t_cls.npy")))
+
+    def test_no_airport_no_grass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._pass1(False, tmp), {"skip": None})
+
+    def test_full_tile_grows_grass_without_airports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self._pass1(True, tmp)
+            self.assertGreater(r["meta"]["grass_km2"], 0)
+            self.assertTrue(os.path.exists(r["spill"]))           # masks wait on disk for pass 2
+            centres = r["sample"][:1]
+            out = GRASS._pass2((r["meta"], r["spill"], centres, 0))
+            self.assertGreater(out["n_poly"], 0)
+
+    def test_class_map_kept_at_grass_resolution(self):
+        bbox = GRASS.footprint_bbox(28176 * 8, 54800 * 8, 19)     # ZL19: ~0.27 m/px
+        hook = GRASS.GrassHook.__new__(GRASS.GrassHook)
+        with tempfile.TemporaryDirectory() as tmp:
+            hook.cache_dir, hook.settings, hook.class_maps = tmp, GRASS.GrassSettings(), {}
+            hook.sources = {"x.png": (bbox, ())}
+            hook.take_class_map("x.png", np.zeros((4096, 4096), np.int8))
+            self.assertEqual(np.load(hook.class_maps["x.png"]).shape, (1024, 1024))
+
+
 class PipelineWiringTest(unittest.TestCase):
     def _code(self, enabled):
         captured = {}
@@ -196,7 +234,7 @@ class PipelineWiringTest(unittest.TestCase):
 
     def test_grass_settings_reach_the_overlay(self):
         code = self._code(True)
-        self.assertIn("GrassSettings(airport_buffer_m=750.0)", code)
+        self.assertIn("GrassSettings(airport_buffer_m=750.0, full_tile=False)", code)
         self.assertIn("grass_settings   = _grass", code)
         self.assertRegex(code, r"grass_out_dsf    = '[^']*yOrtho4XP_Grass_Overlays[^']*\+10\+020\.dsf'")
 

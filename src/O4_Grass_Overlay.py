@@ -17,7 +17,8 @@ Where grass grows, per pixel:
   * never on apt.dat pavement (runways with blast pads, helipads, taxiways,
     aprons, shoulders) or on the simHeaven road/rail network;
   * only inside airport zones: each airport's apt.dat boundary, or without
-    one a circle to its furthest pavement point, grown by a buffer.
+    one a circle to its furthest pavement point, grown by a buffer -- or
+    anywhere in the tile with full_tile set.
 
 Colour: one k-means palette per tile over a 4 m grid of the ortho's Lab,
 smoothed over grass only; each palette colour is its own .for with its own
@@ -64,6 +65,7 @@ ROAD_HALF_WIDTH_M = {
 @dataclass
 class GrassSettings:
     airport_buffer_m: float = 500.0     # zone = boundary (or reach circle) grown by this
+    full_tile: bool = False             # grass anywhere in the tile, not only in airport zones
     sigma_m: float = 8.0                # colour smoothing over grass
     win_m: float = 9.0                  # colour clean-up (majority) window
     min_m2: float = 50.0                # smallest grass patch
@@ -116,6 +118,11 @@ def _to_px(lons, lats, bbox, h, w):
     x = (np.asarray(lons) - lon_w) / (lon_e - lon_w) * w
     y = (ym_n - merc_y(np.asarray(lats))) / (ym_n - ym_s) * h
     return np.stack([x, y], -1).round().astype(np.int32)
+
+
+def fine_factor(mpp, fine_m):
+    """Power-of-two downsampling that brings mpp up to about fine_m."""
+    return 2 ** max(0, int(round(math.log2(max(1.0, fine_m / mpp)))))
 
 
 def lab2rgb(lab):
@@ -447,16 +454,18 @@ def _pass1(src):
         cls = np.load(cls_path)
     except Exception as exc:              # unreadable disk sectors etc.: skip, don't abort
         return {"skip": f"{key}: {exc}"}
-    if cls.shape[:2] != img.shape[:2]:
-        cls = cv2.resize(cls, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
     tlat, tlon = _W["lat"], _W["lon"]
     lat_s, lon_w, lat_n, lon_e = bbox
-    mpp0 = (lon_e - lon_w) * 111320 * math.cos(math.radians(0.5 * (lat_s + lat_n))) / img.shape[1]
-    f = 2 ** max(0, int(round(math.log2(max(1.0, s.fine_m / mpp0)))))
+    h0, w0 = img.shape[:2]
+    mpp0 = (lon_e - lon_w) * 111320 * math.cos(math.radians(0.5 * (lat_s + lat_n))) / w0
+    f = fine_factor(mpp0, s.fine_m)
     if f > 1:
-        img = cv2.resize(img, (img.shape[1] // f, img.shape[0] // f), interpolation=cv2.INTER_AREA)
-        cls = cls[f // 2::f, f // 2::f][:img.shape[0], :img.shape[1]]
+        img = cv2.resize(img, (w0 // f, h0 // f), interpolation=cv2.INTER_AREA)
     h, w = img.shape[:2]
+    if f > 1 and cls.shape[:2] == (h0, w0):
+        cls = cls[f // 2::f, f // 2::f][:h, :w]
+    if cls.shape[:2] != (h, w):           # stored already downsampled, or at another scale
+        cls = cv2.resize(cls, (w, h), interpolation=cv2.INTER_NEAREST)
     mpp = mpp0 * f
     ym_n, ym_s = merc_y(lat_n), merc_y(lat_s)
     lons = lon_w + (np.arange(w) + 0.5) / w * (lon_e - lon_w)
@@ -467,7 +476,10 @@ def _pass1(src):
         owned[int(round(fy0 * h)):int(round(fy1 * h)), int(round(fx0 * w)):int(round(fx1 * w))] = False
     c = max(1, int(round(s.coarse_m / mpp)))
     hc, wc = -(-h // c), -(-w // c)
-    zone_c = airport_zone(_W["airports"], bbox, hc, wc, mpp * c, s.airport_buffer_m)
+    if s.full_tile:
+        zone_c = np.ones((hc, wc), bool)
+    else:
+        zone_c = airport_zone(_W["airports"], bbox, hc, wc, mpp * c, s.airport_buffer_m)
     if not zone_c.any():
         return {"skip": None}
     climate = _climate(0.5 * (lat_n + lat_s), 0.5 * (lon_w + lon_e))
@@ -489,14 +501,18 @@ def _pass1(src):
     sample = vals[rng.choice(len(vals), min(4000, len(vals)), replace=False)].astype(np.float32)
     meta = dict(key=key, bbox=bbox, mpp=mpp, h=h, w=w, c=c, hc=hc, wc=wc, climate=climate,
                 grass_km2=float(sel.sum()) * mpp * mpp / 1e6, sparse_km2=float(sparse.sum()) * mpp * mpp / 1e6)
-    arrays = dict(sel=np.packbits(sel), sparse=np.packbits(sparse), S=vals, sel_c=np.packbits(sel_c))
-    return {"meta": meta, "arrays": arrays, "sample": sample}
+    # Masks wait on disk for pass 2: a whole tile of them is gigabytes.
+    spill = os.path.join(_W["spill_dir"], key + "_grass1.npz")
+    np.savez(spill, sel=np.packbits(sel), sparse=np.packbits(sparse), S=vals, sel_c=np.packbits(sel_c))
+    return {"meta": meta, "spill": spill, "sample": sample}
 
 
 def _pass2(job):
     """Palette labels -> DSF polygon text for one texture."""
-    t, z, centres, def_offset = job
+    t, spill, centres, def_offset = job
     s = _W["settings"]
+    with np.load(spill) as npz:
+        z = {name: npz[name] for name in npz.files}
     tlat, tlon = _W["lat"], _W["lon"]
     h, w, c, hc, wc = t["h"], t["w"], t["c"], t["hc"], t["wc"]
 
@@ -613,7 +629,8 @@ class GrassHook:
             return
         xplane_dir = os.path.dirname(os.path.abspath(custom_scenery_dir))
         self.airports = APT.airports_for_tile(xplane_dir, self.lat, self.lon, cache_dir, log=log)
-        if not self.airports:
+        full = self.settings.full_tile
+        if not self.airports and not full:
             log(f"[Grass] no airports in the tile ({time.time() - t0:.1f}s)")
             return
         boxes = [zone_box(a, self.settings.airport_buffer_m) for a in self.airports]
@@ -623,8 +640,13 @@ class GrassHook:
             if not m:
                 continue
             bbox = footprint_bbox(int(m.group(1)), int(m.group(2)), int(m.group(4)))
-            if any(b[0] <= bbox[2] and b[2] >= bbox[0] and b[1] <= bbox[3] and b[3] >= bbox[1] for b in boxes):
+            if full or any(b[0] <= bbox[2] and b[2] >= bbox[0] and b[1] <= bbox[3] and b[3] >= bbox[1]
+                           for b in boxes):
                 self.sources[f] = (bbox, excluded.get(f, ()))
+        if full:
+            log(f"[Grass] whole tile: {len(self.sources)} textures, pavement cut from "
+                f"{len(self.airports)} airports ({time.time() - t0:.1f}s)")
+            return
         log(f"[Grass] {len(self.airports)} airports ("
             + ", ".join(f"{a.icao}: {'boundary' if a.boundaries else f'{a.reach_m:.0f} m reach'}"
                         for a in self.airports)
@@ -637,7 +659,13 @@ class GrassHook:
         if not self.wants(fname) or cls is None:
             return
         path = os.path.join(self.cache_dir, fname[:-4] + "_grasscls.npy")
-        np.save(path, np.asarray(cls).astype(np.uint8))      # -1 (no class) becomes 255
+        cls = np.asarray(cls).astype(np.uint8)                # -1 (no class) becomes 255
+        # Kept only at the grass resolution: a whole tile of ZL19 class maps at
+        # full size would be over 100 GB.
+        lat_s, lon_w, lat_n, lon_e = self.sources[fname][0]
+        mpp = (lon_e - lon_w) * 111320 * math.cos(math.radians(0.5 * (lat_s + lat_n))) / cls.shape[1]
+        f = fine_factor(mpp, self.settings.fine_m)
+        np.save(path, cls[f // 2::f, f // 2::f] if f > 1 else cls)
         self.class_maps[fname] = path
 
     def cleanup(self):
@@ -662,7 +690,7 @@ class GrassHook:
                                             self.dsftool_path, self.cache_dir) if self.dsftool_path else []
         pavement = [p for a in self.airports for p in a.pavement]
         cfg = dict(lat=self.lat, lon=self.lon, settings=s, airports=self.airports, pavement=pavement,
-                   roads_raw=[r for r in roads if r.get("type") in ROAD_HALF_WIDTH_M])
+                   roads_raw=[r for r in roads if r.get("type") in ROAD_HALF_WIDTH_M], spill_dir=self.cache_dir)
         workers = s.workers or max(2, min(8, (os.cpu_count() or 4) - 4))
         # One BLAS/OpenMP thread per worker: many processes each starting a
         # thread per core oversubscribe the CPU.  Spawned workers inherit it.
@@ -670,26 +698,36 @@ class GrassHook:
             os.environ.setdefault(var, "1")
         tasks = [(f[:-4], os.path.join(self.tex_dir, f), self.sources[f][0], self.sources[f][1], path)
                  for f, path in sorted(self.class_maps.items())]
-        with CF.ProcessPoolExecutor(workers, initializer=_worker_init, initargs=(cfg,)) as pool:
-            results = []
-            for r in pool.map(_pass1, tasks):
-                if r.get("skip"):
-                    self.log(f"[Grass] skipped {r['skip']}")
-                elif "meta" in r:
-                    results.append(r)
-            if not results:
-                remove_tile_assets(self.pack_dir, self.lat, self.lon)
-                self.log(f"[Grass] no grass in the airport zones ({time.time() - t0:.1f}s)")
-                return None
-            results.sort(key=lambda r: r["meta"]["key"])     # reproducible palette sample
-            samples = np.concatenate([r["sample"] for r in results])
-            samp = samples[np.random.default_rng(0).choice(len(samples), min(300000, len(samples)), replace=False)]
-            k = min(s.k, len(samp))
-            cv2.setRNGSeed(0)
-            _, _, centres = cv2.kmeans(samp, k, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.05),
-                                       3, cv2.KMEANS_PP_CENTERS)
-            jobs = [(r["meta"], r["arrays"], centres, def_offset) for r in results]
-            parts = list(pool.map(_pass2, jobs))
+        results = []
+        try:
+            with CF.ProcessPoolExecutor(workers, initializer=_worker_init, initargs=(cfg,)) as pool:
+                for r in pool.map(_pass1, tasks):
+                    if r.get("skip"):
+                        self.log(f"[Grass] skipped {r['skip']}")
+                    elif "meta" in r:
+                        results.append(r)
+                if not results:
+                    remove_tile_assets(self.pack_dir, self.lat, self.lon)
+                    where = "the tile" if s.full_tile else "the airport zones"
+                    self.log(f"[Grass] no grass in {where} ({time.time() - t0:.1f}s)")
+                    return None
+                results.sort(key=lambda r: r["meta"]["key"])     # reproducible palette sample
+                samples = np.concatenate([r["sample"] for r in results])
+                samp = samples[np.random.default_rng(0).choice(len(samples), min(300000, len(samples)),
+                                                               replace=False)]
+                k = min(s.k, len(samp))
+                cv2.setRNGSeed(0)
+                _, _, centres = cv2.kmeans(samp, k, None,
+                                           (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.05),
+                                           3, cv2.KMEANS_PP_CENTERS)
+                jobs = [(r["meta"], r["spill"], centres, def_offset) for r in results]
+                parts = list(pool.map(_pass2, jobs))
+        finally:
+            for r in results:
+                try:
+                    os.remove(r["spill"])
+                except OSError:
+                    pass
         name = tile_name(self.lat, self.lon)
         remove_tile_assets(self.pack_dir, self.lat, self.lon)
         gdir = os.path.join(self.pack_dir, "grass", name)
@@ -706,6 +744,7 @@ class GrassHook:
                      grass_km2=round(sum(r["meta"]["grass_km2"] for r in results), 2),
                      sparse_km2=round(sum(r["meta"]["sparse_km2"] for r in results), 2),
                      airports=[a.icao for a in self.airports], seconds=round(time.time() - t0, 1))
-        self.log(f"[Grass] {stats['polygons']} polygons, {stats['grass_km2']} km2 around "
-                 f"{len(self.airports)} airports from {stats['textures']} textures ({stats['seconds']}s)")
+        where = "over the tile" if s.full_tile else f"around {len(self.airports)} airports"
+        self.log(f"[Grass] {stats['polygons']} polygons, {stats['grass_km2']} km2 {where} "
+                 f"from {stats['textures']} textures ({stats['seconds']}s)")
         return defs, "".join(p["text"] for p in parts), stats

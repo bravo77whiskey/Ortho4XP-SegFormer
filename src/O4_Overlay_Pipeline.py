@@ -71,6 +71,7 @@ _DERIVED_FILE_PATTERNS = (
     "*_vegaux.pkl",
     "*_vegpoly.pkl",
     "*_grasscls.npy",     # class maps the grass step keeps until it is done
+    "*_grass1.npz",       # grass masks between its two passes
 )
 _DISABLED_TILE_FILE_PATTERNS = (
     "*.osm.bz2",
@@ -283,6 +284,7 @@ veg_disable_cache = False
 veg_verbose_log = False
 grass_enabled     = True    # 3-d grass around airports, built by the veg overlay into its own pack
 grass_airport_buffer_m = 500.0
+grass_full_tile   = False   # grass over the whole tile, not just around airports
 
 bld_spacing_m     = 0.0
 bld_close_m       = 30.0
@@ -824,7 +826,8 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         f"import O4_Vegetation_Overlay as veg_overlay\n"
         + (
             f"import O4_Grass_Overlay as _GRASS\n"
-            f"_grass = _GRASS.GrassSettings(airport_buffer_m={float(grass_airport_buffer_m)!r})\n"
+            f"_grass = _GRASS.GrassSettings(airport_buffer_m={float(grass_airport_buffer_m)!r}, "
+            f"full_tile={bool(grass_full_tile)!r})\n"
             if grass_enabled else "_grass = None\n"
         ) +
         f"veg_overlay.run(\n"
@@ -874,7 +877,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
             _purge_overlay_cache(
                 cache_dir,
                 ['*_veg.npy', '*_vegtree.npy', '*_vegcanopy.npy', '*_vegaux.pkl', '*_vegpoly.pkl',
-                 '*_grasscls.npy'],
+                 '*_grasscls.npy', '*_grass1.npz'],
                 'veg',
             )
         else:

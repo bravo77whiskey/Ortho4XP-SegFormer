@@ -562,6 +562,16 @@ cfg_tile_vars = {
         "hint": "How far the grass reaches beyond each airport's boundary, in "
                 "metres.",
     },
+    "grass_full_tile": {
+        "type": bool,
+        "default": False,
+        "short_name": "grass_tile",
+        "hint": "Grow grass over the whole tile instead of only around its "
+                "airports (same rules: not on runways, roads, rail or built "
+                "ground). Only the grass within 230 m of the camera is drawn, "
+                "but the grass DSF, the build time and the disk used while "
+                "building grow with the area covered.",
+    },
     "veg_disable_cache": {
         "type": bool,
         "default": False,
@@ -857,6 +867,7 @@ list_veg_vars = [
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",
+    "grass_full_tile",
     "veg_disable_cache",
     "veg_verbose_log",
     "segformer_patch_size",
