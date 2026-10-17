@@ -167,6 +167,36 @@ def _point_trees_enabled():
     return _veg_flag("O4_VEG_POINT_TREES")
 
 
+# Clearings inside a forest outline are written as holes (extra windings), so
+# X-Plane leaves fields, houses and meadows in them bare instead of spreading
+# the forest's trees across the whole outline at a lower density. Smaller
+# gaps stay part of the forest.
+FOREST_HOLE_MIN_AREA_M2 = 200.0
+
+
+def _forest_holes_enabled():
+    """O4_VEG_FOREST_HOLES=0: forests are outer outlines only (no clearings)."""
+    return _veg_flag("O4_VEG_FOREST_HOLES")
+
+
+class HoledRing(list):
+    """A forest outline (lon, lat) list that also carries its hole outlines."""
+
+    def __init__(self, ring, holes=()):
+        super().__init__(ring)
+        self.holes = list(holes)
+
+    def __reduce__(self):
+        return (HoledRing, (list(self), self.holes))
+
+
+def _signed_area(ring):
+    a = 0.0
+    for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1]):
+        a += x0 * y1 - x1 * y0
+    return a / 2.0
+
+
 def _osm_forest_rescue_enabled():
     """O4_VEG_OSM_FOREST_RESCUE=0: trust SegFormer alone inside OSM forests."""
     return _veg_flag("O4_VEG_OSM_FOREST_RESCUE")
@@ -204,7 +234,48 @@ def _veg_infer_factor(zl):
 # network instead (O4_Canopy_Height): it measures height from the ortho, so
 # the meadow around runways is ~0 m while hedges and tree rows stand out. The
 # SegFormer class map is still made, for roads, buildings, context and grass.
+# A pixel is tree when its mean canopy height reaches CANOPY_MIN_TREE_H_M or,
+# with a confidence set, when the network gives at least that much
+# probability to the canopy being that tall (O4_VEG_CANOPY_MIN_H must then be
+# one of O4_Canopy_Height.LEVELS_M).
 CANOPY_MIN_TREE_H_M = 2.0
+CANOPY_MIN_CONFIDENCE = 0.2
+# Low tropical scrub, young plantation rows and bush clusters read 0.2-1 m to
+# the canopy network, under the tree rule above, while flat meadow reads ~0 m.
+# SegFormer's trees are kept wherever the canopy has at least this much height,
+# so they come back and the airfield grass stays clear (VVPQ / EDDB, 2026-10).
+CANOPY_SEG_MIN_H_M = 0.25
+
+
+def _canopy_seg_min_h():
+    """O4_VEG_CANOPY_SEG_MIN_H: height gate for SegFormer trees; 'off' keeps canopy only."""
+    raw = os.environ.get("O4_VEG_CANOPY_SEG_MIN_H", "").strip().lower()
+    if raw in ("off", "none", "no", "false"):
+        return None
+    try:
+        return float(raw) if raw else CANOPY_SEG_MIN_H_M
+    except ValueError:
+        return CANOPY_SEG_MIN_H_M
+
+
+def _canopy_rule():
+    """(min height m, min confidence or None), O4_VEG_CANOPY_MIN_H / _MIN_CONF override."""
+    def _num(name, default):
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+    min_h = _num("O4_VEG_CANOPY_MIN_H", CANOPY_MIN_TREE_H_M)
+    min_conf = _num("O4_VEG_CANOPY_MIN_CONF", CANOPY_MIN_CONFIDENCE)
+    if min_conf is not None and float(min_h) not in CANOPY.LEVELS_M:
+        nearest = min(CANOPY.LEVELS_M, key=lambda level: abs(level - float(min_h)))
+        print(f"[Canopy] confidence needs a height in {CANOPY.LEVELS_M}; using {nearest} m "
+              f"instead of {min_h} m", flush=True)
+        min_h = nearest
+    return float(min_h), (None if min_conf is None else float(min_conf))
 # The canopy network misses single rows of roadside trees. SegFormer finds
 # them, so its narrow canopy is kept on top: what remains of its tree mask
 # after an opening ROW_MAX_WIDTH_M across, in pieces at least ROW_MIN_LENGTH_M
@@ -241,9 +312,10 @@ def _veg_feature_sig():
         _road_clip_enabled(),
         _road_width_scale(),
         _point_trees_enabled(),
+        _forest_holes_enabled(), FOREST_HOLE_MIN_AREA_M2,
         _osm_forest_rescue_enabled(),
         _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
-        _canopy_enabled(), CANOPY_MIN_TREE_H_M, CANOPY.INFER_ZL,
+        _canopy_enabled(), _canopy_rule(), _canopy_seg_min_h(), CANOPY.INFER_ZL, CANOPY.LEVELS_M,
         ROW_MAX_WIDTH_M, ROW_MIN_LENGTH_M, ROW_MIN_AREA_M2,
         SEGFORMER.tree_support_enabled(),
         tuple(sorted(SIMHEAVEN_ROAD_HALF_WIDTH_M.items())),
@@ -783,7 +855,7 @@ def _dds_polygon_cache_key(
     covered_fracs=None,
 ):
     return {
-        'version': 7,
+        'version': 8,
         'forest_type_sig': forest_type_sig,
         'covered_fracs': covered_fracs,
         'fname': fname,
@@ -1731,10 +1803,20 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
     ``forest_path_mapper.map_path(path, lon, lat, veg_type)`` may swap the
     chosen tree family for a climate-specific X-Plane forest at the polygon.
     """
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    with_holes = _forest_holes_enabled() and veg_cls == SEGFORMER.CLASS_TREE
+    cnts, hier = cv2.findContours(
+        mask, cv2.RETR_CCOMP if with_holes else cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    holes_of = {}
+    if with_holes and hier is not None:
+        for i, (_nxt, _prv, _child, parent) in enumerate(hier[0]):
+            if parent >= 0:
+                holes_of.setdefault(parent, []).append(i)
     polys   = []
     point_trees = _point_trees_enabled()
-    for cnt in cnts:
+    for ci, cnt in enumerate(cnts):
+        if with_holes and hier is not None and hier[0][ci][3] >= 0:
+            continue   # a hole: written with its outline below
         shape, area_px = _contour_shape(cnt, min_area_px, m_per_px)
         if shape == 'tiny':
             continue
@@ -1760,9 +1842,29 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         prepared_fill = None
         frac = 0.0
         veg_type = None
+        hole_rings = []
+        hole_px = 0.0
+        for hj in holes_of.get(ci, ()):
+            hole = cnts[hj]
+            h_area = cv2.contourArea(hole)
+            if h_area * m_per_px * m_per_px < FOREST_HOLE_MIN_AREA_M2:
+                continue
+            hole_s = cv2.approxPolyDP(hole, simplify_px, closed=True)
+            if len(hole_s) < 3:
+                continue
+            hr = _contour_to_latlon(hole_s, img_w, img_h, lat_n, lat_s, lon_w, lon_e)
+            if len(hr) < 4:
+                continue
+            hole_rings.append(hr)
+            hole_px += h_area
         if veg_cls == SEGFORMER.CLASS_TREE:
             prepared_fill = _contour_fill_stats(cnt, m_per_px, include_ring=True)
             frac = _polygon_fill_frac(mask, cnt, prepared=prepared_fill)
+            if hole_px and prepared_fill is not None:
+                # The holes are bare by definition: density is over what is left.
+                left = prepared_fill['area_px'] - hole_px
+                if left > 0:
+                    frac = min(1.0, frac * prepared_fill['area_px'] / left)
             prepared_stats = _contour_context_stats(
                 cnt, context_masks, m_per_px, prepared=prepared_fill
             )
@@ -1809,6 +1911,15 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             if pts:
                 polys.append((fpath, (dsf_den % LINE_MODE) + POINT_MODE, pts))
             continue
+        if hole_rings:
+            # DSF: first winding is the outline, the rest are holes, wound the other way.
+            outer_sign = _signed_area(ring[:-1]) >= 0
+            fixed = []
+            for hr in hole_rings:
+                if (_signed_area(hr[:-1]) >= 0) == outer_sign:
+                    hr = hr[::-1]
+                fixed.append(hr)
+            ring = HoledRing(ring, fixed)
         polys.append((fpath, dsf_den, ring))
     return polys
 
@@ -2487,12 +2598,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             grass_hook.take_class_map(fname, veg_map)
 
         # Airport-zone textures: canopy height from the ortho decides the trees.
-        canopy_heights = None
+        canopy_maps = None
         canopy_path = os.path.join(cache_dir, fname.replace('.dds', '_vegcanopy.npy'))
         if infer_factor > 1 and _canopy_enabled() and not mesh_water_full:
             if not disable_cache and os.path.exists(canopy_path):
-                canopy_heights = np.load(canopy_path)
-            else:
+                canopy_maps = np.load(canopy_path)
+                if canopy_maps.ndim != 3 or canopy_maps.shape[0] != 1 + len(CANOPY.LEVELS_M):
+                    canopy_maps = None   # heights-only cache from before the confidence maps
+            if canopy_maps is None:
                 if not canopy_tried:
                     canopy_tried = True
                     canopy_model = CANOPY.CanopyModel.load(CANOPY.default_model_dir(cache_dir))
@@ -2502,14 +2615,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     if img is not None:
                         _t = time.perf_counter()
                         try:
-                            canopy_heights = canopy_model.heights(img, zl)
+                            canopy_maps = canopy_model.maps(img, zl)
                         except Exception as exc:
                             print(f"    [Canopy] {fname}: failed ({exc}); SegFormer trees "
                                   f"for the rest of this tile", flush=True)
                             canopy_model = None
                         timings['canopy'] += time.perf_counter() - _t
-                        if canopy_heights is not None and not disable_cache:
-                            np.save(canopy_path, canopy_heights)
+                        if canopy_maps is not None and not disable_cache:
+                            np.save(canopy_path, canopy_maps)
 
         if disable_cache:
             veg_cache_stat = None
@@ -2520,7 +2633,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 if tree_support is not None:
                     _ts_st = os.stat(tree_support_path)
                     veg_cache_stat += (_ts_st.st_mtime_ns, _ts_st.st_size)
-                if canopy_heights is not None:
+                if canopy_maps is not None:
                     _cn_st = os.stat(canopy_path)
                     veg_cache_stat += (_cn_st.st_mtime_ns, _cn_st.st_size)
             except OSError:
@@ -2565,9 +2678,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         tree_raw = (veg_map == SEGFORMER.CLASS_TREE)
         if tree_support is not None:
             tree_raw = tree_raw | tree_support
-        if canopy_heights is not None:
+        if canopy_maps is not None:
             rows = _narrow_rows(_morph(tree_raw.astype(np.uint8)), mpp)
-            tree_raw = CANOPY.tree_mask(canopy_heights, (img_h, img_w), CANOPY_MIN_TREE_H_M) | rows
+            canopy_tree = CANOPY.tree_mask(canopy_maps, (img_h, img_w), *_canopy_rule()) | rows
+            seg_min_h = _canopy_seg_min_h()
+            if seg_min_h is not None:
+                canopy_tree |= tree_raw & CANOPY.tree_mask(canopy_maps, (img_h, img_w), seg_min_h)
+            tree_raw = canopy_tree
         tree_raw = tree_raw.astype(np.uint8)
         tree_mask = _morph(tree_raw)
 
@@ -2833,7 +2950,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         # Canopy SegFormer misread inside an OSM forest; the exclusions below
         # (mesh water, roads, buildings, airport zones) still cut it back.
         _osm_forest = local_context_masks.get('forest')
-        if _osm_forest is not None and _osm_forest_rescue_enabled() and canopy_heights is None:
+        if _osm_forest is not None and _osm_forest_rescue_enabled() and canopy_maps is None:
             rescue = (
                 _osm_forest.astype(bool)
                 & np.isin(veg_map, OSM_FOREST_RESCUE_CLASSES)
@@ -3084,7 +3201,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             if dsf_den >= POINT_MODE:
                 _write_point_windings(f, ring)
             else:
-                _write_winding(f, ring)
+                _write_winding(f, list(ring))
+                for hole in getattr(ring, 'holes', ()):
+                    _write_winding(f, list(hole))
             f.write("END_POLYGON\n")
     timings['dsf_text'] += time.perf_counter() - _t
 

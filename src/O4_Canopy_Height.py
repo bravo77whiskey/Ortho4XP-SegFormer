@@ -36,6 +36,9 @@ PATCH = 256
 STRIDE = 192
 BATCH = 16
 NEED_MB = 4096         # fp32 ViT-H weights + one bf16 batch
+# Heights (m) whose exceedance probability is kept per pixel, for a
+# confidence threshold on "at least this tall".
+LEVELS_M = (1.0, 1.5, 2.0, 3.0, 5.0)
 # Satellite-image normalisation the network was trained with.
 MEAN = (0.420, 0.411, 0.296)
 STD = (0.213, 0.156, 0.143)
@@ -197,7 +200,25 @@ class _HeightNet:
                     post_process_channels=[160, 320, 640, 1280])
 
             def forward(self, x):
-                return self.decode_head(self.backbone(x))
+                """(B, 1 + len(LEVELS_M), H, W): mean height, then P(height >= level).
+
+                Meta's DPTHead.forward (classify=True) up to its bin spread, kept
+                instead of collapsed to the mean; heights x10 as in their SSLModule.
+                """
+                head = self.decode_head
+                feats = head.reassemble_blocks(list(self.backbone(x)))
+                feats = [head.convs[i](f) for i, f in enumerate(feats)]
+                out = head.fusion_blocks[0](feats[-1])
+                for i in range(1, len(head.fusion_blocks)):
+                    out = head.fusion_blocks[i](out, feats[-(i + 1)])
+                out = head.project(out)
+                logit = torch.relu(head.conv_depth(out)) + 0.1
+                prob = logit / logit.sum(dim=1, keepdim=True)
+                bins_m = 10 * torch.linspace(head.min_depth, head.max_depth, head.n_bins,
+                                             device=prob.device, dtype=prob.dtype)
+                mean = torch.einsum("ikmn,k->imn", prob, bins_m)
+                exceed = [prob[:, bins_m >= level].sum(dim=1) for level in LEVELS_M]
+                return torch.stack([mean] + exceed, dim=1)
 
         self.module = Net().eval()
 
@@ -242,11 +263,15 @@ class CanopyModel:
             log(f"  [Canopy] unavailable ({exc}); airport-zone trees stay with SegFormer")
             return None
 
-    def heights(self, img_rgb, zl):
-        """Canopy height in metres for an RGB texture, at ZL17 scale (float16 array)."""
-        return GPUB.call("canopy", self._heights, img_rgb, zl, need_mb=NEED_MB)
+    def maps(self, img_rgb, zl):
+        """Canopy maps for an RGB texture at INFER_ZL scale, float16 (1 + len(LEVELS_M), h, w).
 
-    def _heights(self, img_rgb, zl):
+        Channel 0 is the mean height in metres; channel 1 + i is the probability
+        that the canopy is at least LEVELS_M[i] tall.
+        """
+        return GPUB.call("canopy", self._maps, img_rgb, zl, need_mb=NEED_MB)
+
+    def _maps(self, img_rgb, zl):
         import cv2
 
         torch = self.torch
@@ -260,7 +285,7 @@ class CanopyModel:
         pad = min(PATCH // 2, sh - 1, sw - 1)
         x = F.pad(x[None], (pad, pad, pad, pad), mode="reflect")[0]
         H, W = x.shape[1:]
-        acc = torch.zeros((H, W))
+        acc = torch.zeros((1 + len(LEVELS_M), H, W))
         wt = torch.zeros((H, W))
         ramp = torch.hann_window(PATCH, periodic=False)
         win = torch.outer(ramp, ramp) + 1e-3
@@ -281,18 +306,29 @@ class CanopyModel:
                 batch = (batch - self.mean) / self.std
                 # bf16: fp16 overflows inside the ViT-huge and returns NaN.
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    pred = (10 * self.net(batch)).float().relu().cpu()[:, 0]
+                    pred = self.net(batch).float().cpu()
                 for (r, c), p in zip(cs, pred):
-                    acc[r:r + PATCH, c:c + PATCH] += p * win
+                    acc[:, r:r + PATCH, c:c + PATCH] += p * win
                     wt[r:r + PATCH, c:c + PATCH] += win
-        out = (acc / wt)[pad:pad + sh, pad:pad + sw].numpy()
+        out = (acc / wt)[:, pad:pad + sh, pad:pad + sw].numpy()
         return out.astype(np.float16)
 
 
-def tree_mask(heights, shape, min_height_m):
-    """Pixels of a ``shape`` texture whose canopy is at least ``min_height_m``."""
+def tree_mask(maps, shape, min_height_m, min_confidence=None):
+    """Tree pixels of a ``shape`` texture from ``CanopyModel.maps`` output.
+
+    Without ``min_confidence``: the mean height reaches ``min_height_m``.
+    With it: the probability that the canopy reaches ``min_height_m`` (which
+    must be one of LEVELS_M) is at least ``min_confidence``.
+    """
     import cv2
 
+    if min_confidence is None:
+        layer = maps[0]
+        cut = float(min_height_m)
+    else:
+        layer = maps[1 + LEVELS_M.index(float(min_height_m))]
+        cut = float(min_confidence)
     h, w = shape
-    up = cv2.resize(heights.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
-    return up >= float(min_height_m)
+    up = cv2.resize(layer.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    return up >= cut
