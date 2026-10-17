@@ -557,12 +557,38 @@ cfg_tile_vars = {
                 "as holes, so X-Plane leaves them bare instead of spreading "
                 "the forest's trees across the whole outline.",
     },
+    "veg_point_tree_max_cells": {
+        "type": float,
+        "default": 2.0,
+        "short_name": "veg_pt_cells",
+        "hint": "Tree patches smaller than this many grid cells of their "
+                "forest become single trees, one per crown. A cell is the "
+                "forest's tree spacing squared (10-12 m for X-Plane 12 "
+                "forests); X-Plane's grid often plants no tree at all in "
+                "a polygon under 2 cells.",
+    },
+    "veg_hole_certain_cells": {
+        "type": float,
+        "default": 1.0,
+        "short_name": "veg_hole_sure",
+        "hint": "Cut a clearing out of a forest from this many grid cells "
+                "when its cause is known: a building, road, water, field, "
+                "bare ground, flat canopy, or another forest type.",
+    },
+    "veg_hole_unsure_cells": {
+        "type": float,
+        "default": 2.0,
+        "short_name": "veg_hole_unsure",
+        "hint": "Cut a clearing out of a forest from this many grid cells "
+                "when it is only ground the models were not confident is "
+                "tree.",
+    },
     "veg_forest_hole_min_m2": {
         "type": float,
         "default": 200.0,
         "short_name": "veg_hole_m2",
-        "hint": "Smallest clearing cut out of a forest, in square metres; "
-                "smaller gaps stay part of the forest.",
+        "hint": "Replaced by veg_hole_certain_cells / veg_hole_unsure_cells; "
+                "kept so older config files still load.",
     },
     "veg_avoid_gfv2": {
         "type": bool,
@@ -913,7 +939,9 @@ list_veg_vars = [
     "veg_canopy_min_conf",
     "veg_canopy_seg_min_h_m",
     "veg_forest_holes",
-    "veg_forest_hole_min_m2",
+    "veg_point_tree_max_cells",
+    "veg_hole_certain_cells",
+    "veg_hole_unsure_cells",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",
@@ -929,6 +957,7 @@ list_veg_vars = [
 # remain valid and code that copies a Tile object does not lose attributes. They
 # are intentionally excluded from the vegetation settings UI above.
 list_veg_legacy_vars = [
+    "veg_forest_hole_min_m2",
     "veg_avoid_gfv2",
     "veg_gfv2_buffer_m",
     "veg_use_gfv2_asset_proximity",

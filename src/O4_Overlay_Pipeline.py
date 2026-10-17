@@ -267,7 +267,9 @@ def _veg_tree_env():
         "O4_VEG_CANOPY_MIN_CONF": repr(max(0.0, float(veg_canopy_min_conf))),
         "O4_VEG_CANOPY_SEG_MIN_H": "off" if seg <= 0 else repr(seg),
         "O4_VEG_FOREST_HOLES": "1" if veg_forest_holes else "0",
-        "O4_VEG_FOREST_HOLE_MIN_M2": repr(max(0.0, float(veg_forest_hole_min_m2))),
+        "O4_VEG_POINT_MAX_CELLS": repr(max(0.0, float(veg_point_tree_max_cells))),
+        "O4_VEG_HOLE_CERTAIN_CELLS": repr(max(0.0, float(veg_hole_certain_cells))),
+        "O4_VEG_HOLE_UNSURE_CELLS": repr(max(0.0, float(veg_hole_unsure_cells))),
     }
 
 
@@ -292,7 +294,10 @@ veg_canopy        = True    # ZL18/19 trees from canopy height on the ortho
 veg_canopy_min_conf = 0.2   # 0 = mean height >= 2 m
 veg_canopy_seg_min_h_m = 0.25  # 0 = off
 veg_forest_holes  = True
-veg_forest_hole_min_m2 = 200.0
+veg_point_tree_max_cells = 2.0   # in grid cells of the forest's own spacing
+veg_hole_certain_cells = 1.0
+veg_hole_unsure_cells = 2.0
+veg_forest_hole_min_m2 = 200.0   # legacy, unused
 veg_avoid_gfv2    = False
 veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False

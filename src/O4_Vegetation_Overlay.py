@@ -51,6 +51,7 @@ import O4_Persistent_Cache as PCACHE
 import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
 import O4_Canopy_Height as CANOPY
+import O4_Forest_Spacing as FOREST_SPACING
 import O4_Texture_Selection as TEXSEL
 from O4_Building_Overlay import (
     _load_simheaven_building_exclusions,
@@ -170,7 +171,8 @@ def _point_trees_enabled():
 # Clearings inside a forest outline are written as holes (extra windings), so
 # X-Plane leaves fields, houses and meadows in them bare instead of spreading
 # the forest's trees across the whole outline at a lower density. Smaller
-# gaps stay part of the forest.
+# gaps stay part of the forest. FOREST_HOLE_MIN_AREA_M2 is only the fallback
+# when the forest's spacing is unknown (no Custom Scenery folder given).
 FOREST_HOLE_MIN_AREA_M2 = 200.0
 
 
@@ -179,12 +181,50 @@ def _forest_holes_enabled():
     return _veg_flag("O4_VEG_FOREST_HOLES")
 
 
+# Sizes in grid cells of the forest's own .for SPACING (O4_Forest_Spacing):
+# under POINT_TREE_MAX_CELLS a polygon often gets no tree from X-Plane's grid
+# (simulated on real patches: P(no tree) ~0 from 2 cells up), so it becomes
+# single trees; a hole removes about one tree per cell, so a clearing with a
+# known cause is cut from 1 cell and one that is only "not confidently tree"
+# from HOLE_UNSURE_CELLS.
+POINT_TREE_MAX_CELLS = 2.0
+HOLE_CERTAIN_CELLS = 1.0
+HOLE_UNSURE_CELLS = 2.0
+HOLE_CERTAIN_FRAC = 0.5
+GAP_CERTAIN_CLASSES = (
+    SEGFORMER.CLASS_BUILDING, SEGFORMER.CLASS_ROAD, SEGFORMER.CLASS_DEVELOPED,
+    SEGFORMER.CLASS_WATER, SEGFORMER.CLASS_AGRICULTURE, SEGFORMER.CLASS_BARELAND,
+)
+
+
+def _spacing_rules_enabled():
+    """O4_VEG_SPACING_RULES=0: fixed POINT_TREE_MAX_AREA_M2 / hole size instead."""
+    return _veg_flag("O4_VEG_SPACING_RULES")
+
+
 def _forest_hole_min_m2():
-    """O4_VEG_FOREST_HOLE_MIN_M2 overrides FOREST_HOLE_MIN_AREA_M2."""
+    """Fixed hole size, used only when the forest's spacing is unknown."""
+    return FOREST_HOLE_MIN_AREA_M2
+
+
+def _env_cells(name, default):
     try:
-        return max(0.0, float(os.environ.get("O4_VEG_FOREST_HOLE_MIN_M2", "")))
+        return max(0.0, float(os.environ.get(name, "")))
     except ValueError:
-        return FOREST_HOLE_MIN_AREA_M2
+        return default
+
+
+def _cell_rules():
+    """(point-tree max, certain hole min, unsure hole min) in grid cells.
+
+    O4_VEG_POINT_MAX_CELLS / O4_VEG_HOLE_CERTAIN_CELLS / O4_VEG_HOLE_UNSURE_CELLS
+    override; the pipeline sets them from the tile config.
+    """
+    return (
+        _env_cells("O4_VEG_POINT_MAX_CELLS", POINT_TREE_MAX_CELLS),
+        _env_cells("O4_VEG_HOLE_CERTAIN_CELLS", HOLE_CERTAIN_CELLS),
+        _env_cells("O4_VEG_HOLE_UNSURE_CELLS", HOLE_UNSURE_CELLS),
+    )
 
 
 class HoledRing(list):
@@ -325,6 +365,7 @@ def _veg_feature_sig():
         _road_width_scale(),
         _point_trees_enabled(),
         _forest_holes_enabled(), _forest_hole_min_m2(),
+        _spacing_rules_enabled(), _cell_rules(), HOLE_CERTAIN_FRAC,
         _osm_forest_rescue_enabled(),
         _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
         _canopy_enabled(), _canopy_rule(), _canopy_seg_min_h(), CANOPY.INFER_ZL, CANOPY.LEVELS_M,
@@ -1809,14 +1850,21 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       context_masks=None, type_counts=None,
                       simheaven_type_path=None,
                       simheaven_type_resolver=None,
-                      forest_path_mapper=None):
+                      forest_path_mapper=None,
+                      forest_spacing=None, gap_certain=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring).
+
+    ``forest_spacing`` (O4_Forest_Spacing.ForestSpacing) sizes single-tree
+    patches and holes in grid cells of each polygon's forest; ``gap_certain``
+    marks pixels known not to be tree (built-up, water, fields, other forest).
 
     ``forest_path_mapper.map_path(path, lon, lat, veg_type)`` may swap the
     chosen tree family for a climate-specific X-Plane forest at the polygon.
     """
     with_holes = _forest_holes_enabled() and veg_cls == SEGFORMER.CLASS_TREE
     hole_min_m2 = _forest_hole_min_m2()
+    spacing_rules = _spacing_rules_enabled() and forest_spacing is not None
+    point_cells, certain_cells, unsure_cells = _cell_rules()
     cnts, hier = cv2.findContours(
         mask, cv2.RETR_CCOMP if with_holes else cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -1855,12 +1903,13 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         prepared_fill = None
         frac = 0.0
         veg_type = None
-        hole_rings = []
+        hole_cands = []   # (ring, area_px, area_m2, certain)
         hole_px = 0.0
         for hj in holes_of.get(ci, ()):
             hole = cnts[hj]
             h_area = cv2.contourArea(hole)
-            if h_area * m_per_px * m_per_px < hole_min_m2:
+            h_m2 = h_area * m_per_px * m_per_px
+            if h_m2 < (25.0 if spacing_rules else hole_min_m2):   # speckle: never a hole
                 continue
             hole_s = cv2.approxPolyDP(hole, simplify_px, closed=True)
             if len(hole_s) < 3:
@@ -1868,8 +1917,16 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             hr = _contour_to_latlon(hole_s, img_w, img_h, lat_n, lat_s, lon_w, lon_e)
             if len(hr) < 4:
                 continue
-            hole_rings.append(hr)
-            hole_px += h_area
+            certain = False
+            if spacing_rules and gap_certain is not None:
+                hp = _contour_fill_stats(hole, m_per_px, include_ring=False)
+                if hp is not None:
+                    roi = gap_certain[hp['y']:hp['y'] + hp['h'], hp['x']:hp['x'] + hp['w']]
+                    certain = (float((roi.astype(bool) & hp['fill'].astype(bool)).sum())
+                               >= HOLE_CERTAIN_FRAC * hp['area_px'])
+            hole_cands.append((hr, h_area, h_m2, certain))
+            if h_m2 >= hole_min_m2:
+                hole_px += h_area   # provisional, for the density below
         if veg_cls == SEGFORMER.CLASS_TREE:
             prepared_fill = _contour_fill_stats(cnt, m_per_px, include_ring=True)
             frac = _polygon_fill_frac(mask, cnt, prepared=prepared_fill)
@@ -1911,9 +1968,19 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             c_lon = sum(p[0] for p in ring) / len(ring)
             c_lat = sum(p[1] for p in ring) / len(ring)
             fpath = forest_path_mapper.map_path(fpath, c_lon, c_lat, veg_type)
+        if spacing_rules and forest_spacing is not None:
+            cell_m2 = forest_spacing.cell_m2(fpath)
+            point_max_m2 = point_cells * cell_m2
+            hole_rings = [
+                hr for hr, _a, h_m2, certain in hole_cands
+                if h_m2 >= (certain_cells if certain else unsure_cells) * cell_m2
+            ]
+        else:
+            point_max_m2 = POINT_TREE_MAX_AREA_M2
+            hole_rings = [hr for hr, _a, h_m2, _c in hole_cands if h_m2 >= hole_min_m2]
         if (
             point_trees and prepared_fill is not None and shape == 'area'
-            and area_px * m_per_px * m_per_px < POINT_TREE_MAX_AREA_M2
+            and area_px * m_per_px * m_per_px < point_max_m2
         ):
             pts = []
             for px, py in _crown_points(mask, prepared_fill, m_per_px):
@@ -2160,6 +2227,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     model = proc = None
     canopy_model = None
     canopy_tried = False
+    forest_spacing = FOREST_SPACING.ForestSpacing(custom_scenery_dir) if custom_scenery_dir else None
 
     tile_center_lat = lat + 0.5
     tile_center_lon = lon + 0.5
@@ -3070,6 +3138,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                       context_masks=local_context_masks,
                       type_counts=None,
                       forest_path_mapper=xp_forest_mapper)
+        if _spacing_rules_enabled() and forest_spacing is not None:
+            # Gaps whose cause is known: excluded ground, land-cover classes
+            # that are clearly not tree, and flat canopy on canopy textures.
+            gap_certain = excl_mask.astype(bool) | np.isin(veg_map, GAP_CERTAIN_CLASSES)
+            if canopy_maps is not None:
+                seg_gate = _canopy_seg_min_h() or CANOPY_SEG_MIN_H_M
+                gap_certain |= ~CANOPY.tree_mask(canopy_maps, (img_h, img_w), seg_gate)
+            kwargs['forest_spacing'] = forest_spacing
+            kwargs['gap_certain'] = gap_certain
         if simheaven_type_source_path:
             kwargs['simheaven_type_path'] = simheaven_type_source_path
         if simheaven_type_resolver is not None:
@@ -3092,11 +3169,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             for code, for_path in LEAF_TYPE.CODE_PATHS:
                 part = np.where(zone == code, tree_mask, 0).astype(np.uint8)
                 if part.any():
-                    p.extend(_process_dds_mask(
-                        part, SEGFORMER.CLASS_TREE,
-                        **dict(kwargs, simheaven_type_path=for_path,
-                               simheaven_type_resolver=None),
-                    ))
+                    part_kwargs = dict(kwargs, simheaven_type_path=for_path,
+                                       simheaven_type_resolver=None)
+                    if kwargs.get('gap_certain') is not None:
+                        # Another leaf type's forest is planted by its own polygon.
+                        part_kwargs['gap_certain'] = kwargs['gap_certain'] | (
+                            (tree_mask > 0) & (zone != code))
+                    p.extend(_process_dds_mask(part, SEGFORMER.CLASS_TREE, **part_kwargs))
             timings['contours'] += time.perf_counter() - _t
         else:
             _t = time.perf_counter()
