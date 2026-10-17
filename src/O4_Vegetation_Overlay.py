@@ -166,6 +166,24 @@ def _point_trees_enabled():
     return _veg_flag("O4_VEG_POINT_TREES")
 
 
+def _osm_forest_rescue_enabled():
+    """O4_VEG_OSM_FOREST_RESCUE=0: trust SegFormer alone inside OSM forests."""
+    return _veg_flag("O4_VEG_OSM_FOREST_RESCUE")
+
+
+# SegFormer sees a 512-px patch at a time, and on dense pine plantations or
+# leaf-off broadleaf it can call a whole patch farmland or water with ~0.97
+# confidence — a square hole with straight edges where the patches meet, made
+# visible by the tile-wide forest exclusion. Inside a simHeaven (OSM) forest
+# polygon those classes are read as canopy. Rangeland is left alone: clearings,
+# heath and young plantings land there and should stay open.
+OSM_FOREST_RESCUE_CLASSES = (
+    SEGFORMER.CLASS_AGRICULTURE,
+    SEGFORMER.CLASS_WATER,
+    -1,  # under the confidence threshold
+)
+
+
 def _veg_feature_sig():
     """Cache-key part for the switches above and the tree-support rule."""
     return (
@@ -173,6 +191,7 @@ def _veg_feature_sig():
         _road_clip_enabled(),
         _road_width_scale(),
         _point_trees_enabled(),
+        _osm_forest_rescue_enabled(),
         SEGFORMER.tree_support_enabled(),
         tuple(sorted(SIMHEAVEN_ROAD_HALF_WIDTH_M.items())),
         POINT_TREE_MAX_AREA_M2, POINT_TREE_SPACING_M, POINT_TREE_MIN_DEPTH_M,
@@ -2708,6 +2727,17 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             local_context_masks['water'] = _or_optional_masks(
                 local_context_masks.get('water'), mesh_water_mask
             )
+
+        # Canopy SegFormer misread inside an OSM forest; the exclusions below
+        # (mesh water, roads, buildings, airport zones) still cut it back.
+        _osm_forest = local_context_masks.get('forest')
+        if _osm_forest is not None and _osm_forest_rescue_enabled():
+            rescue = (
+                _osm_forest.astype(bool)
+                & np.isin(veg_map, OSM_FOREST_RESCUE_CLASSES)
+            ).astype(np.uint8)
+            if rescue.any():
+                tree_mask = cv2.bitwise_or(tree_mask, _morph(rescue))
 
         review_cuts = None
         if _review_dump_enabled():
