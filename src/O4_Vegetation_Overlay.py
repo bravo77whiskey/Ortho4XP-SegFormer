@@ -184,6 +184,21 @@ OSM_FOREST_RESCUE_CLASSES = (
 )
 
 
+# At ZL18+ (0.4 m/px and finer) the landcover model reads patchy meadow — the
+# grass around runways — as tree, and flips whole patches to water or
+# farmland. Shrunk to ZL17 scale it sees the same textures as grassland, and
+# real tree rows survive. The class map is cached apart from the building
+# pass's full-resolution one (<stem>_z17_veg.npy), which is left untouched.
+VEG_INFER_MAX_ZL = 17
+
+
+def _veg_infer_factor(zl):
+    """O4_VEG_ZL17_INFERENCE=0: infer every texture at its own resolution."""
+    if not _veg_flag("O4_VEG_ZL17_INFERENCE"):
+        return 1
+    return 2 ** max(0, int(zl) - VEG_INFER_MAX_ZL)
+
+
 def _veg_feature_sig():
     """Cache-key part for the switches above and the tree-support rule."""
     return (
@@ -192,6 +207,7 @@ def _veg_feature_sig():
         _road_width_scale(),
         _point_trees_enabled(),
         _osm_forest_rescue_enabled(),
+        _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
         SEGFORMER.tree_support_enabled(),
         tuple(sorted(SIMHEAVEN_ROAD_HALF_WIDTH_M.items())),
         POINT_TREE_MAX_AREA_M2, POINT_TREE_SPACING_M, POINT_TREE_MIN_DEPTH_M,
@@ -1881,6 +1897,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             for suffix in (
                 '_veg.npy',
                 '_vegtree.npy',
+                f'_z{VEG_INFER_MAX_ZL}_veg.npy',
+                f'_z{VEG_INFER_MAX_ZL}_vegtree.npy',
                 '_road.pkl',
                 '_bld.pkl',
                 '_vegaux.pkl',
@@ -2330,7 +2348,16 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
         lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
-        cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
+        infer_factor = _veg_infer_factor(zl)
+        if infer_factor > 1:
+            # Not the building pass's map: never wait for or reuse it.
+            cache_path = os.path.join(
+                cache_dir, fname.replace('.dds', f'_z{VEG_INFER_MAX_ZL}_veg.npy')
+            )
+            use_bld_seg = False
+        else:
+            cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
+            use_bld_seg = reuse_bld_seg
         tree_support_path = SEGFORMER.tree_support_cache_path(cache_path)
         want_tree_support = SEGFORMER.tree_support_enabled()
         tree_support = None
@@ -2338,9 +2365,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         veg_map = None
         mesh_water_mask = None
         mesh_water_full = False
-        if reuse_bld_seg:
+        if use_bld_seg:
             _wait_for_bld_seg(cache_path)
-        if (not disable_cache or reuse_bld_seg) and os.path.exists(cache_path):
+        if (not disable_cache or use_bld_seg) and os.path.exists(cache_path):
             _t = time.perf_counter()
             veg_map = np.load(cache_path)
             timings['cache_load'] += time.perf_counter() - _t
@@ -2399,11 +2426,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     model, proc, device = SEGFORMER.load_vegetation_model(device)
                 _t = time.perf_counter()
                 if want_tree_support:
-                    veg_map, tree_support = SEGFORMER.run_inference(
-                        model, device, img, proc, tree_support=True
+                    veg_map, tree_support = SEGFORMER.run_inference_downscaled(
+                        model, device, img, proc, tree_support=True,
+                        factor=infer_factor,
                     )
                 else:
-                    veg_map = SEGFORMER.run_inference(model, device, img, proc)
+                    veg_map = SEGFORMER.run_inference_downscaled(
+                        model, device, img, proc, factor=infer_factor
+                    )
                 timings['inference'] += time.perf_counter() - _t
             if not disable_cache and not mesh_water_full:
                 np.save(cache_path, veg_map)

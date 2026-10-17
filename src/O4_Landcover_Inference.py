@@ -506,6 +506,28 @@ def run_inference(model, device, img_rgb, processor=None, tree_support=False):
                      processor, tree_support)
 
 
+def run_inference_downscaled(model, device, img_rgb, processor=None,
+                             tree_support=False, factor=1):
+    """``run_inference`` on the image shrunk ``factor`` times, mapped back up.
+
+    The class map (and tree-support mask) come back at the full image size,
+    each output pixel taking the class of the shrunk pixel it falls in.
+    """
+    if factor <= 1:
+        return run_inference(model, device, img_rgb, processor, tree_support)
+    import cv2
+    h, w = img_rgb.shape[:2]
+    sw, sh = max(1, w // factor), max(1, h // factor)
+    small = cv2.resize(img_rgb, (sw, sh), interpolation=cv2.INTER_AREA)
+    result = run_inference(model, device, small, processor, tree_support)
+    rows = (np.arange(h) * sh // h)[:, None]
+    cols = (np.arange(w) * sw // w)[None, :]
+    if tree_support:
+        cls_map, weak = result
+        return cls_map[rows, cols], (None if weak is None else weak[rows, cols])
+    return result[rows, cols]
+
+
 def _run_inference(model, device, img_rgb, processor, tree_support):
     import torch
     import torch.nn.functional as F
