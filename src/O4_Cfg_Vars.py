@@ -519,6 +519,51 @@ cfg_tile_vars = {
                 "band follows the default global scenery's nearest forest, "
                 "with Koppen climate as fallback.",
     },
+    "veg_canopy": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_canopy",
+        "hint": "At ZL18 and ZL19 (airport zones), take trees from canopy "
+                "height measured on the ortho (Meta/WRI canopy-height model) "
+                "instead of the land-cover classes, which read airfield grass "
+                "as trees. Needs CUDA; the 3.1 GB model downloads once into "
+                "Overlay_cache/_canopy_height.",
+    },
+    "veg_canopy_min_conf": {
+        "type": float,
+        "default": 0.2,
+        "short_name": "veg_can_conf",
+        "hint": "ZL18/19: a pixel is a tree when the canopy model gives at "
+                "least this probability to it being 2 m or taller. Lower "
+                "plants more trees (0.15 fills gardens, under 0.1 overfills), "
+                "higher plants fewer (0.3 and up starts dropping real woods). "
+                "0 uses the model's mean height >= 2 m instead.",
+    },
+    "veg_canopy_seg_min_h_m": {
+        "type": float,
+        "default": 0.25,
+        "short_name": "veg_can_seg",
+        "hint": "ZL18/19: also keep the land-cover model's trees where the "
+                "canopy is at least this tall, in metres. Brings back low "
+                "scrub, young plantations and bush clusters that the canopy "
+                "model rates under 2 m, while flat grass (~0 m) stays bare. "
+                "0 turns it off.",
+    },
+    "veg_forest_holes": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_holes",
+        "hint": "Cut fields, yards and meadows enclosed by a forest out of it "
+                "as holes, so X-Plane leaves them bare instead of spreading "
+                "the forest's trees across the whole outline.",
+    },
+    "veg_forest_hole_min_m2": {
+        "type": float,
+        "default": 200.0,
+        "short_name": "veg_hole_m2",
+        "hint": "Smallest clearing cut out of a forest, in square metres; "
+                "smaller gaps stay part of the forest.",
+    },
     "veg_avoid_gfv2": {
         "type": bool,
         "default": False,
@@ -864,6 +909,11 @@ list_veg_vars = [
     "veg_use_simheaven_asset_proximity",
     "veg_use_leaf_type_maps",
     "veg_use_xp_forests",
+    "veg_canopy",
+    "veg_canopy_min_conf",
+    "veg_canopy_seg_min_h_m",
+    "veg_forest_holes",
+    "veg_forest_hole_min_m2",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",

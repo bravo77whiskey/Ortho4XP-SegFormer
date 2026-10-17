@@ -259,6 +259,18 @@ def _red_flag_set():
     UI = _ui()
     return bool(UI.red_flag) if UI else False
 
+def _veg_tree_env():
+    """The tree-rule settings as the O4_VEG_* switches the veg overlay reads."""
+    seg = float(veg_canopy_seg_min_h_m)
+    return {
+        "O4_VEG_CANOPY": "1" if veg_canopy else "0",
+        "O4_VEG_CANOPY_MIN_CONF": repr(max(0.0, float(veg_canopy_min_conf))),
+        "O4_VEG_CANOPY_SEG_MIN_H": "off" if seg <= 0 else repr(seg),
+        "O4_VEG_FOREST_HOLES": "1" if veg_forest_holes else "0",
+        "O4_VEG_FOREST_HOLE_MIN_M2": repr(max(0.0, float(veg_forest_hole_min_m2))),
+    }
+
+
 # ── Module-level config vars — synced from Tile before each call ──────────────
 veg_density       = -1.0    # -1 = auto; 0.0–1.0 = override
 veg_close_m       = 10.0
@@ -276,6 +288,11 @@ veg_remove_embedded_trees = False
 veg_use_simheaven_asset_proximity = True
 veg_use_leaf_type_maps = True
 veg_use_xp_forests = True
+veg_canopy        = True    # ZL18/19 trees from canopy height on the ortho
+veg_canopy_min_conf = 0.2   # 0 = mean height >= 2 m
+veg_canopy_seg_min_h_m = 0.25  # 0 = off
+veg_forest_holes  = True
+veg_forest_hole_min_m2 = 200.0
 veg_avoid_gfv2    = False
 veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False
@@ -817,6 +834,7 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
             f"import os\nos.environ['O4_VEG_WAIT_FOR_BLD_SEG'] = {wait_for_bld_flag!r}\n"
             if wait_for_bld_flag else ""
         ) +
+        f"import os\nos.environ.update({_veg_tree_env()!r})\n"
         f"import O4_Landcover_Inference as SEG\n"
         f"SEG.segformer_patch_size = {segformer_patch_size!r}\n"
         f"SEG.segformer_overlap    = {segformer_overlap!r}\n"

@@ -179,6 +179,14 @@ def _forest_holes_enabled():
     return _veg_flag("O4_VEG_FOREST_HOLES")
 
 
+def _forest_hole_min_m2():
+    """O4_VEG_FOREST_HOLE_MIN_M2 overrides FOREST_HOLE_MIN_AREA_M2."""
+    try:
+        return max(0.0, float(os.environ.get("O4_VEG_FOREST_HOLE_MIN_M2", "")))
+    except ValueError:
+        return FOREST_HOLE_MIN_AREA_M2
+
+
 class HoledRing(list):
     """A forest outline (lon, lat) list that also carries its hole outlines."""
 
@@ -270,12 +278,16 @@ def _canopy_rule():
             return default
     min_h = _num("O4_VEG_CANOPY_MIN_H", CANOPY_MIN_TREE_H_M)
     min_conf = _num("O4_VEG_CANOPY_MIN_CONF", CANOPY_MIN_CONFIDENCE)
+    if min_conf is not None and min_conf <= 0:
+        min_conf = None   # 0: the mean height decides
     if min_conf is not None and float(min_h) not in CANOPY.LEVELS_M:
         nearest = min(CANOPY.LEVELS_M, key=lambda level: abs(level - float(min_h)))
         print(f"[Canopy] confidence needs a height in {CANOPY.LEVELS_M}; using {nearest} m "
               f"instead of {min_h} m", flush=True)
         min_h = nearest
     return float(min_h), (None if min_conf is None else float(min_conf))
+
+
 # The canopy network misses single rows of roadside trees. SegFormer finds
 # them, so its narrow canopy is kept on top: what remains of its tree mask
 # after an opening ROW_MAX_WIDTH_M across, in pieces at least ROW_MIN_LENGTH_M
@@ -312,7 +324,7 @@ def _veg_feature_sig():
         _road_clip_enabled(),
         _road_width_scale(),
         _point_trees_enabled(),
-        _forest_holes_enabled(), FOREST_HOLE_MIN_AREA_M2,
+        _forest_holes_enabled(), _forest_hole_min_m2(),
         _osm_forest_rescue_enabled(),
         _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
         _canopy_enabled(), _canopy_rule(), _canopy_seg_min_h(), CANOPY.INFER_ZL, CANOPY.LEVELS_M,
@@ -1804,6 +1816,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
     chosen tree family for a climate-specific X-Plane forest at the polygon.
     """
     with_holes = _forest_holes_enabled() and veg_cls == SEGFORMER.CLASS_TREE
+    hole_min_m2 = _forest_hole_min_m2()
     cnts, hier = cv2.findContours(
         mask, cv2.RETR_CCOMP if with_holes else cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -1847,7 +1860,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         for hj in holes_of.get(ci, ()):
             hole = cnts[hj]
             h_area = cv2.contourArea(hole)
-            if h_area * m_per_px * m_per_px < FOREST_HOLE_MIN_AREA_M2:
+            if h_area * m_per_px * m_per_px < hole_min_m2:
                 continue
             hole_s = cv2.approxPolyDP(hole, simplify_px, closed=True)
             if len(hole_s) < 3:
