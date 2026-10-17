@@ -5,6 +5,8 @@ saved situation (Reload Scenery is not trusted to pick up every change).
     python scripts/sim_ab.py install   --tile +22+120      (X-Plane closed)
     python scripts/sim_ab.py grass on|off      --tile +22+120
     python scripts/sim_ab.py mat 2048|1024|off --tile +22+120
+    python scripts/sim_ab.py trees-build --tile +22+120  (after build)
+    python scripts/sim_ab.py trees off|on      --tile +22+120
     python scripts/sim_ab.py status    --tile +22+120
     python scripts/sim_ab.py uninstall --tile +22+120      (X-Plane closed)
 
@@ -27,6 +29,17 @@ to _ab/ first.
 
 The grass swap expects the grass inside the veg DSF, i.e. a tile built before
 the grass got its own pack (yOrtho4XP_Grass_Overlays, 890d523b).
+
+trees-build regenerates the trees of the tile's ZL18/19 textures (the
+airport zones, where trees come from the canopy-height model) with THIS
+checkout's vegetation overlay, twice: 'off' = single trees and forests as
+X-Plane's full-height climate forests, 'on' = sized single-species trees and
+shorter forest copies (veg_tree_sizes / veg_forest_heights).  Each result
+replaces the copied veg DSF's polygons centred inside those textures; the
+rest of the tile, grass included, stays as built.  The shorter forests come
+from an O4XP_Forest_Heights library written under --out; install links it
+into Custom Scenery too (uninstall removes it).  A later 'grass' swap
+replaces the trees variant and the other way round.
 """
 
 import argparse
@@ -45,6 +58,11 @@ import O4_Terrain_Materials as TMAT  # noqa: E402
 
 DEFAULT_CS = r"D:\SteamLibrary\steamapps\common\X-Plane 12\Custom Scenery"
 DEFAULT_OUT = r"E:\Ortho4XP_Review\sim_ab"
+CUDA_PYTHON = r"G:\Dev\Ortho4XP\.venv\Scripts\python.exe"
+INSTALLED_CFG = r"G:\Dev\Ortho4XP\_internal\Ortho4XP_Data\Ortho4XP.cfg"
+CANOPY_MODEL_DIR = r"E:\Ortho4XP_Review\veg_alt\chm_model\ckpt"
+LEAF_TYPE_CACHE = r"E:\Ortho4XP_Review\_cache\w0\_leaf_type"
+FOREST_PACK = "O4XP_Forest_Heights"
 VEG_PACK = "yOrtho4XP_Veg_Overlays"
 NVCOMPRESS = os.path.join(ROOT, "Utils", "win", "nvcompress", "nvcompress.exe")
 DSFTOOL = os.path.join(ROOT, "Utils", "win", "DSFTool.exe")
@@ -66,6 +84,7 @@ class Names:
         self.veg_dir = os.path.join(self.out, self.veg_pack)
         self.ab = os.path.join(self.out, "_ab", args.tile)
         self.state_file = os.path.join(self.ab, "state.json")
+        self.forest_dir = os.path.join(self.out, FOREST_PACK)
 
     def real(self, pack):
         return os.path.realpath(os.path.join(self.cs, pack))
@@ -229,11 +248,192 @@ def cmd_build(n, args):
     print(f"built in {time.time() - t0:.0f}s")
 
 
+# ── trees ────────────────────────────────────────────────────────────────────
+TREE_VARIANTS = {"off": {"O4_VEG_TREE_SIZES": "0", "O4_VEG_FOREST_HEIGHTS": "0"},
+                 "on": {"O4_VEG_TREE_SIZES": "1", "O4_VEG_FOREST_HEIGHTS": "1"}}
+
+
+def installed_veg_settings():
+    """The installed config's veg_* values as run() keywords, the way a tile build sets them."""
+    vals = {}
+    with open(INSTALLED_CFG, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if "=" in line and line.startswith("veg_"):
+                k, v = line.strip().split("=", 1)
+                vals[k] = v
+
+    def num(k, d):
+        return float(vals.get(k, d))
+
+    def yes(k, d):
+        return vals.get(k, str(d)) == "True"
+    density = num("veg_density", -1.0)
+    return dict(
+        close_m=num("veg_close_m", 10.0), open_m=num("veg_open_m", 3.0),
+        min_area_m2=num("veg_min_area_m2", 50.0), simplify_m=num("veg_simplify_m", 3.0),
+        density_override=density if density >= 0 else None,
+        res_m=num("veg_res_m", 0.0) or None, excl_buffer_m=num("veg_excl_buffer_m", 5.0),
+        use_simheaven=yes("veg_use_simheaven", True),
+        avoid_simheaven_buildings=yes("veg_avoid_simheaven_buildings", True),
+        simheaven_building_buffer_m=num("veg_simheaven_building_buffer_m", 10.0),
+        avoid_simheaven_forests=yes("veg_avoid_simheaven_forests", True),
+        simheaven_forest_buffer_m=num("veg_simheaven_forest_buffer_m", 0.0),
+        use_simheaven_asset_proximity=yes("veg_use_simheaven_asset_proximity", True),
+        exclude_lower_forests=yes("veg_exclude_lower_forests", False),
+        avoid_gfv2=yes("veg_avoid_gfv2", False), gfv2_buffer_m=num("veg_gfv2_buffer_m", 0.0),
+        use_gfv2_asset_proximity=yes("veg_use_gfv2_asset_proximity", False),
+        use_leaf_type_maps=yes("veg_use_leaf_type_maps", True),
+        use_xp_forests=yes("veg_use_xp_forests", True),
+        bld_excl_m=0.0 if yes("veg_disable_cache", False) else 10.0,
+    )
+
+
+def zone_textures(n):
+    """(name, (lat_n, lat_s, lon_w, lon_e)) of the copy's ZL18+ textures."""
+    import re
+    import O4_Vegetation_Overlay as VEG
+    out = []
+    for name in sorted(os.listdir(os.path.join(n.tile_dir, "textures"))):
+        m = re.match(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*?)(\d{2})\.dds$", name)
+        if m and int(m.group(4)) >= 18:
+            out.append((name, VEG.dds_bounds(int(m.group(1)), int(m.group(2)), int(m.group(4)))))
+    return out
+
+
+def read_dsf_text(path):
+    """(PROPERTY lines, polygon defs, [(def index, block lines, centroid lon/lat)])."""
+    header, defs, polys, block = [], [], [], None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("POLYGON_DEF "):
+                defs.append(line.split(None, 1)[1].strip())
+            elif line.startswith("BEGIN_POLYGON"):
+                block = [line]
+            elif block is not None:
+                block.append(line)
+                if line.startswith("END_POLYGON"):
+                    pts = [tuple(map(float, ln.split()[1:3])) for ln in block if ln.startswith("POLYGON_POINT")]
+                    c = ((sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+                         if pts else (0.0, 0.0))
+                    polys.append((int(block[0].split()[1]), block, c))
+                    block = None
+            elif line.startswith("PROPERTY"):
+                header.append(line)
+    return header, defs, polys
+
+
+def merge_tree_dsf(base_dsf, new_dsf, out_dsf, boxes):
+    """base_dsf with its tree polygons centred inside ``boxes`` replaced by new_dsf's."""
+    def inside(c):
+        return any(s <= c[1] <= nn and w <= c[0] <= e for nn, s, w, e in boxes)
+    tmp = []
+    try:
+        texts = []
+        for dsf in (base_dsf, new_dsf):
+            txt = f"{out_dsf}.{len(texts)}.txt"
+            tmp.append(txt)
+            subprocess.run([DSFTOOL, "--dsf2text", dsf, txt], check=True, stdout=subprocess.DEVNULL)
+            texts.append(read_dsf_text(txt))
+        (header, bdefs, bpolys), (_h, ndefs, npolys) = texts
+        defs, index, keep, dropped = [], {}, [], 0
+
+        def remap(defs_list, i):
+            path = defs_list[i]
+            if path not in index:
+                index[path] = len(defs)
+                defs.append(path)
+            return index[path]
+        for i, block, c in bpolys:
+            if bdefs[i].startswith("grass/") or not inside(c):
+                keep.append((remap(bdefs, i), block))
+            else:
+                dropped += 1
+        for i, block, _c in npolys:
+            keep.append((remap(ndefs, i), block))
+        txt = out_dsf + ".txt"
+        tmp.append(txt)
+        with open(txt, "w", encoding="utf-8") as f:
+            f.writelines(header)
+            f.write("\n")
+            for path in defs:
+                f.write(f"POLYGON_DEF {path}\n")
+            f.write("\n")
+            for i, block in keep:
+                parts = block[0].split()
+                parts[1] = str(i)
+                f.write(" ".join(parts) + "\n")
+                f.writelines(block[1:])
+        subprocess.run([DSFTOOL, "--text2dsf", txt, out_dsf], check=True, stdout=subprocess.DEVNULL)
+        return dropped, len(npolys)
+    finally:
+        for t in tmp:
+            if os.path.exists(t):
+                os.remove(t)
+
+
+def cmd_trees_build(n, args):
+    if not load_state(n):
+        sys.exit("build first")
+    zones = zone_textures(n)
+    if not zones:
+        sys.exit("the tile copy has no ZL18/19 textures")
+    lat, lon = int(n.tile[:3]), int(n.tile[3:])
+    tex = os.path.join(n.ab, "trees_textures")
+    os.makedirs(tex, exist_ok=True)
+    for name, _b in zones:                           # the zone textures only, as hard links
+        dst = os.path.join(tex, name)
+        if not os.path.exists(dst):
+            try:
+                os.link(os.path.join(n.tile_dir, "textures", name), dst)
+            except OSError:
+                shutil.copy2(os.path.join(n.tile_dir, "textures", name), dst)
+    settings = installed_veg_settings()
+    base = os.path.join(n.ab, "veg_grass_on.dsf")
+    t0 = time.time()
+    for variant, env in TREE_VARIANTS.items():
+        out = os.path.join(n.ab, f"trees_{variant}_zones.dsf")
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {os.path.join(ROOT, 'src')!r})\n"
+            "import O4_Landcover_Inference as SEG\n"
+            f"SEG._dsftool = {DSFTOOL!r}\n"
+            "import O4_Vegetation_Overlay as V\n"
+            f"V.run(tex_dir={tex!r}, lat={lat}, lon={lon}, out_dsf={out!r},\n"
+            f"      cache_dir={os.path.join(n.ab, 'trees_cache')!r}, make_viz=False,\n"
+            f"      dsftool_path={DSFTOOL!r}, custom_scenery_dir={n.cs!r},\n"
+            f"      leaf_type_cache_dir={LEAF_TYPE_CACHE!r}, grass_settings=None,\n"
+            f"      **{settings!r})\n"
+        )
+        run_env = dict(os.environ, O4_CANOPY_MODEL_DIR=CANOPY_MODEL_DIR,
+                       O4_FOREST_HEIGHTS_PACK=n.forest_dir, **env)
+        print(f"trees {variant}: building {len(zones)} ZL18/19 textures ...", flush=True)
+        rc = subprocess.call([CUDA_PYTHON, "-c", code], env=run_env, cwd=os.path.join(ROOT, "src"))
+        if rc != 0 or not os.path.isfile(out):
+            sys.exit(f"vegetation overlay failed for trees {variant}")
+        dropped, added = merge_tree_dsf(base, out, os.path.join(n.ab, f"veg_trees_{variant}.dsf"),
+                                        [b for _n, b in zones])
+        print(f"  trees {variant}: {dropped} built polygons in the zones replaced by {added}")
+    s = load_state(n)
+    s["trees_built"] = time.strftime("%Y-%m-%d %H:%M")
+    save_state(n, s)
+    set_trees(n, "off")
+    print(f"trees built in {time.time() - t0:.0f}s; swapped to 'trees off'")
+
+
+def set_trees(n, mode):
+    shutil.copyfile(os.path.join(n.ab, f"veg_trees_{mode}.dsf"), n.veg_dsf(n.veg_dir))
+    state = load_state(n)
+    state["trees"] = mode
+    state["grass"] = "on"                            # the trees variants keep the built grass
+    save_state(n, state)
+
+
 # ── swaps ────────────────────────────────────────────────────────────────────
 def set_grass(n, mode):
     shutil.copyfile(os.path.join(n.ab, f"veg_grass_{mode}.dsf"), n.veg_dsf(n.veg_dir))
     state = load_state(n)
     state["grass"] = mode
+    state.pop("trees", None)                         # the grass variants carry the trees as built
     save_state(n, state)
 
 
@@ -260,7 +460,8 @@ def cmd_status(n, args):
     s = load_state(n)
     if not s:
         sys.exit("not built")
-    print(f"tile {n.tile}: grass {s.get('grass')}, material maps {s.get('mat')}"
+    print(f"tile {n.tile}: grass {s.get('grass')}, material maps {s.get('mat')}, "
+          f"trees {s.get('trees', 'as built')}"
           f" ({'installed' if s.get('installed') else 'NOT installed'}); GPU memory used {gpu_memory()}")
 
 
@@ -285,18 +486,24 @@ def cmd_install(n, args):
     s = load_state(n)
     if not s:
         sys.exit("build first")
-    for pack, target in ((n.tile_pack, n.tile_dir), (n.veg_pack, n.veg_dir)):
+    forest = os.path.isfile(os.path.join(n.forest_dir, "library.txt"))
+    links = [(n.tile_pack, n.tile_dir), (n.veg_pack, n.veg_dir)]
+    if forest:
+        links.append((FOREST_PACK, n.forest_dir))
+    for pack, target in links:
         link = os.path.join(n.cs, pack)
         if not os.path.exists(link):
             subprocess.run(["cmd", "/c", "mklink", "/J", link, target], check=True, stdout=subprocess.DEVNULL)
     path, lines = read_ini(n)
     out = []
     for line in lines:
-        if line.strip() in (n.ini_line(n.tile_pack), n.ini_line(n.veg_pack)):
+        if line.strip() in (n.ini_line(n.tile_pack), n.ini_line(n.veg_pack), n.ini_line(FOREST_PACK)):
             continue                                   # re-install: placed again below
         if line.strip() == n.ini_line(n.real_tile_pack):
             out.append(n.ini_line(n.tile_pack))
         elif line.strip() == n.ini_line(VEG_PACK):
+            if forest:
+                out.append(n.ini_line(FOREST_PACK))    # a library: its place does not matter
             out.append(n.ini_line(n.veg_pack))
             line = n.ini_line(VEG_PACK, enabled=False)
             s["veg_disabled_by_us"] = True
@@ -305,8 +512,10 @@ def cmd_install(n, args):
         sys.exit(f"{n.real_tile_pack} or {VEG_PACK} not found enabled in scenery_packs.ini; nothing changed")
     write_ini(n, path, out)
     s["installed"] = True
+    s["forest_pack_installed"] = forest
     save_state(n, s)
-    print(f"installed: {n.tile_pack} above {n.real_tile_pack}, {n.veg_pack} above {VEG_PACK} (disabled)")
+    print(f"installed: {n.tile_pack} above {n.real_tile_pack}, {n.veg_pack} above {VEG_PACK} (disabled)"
+          + (f", {FOREST_PACK} library" if forest else ""))
 
 
 def cmd_uninstall(n, args):
@@ -318,40 +527,47 @@ def cmd_uninstall(n, args):
     for line in lines:
         if line.strip() in (n.ini_line(n.tile_pack), n.ini_line(n.veg_pack)):
             continue
+        if line.strip() == n.ini_line(FOREST_PACK) and s.get("forest_pack_installed"):
+            continue
         if line.strip() == n.ini_line(VEG_PACK, enabled=False) and s.get("veg_disabled_by_us"):
             line = n.ini_line(VEG_PACK)
         out.append(line)
     if out != lines:
         write_ini(n, path, out)
-    for pack in (n.tile_pack, n.veg_pack):
+    packs = (n.tile_pack, n.veg_pack) + ((FOREST_PACK,) if s.get("forest_pack_installed") else ())
+    for pack in packs:
         link = os.path.join(n.cs, pack)
         if os.path.isdir(link) and os.path.realpath(link) != os.path.abspath(link):
             os.rmdir(link)                              # removes the junction only
-    s.update(installed=False, veg_disabled_by_us=False)
+    s.update(installed=False, veg_disabled_by_us=False, forest_pack_installed=False)
     save_state(n, s)
     print(f"uninstalled; {VEG_PACK} re-enabled. Test data stays in {n.out}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["build", "install", "uninstall", "status", "grass", "mat"])
+    ap.add_argument("command", choices=["build", "install", "uninstall", "status", "grass", "mat",
+                                        "trees-build", "trees"])
     ap.add_argument("mode", nargs="?")
     ap.add_argument("--tile", required=True, help="e.g. +22+120")
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--custom-scenery", default=DEFAULT_CS)
     args = ap.parse_args()
     n = Names(args)
-    if args.command in ("grass", "mat"):
-        modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off")}[args.command]
+    if args.command in ("grass", "mat", "trees"):
+        modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off"), "trees": ("off", "on")}[args.command]
         if args.mode not in modes:
             sys.exit(f"{args.command} needs one of: {' '.join(modes)}")
         if not load_state(n):
             sys.exit("build first")
-        (set_grass if args.command == "grass" else set_mat)(n, args.mode)
+        if args.command == "trees" and not os.path.isfile(os.path.join(n.ab, "veg_trees_on.dsf")):
+            sys.exit("trees-build first")
+        {"grass": set_grass, "mat": set_mat, "trees": set_trees}[args.command](n, args.mode)
         cmd_status(n, args)
         print("now restart X-Plane (or start it) to load this variant")
         return
-    {"build": cmd_build, "install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status}[args.command](n, args)
+    {"build": cmd_build, "install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status,
+     "trees-build": cmd_trees_build}[args.command](n, args)
 
 
 if __name__ == "__main__":

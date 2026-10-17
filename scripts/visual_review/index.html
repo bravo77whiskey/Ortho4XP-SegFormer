@@ -74,6 +74,8 @@
     <label class="row"><input type="checkbox" id="lyFill" checked>Filled shapes</label>
     <label class="row"><input type="checkbox" id="lyBounds" checked>Texture &amp; tile boundaries</label>
     <label class="row"><input type="checkbox" id="lySeams">YOLO window seams (512 px)</label>
+    <label class="row"><input type="checkbox" id="lyTreeH" checked>Colour trees by height</label>
+    <div id="treeHLegend" class="hint"></div>
     <div class="hint">Overlay opacity</div>
     <input type="range" id="opacity" min="0.1" max="1" step="0.05" value="0.55">
     <h2>Keys</h2>
@@ -280,6 +282,32 @@
     return (geoms[k] = { shapes, byLayer, grid, diag, paths: {}, nearKey: null });
   }
   const visible = (s, nearMin) => on(s.layer) && !(s.layer === "near" && s.info.c < nearMin);
+  // Tree colours by the canopy height of the asset X-Plane plants (runs that record it).
+  const TREE_H = [[3, "250,250,110"], [6, "190,240,70"], [9, "100,220,80"], [12, "40,200,150"],
+    [15, "40,170,230"], [18, "70,110,250"], [22, "140,80,240"], [Infinity, "120,40,160"]];
+  const treeHColor = h => TREE_H.find(([top]) => h < top)[1];
+  $("treeHLegend").innerHTML = TREE_H.map(([top, c], i) =>
+    `<span class="sw" style="background:rgb(${c})"></span> ${i ? TREE_H[i - 1][0] : 0}${top === Infinity ? "+" : "-" + top} m`
+  ).join("&nbsp; ");
+  function treeHeightDraw(g, layer, op, fill) {
+    const key = layer + "_h";
+    if (!g.paths[key]) {
+      const groups = {};
+      for (const s of g.byLayer[layer] || []) {
+        if (s.info.h == null) continue;
+        const c = treeHColor(s.info.h), p = groups[c] || (groups[c] = new Path2D());
+        for (const r of s.rings) { r.forEach(([x, y], i) => i ? p.lineTo(x, y) : p.moveTo(x, y)); p.closePath(); }
+      }
+      g.paths[key] = Object.entries(groups);
+    }
+    if (!g.paths[key].length) return false;
+    ctx.lineWidth = 2.0 / view.s; ctx.setLineDash([]);
+    for (const [rgb, p] of g.paths[key]) {
+      if (fill) { ctx.fillStyle = `rgba(${rgb},${Math.min(1, op + 0.15)})`; ctx.fill(p, "evenodd"); }
+      ctx.strokeStyle = `rgba(${rgb},1)`; ctx.stroke(p);
+    }
+    return true;
+  }
   function layerPath(g, layer, nearMin) {
     if (layer === "near" && g.nearKey !== nearMin) { delete g.paths.near; g.nearKey = nearMin; }
     if (g.paths[layer]) return g.paths[layer];
@@ -339,6 +367,7 @@
       const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
       for (const layer of order) {
         if (!on(layer)) continue;
+        if ((layer === "tree" || layer === "treept") && $("lyTreeH").checked && treeHeightDraw(g, layer, op, fill)) continue;
         const { p, n } = layerPath(g, layer, nearMin);
         if (!n) continue;
         const rgb = css(defs[layer].color), cand = CAND.some(c => c.id === layer) || defs[layer].outline;
@@ -464,10 +493,11 @@
     if (s.vcut) return i.cut === "road"
       ? `<b class="t">Trees removed by the road exclusion</b><br>canopy within a road's clearance (simHeaven network / OSM roads)`
       : `<b class="t">Trees removed by another exclusion</b><br>SegFormer road/building/developed buffer, existing buildings, water, forests or exclusion zones`;
-    if (s.layer === "treept") return `<b>single trees</b> · ${i.pt} tree${i.pt > 1 ? "s" : ""}, one per crown<br>${esc(i.a)}`;
+    const tall = i.h != null ? ` · ~${i.h} m tall` : "";
+    if (s.layer === "treept") return `<b>single trees</b> · ${i.pt} tree${i.pt > 1 ? "s" : ""}, one per crown${tall}<br>${esc(i.a)}`;
     if (s.layer === "obj") return `<b>object</b><br>${esc(i.a)}`;
     if (s.layer === "fac") return `<b>facade</b> · height ${i.h} m<br>${esc(i.a)}`;
-    return `<b>trees</b> · density ${i.d}<br>${esc(i.a)}`;
+    return `<b>trees</b> · density ${i.d}${tall}<br>${esc(i.a)}`;
   }
   function hover(e) {
     const tip = $("tip"), id = current();
@@ -542,7 +572,7 @@
   });
   $("runB").onchange = () => { showNotes();
     loadRun($("runB").value).then(() => sample && loadSample($("runB").value, sample)).then(draw); };
-  for (const id of ["lyFill", "lyBounds", "lySeams", "opacity", "nearMin"]) $(id).oninput = draw;
+  for (const id of ["lyFill", "lyBounds", "lySeams", "lyTreeH", "opacity", "nearMin"]) $(id).oninput = draw;
 
   let drag = null;
   cv.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; cv.classList.add("drag"); });

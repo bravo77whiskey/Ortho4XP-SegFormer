@@ -213,6 +213,7 @@ import O4_Cfg_Vars as CFGVARS  # noqa: E402
 import O4_Scenery_Links as SLINK  # noqa: E402
 import O4_Overlay_Pipeline as PIPELINE  # noqa: E402
 import O4_Building_Overlay as BLD  # noqa: E402
+import O4_Forest_Heights as FOREST_HEIGHTS  # noqa: E402
 
 # The user's installed settings, applied over the repo defaults.
 CFG.global_cfg_file = LIVE_CFG
@@ -232,6 +233,8 @@ CFG.auto_link_custom_scenery = False
 SLINK.auto_link_tile = lambda tile: None
 PIPELINE._finish_veg_tile_replacement = lambda *a, **kw: None
 PIPELINE._VENV_DIR = CUDA_VENV
+# Shorter forest copies go into the run's data folder, not X-Plane's Custom Scenery.
+os.environ["O4_FOREST_HEIGHTS_PACK"] = os.path.join(DATA, "_tmp", FOREST_HEIGHTS.PACK_NAME)
 # Candidate outcomes + blocking scenery per texture (never changes placements).
 os.environ["O4_BLD_REVIEW_DUMP"] = "1"
 os.environ.setdefault("O4_BLD_REVIEW_CONF", "0.01")
@@ -313,6 +316,36 @@ def read_outputs(out_dir):
     return parsed
 
 
+_XP_EXPORTS = None
+_TREE_H = {}
+
+
+def tree_height(path):
+    """Canopy-layer mean height (m) of a forest path, from X-Plane's own files; None if unknown."""
+    global _XP_EXPORTS
+    if path in _TREE_H:
+        return _TREE_H[path]
+    m = re.match(r"^" + re.escape(FOREST_HEIGHTS.VIRTUAL_PREFIX) + r"h(\d+)/", path)
+    height = float(m.group(1)) if m else None
+    if height is None:
+        if _XP_EXPORTS is None:
+            cs = getattr(CFG, "custom_scenery_dir", "") or ""
+            xp = FOREST_HEIGHTS.xp_forests_dir(cs) if cs else ""
+            lib = os.path.join(xp, "library.txt")
+            _XP_EXPORTS = (xp, FOREST_HEIGHTS.read_exports(lib) if os.path.isfile(lib) else {})
+        xp, exports = _XP_EXPORTS
+        seasons = exports.get(path) or {}
+        rel = seasons.get("sum") or seasons.get("") or next(iter(seasons.values()), None)
+        if rel:
+            try:
+                with open(os.path.join(xp, rel), encoding="utf-8", errors="ignore") as f:
+                    height = FOREST_HEIGHTS.canopy_mean_height(f.read())
+            except OSError:
+                height = None
+    _TREE_H[path] = round(height, 1) if height else None
+    return _TREE_H[path]
+
+
 def inside(px):
     return 0.0 <= px[0] < 4096.0 and 0.0 <= px[1] < 4096.0
 
@@ -346,9 +379,11 @@ def collect(parsed, sample, m_per_px):
                 pts = [p for r in rings for p in r if inside(p)]
                 if pts:
                     veg.append({"a": poly["def"], "d": poly["param"], "pt": len(pts),
+                                "h": tree_height(poly["def"]),
                                 "r": [crown(p, 3.0 / m_per_px) for p in pts]})
             elif poly["def"].lower().endswith(".for"):
-                veg.append({"a": poly["def"], "d": poly["param"], "r": rings})
+                veg.append({"a": poly["def"], "d": poly["param"], "h": tree_height(poly["def"]),
+                            "r": rings})
             else:
                 bld.append({"t": "fac", "a": poly["def"], "h": poly["param"], "r": rings})
     return bld, veg
