@@ -26,6 +26,8 @@ NEW_VARS = (
     "veg_point_tree_max_cells",
     "veg_hole_certain_cells",
     "veg_hole_unsure_cells",
+    "veg_tree_sizes",
+    "veg_forest_heights",
 )
 
 
@@ -70,11 +72,16 @@ class TreeSettingsTests(unittest.TestCase):
             self.assertEqual(VEG._canopy_seg_min_h(), 0.5)
             self.assertTrue(VEG._forest_holes_enabled())
             self.assertEqual(VEG._cell_rules(), (3.0, 0.5, 4.0))
+            self.assertTrue(VEG._tree_sizes_enabled())
+            self.assertTrue(VEG._forest_heights_enabled())
 
     def test_zero_and_false_turn_things_off(self):
         env = self._env_for(veg_canopy=False, veg_canopy_min_conf=0.0,
-                            veg_canopy_seg_min_h_m=0.0, veg_forest_holes=False)
+                            veg_canopy_seg_min_h_m=0.0, veg_forest_holes=False,
+                            veg_tree_sizes=False, veg_forest_heights=False)
         with mock.patch.dict(os.environ, env):
+            self.assertFalse(VEG._tree_sizes_enabled())
+            self.assertFalse(VEG._forest_heights_enabled())
             self.assertFalse(VEG._canopy_enabled())
             self.assertEqual(VEG._canopy_rule(), (2.0, None))   # mean height >= 2 m
             self.assertIsNone(VEG._canopy_seg_min_h())

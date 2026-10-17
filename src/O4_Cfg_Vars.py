@@ -590,6 +590,24 @@ cfg_tile_vars = {
         "hint": "Replaced by veg_hole_certain_cells / veg_hole_unsure_cells; "
                 "kept so older config files still load.",
     },
+    "veg_tree_sizes": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_tree_sizes",
+        "hint": "ZL18/19: plant single trees as X-Plane's sized single-species "
+                "trees (small to tall oak, pine, kapok... as X-Plane plants in "
+                "that climate), sized to the canopy height measured at each "
+                "crown, instead of the full-height climate forest.",
+    },
+    "veg_forest_heights": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_forest_h",
+        "hint": "ZL18/19: give forests whose measured canopy is well under "
+                "X-Plane's climate forest a copy of that forest with shorter "
+                "canopy trees (6, 9, 12 or 15 m). The copies are written into "
+                "the O4XP_Forest_Heights library pack in Custom Scenery.",
+    },
     "veg_avoid_gfv2": {
         "type": bool,
         "default": False,
@@ -942,6 +960,8 @@ list_veg_vars = [
     "veg_point_tree_max_cells",
     "veg_hole_certain_cells",
     "veg_hole_unsure_cells",
+    "veg_tree_sizes",
+    "veg_forest_heights",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",

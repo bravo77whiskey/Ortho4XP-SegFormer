@@ -52,6 +52,8 @@ import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
 import O4_Canopy_Height as CANOPY
 import O4_Forest_Spacing as FOREST_SPACING
+import O4_Tree_Sizes as TREE_SIZES
+import O4_Forest_Heights as FOREST_HEIGHTS
 import O4_Texture_Selection as TEXSEL
 from O4_Building_Overlay import (
     _load_simheaven_building_exclusions,
@@ -166,6 +168,105 @@ def _road_clip_enabled():
 def _point_trees_enabled():
     """O4_VEG_POINT_TREES=0: small canopy blobs stay area-fill forests."""
     return _veg_flag("O4_VEG_POINT_TREES")
+
+
+# On canopy textures each single (point-mode) tree is planted as one of
+# X-Plane's sized single-species trees (O4_Tree_Sizes), sized to the tallest
+# canopy height within CROWN_RADIUS_M of its crown centre, plus
+# CROWN_HEIGHT_OFFSET_M: against 2019 Brandenburg LiDAR (3,600 crowns in two
+# garden suburbs) the canopy network reads single crowns ~2 m low, most on
+# the smallest patches, where its output blurs the crown into the ground.
+CROWN_RADIUS_M = 3.0
+CROWN_HEIGHT_OFFSET_M = 1.5
+
+
+def _tree_sizes_enabled():
+    """O4_VEG_TREE_SIZES=0: single trees keep their polygon's climate forest."""
+    return _veg_flag("O4_VEG_TREE_SIZES")
+
+
+# Forest polygons on canopy textures take a copy of their climate forest with
+# shorter canopy trees (O4_Forest_Heights) where the canopy is well under the
+# forest's own height. One forest outline often holds young and old stands,
+# so the canopy is first split into height zones: crown-top height (max within
+# CROWN_RADIUS_M) averaged over the canopy with a FOREST_ZONE_SIGMA_M Gaussian,
+# cut at FOREST_ZONE_EDGES_M (midway between the copies' heights); zone patches
+# under FOREST_ZONE_MIN_M2 join the zone around them. Each zone's polygons take
+# the copy (or the original) nearest to their median smoothed height.
+# Against 2019 Brandenburg LiDAR this cut the forest height error from 5.5 to
+# 3.8 m in a garden suburb and from 13-16 m to 4-6 m in EDDB's hedges and
+# belts, with no change in a suburb of tall old forest.
+FOREST_ZONE_SIGMA_M = 20.0
+FOREST_ZONE_EDGES_M = (7.5, 10.5, 13.5, 16.5, 20.0)
+FOREST_ZONE_MIN_M2 = 2000.0
+
+
+def _forest_heights_enabled():
+    """O4_VEG_FOREST_HEIGHTS=0: forests keep X-Plane's own canopy height."""
+    return _veg_flag("O4_VEG_FOREST_HEIGHTS")
+
+
+def _forest_height_map(canopy_height, tree_mask, m_per_px):
+    """Smoothed crown-top height over the canopy (metres, mask-sized)."""
+    r = max(1, int(round(CROWN_RADIUS_M / m_per_px)))
+    tops = cv2.dilate(canopy_height, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2))
+    m = (tree_mask > 0).astype(np.float32)
+    h, w = m.shape
+    # The blur runs on a grid ~1/8 sigma per cell: same result, not 30 s a texture.
+    k = max(1, int(FOREST_ZONE_SIGMA_M / m_per_px / 8))
+    size = (max(1, w // k), max(1, h // k))
+    sigma = FOREST_ZONE_SIGMA_M / (m_per_px * w / size[0])
+    num = cv2.GaussianBlur(cv2.resize(tops * m, size, interpolation=cv2.INTER_AREA), (0, 0), sigma)
+    den = cv2.GaussianBlur(cv2.resize(m, size, interpolation=cv2.INTER_AREA), (0, 0), sigma)
+    return cv2.resize(num / np.maximum(den, 1e-3), (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _forest_height_zones(height_map, tree_mask, m_per_px):
+    """Zone index (1..len(FOREST_ZONE_EDGES_M)+1) per canopy pixel, 0 elsewhere."""
+    zones = np.where(tree_mask > 0, np.digitize(height_map, FOREST_ZONE_EDGES_M) + 1, 0).astype(np.uint8)
+    min_px = FOREST_ZONE_MIN_M2 / (m_per_px * m_per_px)
+    small = np.zeros(zones.shape, bool)
+    for z in np.unique(zones[zones > 0]):
+        n, lab, st, _ = cv2.connectedComponentsWithStats((zones == z).astype(np.uint8), connectivity=8)
+        tiny = np.nonzero(st[1:, cv2.CC_STAT_AREA] < min_px)[0] + 1
+        if len(tiny):
+            small |= np.isin(lab, tiny)
+    keep = (zones > 0) & ~small
+    if small.any() and keep.any():
+        # Each small patch pixel takes the zone of the nearest kept canopy pixel.
+        _d, near = cv2.distanceTransformWithLabels(
+            (~keep).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+        ys, xs = np.nonzero(keep)
+        lut = np.zeros(int(near.max()) + 1, np.uint8)
+        lut[near[ys, xs]] = zones[ys, xs]
+        zones[small] = lut[near[small]]
+    return zones
+
+
+def _polygon_forest_height(height_map, mask, prepared):
+    """Median smoothed height over the polygon's canopy pixels."""
+    x, y, w, h = prepared['x'], prepared['y'], prepared['w'], prepared['h']
+    sel = prepared['fill'].astype(bool) & (mask[y:y + h, x:x + w] > 0)
+    if not sel.any():
+        return None
+    return float(np.median(height_map[y:y + h, x:x + w][sel]))
+
+
+def _process_tree_mask(mask, **kwargs):
+    """_process_dds_mask for the tree class, split into forest height zones when it has heights."""
+    height_map = kwargs.get('forest_height_map')
+    if height_map is None or kwargs.get('forest_heights') is None:
+        return _process_dds_mask(mask, SEGFORMER.CLASS_TREE, **kwargs)
+    zones = _forest_height_zones(height_map, mask, kwargs['m_per_px'])
+    polys = []
+    for z in np.unique(zones[zones > 0]):
+        part = np.where(zones == z, mask, 0).astype(np.uint8)
+        part_kwargs = kwargs
+        if kwargs.get('gap_certain') is not None:
+            # Another height zone's forest is planted by its own polygon.
+            part_kwargs = dict(kwargs, gap_certain=kwargs['gap_certain'] | ((mask > 0) & (zones != z)))
+        polys.extend(_process_dds_mask(part, SEGFORMER.CLASS_TREE, **part_kwargs))
+    return polys
 
 
 # Clearings inside a forest outline are written as holes (extra windings), so
@@ -364,6 +465,10 @@ def _veg_feature_sig():
         _road_clip_enabled(),
         _road_width_scale(),
         _point_trees_enabled(),
+        _tree_sizes_enabled(), CROWN_RADIUS_M, CROWN_HEIGHT_OFFSET_M, TREE_SIZES.SIGNATURE,
+        _forest_heights_enabled(), FOREST_ZONE_SIGMA_M, FOREST_ZONE_EDGES_M, FOREST_ZONE_MIN_M2,
+        FOREST_HEIGHTS.SIGNATURE,
+        FOREST_HEIGHTS.BAND_HEIGHTS_M, FOREST_HEIGHTS.MIN_GAIN_M,
         _forest_holes_enabled(), _forest_hole_min_m2(),
         _spacing_rules_enabled(), _cell_rules(), HOLE_CERTAIN_FRAC,
         _osm_forest_rescue_enabled(),
@@ -1851,12 +1956,19 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       simheaven_type_path=None,
                       simheaven_type_resolver=None,
                       forest_path_mapper=None,
-                      forest_spacing=None, gap_certain=None):
+                      forest_spacing=None, gap_certain=None, canopy_height=None,
+                      forest_heights=None, forest_height_map=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring).
 
     ``forest_spacing`` (O4_Forest_Spacing.ForestSpacing) sizes single-tree
     patches and holes in grid cells of each polygon's forest; ``gap_certain``
     marks pixels known not to be tree (built-up, water, fields, other forest).
+
+    ``canopy_height`` (metres, mask-sized) sizes point-mode trees with
+    X-Plane's single-species trees instead of the polygon's forest and, with
+    ``forest_heights`` (O4_Forest_Heights.ForestHeights) and the smoothed
+    ``forest_height_map``, gives other forest polygons a shorter copy of
+    their forest.
 
     ``forest_path_mapper.map_path(path, lon, lat, veg_type)`` may swap the
     chosen tree family for a climate-specific X-Plane forest at the polygon.
@@ -1979,17 +2091,41 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             point_max_m2 = POINT_TREE_MAX_AREA_M2
             hole_rings = [hr for hr, _a, h_m2, _c in hole_cands if h_m2 >= hole_min_m2]
         if (
+            forest_heights is not None and forest_height_map is not None
+            and prepared_fill is not None and veg_cls == SEGFORMER.CLASS_TREE
+        ):
+            fpath = forest_heights.path_for(
+                fpath, _polygon_forest_height(forest_height_map, mask, prepared_fill))
+        if (
             point_trees and prepared_fill is not None and shape == 'area'
             and area_px * m_per_px * m_per_px < point_max_m2
         ):
             pts = []
+            crowns = []
             for px, py in _crown_points(mask, prepared_fill, m_per_px):
                 lo = lon_w + px / img_w * (lon_e - lon_w)
                 la = lat_n - py / img_h * (lat_n - lat_s)
                 if tile_lon <= lo < tile_lon + 1 and tile_lat <= la < tile_lat + 1:
                     pts.append((lo, la))
-            if pts:
+                    crowns.append((px, py))
+            if not pts:
+                continue
+            band = None
+            if canopy_height is not None and _tree_sizes_enabled():
+                band = TREE_SIZES.band_of_path(FOREST_HEIGHTS.source_path(fpath))
+            if band is None:
                 polys.append((fpath, (dsf_den % LINE_MODE) + POINT_MODE, pts))
+                continue
+            heights = TREE_SIZES.crown_heights(canopy_height, crowns, CROWN_RADIUS_M / m_per_px)
+            by_path = {}
+            for pt, h in zip(pts, heights):
+                path = None
+                if h >= TREE_SIZES.MIN_MEASURED_H_M:
+                    path = TREE_SIZES.sized_tree_path(*band, float(h) + CROWN_HEIGHT_OFFSET_M, rng)
+                path = path or fpath
+                by_path.setdefault(path, []).append(pt)
+            for path, group in by_path.items():
+                polys.append((path, (dsf_den % LINE_MODE) + POINT_MODE, group))
             continue
         if hole_rings:
             # DSF: first winding is the outline, the rest are holes, wound the other way.
@@ -2228,6 +2364,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     canopy_model = None
     canopy_tried = False
     forest_spacing = FOREST_SPACING.ForestSpacing(custom_scenery_dir) if custom_scenery_dir else None
+    forest_heights = None
+    if custom_scenery_dir and _forest_heights_enabled():
+        forest_heights = FOREST_HEIGHTS.ForestHeights(custom_scenery_dir, log=verbose_print)
+        if not forest_heights.available:
+            forest_heights = None
 
     tile_center_lat = lat + 0.5
     tile_center_lon = lon + 0.5
@@ -3147,6 +3288,15 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 gap_certain |= ~CANOPY.tree_mask(canopy_maps, (img_h, img_w), seg_gate)
             kwargs['forest_spacing'] = forest_spacing
             kwargs['gap_certain'] = gap_certain
+        if canopy_maps is not None and (
+            (_tree_sizes_enabled() and _point_trees_enabled()) or forest_heights is not None
+        ):
+            kwargs['canopy_height'] = cv2.resize(
+                canopy_maps[0].astype(np.float32), (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+            if forest_heights is not None:
+                kwargs['forest_heights'] = forest_heights
+                kwargs['forest_height_map'] = _forest_height_map(
+                    kwargs['canopy_height'], tree_mask, mpp)
         if simheaven_type_source_path:
             kwargs['simheaven_type_path'] = simheaven_type_source_path
         if simheaven_type_resolver is not None:
@@ -3175,11 +3325,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         # Another leaf type's forest is planted by its own polygon.
                         part_kwargs['gap_certain'] = kwargs['gap_certain'] | (
                             (tree_mask > 0) & (zone != code))
-                    p.extend(_process_dds_mask(part, SEGFORMER.CLASS_TREE, **part_kwargs))
+                    p.extend(_process_tree_mask(part, **part_kwargs))
             timings['contours'] += time.perf_counter() - _t
         else:
             _t = time.perf_counter()
-            p = _process_dds_mask(tree_mask, SEGFORMER.CLASS_TREE, **kwargs)
+            p = _process_tree_mask(tree_mask, **kwargs)
             timings['contours'] += time.perf_counter() - _t
         n_tree += len(p); polygons.extend(p)
         for veg_type, count in dds_type_counts.items():
@@ -3266,6 +3416,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     tmp_dsf = out_dsf + '.tmp'
 
     for_paths = sorted(set(p for p, _, _ in polygons))
+    banded = [p for p in for_paths if p.startswith(FOREST_HEIGHTS.VIRTUAL_PREFIX)]
+    if banded and not (forest_heights is not None and forest_heights.ensure(banded)):
+        # No pack to plant them from: their full-height originals instead.
+        polygons = [(FOREST_HEIGHTS.source_path(p), d, r) for p, d, r in polygons]
+        for_paths = sorted(set(p for p, _, _ in polygons))
+    elif banded:
+        print(f"  [ForestHeights] {len(banded)} shorter forest(s) from {FOREST_HEIGHTS.PACK_NAME}",
+              flush=True)
     for_idx   = {p: i for i, p in enumerate(for_paths)}
     lat_i = int(math.floor(lat)); lon_i = int(math.floor(lon))
 
