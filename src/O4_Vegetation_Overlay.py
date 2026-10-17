@@ -50,6 +50,7 @@ import O4_Bounds_Index as BBOX
 import O4_Persistent_Cache as PCACHE
 import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
+import O4_Canopy_Height as CANOPY
 import O4_Texture_Selection as TEXSEL
 from O4_Building_Overlay import (
     _load_simheaven_building_exclusions,
@@ -199,6 +200,40 @@ def _veg_infer_factor(zl):
     return 2 ** max(0, int(zl) - VEG_INFER_MAX_ZL)
 
 
+# Above VEG_INFER_MAX_ZL (the airport zones) trees come from the canopy-height
+# network instead (O4_Canopy_Height): it measures height from the ortho, so
+# the meadow around runways is ~0 m while hedges and tree rows stand out. The
+# SegFormer class map is still made, for roads, buildings, context and grass.
+CANOPY_MIN_TREE_H_M = 2.0
+# The canopy network misses single rows of roadside trees. SegFormer finds
+# them, so its narrow canopy is kept on top: what remains of its tree mask
+# after an opening ROW_MAX_WIDTH_M across, in pieces at least ROW_MIN_LENGTH_M
+# long. Broad SegFormer blobs — the false trees on airfield grass — fall out.
+ROW_MAX_WIDTH_M = 20.0
+ROW_MIN_LENGTH_M = 40.0
+ROW_MIN_AREA_M2 = 60.0
+
+
+def _narrow_rows(tree_mask, m_per_px):
+    """The parts of ``tree_mask`` narrower than ROW_MAX_WIDTH_M, as long strips."""
+    r = max(1, int(ROW_MAX_WIDTH_M / 2.0 / m_per_px))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    thin = cv2.bitwise_and(tree_mask, cv2.bitwise_not(cv2.morphologyEx(tree_mask, cv2.MORPH_OPEN, k)))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(thin, 8)
+    if n <= 1:
+        return np.zeros(tree_mask.shape, bool)
+    length_m = np.maximum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT]) * m_per_px
+    area_m2 = stats[:, cv2.CC_STAT_AREA] * m_per_px * m_per_px
+    keep = (length_m >= ROW_MIN_LENGTH_M) & (area_m2 >= ROW_MIN_AREA_M2)
+    keep[0] = False
+    return keep[labels]
+
+
+def _canopy_enabled():
+    """O4_VEG_CANOPY=0: ZL18+ trees come from SegFormer at ZL17 scale."""
+    return _veg_flag("O4_VEG_CANOPY")
+
+
 def _veg_feature_sig():
     """Cache-key part for the switches above and the tree-support rule."""
     return (
@@ -208,6 +243,8 @@ def _veg_feature_sig():
         _point_trees_enabled(),
         _osm_forest_rescue_enabled(),
         _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
+        _canopy_enabled(), CANOPY_MIN_TREE_H_M, CANOPY.INFER_ZL,
+        ROW_MAX_WIDTH_M, ROW_MIN_LENGTH_M, ROW_MIN_AREA_M2,
         SEGFORMER.tree_support_enabled(),
         tuple(sorted(SIMHEAVEN_ROAD_HALF_WIDTH_M.items())),
         POINT_TREE_MAX_AREA_M2, POINT_TREE_SPACING_M, POINT_TREE_MIN_DEPTH_M,
@@ -1899,6 +1936,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 '_vegtree.npy',
                 f'_z{VEG_INFER_MAX_ZL}_veg.npy',
                 f'_z{VEG_INFER_MAX_ZL}_vegtree.npy',
+                '_vegcanopy.npy',
                 '_road.pkl',
                 '_bld.pkl',
                 '_vegaux.pkl',
@@ -1996,6 +2034,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
 
     device = __import__('torch').device('cuda' if __import__('torch').cuda.is_available() else 'cpu')
     model = proc = None
+    canopy_model = None
+    canopy_tried = False
 
     tile_center_lat = lat + 0.5
     tile_center_lon = lon + 0.5
@@ -2024,6 +2064,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'dsf_text': 0.0,
         'dsf_compile': 0.0,
         'bld_wait': 0.0,
+        'canopy': 0.0,
     }
 
     # ── Pre-load road / network exclusion sources ────────────────────────────
@@ -2445,6 +2486,31 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if grass_hook is not None and grass_hook.wants(fname):
             grass_hook.take_class_map(fname, veg_map)
 
+        # Airport-zone textures: canopy height from the ortho decides the trees.
+        canopy_heights = None
+        canopy_path = os.path.join(cache_dir, fname.replace('.dds', '_vegcanopy.npy'))
+        if infer_factor > 1 and _canopy_enabled() and not mesh_water_full:
+            if not disable_cache and os.path.exists(canopy_path):
+                canopy_heights = np.load(canopy_path)
+            else:
+                if not canopy_tried:
+                    canopy_tried = True
+                    canopy_model = CANOPY.CanopyModel.load(CANOPY.default_model_dir(cache_dir))
+                if canopy_model is not None:
+                    if img is None:
+                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                    if img is not None:
+                        _t = time.perf_counter()
+                        try:
+                            canopy_heights = canopy_model.heights(img, zl)
+                        except Exception as exc:
+                            print(f"    [Canopy] {fname}: failed ({exc}); SegFormer trees "
+                                  f"for the rest of this tile", flush=True)
+                            canopy_model = None
+                        timings['canopy'] += time.perf_counter() - _t
+                        if canopy_heights is not None and not disable_cache:
+                            np.save(canopy_path, canopy_heights)
+
         if disable_cache:
             veg_cache_stat = None
         else:
@@ -2454,6 +2520,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 if tree_support is not None:
                     _ts_st = os.stat(tree_support_path)
                     veg_cache_stat += (_ts_st.st_mtime_ns, _ts_st.st_size)
+                if canopy_heights is not None:
+                    _cn_st = os.stat(canopy_path)
+                    veg_cache_stat += (_cn_st.st_mtime_ns, _cn_st.st_size)
             except OSError:
                 veg_cache_stat = None
 
@@ -2493,9 +2562,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             m = cv2.morphologyEx(m,   cv2.MORPH_OPEN,  ko)
             return m
 
-        tree_raw  = (veg_map == SEGFORMER.CLASS_TREE)
+        tree_raw = (veg_map == SEGFORMER.CLASS_TREE)
         if tree_support is not None:
             tree_raw = tree_raw | tree_support
+        if canopy_heights is not None:
+            rows = _narrow_rows(_morph(tree_raw.astype(np.uint8)), mpp)
+            tree_raw = CANOPY.tree_mask(canopy_heights, (img_h, img_w), CANOPY_MIN_TREE_H_M) | rows
         tree_raw = tree_raw.astype(np.uint8)
         tree_mask = _morph(tree_raw)
 
@@ -2761,7 +2833,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         # Canopy SegFormer misread inside an OSM forest; the exclusions below
         # (mesh water, roads, buildings, airport zones) still cut it back.
         _osm_forest = local_context_masks.get('forest')
-        if _osm_forest is not None and _osm_forest_rescue_enabled():
+        if _osm_forest is not None and _osm_forest_rescue_enabled() and canopy_heights is None:
             rescue = (
                 _osm_forest.astype(bool)
                 & np.isin(veg_map, OSM_FOREST_RESCUE_CLASSES)
@@ -3078,7 +3150,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"contours={timings['contours']:.1f}s  "
         f"dsf_text={timings['dsf_text']:.1f}s  "
         f"dsf_compile={timings['dsf_compile']:.1f}s  "
-        f"bld_wait={timings['bld_wait']:.1f}s"
+        f"bld_wait={timings['bld_wait']:.1f}s  "
+        f"canopy={timings['canopy']:.1f}s"
     )
 
     _print_tile_summary(n_tree, n_grass)

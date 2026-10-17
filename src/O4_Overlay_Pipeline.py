@@ -873,7 +873,8 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
         if veg_disable_cache:
             _purge_overlay_cache(
                 cache_dir,
-                ['*_veg.npy', '*_vegtree.npy', '*_vegaux.pkl', '*_vegpoly.pkl', '*_grasscls.npy'],
+                ['*_veg.npy', '*_vegtree.npy', '*_vegcanopy.npy', '*_vegaux.pkl', '*_vegpoly.pkl',
+                 '*_grasscls.npy'],
                 'veg',
             )
         else:
