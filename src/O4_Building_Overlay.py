@@ -853,7 +853,11 @@ def _rasterize_mesh_water_mask(mesh_water_index, lat_n, lat_s, lon_w, lon_e,
     if not bool(np.any(intersects)):
         return None
     mask = np.zeros((img_h, img_w), dtype=np.uint8)
-    cv2.fillPoly(mask, [np.ascontiguousarray(poly) for poly in pts[intersects]], 1)
+    # One triangle at a time: a single fillPoly over all of them slows down
+    # about quadratically with their number (a Taihu shore texture of +30+120
+    # has 974k mesh water triangles: 854 s, against 1 s this way).
+    for tri in pts[intersects]:
+        cv2.fillConvexPoly(mask, tri, 1)
     return mask
 
 
