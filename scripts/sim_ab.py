@@ -31,10 +31,13 @@ The grass swap expects the grass inside the veg DSF, i.e. a tile built before
 the grass got its own pack (yOrtho4XP_Grass_Overlays, 890d523b).
 
 trees-build regenerates the trees of the tile's ZL18/19 textures (the
-airport zones, where trees come from the canopy-height model) with THIS
-checkout's vegetation overlay, twice: 'off' = single trees and forests as
-X-Plane's full-height climate forests, 'on' = sized single-species trees and
-shorter forest copies (veg_tree_sizes / veg_forest_heights).  Each result
+airport zones) with THIS checkout's vegetation overlay, twice: 'off' = the
+canopy-height model decides trees on the whole texture and single trees and
+forests are X-Plane's full-height climate forests, 'on' = the canopy model
+decides trees only inside airport boundaries, sized single-species trees and
+shorter forest copies from canopy height, and trees under runway approaches
+capped by the approach surface (veg_tree_sizes / veg_forest_heights /
+veg_approach_heights).  Each result
 replaces the copied veg DSF's polygons centred inside those textures; the
 rest of the tile, grass included, stays as built.  The shorter forests come
 from an O4XP_Forest_Heights library written under --out; install links it
@@ -63,6 +66,9 @@ INSTALLED_CFG = r"G:\Dev\Ortho4XP\_internal\Ortho4XP_Data\Ortho4XP.cfg"
 CANOPY_MODEL_DIR = r"E:\Ortho4XP_Review\veg_alt\chm_model\ckpt"
 LEAF_TYPE_CACHE = r"E:\Ortho4XP_Review\_cache\w0\_leaf_type"
 FOREST_PACK = "O4XP_Forest_Heights"
+# A real O4XP_Forest_Heights written by tile builds is moved here while the
+# A/B is installed (the real veg pack, its only user, is disabled meanwhile).
+FOREST_HIDDEN = FOREST_PACK + ".hidden_by_sim_ab"
 VEG_PACK = "yOrtho4XP_Veg_Overlays"
 NVCOMPRESS = os.path.join(ROOT, "Utils", "win", "nvcompress", "nvcompress.exe")
 DSFTOOL = os.path.join(ROOT, "Utils", "win", "DSFTool.exe")
@@ -249,8 +255,10 @@ def cmd_build(n, args):
 
 
 # ── trees ────────────────────────────────────────────────────────────────────
-TREE_VARIANTS = {"off": {"O4_VEG_TREE_SIZES": "0", "O4_VEG_FOREST_HEIGHTS": "0"},
-                 "on": {"O4_VEG_TREE_SIZES": "1", "O4_VEG_FOREST_HEIGHTS": "1"}}
+TREE_VARIANTS = {"off": {"O4_VEG_TREE_SIZES": "0", "O4_VEG_FOREST_HEIGHTS": "0",
+                         "O4_VEG_APPROACH_HEIGHTS": "0", "O4_VEG_CANOPY_AIRPORTS_ONLY": "0"},
+                 "on": {"O4_VEG_TREE_SIZES": "1", "O4_VEG_FOREST_HEIGHTS": "1",
+                        "O4_VEG_APPROACH_HEIGHTS": "1", "O4_VEG_CANOPY_AIRPORTS_ONLY": "1"}}
 
 
 def installed_veg_settings():
@@ -487,6 +495,15 @@ def cmd_install(n, args):
     if not s:
         sys.exit("build first")
     forest = os.path.isfile(os.path.join(n.forest_dir, "library.txt"))
+    path, lines = read_ini(n)
+    if forest:
+        real = os.path.join(n.cs, FOREST_PACK)
+        if os.path.isdir(real) and os.path.realpath(real) == os.path.abspath(real):
+            os.rename(real, os.path.join(n.cs, FOREST_HIDDEN))
+            s["forest_real_hidden"] = True
+            s["forest_line_existed"] = n.ini_line(FOREST_PACK) in [ln.strip() for ln in lines]
+            save_state(n, s)
+            print(f"moved the real {FOREST_PACK} aside to {FOREST_HIDDEN} until uninstall")
     links = [(n.tile_pack, n.tile_dir), (n.veg_pack, n.veg_dir)]
     if forest:
         links.append((FOREST_PACK, n.forest_dir))
@@ -494,7 +511,6 @@ def cmd_install(n, args):
         link = os.path.join(n.cs, pack)
         if not os.path.exists(link):
             subprocess.run(["cmd", "/c", "mklink", "/J", link, target], check=True, stdout=subprocess.DEVNULL)
-    path, lines = read_ini(n)
     out = []
     for line in lines:
         if line.strip() in (n.ini_line(n.tile_pack), n.ini_line(n.veg_pack), n.ini_line(FOREST_PACK)):
@@ -525,9 +541,10 @@ def cmd_uninstall(n, args):
     path, lines = read_ini(n)
     out = []
     for line in lines:
-        if line.strip() in (n.ini_line(n.tile_pack), n.ini_line(n.veg_pack)):
-            continue
-        if line.strip() == n.ini_line(FOREST_PACK) and s.get("forest_pack_installed"):
+        if line.strip() in (n.ini_line(n.tile_pack), n.ini_line(n.veg_pack), n.ini_line(FOREST_HIDDEN)):
+            continue                                   # X-Plane lists the moved-aside folder as a pack
+        if (line.strip() == n.ini_line(FOREST_PACK) and s.get("forest_pack_installed")
+                and not s.get("forest_line_existed")):
             continue
         if line.strip() == n.ini_line(VEG_PACK, enabled=False) and s.get("veg_disabled_by_us"):
             line = n.ini_line(VEG_PACK)
@@ -539,7 +556,13 @@ def cmd_uninstall(n, args):
         link = os.path.join(n.cs, pack)
         if os.path.isdir(link) and os.path.realpath(link) != os.path.abspath(link):
             os.rmdir(link)                              # removes the junction only
-    s.update(installed=False, veg_disabled_by_us=False, forest_pack_installed=False)
+    hidden = os.path.join(n.cs, FOREST_HIDDEN)
+    if s.get("forest_real_hidden") and os.path.isdir(hidden) and not os.path.exists(
+            os.path.join(n.cs, FOREST_PACK)):
+        os.rename(hidden, os.path.join(n.cs, FOREST_PACK))
+        print(f"put the real {FOREST_PACK} back")
+    s.update(installed=False, veg_disabled_by_us=False, forest_pack_installed=False,
+             forest_real_hidden=False, forest_line_existed=False)
     save_state(n, s)
     print(f"uninstalled; {VEG_PACK} re-enabled. Test data stays in {n.out}")
 

@@ -15,6 +15,8 @@ Per airport:
       - row 110 pavement (taxiways, aprons, shoulders): its boundary loops,
         Bezier edges sampled; the first loop is the outline, later loops holes;
   * boundaries: the row 130 airport boundary polygons, same form;
+  * runways: each row 100 land runway's two thresholds (Runway: position,
+    displaced-threshold length and marking code of each end, width);
   * draped pavement polygons (.pol) in the DSFs of the airport's own pack,
     which apt.dat does not list (pack_pavement);
   * centre and reach: the mean pavement point and the distance from it to the
@@ -29,7 +31,7 @@ from collections import namedtuple
 
 EARTH_M_PER_DEG_LAT = 110574.0
 BEZIER_STEPS = 8
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 # Shoulder codes from before XP12 carry no width: assume the ICAO-typical
 # 7.5 m a side (60 m over all for a 45 m runway).
 LEGACY_SHOULDER_M = 7.5
@@ -38,7 +40,11 @@ LEGACY_SHOULDER_M = 7.5
 PAVEMENT_POL_RE = re.compile(r"pavement|asphalt|concrete|tarmac|apron|taxiway|runway|"
                              r"lib/airport/(markings|lines)/", re.I)
 
-Airport = namedtuple("Airport", "icao pack pavement boundaries lat lon reach_m pack_dir")
+Airport = namedtuple("Airport", "icao pack pavement boundaries lat lon reach_m pack_dir runways")
+# One land runway: per end (1, 2) the runway end, displaced threshold length (m)
+# and apt.dat marking code (0 none, 1 visual, 2 non-precision, 3 precision,
+# 4 UK non-precision, 5 UK precision, 6 EASA non-precision, 7 EASA precision).
+Runway = namedtuple("Runway", "width lat1 lon1 disp1 mark1 lat2 lon2 disp2 mark2")
 
 
 def _m_per_deg_lon(lat):
@@ -106,7 +112,13 @@ def _bezier_ring(nodes):
 
 def parse_apt_dat(path):
     """Yield (icao, pavement, boundaries) for every airport in one apt.dat."""
-    icao, pavement, boundaries = None, [], []
+    for icao, pavement, boundaries, _runways in parse_airports(path):
+        yield icao, pavement, boundaries
+
+
+def parse_airports(path):
+    """Yield (icao, pavement, boundaries, runways) for every airport in one apt.dat."""
+    icao, pavement, boundaries, runways = None, [], [], []
     loops, nodes, in_pavement, in_boundary = [], [], False, False
 
     def close_loops():
@@ -126,9 +138,9 @@ def parse_apt_dat(path):
             if code in ("1", "16", "17", "99"):
                 close_loops()
                 if icao is not None:
-                    yield icao, pavement, boundaries
+                    yield icao, pavement, boundaries, runways
                 icao = parts[4] if len(parts) > 4 and code != "99" else None
-                pavement, boundaries = [], []
+                pavement, boundaries, runways = [], [], []
                 continue
             if icao is None:
                 continue
@@ -158,6 +170,9 @@ def parse_apt_dat(path):
                     r = _runway_rect(width, lat1, lon1, blast1, lat2, lon2, blast2)
                     if r:
                         pavement.append((r, []))
+                        runways.append(Runway(float(parts[1]), lat1, lon1, float(parts[11]),
+                                              int(float(parts[13])), lat2, lon2, float(parts[20]),
+                                              int(float(parts[22]))))
                 elif code == "102":
                     pavement.append((_helipad_rect(float(parts[2]), float(parts[3]), float(parts[4]),
                                                    float(parts[5]), float(parts[6])), []))
@@ -165,7 +180,7 @@ def parse_apt_dat(path):
                 pass
     close_loops()
     if icao is not None:
-        yield icao, pavement, boundaries
+        yield icao, pavement, boundaries, runways
 
 
 def _apt_sources(xplane_dir):
@@ -202,7 +217,7 @@ def airports_near(xplane_dir, lat0, lon0, radius_m, log=print):
         try:
             if not os.path.isfile(apt):
                 continue
-            for icao, pavement, bounds in parse_apt_dat(apt):
+            for icao, pavement, bounds, runways in parse_airports(apt):
                 if icao in seen or not pavement or not _near(pavement, lat0, lon0, radius_m):
                     continue
                 seen.add(icao)
@@ -212,7 +227,8 @@ def airports_near(xplane_dir, lat0, lon0, radius_m, log=print):
                 kx = _m_per_deg_lon(clat)
                 reach = max(math.hypot((p[0] - clon) * kx, (p[1] - clat) * EARTH_M_PER_DEG_LAT) for p in pts)
                 pack_dir = os.path.dirname(os.path.dirname(apt)) if name != "Global Airports" else None
-                out.append(Airport(icao, name, pavement, bounds, clat, clon, reach, pack_dir))
+                out.append(Airport(icao, name, pavement, bounds, clat, clon, reach, pack_dir,
+                                   list(runways)))
         except OSError as exc:                   # unreadable disk sectors: skip, don't abort
             log(f"apt.dat unreadable, skipped: {apt}: {exc}")
     return out

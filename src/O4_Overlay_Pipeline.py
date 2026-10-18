@@ -272,6 +272,7 @@ def _veg_tree_env():
         "O4_VEG_HOLE_UNSURE_CELLS": repr(max(0.0, float(veg_hole_unsure_cells))),
         "O4_VEG_TREE_SIZES": "1" if veg_tree_sizes else "0",
         "O4_VEG_FOREST_HEIGHTS": "1" if veg_forest_heights else "0",
+        "O4_VEG_APPROACH_HEIGHTS": "1" if veg_approach_heights else "0",
     }
 
 
@@ -300,8 +301,9 @@ veg_point_tree_max_cells = 2.0   # in grid cells of the forest's own spacing
 veg_hole_certain_cells = 1.0
 veg_hole_unsure_cells = 2.0
 veg_forest_hole_min_m2 = 200.0   # legacy, unused
-veg_tree_sizes    = False   # ZL18/19 single trees sized from canopy height
-veg_forest_heights = False  # ZL18/19 shorter copies of the climate forests
+veg_tree_sizes    = True    # ZL18/19 single trees sized from canopy height
+veg_forest_heights = True   # ZL18/19 shorter copies of the climate forests
+veg_approach_heights = True  # trees under runway approaches below the approach surface
 veg_avoid_gfv2    = False
 veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False

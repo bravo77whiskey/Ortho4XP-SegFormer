@@ -325,21 +325,26 @@ def tree_height(path):
     global _XP_EXPORTS
     if path in _TREE_H:
         return _TREE_H[path]
-    m = re.match(r"^" + re.escape(FOREST_HEIGHTS.VIRTUAL_PREFIX) + r"h(\d+)/", path)
-    height = float(m.group(1)) if m else None
+    copy = FOREST_HEIGHTS.parse_virtual(path)
+    height = copy[2] if copy and copy[1] == "h" else None
+    cap = copy[2] if copy and copy[1] in "cs" and copy[2] else None
     if height is None:
+        source = copy[0] if copy else path
         if _XP_EXPORTS is None:
             cs = getattr(CFG, "custom_scenery_dir", "") or ""
             xp = FOREST_HEIGHTS.xp_forests_dir(cs) if cs else ""
             lib = os.path.join(xp, "library.txt")
             _XP_EXPORTS = (xp, FOREST_HEIGHTS.read_exports(lib) if os.path.isfile(lib) else {})
         xp, exports = _XP_EXPORTS
-        seasons = exports.get(path) or {}
+        seasons = exports.get(source) or {}
         rel = seasons.get("sum") or seasons.get("") or next(iter(seasons.values()), None)
         if rel:
             try:
                 with open(os.path.join(xp, rel), encoding="utf-8", errors="ignore") as f:
-                    height = FOREST_HEIGHTS.canopy_mean_height(f.read())
+                    text = f.read()
+                if cap is not None:
+                    text = FOREST_HEIGHTS.cap_trees(text, cap)
+                height = FOREST_HEIGHTS.canopy_mean_height(text)
             except OSError:
                 height = None
     _TREE_H[path] = round(height, 1) if height else None

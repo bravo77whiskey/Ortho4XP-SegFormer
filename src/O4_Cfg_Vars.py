@@ -523,11 +523,12 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "veg_canopy",
-        "hint": "At ZL18 and ZL19 (airport zones), take trees from canopy "
-                "height measured on the ortho (Meta/WRI canopy-height model) "
-                "instead of the land-cover classes, which read airfield grass "
-                "as trees. Needs CUDA; the 3.1 GB model downloads once into "
-                "Overlay_cache/_canopy_height.",
+        "hint": "Measure canopy height on ZL18 and ZL19 textures (Meta/WRI "
+                "canopy-height model). Inside airport boundaries it decides "
+                "where trees are, instead of the land-cover classes, which read "
+                "airfield grass as trees; everywhere on those textures it sizes "
+                "the trees (veg_tree_sizes, veg_forest_heights). Needs CUDA; the "
+                "3.1 GB model downloads once into Overlay_cache/_canopy_height.",
     },
     "veg_canopy_min_conf": {
         "type": float,
@@ -592,24 +593,37 @@ cfg_tile_vars = {
     },
     "veg_tree_sizes": {
         "type": bool,
-        "default": False,
+        "default": True,
         "short_name": "veg_tree_sizes",
         "hint": "ZL18/19: plant single trees as X-Plane's sized single-species "
                 "trees (small to tall oak, pine, kapok... as X-Plane plants in "
                 "that climate), sized to the canopy height measured at each "
-                "crown, instead of the full-height climate forest. Off by default: "
-                "X-Plane fades small trees out much nearer the camera, so "
-                "shorter trees thin out the view from a distance.",
+                "crown, instead of the full-height climate forest. ZL16/17 "
+                "imagery is too coarse to measure heights on.",
     },
     "veg_forest_heights": {
         "type": bool,
-        "default": False,
+        "default": True,
         "short_name": "veg_forest_h",
         "hint": "ZL18/19: give forests whose measured canopy is well under "
                 "X-Plane's climate forest a copy of that forest with shorter "
-                "canopy trees (6, 9, 12 or 15 m). The copies are written into "
-                "the O4XP_Forest_Heights library pack in Custom Scenery. Off by "
-                "default for the same reason as veg_tree_sizes.",
+                "trees (canopy 6, 9, 12 or 15 m), and forests measured under 5 m "
+                "(X-Plane's smallest tree) its shrubs of the nearest size. The "
+                "copies are written into the O4XP_Forest_Heights library pack in "
+                "Custom Scenery.",
+    },
+    "veg_approach_heights": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_approach_h",
+        "hint": "Keep trees under runway approaches below the ICAO approach "
+                "surface: from the inner edge 30-60 m before the threshold the "
+                "allowed height rises with the surface's slope (2-5 % by runway "
+                "length and approach type), so trees get gradually shorter "
+                "towards the runway; the tallest trees fit from about 2.3 km "
+                "out. Under 9 m they become shrubs of the size that fits, and "
+                "nearest the threshold 1 m shrubs. Uses forest copies in the "
+                "O4XP_Forest_Heights pack.",
     },
     "veg_avoid_gfv2": {
         "type": bool,
@@ -965,6 +979,7 @@ list_veg_vars = [
     "veg_hole_unsure_cells",
     "veg_tree_sizes",
     "veg_forest_heights",
+    "veg_approach_heights",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",

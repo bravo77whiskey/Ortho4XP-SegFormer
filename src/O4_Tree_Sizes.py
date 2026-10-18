@@ -88,8 +88,21 @@ _CONI_DRY = {"wrm": ("pine",)}
 _SHRUB_BY_FAMILY = {"broad": ("shrub",), "coni": ("pine_shrub",), "mixed": ("shrub", "pine_shrub")}
 _TROPICAL = ("hot", "vhot")
 
+# Tallest tree of X-Plane's hot-band shrub forests (lib/g8/shrb_{hot,vhot}_*).
+TROPICAL_SHRUB_MAX_M = 6.0
+
+# Under runway approaches a height limit below SHRUB_CAP_M plants shrubs
+# instead of cut-down trees (shrub_path), and where vegetation is found no
+# limit plants less than SHRUB_FLOOR_M of shrub, the inner strip before the
+# threshold included.
+SHRUB_CAP_M = 9.0
+SHRUB_FLOOR_M = 1.0
+# Smallest single-species tree X-Plane has (maple / black locust small, 5 m);
+# forests whose canopy is measured lower are planted as shrubs (shrub_for_height).
+MIN_TREE_ASSET_M = 5.0
+
 # Bump when the tables or the rule change: part of the polygon cache key.
-SIGNATURE = "tree-sizes-v1"
+SIGNATURE = "tree-sizes-v3"
 
 # Below this the canopy network did not see a tree at the crown (SegFormer
 # rows, height-gated SegFormer trees): the tree keeps the forest it had.
@@ -99,12 +112,52 @@ SPECIES_TOLERANCE_M = 1.0
 
 
 _G8_RE = re.compile(r"^lib/g8/(broad|coni|mixed)_(vcld|cld|tmp|wrm|hot|vhot)_(dry|sdry|wet|rain)\.for$")
+_G8_ANY_RE = re.compile(r"^lib/g8/([a-z_]+?)_(vcld|cld|tmp|wrm|hot|vhot)_(dry|sdry|wet|rain)\.for$")
 
 
 def band_of_path(path):
     """(family, temp, moist) of an X-Plane climate forest path, else None."""
     match = _G8_RE.match(str(path or "").replace("\\", "/"))
     return match.groups() if match else None
+
+
+def _shrub_sizes(path):
+    """(tropical shrub forest or None, sized shrubs) for a tree polygon of forest ``path``.
+
+    Hot bands take their own shrub forest (lib/g8/shrb_*); elsewhere conifer
+    forests take X-Plane's pine shrubs and the rest its deciduous shrubs.
+    """
+    m = _G8_ANY_RE.match(str(path or "").replace("\\", "/"))
+    family, temp, moist = m.groups() if m else ("broad", None, None)
+    if temp in _TROPICAL:
+        return f"lib/g8/shrb_{temp}_{moist}.for", ()
+    return None, SIZED_SPECIES["pine_shrub" if family == "coni" else "shrub"]
+
+
+def shrub_path(path, cap_m):
+    """The shrubs that replace a tree polygon of ``path`` where nothing may be taller than ``cap_m``:
+    the largest size that can still grow under the cap (the caller cuts it down
+    to the cap where its tallest shrubs overtop it)."""
+    tropical, sizes = _shrub_sizes(path)
+    if tropical:
+        return tropical
+    fits = [size for size in sizes if size[1] < cap_m]
+    return (fits[-1] if fits else sizes[0])[0]
+
+
+def shrub_for_height(path, height_m):
+    """The shrubs that replace a tree polygon of ``path`` whose canopy is ``height_m`` tall:
+    the size whose height range is nearest."""
+    tropical, sizes = _shrub_sizes(path)
+    if tropical:
+        return tropical
+    return min(sizes, key=lambda size: (_size_miss(height_m, size[1], size[2]), size[1]))[0]
+
+
+def fits_under(path, cap_m):
+    """True for a sized tree or shrub whose tallest tree is at most ``cap_m``."""
+    return any(p == path and hi <= cap_m + 1e-6
+               for sizes in SIZED_SPECIES.values() for p, _lo, hi in sizes)
 
 
 def species_pool(family, temp, moist):
@@ -122,28 +175,37 @@ def _size_miss(height, lo, hi):
     return 0.0 if lo <= height <= hi else min(abs(height - lo), abs(height - hi))
 
 
-def sized_tree_path(family, temp, moist, height, rng=None):
+def sized_tree_path(family, temp, moist, height, rng=None, max_h=None):
     """Sized single-tree path for a crown ``height`` m tall, or None.
 
     None when the family has no sized species in that band; the caller keeps
     its forest path. In hot bands, trees shorter than the smallest sized
-    species take the band's own shrub forest.
+    species take the band's own shrub forest. With ``max_h`` only sizes
+    whose tallest tree is at most that tall qualify (None when none does).
     """
     if family not in ("broad", "coni", "mixed") or height < MIN_MEASURED_H_M:
         return None
     pool = species_pool(family, temp, moist)
     if not pool:
         return None
+    if max_h is not None:
+        height = min(height, max_h)
     if temp in _TROPICAL:
         smallest = min(SIZED_SPECIES[s][0][1] for s in pool)
         if height < smallest - SPECIES_TOLERANCE_M:
+            if max_h is not None and max_h < TROPICAL_SHRUB_MAX_M:
+                return None
             return f"lib/g8/shrb_{temp}_{moist}.for"
     else:
         pool = pool + _SHRUB_BY_FAMILY[family]
     best = {}
     for name in pool:
-        best[name] = min((_size_miss(height, lo, hi), path)
-                         for path, lo, hi in SIZED_SPECIES[name])
+        sizes = [(_size_miss(height, lo, hi), path) for path, lo, hi in SIZED_SPECIES[name]
+                 if max_h is None or hi <= max_h + 1e-6]
+        if sizes:
+            best[name] = min(sizes)
+    if not best:
+        return None
     floor = min(miss for miss, _p in best.values())
     choices = sorted(path for miss, path in best.values() if miss <= floor + SPECIES_TOLERANCE_M)
     if rng is None or len(choices) == 1:

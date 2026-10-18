@@ -536,7 +536,7 @@ class ForestAssetPolicyTests(unittest.TestCase):
         self.assertNotEqual(dominant_key, other_dominant_key)
         self.assertNotEqual(dominant_key, closest_key)
         self.assertNotEqual(climate_key, covered_key)
-        self.assertEqual(climate_key["version"], 8)
+        self.assertEqual(climate_key["version"], 9)
 
     def test_dominant_simheaven_path_ignores_non_tree_votes(self):
         records = [

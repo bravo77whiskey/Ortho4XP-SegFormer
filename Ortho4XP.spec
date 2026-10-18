@@ -50,6 +50,7 @@ added_datas = [
 OVERLAY_MODULES = [
     "O4_Agri_Structures",
     "O4_Airport_Zones",
+    "O4_Approach_Heights",
     "O4_Apt_Pavement",
     "O4_Asset_Inventory",
     "O4_Bld_Overlap_Facades",
