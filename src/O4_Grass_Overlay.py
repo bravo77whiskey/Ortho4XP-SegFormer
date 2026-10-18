@@ -14,8 +14,10 @@ Where grass grows, per pixel:
     SegFormer put in a non-vegetation class;
   * the Koppen regime decides how much the ortho must show -- desert: green
     only; steppe: non-green vegetation becomes sparse grass;
-  * never on apt.dat pavement (runways with blast pads, helipads, taxiways,
-    aprons, shoulders) or on the simHeaven road/rail network;
+  * never on airport pavement -- apt.dat runways with their blast pads and
+    shoulders, helipads, taxiways and aprons, plus the draped pavement
+    polygons in the airport pack's own DSF -- or on the simHeaven road/rail
+    network; outlines simplified across pavement are traced again finely;
   * only inside airport zones: each airport's apt.dat boundary, or without
     one a circle to its furthest pavement point, grown by a buffer -- or
     anywhere in the tile with full_tile set.
@@ -248,11 +250,20 @@ def pavement_mask(pavement, bbox, h, w, mpp, buffer_m=2.0):
         o = np.asarray(outer)
         if o[:, 0].max() < lon_w or o[:, 0].min() > lon_e or o[:, 1].max() < lat_s or o[:, 1].min() > lat_n:
             continue
-        one = np.zeros((h, w), np.uint8)
-        cv2.fillPoly(one, [_to_px(o[:, 0], o[:, 1], bbox, h, w)], 1)
-        if holes:
-            cv2.fillPoly(one, [_to_px(np.asarray(r)[:, 0], np.asarray(r)[:, 1], bbox, h, w) for r in holes], 0)
-        mask |= one
+        po = _to_px(o[:, 0], o[:, 1], bbox, h, w)
+        if not holes:
+            cv2.fillPoly(mask, [po], 1)
+            continue
+        # Holes clear only this polygon: work in its own crop.
+        x0, y0 = np.maximum(po.min(0), 0)
+        x1, y1 = np.minimum(po.max(0) + 1, (w, h))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        one = np.zeros((y1 - y0, x1 - x0), np.uint8)
+        cv2.fillPoly(one, [po - (x0, y0)], 1)
+        cv2.fillPoly(one, [_to_px(np.asarray(r)[:, 0], np.asarray(r)[:, 1], bbox, h, w) - (x0, y0)
+                           for r in holes], 0)
+        mask[y0:y1, x0:x1] |= one
     if mask.any() and buffer_m > 0:
         r = max(1, int(round(buffer_m / mpp)))
         mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
@@ -486,9 +497,16 @@ def _pass1(src):
     L = cv2.cvtColor(img.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
     grass, sparse = fused_grass(L, cls, mpp, climate, s.green_chroma)
     del cls
+    # Hard ground: pavement and roads as drawn, never under grass even after
+    # the outlines are simplified; the grass keeps pave_buffer_m off it.
+    hard = _W["roads"].mask(bbox, h, w)
     if _W["pavement"]:
-        grass &= ~pavement_mask(_W["pavement"], bbox, h, w, mpp, s.pave_buffer_m)
-    grass &= ~_W["roads"].mask(bbox, h, w)
+        pave = pavement_mask(_W["pavement"], bbox, h, w, mpp, 0)
+        hard |= pave
+        r = max(1, int(round(s.pave_buffer_m / mpp)))
+        grass &= ~cv2.dilate(pave.astype(np.uint8),
+                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))).astype(bool)
+    grass &= ~hard
     sel = grass & inside & owned & np.repeat(np.repeat(zone_c, c, 0), c, 1)[:h, :w]
     sparse &= sel
     if not sel.any():
@@ -503,8 +521,30 @@ def _pass1(src):
                 grass_km2=float(sel.sum()) * mpp * mpp / 1e6, sparse_km2=float(sparse.sum()) * mpp * mpp / 1e6)
     # Masks wait on disk for pass 2: a whole tile of them is gigabytes.
     spill = os.path.join(_W["spill_dir"], key + "_grass1.npz")
-    np.savez(spill, sel=np.packbits(sel), sparse=np.packbits(sparse), S=vals, sel_c=np.packbits(sel_c))
+    np.savez(spill, sel=np.packbits(sel), sparse=np.packbits(sparse), hard=np.packbits(hard), S=vals,
+             sel_c=np.packbits(sel_c))
     return {"meta": meta, "spill": spill, "sample": sample}
+
+
+def _simplify(ring, eps):
+    simple = cv2.approxPolyDP(ring, eps, True)
+    while len(simple) > MAX_RING_PTS:
+        eps *= 2
+        simple = cv2.approxPolyDP(ring, eps, True)
+    return simple
+
+
+def _covers(rings, hard, x0, y0):
+    """True when the polygon (outer ring, then holes) reaches a hard pixel of
+    the crop starting at (x0, y0)."""
+    m = np.zeros(hard.shape, np.uint8)
+    outer = [r.reshape(-1, 2) - (x0, y0) for r in rings if len(r) >= 3]
+    if not outer:
+        return False
+    cv2.fillPoly(m, outer[:1], 1)
+    if len(outer) > 1:
+        cv2.fillPoly(m, outer[1:], 0)
+    return bool((m.view(bool) & hard).any())
 
 
 def _pass2(job):
@@ -521,6 +561,7 @@ def _pass2(job):
 
     sel = unpack(z["sel"], h * w, (h, w))
     sparse = unpack(z["sparse"], h * w, (h, w))
+    hard = unpack(z["hard"], h * w, (h, w))
     sel_c = unpack(z["sel_c"], hc * wc, (hc, wc))
     lbl_c = np.full((hc, wc), -1, np.int32)
     lbl_c[sel_c] = assign(z["S"].astype(np.float32), centres)
@@ -530,6 +571,7 @@ def _pass2(job):
     lat_s, lon_w, lat_n, lon_e = t["bbox"]
     ym_n, ym_s = merc_y(lat_n), merc_y(lat_s)
     eps = max(0.5, s.simplify_m / t["mpp"])
+    eps_fine = 0.5                          # through the boundary pixels' centres: stays on grass
     min_px = s.min_m2 / t["mpp"] ** 2
     min_cells = s.min_m2 / (t["mpp"] * c) ** 2
     sparse_den = max(1, min(255, int(round(s.sparse_density * 255))))
@@ -559,6 +601,7 @@ def _pass2(job):
             piece = cc[cy0:cy0 + chh, cx0:cx0 + cw] == i
             lk = np.repeat(np.repeat(piece, c, 0), c, 1)[:y1 - y0, :x1 - x0] & sel[y0:y1, x0:x1]
             sp = sparse[y0:y1, x0:x1]
+            hd = hard[y0:y1, x0:x1]
             for den, part in ((255, lk & ~sp), (sparse_den, lk & sp)):
                 if not part.any():
                     continue
@@ -575,15 +618,15 @@ def _pass2(job):
                             holes.append((a, cnts[chn]))
                         chn = hier[0][chn][0]
                     holes.sort(key=lambda x: -x[0])
+                    rings = [cn] + [hh for _, hh in holes[:MAX_HOLES]]
+                    simple = [_simplify(r, eps) for r in rings]
+                    if hd.any() and _covers(simple, hd, x0, y0):
+                        # A simplified edge cut across pavement or a road.
+                        simple = [_simplify(r, eps_fine) for r in rings]
                     body = []
-                    for r in [cn] + [hh for _, hh in holes[:MAX_HOLES]]:
-                        e = eps
-                        simple = cv2.approxPolyDP(r, e, True)
-                        while len(simple) > MAX_RING_PTS:
-                            e *= 2
-                            simple = cv2.approxPolyDP(r, e, True)
-                        if len(simple) >= 3:
-                            txt, n = winding(simple)
+                    for sr in simple:
+                        if len(sr) >= 3:
+                            txt, n = winding(sr)
                             body.append(txt)
                             n_pts += n
                     if body:
@@ -689,6 +732,9 @@ class GrassHook:
         roads = BLD._load_simheaven_network(self.custom_scenery_dir, self.lat, self.lon,
                                             self.dsftool_path, self.cache_dir) if self.dsftool_path else []
         pavement = [p for a in self.airports for p in a.pavement]
+        if self.dsftool_path:
+            pavement += APT.pack_pavement(self.airports, self.lat, self.lon, self.dsftool_path,
+                                          self.cache_dir, log=self.log)
         cfg = dict(lat=self.lat, lon=self.lon, settings=s, airports=self.airports, pavement=pavement,
                    roads_raw=[r for r in roads if r.get("type") in ROAD_HALF_WIDTH_M], spill_dir=self.cache_dir)
         workers = s.workers or max(2, min(8, (os.cpu_count() or 4) - 4))

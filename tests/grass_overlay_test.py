@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +79,17 @@ class AptParseTest(unittest.TestCase):
         # The Bezier node is sampled into extra points along its edge.
         self.assertGreater(len(apron_outer), 4)
 
+    def test_runway_shoulders_widen_the_runway(self):
+        self.assertEqual(APT.shoulder_width_m(0), 0.0)
+        self.assertEqual(APT.shoulder_width_m(753), 7.0)        # XP12: 7 m of surface 53
+        self.assertEqual(APT.shoulder_width_m(1529), 15.0)
+        self.assertEqual(APT.shoulder_width_m(1), APT.LEGACY_SHOULDER_M)
+        path = os.path.join(self.tmp.name, "shoulders.dat")
+        _write(path, APT_DAT.replace("100 30.00 1 0 ", "100 30.00 1 853 "))
+        runway = np.array(dict((i, p) for i, p, _ in APT.parse_apt_dat(path))["TEST"][0][0])
+        width = math.hypot(*(runway[0] - runway[3]) * [111320 * math.cos(math.radians(10)), 110574])
+        self.assertAlmostEqual(width, 30.0 + 2 * 8, delta=0.5)
+
     def test_airport_without_pavement_is_kept_but_empty(self):
         airports = {icao: (pav, bnd) for icao, pav, bnd in APT.parse_apt_dat(self.path)}
         self.assertEqual(airports["NOPV"], ([], []))
@@ -122,6 +134,71 @@ class AirportPriorityTest(unittest.TestCase):
         os.utime(self.ini, (st.st_atime, st.st_mtime + 5))
         second = APT.airports_for_tile(self.xp, 10, 20, cache, log=lambda *_: None)
         self.assertEqual(second[0].pack, "Airport_B")
+
+
+DSF_TEXT = """POLYGON_DEF lib/airport/pavement/asphalt_2L.pol
+POLYGON_DEF lib/vegetation/forests/broadleaves/warm.for
+POLYGON_DEF local/apron.pol
+POLYGON_DEF local/lawn.pol
+POLYGON_DEF lib/airport/markings/DrapedDirSigns.pol
+BEGIN_POLYGON 0 65535 4
+BEGIN_WINDING
+POLYGON_POINT 20.0 10.0 0 0
+POLYGON_POINT 20.001 10.0 1 0
+POLYGON_POINT 20.001 10.001 1 1
+END_WINDING
+BEGIN_WINDING
+POLYGON_POINT 20.0002 10.0002 0 0
+POLYGON_POINT 20.0004 10.0002 1 0
+POLYGON_POINT 20.0004 10.0004 1 1
+END_WINDING
+END_POLYGON
+BEGIN_POLYGON 1 255 2
+BEGIN_WINDING
+POLYGON_POINT 21.0 11.0
+POLYGON_POINT 21.001 11.0
+POLYGON_POINT 21.001 11.001
+END_WINDING
+END_POLYGON
+BEGIN_POLYGON 2 65535 4
+BEGIN_WINDING
+POLYGON_POINT 22.0 12.0 0 0
+POLYGON_POINT 22.001 12.0 1 0
+POLYGON_POINT 22.001 12.001 1 1
+END_WINDING
+END_POLYGON
+BEGIN_POLYGON 3 65535 4
+BEGIN_WINDING
+POLYGON_POINT 23.0 13.0 0 0
+POLYGON_POINT 23.001 13.0 1 0
+POLYGON_POINT 23.001 13.001 1 1
+END_WINDING
+END_POLYGON
+BEGIN_POLYGON 4 65535 4
+BEGIN_WINDING
+POLYGON_POINT 24.0 14.0 0 0
+POLYGON_POINT 24.001 14.0 1 0
+POLYGON_POINT 24.001 14.001 1 1
+END_WINDING
+END_POLYGON
+"""
+
+
+class PackPavementTest(unittest.TestCase):
+    """Draped pavement in an airport pack's own DSF, which apt.dat doesn't list."""
+
+    def test_pavement_polygons_by_path_or_texture(self):
+        with tempfile.TemporaryDirectory() as pack:
+            _write(os.path.join(pack, "local", "apron.pol"), "A\n850\nDRAPED_POLYGON\nTEXTURE apron_concrete.dds\n")
+            _write(os.path.join(pack, "local", "lawn.pol"), "A\n850\nDRAPED_POLYGON\nTEXTURE grass_cut.dds\n")
+            text = os.path.join(pack, "dsf.txt")
+            _write(text, DSF_TEXT)
+            polys = APT.dsf_pavement(text, pack)
+        # library pavement (with its hole), the pack's concrete apron, painted signs;
+        # not the forest or the pack's lawn
+        self.assertEqual([round(o[0][0]) for o, _ in polys], [20, 22, 24])
+        self.assertEqual(len(polys[0][1]), 1)
+        self.assertEqual(polys[0][0][1], (20.001, 10.0))      # lon, lat; UVs dropped
 
 
 def _lab(l, a, b, shape=(40, 40)):
@@ -199,6 +276,41 @@ class FullTileTest(unittest.TestCase):
             centres = r["sample"][:1]
             out = GRASS._pass2((r["meta"], r["spill"], centres, 0))
             self.assertGreater(out["n_poly"], 0)
+
+    def test_simplified_outlines_stay_off_pavement(self):
+        """A round apron: its hole in the grass, simplified, must not shrink onto it."""
+        from PIL import Image
+        bbox = GRASS.footprint_bbox(28176 * 8, 54800 * 8, 19)     # ~1.1 km, ~2.2 m/px at 512 px
+        lat, lon = math.floor(bbox[0]), math.floor(bbox[1])
+        n = 512
+        lat_c, lon_c = 0.5 * (bbox[0] + bbox[2]), 0.5 * (bbox[1] + bbox[3])
+        kx = 111320 * math.cos(math.radians(lat_c))
+        ring = [(lon_c + 90 * math.cos(t) / kx, lat_c + 90 * math.sin(t) / 110574)
+                for t in np.linspace(0, 2 * math.pi, 90, endpoint=False)]
+        with tempfile.TemporaryDirectory() as tmp:
+            img = np.zeros((n, n, 3), np.uint8)
+            img[...] = (70, 120, 40)
+            Image.fromarray(img).save(os.path.join(tmp, "t.png"))
+            np.save(os.path.join(tmp, "t_cls.npy"), np.full((n, n), 2, np.uint8))
+            # A coarse tolerance, so the plain simplification does cut across.
+            settings = GRASS.GrassSettings(full_tile=True, simplify_m=10.0)
+            GRASS._worker_init(dict(lat=lat, lon=lon, settings=settings,
+                                    airports=[], pavement=[(ring, [])], roads_raw=[], spill_dir=tmp))
+            r = GRASS._pass1(("t", os.path.join(tmp, "t.png"), bbox, (), os.path.join(tmp, "t_cls.npy")))
+            out = GRASS._pass2((r["meta"], r["spill"], r["sample"][:1], 0))
+        drawn = np.zeros((n, n), np.uint8)
+        for poly in out["text"].split("BEGIN_POLYGON")[1:]:
+            wind = [np.array([[float(v) for v in l.split()[1:3]] for l in w.splitlines() if l.startswith("POLYGON_POINT")])
+                    for w in poly.split("BEGIN_WINDING")[1:]]
+            px = [GRASS._to_px(w[:, 0], w[:, 1], bbox, n, n) for w in wind]
+            one = np.zeros((n, n), np.uint8)
+            cv2.fillPoly(one, px[:1], 1)
+            cv2.fillPoly(one, px[1:], 0)
+            drawn |= one
+        mpp = (bbox[3] - bbox[1]) * kx / n
+        pave = GRASS.pavement_mask([(ring, [])], bbox, n, n, mpp, 0)
+        self.assertGreater(drawn.sum(), 0.5 * n * n)
+        self.assertEqual(int((drawn.astype(bool) & pave).sum()), 0)
 
     def test_class_map_kept_at_grass_resolution(self):
         bbox = GRASS.footprint_bbox(28176 * 8, 54800 * 8, 19)     # ZL19: ~0.27 m/px

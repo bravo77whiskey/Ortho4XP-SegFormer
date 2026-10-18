@@ -7,12 +7,16 @@ place in that order.
 
 Per airport:
   * pavement, as [(outer_ring, [hole_rings])] with rings of (lon, lat):
-      - row 100 land runways: the full-width rectangle between the two ends,
-        extended by each end's blast pad length;
+      - row 100 land runways: the rectangle between the two ends, extended by
+        each end's blast pad length and widened by the shoulders on both
+        sides (XP12 stores the shoulder width in metres as the hundreds of
+        the shoulder code: 753 = 7 m of surface 53);
       - row 102 helipads: their rectangle;
       - row 110 pavement (taxiways, aprons, shoulders): its boundary loops,
         Bezier edges sampled; the first loop is the outline, later loops holes;
   * boundaries: the row 130 airport boundary polygons, same form;
+  * draped pavement polygons (.pol) in the DSFs of the airport's own pack,
+    which apt.dat does not list (pack_pavement);
   * centre and reach: the mean pavement point and the distance from it to the
     furthest one -- a stand-in footprint for airports without a boundary.
 """
@@ -20,13 +24,21 @@ Per airport:
 import math
 import os
 import pickle
+import re
 from collections import namedtuple
 
 EARTH_M_PER_DEG_LAT = 110574.0
 BEZIER_STEPS = 8
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
+# Shoulder codes from before XP12 carry no width: assume the ICAO-typical
+# 7.5 m a side (60 m over all for a 45 m runway).
+LEGACY_SHOULDER_M = 7.5
+# Draped polygons that are pavement, or painted on it, by their .pol path or,
+# for a pack's own .pol, its texture name.
+PAVEMENT_POL_RE = re.compile(r"pavement|asphalt|concrete|tarmac|apron|taxiway|runway|"
+                             r"lib/airport/(markings|lines)/", re.I)
 
-Airport = namedtuple("Airport", "icao pack pavement boundaries lat lon reach_m")
+Airport = namedtuple("Airport", "icao pack pavement boundaries lat lon reach_m pack_dir")
 
 
 def _m_per_deg_lon(lat):
@@ -35,6 +47,14 @@ def _m_per_deg_lon(lat):
 
 def _offset(lon, lat, east_m, north_m):
     return lon + east_m / _m_per_deg_lon(lat), lat + north_m / EARTH_M_PER_DEG_LAT
+
+
+def shoulder_width_m(code):
+    """Width of one runway shoulder from the row 100 shoulder code."""
+    code = int(code)
+    if code <= 0:
+        return 0.0
+    return float(code // 100) if code >= 100 else LEGACY_SHOULDER_M
 
 
 def _runway_rect(width, lat1, lon1, blast1, lat2, lon2, blast2):
@@ -132,7 +152,7 @@ def parse_apt_dat(path):
                 elif code == "130":
                     in_boundary = True
                 elif code == "100":
-                    width = float(parts[1])
+                    width = float(parts[1]) + 2 * shoulder_width_m(float(parts[3]))
                     lat1, lon1, blast1 = float(parts[9]), float(parts[10]), float(parts[12])
                     lat2, lon2, blast2 = float(parts[18]), float(parts[19]), float(parts[21])
                     r = _runway_rect(width, lat1, lon1, blast1, lat2, lon2, blast2)
@@ -149,7 +169,8 @@ def parse_apt_dat(path):
 
 
 def _apt_sources(xplane_dir):
-    """(pack name, apt.dat path) in scenery_packs.ini priority order."""
+    """(pack name, apt.dat path) in scenery_packs.ini priority order; the
+    pack's folder is two levels above its apt.dat."""
     ini = os.path.join(xplane_dir, "Custom Scenery", "scenery_packs.ini")
     sources = []
     with open(ini, "r", encoding="utf-8", errors="replace") as f:
@@ -190,7 +211,8 @@ def airports_near(xplane_dir, lat0, lon0, radius_m, log=print):
                 clon = sum(p[0] for p in pts) / len(pts)
                 kx = _m_per_deg_lon(clat)
                 reach = max(math.hypot((p[0] - clon) * kx, (p[1] - clat) * EARTH_M_PER_DEG_LAT) for p in pts)
-                out.append(Airport(icao, name, pavement, bounds, clat, clon, reach))
+                pack_dir = os.path.dirname(os.path.dirname(apt)) if name != "Global Airports" else None
+                out.append(Airport(icao, name, pavement, bounds, clat, clon, reach, pack_dir))
         except OSError as exc:                   # unreadable disk sectors: skip, don't abort
             log(f"apt.dat unreadable, skipped: {apt}: {exc}")
     return out
@@ -232,3 +254,82 @@ def airports_for_tile(xplane_dir, tile_lat, tile_lon, cache_dir=None, log=print)
         except OSError:
             pass
     return airports
+
+
+def _pol_is_pavement(pol_def, pack_dir):
+    """True for a draped polygon that is pavement or painted on it."""
+    path = pol_def.replace("\\", "/")
+    if not path.lower().endswith(".pol"):
+        return False
+    if PAVEMENT_POL_RE.search(path):
+        return True
+    local = os.path.join(pack_dir, path)
+    if not os.path.isfile(local):
+        return False                                # a library .pol by another name
+    try:
+        with open(local, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split(None, 1)
+                if parts and parts[0] in ("TEXTURE", "TEXTURE_NOWRAP") and len(parts) > 1:
+                    return bool(PAVEMENT_POL_RE.search(parts[1]))
+    except OSError:
+        pass
+    return False
+
+
+def dsf_pavement(text_path, pack_dir):
+    """Draped pavement polygons of one disassembled DSF, as [(outer, holes)]."""
+    defs, out = [], []
+    keep, windings, ring = False, [], None
+    with open(text_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith("POLYGON_POINT "):
+                if keep and ring is not None:
+                    parts = line.split()
+                    ring.append((float(parts[1]), float(parts[2])))
+            elif line.startswith("BEGIN_WINDING"):
+                ring = [] if keep else None
+            elif line.startswith("END_WINDING"):
+                if keep and ring and len(ring) >= 3:
+                    windings.append(ring)
+                ring = None
+            elif line.startswith("BEGIN_POLYGON "):
+                keep = defs[int(line.split()[1])] if int(line.split()[1]) < len(defs) else False
+                windings = []
+            elif line.startswith("END_POLYGON"):
+                if keep and windings:
+                    out.append((windings[0], windings[1:]))
+                keep, windings = False, []
+            elif line.startswith("POLYGON_DEF "):
+                defs.append(_pol_is_pavement(line.split(" ", 1)[1].strip(), pack_dir))
+    return out
+
+
+def pack_pavement(airports, tile_lat, tile_lon, dsftool_path, cache_dir, log=print):
+    """Draped pavement from the DSFs of the airports' own packs that cover the
+    tile or its neighbours (an airport near the edge reaches across)."""
+    import O4_Scenery_Packs as PACKS
+    out, seen = [], set()
+    for a in airports:
+        if not a.pack_dir or a.pack_dir in seen:
+            continue
+        seen.add(a.pack_dir)
+        nav = os.path.join(a.pack_dir, "Earth nav data")
+        found = 0
+        for la in (tile_lat - 1, tile_lat, tile_lat + 1):
+            for lo in (tile_lon - 1, tile_lon, tile_lon + 1):
+                sub = f"{la - la % 10:+03d}{lo - lo % 10:+04d}"
+                dsf = os.path.join(nav, sub, f"{la:+03d}{lo:+04d}.dsf")
+                if not os.path.isfile(dsf):
+                    continue
+                try:
+                    text = PACKS.ensure_cached_dsf_text(dsf, dsftool_path, cache_dir)
+                    polys = dsf_pavement(text, a.pack_dir)
+                except Exception as exc:            # unreadable DSF: keep the apt.dat pavement
+                    log(f"[Grass] {a.pack}: DSF unreadable, skipped: {dsf}: {exc}")
+                    continue
+                out.extend(polys)
+                found += len(polys)
+        if found:
+            log(f"[Grass] {a.pack}: {found} draped pavement polygons")
+    return out
