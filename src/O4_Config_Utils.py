@@ -225,6 +225,10 @@ class Tile:
         )
         self.build_dir = FNAMES.build_dir(lat, lon, custom_build_dir)
         self.dem = None
+        self.reset_tile_vars()
+
+    def reset_tile_vars(self):
+        """Every tile setting back to the in-memory global value (the baseline a new Tile gets)."""
         for var in list_tile_vars:
             global_var = global_prefix + var
             source_var = global_var if global_var in cfg_global_tile_vars else var
@@ -310,6 +314,11 @@ class Tile:
         :return type: int
         """
         if not config_file:
+            # A batch reads every tile into one Tile object: start from the
+            # baseline, or a setting neither file mentions would keep the
+            # previous tile's value (+10+103's grass_full_tile=True gave the
+            # next tile, whose config predates that setting, whole-tile grass).
+            self.reset_tile_vars()
             tile_config = os.path.join(
                 self.build_dir,
                 "Ortho4XP_" + FNAMES.short_latlon(self.lat, self.lon) + ".cfg",
