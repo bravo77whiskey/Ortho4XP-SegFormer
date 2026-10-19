@@ -227,12 +227,16 @@ class ForestHeightTests(unittest.TestCase):
     def test_shrub_copies_plant_on_a_close_grid(self):
         shrubs = _FOR.replace("SPACING\t12 12", "SPACING\t10 10\nRANDOM\t4 4")
         dense = FOREST_HEIGHTS.shrub_trees(shrubs, None, "_o4s0")
-        self.assertIn("SPACING\t4\t4", dense)
-        self.assertIn("RANDOM\t1.6\t1.6", dense)
+        self.assertIn("SPACING\t3\t3", dense)
+        self.assertIn("RANDOM\t1.2\t1.2", dense)
         self.assertEqual(FOREST_HEIGHTS.max_tree_height(dense), 26.0)      # no cap: heights kept
+        # Cut down, the shrubs' crowns shrink and their grid closes up with them.
         capped = FOREST_HEIGHTS.shrub_trees(shrubs, 3.0, "_o4s3")
         self.assertEqual(FOREST_HEIGHTS.max_tree_height(capped), 3.0)
-        self.assertIn("SPACING\t4\t4", capped)
+        self.assertIn("SPACING\t1.5\t1.5", capped)                         # held at the floor
+        half = FOREST_HEIGHTS.shrub_trees(shrubs, 13.0, "_o4s13")
+        grid = float([ln for ln in half.splitlines() if ln.startswith("SPACING")][0].split()[1])
+        self.assertAlmostEqual(grid, 3 * (13 / 20 + 13 / 26) / 2, places=1)
         self.assertEqual(FOREST_HEIGHTS.parse_virtual("o4xp/forests/s0/trees/deciduous/shrubs_small.for"),
                          ("lib/vegetation/trees/deciduous/shrubs_small.for", "s", 0.0))
 
@@ -309,6 +313,68 @@ class ForestHeightTests(unittest.TestCase):
             self.assertIn("o4xp/forests/c6/broad_tmp_wet.for", lib)
             self.assertEqual(open(os.path.join(pack, FOREST_HEIGHTS.VERSION_FILE)).read().strip(),
                              FOREST_HEIGHTS.SIGNATURE)
+
+    def test_evergreen_copies_keep_the_summer_forest_all_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            xp = os.path.join(tmp, "xp")
+            cs = os.path.join(tmp, "Custom Scenery")
+            os.makedirs(cs)
+            _fake_xp(xp)
+            summer = os.path.join(xp, "sum", "broad_tmp.for")
+            with open(summer, "w", newline="\n") as f:
+                f.write(_FOR.replace("\tTEXTURE ../textures/trees_ALB.png\n",
+                                     "\tTEXTURE ../textures/trees_ALB.png\n"
+                                     "\tSEASONAL ../textures/trees_ALB_fa.png\n"))
+            fh = FOREST_HEIGHTS.ForestHeights(cs, log=lambda *a: None, xp_dir=xp)
+            self.assertTrue(fh.is_seasonal("lib/g8/broad_tmp_wet.for"))
+            self.assertTrue(fh.is_seasonal("o4xp/forests/c6/broad_tmp_wet.for"))
+            self.assertFalse(fh.is_seasonal("lib/g8/broad_vhot_wet.for"))   # X-Plane's evergreen
+            self.assertFalse(fh.is_seasonal("simheaven/forests/x.for"))
+            self.assertEqual(fh.evergreen_path("lib/g8/broad_tmp_wet.for"), "o4xp/forests/ev/broad_tmp_wet.for")
+            self.assertEqual(fh.evergreen_path("lib/g8/broad_vhot_wet.for"), "lib/g8/broad_vhot_wet.for")
+            self.assertEqual(fh.evergreen_path("o4xp/forests/c4.5/broad_tmp_wet.for"),
+                             "o4xp/forests/c4.5-ev/broad_tmp_wet.for")
+            self.assertEqual(FOREST_HEIGHTS.evergreen_virtual_path(
+                "lib/vegetation/trees/deciduous/shrubs_small.for"),
+                "o4xp/forests/ev/trees/deciduous/shrubs_small.for")
+            self.assertEqual(FOREST_HEIGHTS.parse_virtual("o4xp/forests/c4.5-ev/broad_tmp_wet.for"),
+                             ("lib/g8/broad_tmp_wet.for", "c", 4.5))
+            self.assertEqual(FOREST_HEIGHTS.parse_virtual("o4xp/forests/ev/trees/deciduous/shrubs_small.for"),
+                             ("lib/vegetation/trees/deciduous/shrubs_small.for", "e", 0.0))
+            self.assertTrue(fh.ensure(["o4xp/forests/ev/broad_tmp_wet.for",
+                                       "o4xp/forests/c6-ev/broad_tmp_wet.for"]))
+            pack = os.path.join(cs, FOREST_HEIGHTS.PACK_NAME)
+            lib = open(os.path.join(pack, "library.txt")).read()
+            # One plain EXPORT of the summer file: no season swaps to the winter one.
+            self.assertIn("EXPORT\to4xp/forests/ev/broad_tmp_wet.for\tsum_ev/broad_tmp.for", lib)
+            self.assertIn("EXPORT\to4xp/forests/c6-ev/broad_tmp_wet.for\tsum_c6-ev/broad_tmp.for", lib)
+            self.assertNotIn("EXPORT_SEASON", lib)
+            plain = open(os.path.join(pack, "sum_ev", "broad_tmp.for")).read()
+            self.assertEqual(plain, _FOR)                       # the stock forest minus SEASONAL
+            capped = open(os.path.join(pack, "sum_c6-ev", "broad_tmp.for")).read()
+            self.assertNotIn("SEASONAL", capped)
+            self.assertEqual(FOREST_HEIGHTS.max_tree_height(capped), 6.0)
+
+    def test_tropical_polygons_take_evergreen_copies(self):
+        class _Copies:
+            def is_seasonal(self, path):
+                return "tmp" in path
+
+        ring = [(35.3, 0.45), (35.31, 0.45), (35.31, 0.46), (35.3, 0.45)]
+        north = [(lon, lat + 30) for lon, lat in ring]
+        polys, n = VEG._evergreen_in_tropics(
+            [("lib/g8/broad_tmp_wet.for", 255, VEG.HoledRing(ring, [ring[::-1]])),
+             ("lib/g8/broad_vhot_wet.for", 255, ring),
+             ("o4xp/forests/s0/trees/deciduous/shrubs_tmp.for", 512 + 255, ring[:2]),
+             ("lib/g8/broad_tmp_wet.for", 255, north)], _Copies())
+        self.assertEqual(n, 2)
+        self.assertEqual([p for p, _d, _r in polys], [
+            "o4xp/forests/ev/broad_tmp_wet.for", "lib/g8/broad_vhot_wet.for",
+            "o4xp/forests/s0-ev/trees/deciduous/shrubs_tmp.for", "lib/g8/broad_tmp_wet.for"])
+        self.assertEqual(polys[0][2].holes, [ring[::-1]])   # clearings kept
+        self.assertTrue(VEG._tile_reaches_tropics(0) and VEG._tile_reaches_tropics(-24)
+                        and VEG._tile_reaches_tropics(23))
+        self.assertFalse(VEG._tile_reaches_tropics(24) or VEG._tile_reaches_tropics(-25))
 
 
 class OverlayHookTests(unittest.TestCase):
@@ -465,6 +531,20 @@ class ForestZoneTests(unittest.TestCase):
         fmap[95:105, 95:105] = 8.0   # 100 m2 < FOREST_ZONE_MIN_M2
         zones = VEG._forest_height_zones(fmap, mask, mpp)
         self.assertEqual(len(np.unique(zones)), 1)
+
+    def test_flat_canopy_outside_airports_has_no_height(self):
+        mpp = 1.0
+        mask = np.zeros((300, 600), np.uint8)
+        mask[20:280, 20:580] = 1
+        hmap = np.zeros(mask.shape, np.float32)     # the network sees no tree...
+        hmap[:, 400:] = 12.0                        # ...except in the east
+        inside = VEG._forest_height_map(hmap, mask, mpp)
+        self.assertLess(inside[150, 100], 1.0)       # inside airports: flat = low (shrubs)
+        outside = VEG._forest_height_map(hmap, mask, mpp, flat_unknown=np.ones(mask.shape, bool))
+        self.assertTrue(np.isnan(outside[150, 100]))   # outside: unknown, full-height forest
+        self.assertAlmostEqual(float(outside[150, 500]), 12.0, delta=1.0)
+        zones = VEG._forest_height_zones(outside, mask, mpp)
+        self.assertEqual(zones[150, 100], len(VEG.FOREST_ZONE_EDGES_M) + 2)   # the unknown zone
 
 
 class _Mapper:

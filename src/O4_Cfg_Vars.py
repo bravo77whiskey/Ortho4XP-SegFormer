@@ -566,7 +566,7 @@ cfg_tile_vars = {
                 "forest become single trees, one per crown. A cell is the "
                 "forest's tree spacing squared (10-12 m for X-Plane 12 "
                 "forests); X-Plane's grid often plants no tree at all in "
-                "a polygon under 2 cells.",
+                "a polygon under 2 cells. Patches under 600 m2 always do.",
     },
     "veg_hole_certain_cells": {
         "type": float,
@@ -578,11 +578,11 @@ cfg_tile_vars = {
     },
     "veg_hole_unsure_cells": {
         "type": float,
-        "default": 2.0,
+        "default": 0.0,
         "short_name": "veg_hole_unsure",
         "hint": "Cut a clearing out of a forest from this many grid cells "
                 "when it is only ground the models were not confident is "
-                "tree.",
+                "tree (0 = never: such gaps stay forest).",
     },
     "veg_forest_hole_min_m2": {
         "type": float,
@@ -624,6 +624,16 @@ cfg_tile_vars = {
                 "out. Under 9 m they become shrubs of the size that fits, and "
                 "nearest the threshold 1 m shrubs. Uses forest copies in the "
                 "O4XP_Forest_Heights pack.",
+    },
+    "veg_tropics_evergreen": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_tropics_ev",
+        "hint": "Between the tropics, plant X-Plane's seasonal forests and shrubs "
+                "as evergreen copies of their summer look. X-Plane runs its "
+                "seasons by the hemisphere's calendar, so on the equator its "
+                "temperate-band forests (planted on tropical highlands) turn "
+                "autumn brown in October. Uses the O4XP_Forest_Heights pack.",
     },
     "veg_avoid_gfv2": {
         "type": bool,
@@ -980,6 +990,7 @@ list_veg_vars = [
     "veg_tree_sizes",
     "veg_forest_heights",
     "veg_approach_heights",
+    "veg_tropics_evergreen",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",

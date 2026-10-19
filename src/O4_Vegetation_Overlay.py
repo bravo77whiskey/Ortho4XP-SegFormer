@@ -234,15 +234,31 @@ def _forest_heights_enabled():
     return _veg_flag("O4_VEG_FOREST_HEIGHTS")
 
 
-def _forest_height_map(canopy_height, tree_mask, m_per_px):
+# Outside airport boundaries the trees come from SegFormer, and where the
+# canopy network reads them flat (under CANOPY_MIN_TREE_H_M) it has not seen
+# them at all as often as they are really low: planting them as shrubs turned
+# whole SegFormer forests beyond the fence into 1-3 m bushes (review set,
+# 2026-10-19: every forest of the Wenzhou ZL18 texture). Their height counts
+# as unknown there, so they keep the full-height forest; measured canopy
+# around them still sizes them. Unknown where less than this share of the
+# canopy around (FOREST_ZONE_SIGMA_M) is measured.
+FOREST_MEASURED_MIN_SHARE = 0.1
+
+
+def _forest_height_map(canopy_height, tree_mask, m_per_px, flat_unknown=None):
     """Smoothed crown-top height over the canopy (metres, mask-sized).
 
-    Canopy the network reads as flat counts as low: outside airports that is
-    SegFormer's scrub, reeds and bushes, which are planted short.
+    Canopy the network reads as flat counts as low (inside airports that is
+    scrub and bushes the canopy network itself kept), except where
+    ``flat_unknown`` is set: there it is not measured, and the height is NaN
+    (unknown) where little measured canopy is around.
     """
     r = max(1, int(round(CROWN_RADIUS_M / m_per_px)))
     tops = cv2.dilate(canopy_height, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2))
-    m = (tree_mask > 0).astype(np.float32)
+    on = tree_mask > 0
+    if flat_unknown is not None:
+        on &= ~(flat_unknown & (tops < CANOPY_MIN_TREE_H_M))
+    m = on.astype(np.float32)
     h, w = m.shape
     # The blur runs on a grid ~1/8 sigma per cell: same result, not 30 s a texture.
     k = max(1, int(FOREST_ZONE_SIGMA_M / m_per_px / 8))
@@ -250,7 +266,13 @@ def _forest_height_map(canopy_height, tree_mask, m_per_px):
     sigma = FOREST_ZONE_SIGMA_M / (m_per_px * w / size[0])
     num = cv2.GaussianBlur(cv2.resize(tops * m, size, interpolation=cv2.INTER_AREA), (0, 0), sigma)
     den = cv2.GaussianBlur(cv2.resize(m, size, interpolation=cv2.INTER_AREA), (0, 0), sigma)
-    return cv2.resize(num / np.maximum(den, 1e-3), (w, h), interpolation=cv2.INTER_LINEAR)
+    out = cv2.resize(num / np.maximum(den, 1e-3), (w, h), interpolation=cv2.INTER_LINEAR)
+    if flat_unknown is not None:
+        canopy = cv2.GaussianBlur(cv2.resize((tree_mask > 0).astype(np.float32), size,
+                                             interpolation=cv2.INTER_AREA), (0, 0), sigma)
+        share = cv2.resize(den / np.maximum(canopy, 1e-3), (w, h), interpolation=cv2.INTER_LINEAR)
+        out[share < FOREST_MEASURED_MIN_SHARE] = np.nan
+    return out
 
 
 def _forest_height_zones(height_map, tree_mask, m_per_px):
@@ -361,12 +383,15 @@ def _forest_holes_enabled():
 # Sizes in grid cells of the forest's own .for SPACING (O4_Forest_Spacing):
 # under POINT_TREE_MAX_CELLS a polygon often gets no tree from X-Plane's grid
 # (simulated on real patches: P(no tree) ~0 from 2 cells up), so it becomes
-# single trees; a hole removes about one tree per cell, so a clearing with a
-# known cause is cut from 1 cell and one that is only "not confidently tree"
-# from HOLE_UNSURE_CELLS.
+# single trees (and every patch under POINT_TREE_MAX_AREA_M2); a hole removes
+# about one tree per cell, so a clearing with a known cause is cut from 1 cell
+# and one that is only "not confidently tree" from HOLE_UNSURE_CELLS.
 POINT_TREE_MAX_CELLS = 2.0
 HOLE_CERTAIN_CELLS = 1.0
-HOLE_UNSURE_CELLS = 2.0
+# Gaps that are only "not confidently tree" stay forest (0 = never cut): in
+# dense SegFormer forests they are mostly canopy in shadow or of another
+# texture, and cutting them took 4-7 % of the forest (review set, 2026-10-19).
+HOLE_UNSURE_CELLS = 0.0
 HOLE_CERTAIN_FRAC = 0.5
 GAP_CERTAIN_CLASSES = (
     SEGFORMER.CLASS_BUILDING, SEGFORMER.CLASS_ROAD, SEGFORMER.CLASS_DEVELOPED,
@@ -545,6 +570,33 @@ def _canopy_enabled():
 def _canopy_airports_only():
     """O4_VEG_CANOPY_AIRPORTS_ONLY=0: the canopy network decides trees on the whole texture."""
     return _veg_flag("O4_VEG_CANOPY_AIRPORTS_ONLY")
+
+
+# X-Plane runs its seasons by the hemisphere's calendar, also on the equator:
+# its temperate-band forests, which it plants on tropical highlands (Eldoret,
+# Addis Ababa: lib/g8/*_wrm_wet), turn autumn brown there in October. Between
+# the tropics every forest X-Plane changes by season is planted as its
+# evergreen copy (O4_Forest_Heights): the summer forest, all year.
+TROPICS_LAT = 23.44
+
+
+def _tropics_evergreen_enabled():
+    """O4_VEG_TROPICS_EVERGREEN=0: tropical forests keep X-Plane's seasons."""
+    return _veg_flag("O4_VEG_TROPICS_EVERGREEN")
+
+
+def _tile_reaches_tropics(lat):
+    return lat < TROPICS_LAT and lat + 1 > -TROPICS_LAT
+
+
+def _evergreen_in_tropics(polygons, forest_copies):
+    """``polygons`` with seasonal forests between the tropics swapped for evergreen copies."""
+    out, n = [], 0
+    for fpath, dsf_den, ring in polygons:
+        if ring and abs(ring[0][1]) < TROPICS_LAT and forest_copies.is_seasonal(fpath):
+            fpath, n = FOREST_HEIGHTS.evergreen_virtual_path(fpath), n + 1
+        out.append((fpath, dsf_den, ring))
+    return out, n
 
 
 def _airport_inside_mask(airports, lat_n, lat_s, lon_w, lon_e, img_h, img_w):
@@ -2254,10 +2306,15 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             shrubs = True
         if spacing_rules and forest_spacing is not None:
             cell_m2 = forest_spacing.cell_m2(fpath)
-            point_max_m2 = point_cells * cell_m2
+            # Never fewer single trees than before the spacing rules: a patch
+            # of a few cells gets 1-3 trees from X-Plane's grid but holds a
+            # crown every POINT_TREE_SPACING_M (review set, 2026-10-19: the
+            # 2-cell cut-off alone halved the single trees).
+            point_max_m2 = max(POINT_TREE_MAX_AREA_M2, point_cells * cell_m2)
             hole_rings = [
                 hr for hr, _a, h_m2, certain in hole_cands
-                if h_m2 >= (certain_cells if certain else unsure_cells) * cell_m2
+                if (h_m2 >= certain_cells * cell_m2 if certain
+                    else unsure_cells > 0 and h_m2 >= unsure_cells * cell_m2)
             ]
         else:
             point_max_m2 = POINT_TREE_MAX_AREA_M2
@@ -2578,7 +2635,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             f"{max(APPROACH.reach_m(s) for s in approach_surfaces):.0f} m before the threshold")
     # Shorter forest copies: measured heights (forest_heights) and approach caps.
     forest_copies = None
-    if custom_scenery_dir and (_forest_heights_enabled() or approach_surfaces):
+    tropics_evergreen = _tropics_evergreen_enabled() and _tile_reaches_tropics(lat)
+    if custom_scenery_dir and (_forest_heights_enabled() or approach_surfaces or tropics_evergreen):
         forest_copies = FOREST_HEIGHTS.ForestHeights(custom_scenery_dir, log=verbose_print)
         if not forest_copies.available:
             forest_copies = None
@@ -3531,7 +3589,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             if forest_heights is not None:
                 kwargs['forest_heights'] = forest_heights
                 kwargs['forest_height_map'] = _forest_height_map(
-                    kwargs['canopy_height'], tree_mask, mpp)
+                    kwargs['canopy_height'], tree_mask, mpp,
+                    flat_unknown=(~canopy_inside if canopy_inside is not None
+                                  else np.ones(tree_mask.shape, bool)))
         if height_cap_map is not None:
             kwargs['height_cap_map'] = height_cap_map
             kwargs['forest_heights'] = forest_copies
@@ -3653,6 +3713,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     txt_path = out_dsf.replace('.dsf', '_veg.txt')
     tmp_dsf = out_dsf + '.tmp'
 
+    if tropics_evergreen and forest_copies is not None:
+        polygons, n_evergreen = _evergreen_in_tropics(polygons, forest_copies)
+        if n_evergreen:
+            print(f"  [ForestHeights] {n_evergreen} tropical tree polygon(s) planted evergreen "
+                  f"(no autumn colours)", flush=True)
     for_paths = sorted(set(p for p, _, _ in polygons))
     banded = [p for p in for_paths if p.startswith(FOREST_HEIGHTS.VIRTUAL_PREFIX)]
     if banded and not (forest_copies is not None and forest_copies.ensure(banded)):

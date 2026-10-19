@@ -11,9 +11,16 @@ and seasons and only make trees shorter:
     height was measured on the ortho (hedges, young stands, gardens);
   * height caps ``c<level>``: every tree taller than one of CAP_LEVELS_M
     scaled down to it, for approach paths (O4_Approach_Heights);
-  * shrubs ``s<level>``: X-Plane's shrubs planted on a MIN_SPACING_M grid
+  * shrubs ``s<level>``: X-Plane's shrubs planted on a SHRUB_SPACING_M grid
     (its shrublands use 10 m for 2-6 m shrubs, which reads as a few bushes
-    on grass), cut down to the cap level where one applies (``s0``: none).
+    on grass), cut down to the cap level where one applies (``s0``: none),
+    the grid closing up with them down to SHRUB_MIN_SPACING_M;
+  * evergreen ``ev`` (and ``<kind><height>-ev`` for the copies above): the
+    summer file alone, without its SEASONAL autumn texture, exported for
+    every season. X-Plane runs its seasons by the calendar of the hemisphere,
+    so on the equator its temperate-band forests (which it plants on tropical
+    highlands such as Eldoret and Addis Ababa) turn brown in October; its own
+    hot-band forests are already exported like this.
 
 A tree's 3-d meshes are modelled at its minimum height (in all of X-Plane's
 forests, mesh top / TREE min height is 1.00-1.02) and X-Plane scales them
@@ -60,9 +67,19 @@ MIN_GAIN_M = 3.0
 # Tallest-tree heights of the cap copies, metres; under the lowest no tree
 # fits. Finer at the bottom, where the shrubs (O4_Tree_Sizes.shrub_path) are.
 CAP_LEVELS_M = (1.0, 2.0, 3.0, 4.5, 6.0, 7.5) + tuple(float(h) for h in range(9, 34, 3))
-SIGNATURE = "forest-heights-v4"
+SIGNATURE = "forest-heights-v5"
 # Densest planting grid of a copy, metres: X-Plane's own small shrubs.
 MIN_SPACING_M = 4.0
+# Shrub copies' grid, metres. X-Plane's shrub crowns are 3-4 m across, so at
+# 4 m they stood apart (RCKH, 2026-10-19: "shrubs sparse"); at 3 m they close
+# into cover. Shrubs cut down under an approach cap have smaller crowns, so
+# the grid shrinks with them (by the shrubs' mean cut), to SHRUB_MIN_SPACING_M.
+SHRUB_SPACING_M = 3.0
+SHRUB_MIN_SPACING_M = 1.5
+# Suffix of an evergreen copy's kind, and the kind of a plain evergreen copy.
+EVERGREEN_SUFFIX = "-ev"
+EVERGREEN_KIND = "ev"
+_SEASONAL_RE = re.compile(r"^\s*SEASONAL\s")
 # Forests a copy can be made of: X-Plane's climate forests and its single-species trees.
 _SOURCES = ("lib/g8/", "lib/vegetation/trees/")
 VERSION_FILE = "o4xp_version.txt"
@@ -200,7 +217,7 @@ def _scaled_mesh(block, factor, name=None):
     return out
 
 
-def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None):
+def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None, spacing_min_m=None):
     """``text`` with every tree scaled by ``factor_for(layer, min h, max h)``.
 
     A tree's min/max (and TREE2 nominal) heights and the vertices of its 3-d
@@ -208,7 +225,9 @@ def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None):
     factors share keeps one factor and gets a renamed copy per other one.
     Every mesh name gets ``mesh_suffix``. SPACING and RANDOM shrink by the
     canopy (layer 1) trees' frequency-weighted factor, to MIN_SPACING_M, or
-    with ``spacing_m`` to that grid (never wider than the original).
+    with ``spacing_m`` to that grid (never wider than the original); with
+    ``spacing_min_m`` too, that grid shrinks by the same factor, to
+    ``spacing_min_m``.
     """
     lines = text.splitlines(keepends=True)
     tree_factor = {}
@@ -254,6 +273,8 @@ def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None):
     grid = (sum(f * k for f, k in canopy) / weight) if weight > 0 else 1.0
     floor = MIN_SPACING_M
     if spacing_m is not None:
+        if spacing_min_m is not None:
+            spacing_m = max(spacing_min_m, spacing_m * grid)
         grid = min(1.0, spacing_m / spacing) if spacing else 1.0
         floor = 0.0
 
@@ -316,10 +337,17 @@ def cap_trees(text, cap_m, mesh_suffix=""):
 
 
 def shrub_trees(text, cap_m=None, mesh_suffix=""):
-    """Shrub copy: planted on a MIN_SPACING_M grid, shrubs taller than ``cap_m`` cut down to it."""
+    """Shrub copy: planted on a SHRUB_SPACING_M grid, shrubs taller than ``cap_m`` cut down to
+    it and the grid closed up by their mean cut (to SHRUB_MIN_SPACING_M)."""
     factor_for = ((lambda _layer, _lo, hi: min(1.0, cap_m / hi) if hi > 0 else 1.0) if cap_m
                   else (lambda _layer, _lo, _hi: 1.0))
-    return scale_trees(text, factor_for, mesh_suffix, spacing_m=MIN_SPACING_M)
+    return scale_trees(text, factor_for, mesh_suffix, spacing_m=SHRUB_SPACING_M,
+                       spacing_min_m=SHRUB_MIN_SPACING_M)
+
+
+def evergreen_text(text):
+    """A summer .for without its SEASONAL (autumn blend) textures."""
+    return "".join(ln for ln in text.splitlines(keepends=True) if not _SEASONAL_RE.match(ln))
 
 
 def cap_level(cap_m):
@@ -331,29 +359,66 @@ def cap_level(cap_m):
 def band_virtual_path(g8_path, band, kind="h"):
     """``o4xp/forests/<kind><height>/<g8 name>``, or ``.../trees/<group>/<name>`` for a
     lib/vegetation/trees forest."""
-    name = (g8_path[len("lib/vegetation/"):] if g8_path.startswith("lib/vegetation/trees/")
+    return f"{VIRTUAL_PREFIX}{kind}{_fmt(band)}/{_copy_name(g8_path)}"
+
+
+def _copy_name(g8_path):
+    return (g8_path[len("lib/vegetation/"):] if g8_path.startswith("lib/vegetation/trees/")
             else os.path.basename(g8_path))
-    return f"{VIRTUAL_PREFIX}{kind}{_fmt(band)}/{name}"
 
 
 def cap_virtual_path(g8_path, level):
     return band_virtual_path(g8_path, level, "c")
 
 
-def parse_virtual(path):
-    """(source forest path, kind 'h' or 'c', height) of a copy's path, else None."""
+def _split_virtual(path):
+    """(kind segment, rest) of a copy's path, else None."""
     path = str(path)
     if not path.startswith(VIRTUAL_PREFIX):
         return None
     parts = path[len(VIRTUAL_PREFIX):].split("/", 1)
-    if len(parts) != 2 or len(parts[0]) < 2 or parts[0][0] not in "hcs":
+    return parts if len(parts) == 2 else None
+
+
+def parse_virtual(path):
+    """(source forest path, kind 'h', 'c', 's' or 'e', height) of a copy's path, else None.
+
+    An evergreen copy of an h/c/s copy parses as that copy (is_evergreen tells them
+    apart); a plain evergreen copy is kind 'e', height 0.
+    """
+    parts = _split_virtual(path)
+    if not parts:
+        return None
+    seg, rest = parts
+    source = ("lib/vegetation/" if rest.startswith("trees/") else "lib/g8/") + rest
+    if seg == EVERGREEN_KIND:
+        return source, "e", 0.0
+    if seg.endswith(EVERGREEN_SUFFIX):
+        seg = seg[:-len(EVERGREEN_SUFFIX)]
+    if len(seg) < 2 or seg[0] not in "hcs":
         return None
     try:
-        height = float(parts[0][1:])
+        height = float(seg[1:])
     except ValueError:
         return None
-    source = ("lib/vegetation/" if parts[1].startswith("trees/") else "lib/g8/") + parts[1]
-    return source, parts[0][0], height
+    return source, seg[0], height
+
+
+def is_evergreen(path):
+    """True for an evergreen copy's path."""
+    parts = _split_virtual(path)
+    return bool(parts) and (parts[0] == EVERGREEN_KIND or parts[0].endswith(EVERGREEN_SUFFIX))
+
+
+def evergreen_virtual_path(path):
+    """The evergreen copy of an X-Plane forest or of one of its copies (unchanged if already one)."""
+    path = str(path)
+    if is_evergreen(path):
+        return path
+    parts = _split_virtual(path)
+    if parts:
+        return f"{VIRTUAL_PREFIX}{parts[0]}{EVERGREEN_SUFFIX}/{parts[1]}"
+    return f"{VIRTUAL_PREFIX}{EVERGREEN_KIND}/{_copy_name(path)}"
 
 
 def source_path(path):
@@ -440,6 +505,15 @@ class ForestHeights:
                     stats = None
             self._stats[g8_path] = stats
         return self._stats[g8_path]
+
+    def is_seasonal(self, path):
+        """True when X-Plane exports the forest a path is (or was copied from) by season."""
+        seasons = self.exports.get(source_path(path)) or {}
+        return any(seasons)
+
+    def evergreen_path(self, path):
+        """The evergreen copy of ``path`` where X-Plane changes it with the seasons, else ``path``."""
+        return evergreen_virtual_path(path) if self.is_seasonal(path) else path
 
     def stock_height(self, g8_path):
         """Canopy mean height of the forest X-Plane exports at ``g8_path`` (summer), or None."""
@@ -530,14 +604,20 @@ class ForestHeights:
             self.log(f"  [ForestHeights] not a forest copy: {virtual}")
             return False, False
         g8_path, kind, height = parsed
+        evergreen = is_evergreen(virtual)
         seasons = self.exports.get(g8_path)
         stock = self.stock_height(g8_path) if kind == "h" else None
         if not seasons or (kind == "h" and not stock):
             self.log(f"  [ForestHeights] no X-Plane forest for {virtual}")
             return False, False
+        if evergreen:
+            # The summer file for every season (plain EXPORT, season "").
+            rel = seasons.get("sum") or seasons.get("") or next(iter(seasons.values()))
+            seasons = {"": rel}
         added = False
+        seg = _split_virtual(virtual)[0]
         for season, rel in sorted(seasons.items()):
-            sub = f"{os.path.dirname(rel)}_{kind}{_fmt(height)}"
+            sub = f"{os.path.dirname(rel)}_{seg}"
             dst_rel = f"{sub}/{os.path.basename(rel)}"
             dst = os.path.join(self.pack_dir, sub, os.path.basename(rel))
             if not os.path.isfile(dst):
@@ -545,11 +625,13 @@ class ForestHeights:
                           errors="ignore", newline="") as f:
                     text = f.read()
                 suffix = f"_o4{kind}{_fmt(height)}".replace(".", "p")
+                if evergreen:
+                    text = evergreen_text(text)
                 if kind == "h":
                     text = band_trees(text, height, stock, suffix)
                 elif kind == "s":
                     text = shrub_trees(text, height or None, suffix)
-                else:
+                elif kind == "c":
                     text = cap_trees(text, height, suffix)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 tmp = dst + ".tmp"

@@ -29,6 +29,7 @@ NEW_VARS = (
     "veg_tree_sizes",
     "veg_forest_heights",
     "veg_approach_heights",
+    "veg_tropics_evergreen",
 )
 
 
@@ -111,27 +112,36 @@ class SpacingRuleTests(unittest.TestCase):
                                                "O4_VEG_POINT_TREES": "1"}, **env)):
             return VEG._process_dds_mask(mask, VEG.SEGFORMER.CLASS_TREE, **kwargs)
 
-    def test_point_trees_below_two_cells_areas_above(self):
+    def test_point_trees_below_two_cells_or_600_m2_areas_above(self):
         mask = np.zeros((200, 200), np.uint8)
-        mask[10:24, 10:24] = 1          # 196 m2 < 2 cells -> single trees
-        mask[100:116, 100:116] = 1      # 256 m2 > 2 cells -> forest area
+        mask[10:24, 10:24] = 1          # 196 m2 -> single trees
+        mask[100:116, 100:116] = 1      # 256 m2 > 2 cells, < 600 m2 -> still single trees
+        mask[150:180, 150:180] = 1      # 900 m2 -> forest area
         polys = self._run(mask, None, {"O4_VEG_SPACING_RULES": "1"})
         modes = sorted(bool(den & VEG.POINT_MODE) for _p, den, _r in polys)
-        self.assertEqual(modes, [False, True])
+        self.assertEqual(modes, [False, True, True])
+        # Forests on a wider grid: 2 cells reach past 600 m2.
+        polys = self._run(mask, None, {"O4_VEG_SPACING_RULES": "1", "O4_VEG_POINT_MAX_CELLS": "10"})
+        self.assertTrue(all(den & VEG.POINT_MODE for _p, den, _r in polys))
         fixed = self._run(mask, None, {"O4_VEG_SPACING_RULES": "0"})
-        self.assertTrue(all(den & VEG.POINT_MODE for _p, den, _r in fixed))   # both < 600 m2
+        modes = sorted(bool(den & VEG.POINT_MODE) for _p, den, _r in fixed)
+        self.assertEqual(modes, [False, True, True])
 
-    def test_holes_need_one_cell_if_known_two_if_not(self):
+    def test_holes_need_one_cell_if_known_unsure_gaps_stay_forest(self):
         mask = np.zeros((300, 300), np.uint8)
         mask[20:280, 20:280] = 1
         mask[50:62, 50:62] = 0          # 144 m2 gap, known cause -> hole
         mask[150:162, 150:162] = 0      # 144 m2 gap, unknown cause -> stays forest
-        mask[200:216, 50:66] = 0        # 256 m2 gap, unknown cause -> hole
+        mask[200:216, 50:66] = 0        # 256 m2 gap, unknown cause -> stays forest by default
         certain = np.zeros_like(mask, bool)
         certain[50:62, 50:62] = True
         polys = self._run(mask, certain, {"O4_VEG_SPACING_RULES": "1"})
         area = [ring for _p, den, ring in polys if not den & VEG.POINT_MODE]
         self.assertEqual(len(area), 1)
+        self.assertEqual(len(area[0].holes), 1)
+        # Asked for: unsure gaps from 2 cells are cut too.
+        polys = self._run(mask, certain, {"O4_VEG_SPACING_RULES": "1", "O4_VEG_HOLE_UNSURE_CELLS": "2"})
+        area = [ring for _p, den, ring in polys if not den & VEG.POINT_MODE]
         self.assertEqual(len(area[0].holes), 2)
 
 
