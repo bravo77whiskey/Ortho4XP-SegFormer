@@ -274,6 +274,8 @@ def _veg_tree_env():
         "O4_VEG_FOREST_HEIGHTS": "1" if veg_forest_heights else "0",
         "O4_VEG_APPROACH_HEIGHTS": "1" if veg_approach_heights else "0",
         "O4_VEG_TROPICS_EVERGREEN": "1" if veg_tropics_evergreen else "0",
+        "O4_VEG_UPSCALE_TREES": "1" if veg_upscale_gap_trees else "0",
+        "O4_VEG_OSM_RESCUE_RANGELAND": "1" if veg_osm_rescue_rangeland else "0",
     }
 
 
@@ -306,6 +308,8 @@ veg_tree_sizes    = True    # ZL18/19 single trees sized from canopy height
 veg_forest_heights = True   # ZL18/19 shorter copies of the climate forests
 veg_approach_heights = True  # trees under runway approaches below the approach surface
 veg_tropics_evergreen = True  # no autumn colours between the tropics
+veg_upscale_gap_trees = True   # ZL16: add the trees SegFormer finds on the texture enlarged 2x
+veg_osm_rescue_rangeland = True  # trees on SegFormer rangeland inside OSM forests
 veg_avoid_gfv2    = False
 veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False

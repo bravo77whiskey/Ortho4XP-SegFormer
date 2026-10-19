@@ -30,6 +30,8 @@ NEW_VARS = (
     "veg_forest_heights",
     "veg_approach_heights",
     "veg_tropics_evergreen",
+    "veg_upscale_gap_trees",
+    "veg_osm_rescue_rangeland",
 )
 
 
@@ -92,6 +94,57 @@ class TreeSettingsTests(unittest.TestCase):
             self.assertEqual(VEG._canopy_rule(), (2.0, None))   # mean height >= 2 m
             self.assertIsNone(VEG._canopy_seg_min_h())
             self.assertFalse(VEG._forest_holes_enabled())
+
+
+class UpscaleGapTreeTests(unittest.TestCase):
+    def test_on_unless_the_setting_turns_it_off(self):
+        with mock.patch.dict(os.environ, {"O4_VEG_UPSCALE_TREES": ""}):
+            self.assertTrue(VEG._upscale_gap_trees_enabled())
+        saved = PIPELINE.veg_upscale_gap_trees
+        try:
+            PIPELINE.veg_upscale_gap_trees = False
+            with mock.patch.dict(os.environ, PIPELINE._veg_tree_env()):
+                self.assertFalse(VEG._upscale_gap_trees_enabled())
+        finally:
+            PIPELINE.veg_upscale_gap_trees = saved
+
+    def test_trees_found_enlarged_come_back_at_texture_size(self):
+        img = np.zeros((40, 60, 3), np.uint8)
+        seen = {}
+
+        def fake_inference(model, device, big, proc, tree_support=False):
+            seen["shape"] = big.shape
+            cls_map = np.full(big.shape[:2], VEG.SEGFORMER.CLASS_AGRICULTURE, np.int8)
+            cls_map[10:12, 20:22] = VEG.SEGFORMER.CLASS_TREE   # one 2x2 crown -> 1 px
+            weak = np.zeros(big.shape[:2], bool)
+            weak[40:42, 80] = True                             # half of an enlarged px -> tree
+            weak[60, 100] = True                               # a quarter -> not
+            return cls_map, weak
+
+        with mock.patch.object(VEG.SEGFORMER, "run_inference", fake_inference):
+            tree = VEG._upscaled_trees(None, None, img, None)
+        self.assertEqual(seen["shape"], (80, 120, 3))
+        self.assertEqual(tree.shape, (40, 60))
+        self.assertEqual(sorted(zip(*np.nonzero(tree))), [(5, 10), (20, 40)])
+
+
+class OsmRescueTests(unittest.TestCase):
+    def test_rangeland_rescue_is_on_unless_switched_off(self):
+        with mock.patch.dict(os.environ, {"O4_VEG_OSM_RESCUE_RANGELAND": ""}):
+            self.assertTrue(VEG._osm_rescue_rangeland_enabled())
+        with mock.patch.dict(os.environ, {"O4_VEG_OSM_RESCUE_RANGELAND": "0"}):
+            self.assertFalse(VEG._osm_rescue_rangeland_enabled())
+
+    def test_only_dark_green_ground_looks_like_canopy(self):
+        img = np.zeros((60, 90, 3), np.uint8)
+        img[:, :30] = (40, 75, 35)       # forest: dark, green
+        img[:, 30:60] = (95, 105, 70)    # scrub / dry grass: brighter, barely green
+        img[:, 60:] = (150, 135, 110)    # bare rock
+        look = VEG._canopy_look(img, 2.4, (60, 90))
+        self.assertTrue(look[:, 5:20].all())
+        self.assertFalse(look[:, 40:].any())
+        # Other sizes (veg_res_m) come back at the class map's size.
+        self.assertEqual(VEG._canopy_look(img, 2.4, (30, 45)).shape, (30, 45))
 
 
 class _Spacing:

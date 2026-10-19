@@ -456,13 +456,44 @@ def _osm_forest_rescue_enabled():
 # leaf-off broadleaf it can call a whole patch farmland or water with ~0.97
 # confidence — a square hole with straight edges where the patches meet, made
 # visible by the tile-wide forest exclusion. Inside a simHeaven (OSM) forest
-# polygon those classes are read as canopy. Rangeland is left alone: clearings,
-# heath and young plantings land there and should stay open.
+# polygon those classes are read as canopy.
 OSM_FOREST_RESCUE_CLASSES = (
     SEGFORMER.CLASS_AGRICULTURE,
     SEGFORMER.CLASS_WATER,
     -1,  # under the confidence threshold
 )
+# Rangeland too: SegFormer calls whole wooded hillsides rangeland at ~1 %
+# tree probability, which left most of an OSM-mapped forest hill bare
+# (review set, Wenzhou SW, 2026-10-19). OSM forest outlines also take in
+# grass, scrub and rock, which SegFormer calls rangeland as well, so only
+# rangeland that looks like canopy is planted: at least
+# CANOPY_LOOK_MIN_SHARE of the pixels within CANOPY_LOOK_WINDOW_M dark
+# (brightness <= CANOPY_LOOK_MAX_LUM) and green (2G-R-B >= CANOPY_LOOK_MIN_EXG).
+# Measured on Wenzhou SW: forest 73 % of pixels pass (brightness 0.24,
+# greenness 0.15), hill scrub 27 % (0.29, 0.09). Bare ground, buildings and
+# roads in the polygon (quarries, villages) stay open.
+CANOPY_LOOK_MAX_LUM = 0.28
+CANOPY_LOOK_MIN_EXG = 0.10
+CANOPY_LOOK_WINDOW_M = 20.0
+CANOPY_LOOK_MIN_SHARE = 0.5
+
+
+def _canopy_look(img_rgb, m_per_px, shape):
+    """Pixels whose surroundings look like tree canopy in the ortho (``shape``-sized)."""
+    f = img_rgb.astype(np.float32) / 255.0
+    r, g, b = f[..., 0], f[..., 1], f[..., 2]
+    lum = cv2.blur(0.299 * r + 0.587 * g + 0.114 * b, (3, 3))
+    exg = cv2.blur(2 * g - r - b, (3, 3))
+    dark_green = ((lum <= CANOPY_LOOK_MAX_LUM) & (exg >= CANOPY_LOOK_MIN_EXG)).astype(np.float32)
+    if dark_green.shape != tuple(shape):
+        dark_green = cv2.resize(dark_green, (shape[1], shape[0]), interpolation=cv2.INTER_AREA)
+    win = max(3, int(round(CANOPY_LOOK_WINDOW_M / m_per_px)) | 1)
+    return cv2.blur(dark_green, (win, win)) >= CANOPY_LOOK_MIN_SHARE
+
+
+def _osm_rescue_rangeland_enabled():
+    """O4_VEG_OSM_RESCUE_RANGELAND=0: rangeland inside OSM forests stays open."""
+    return _veg_flag("O4_VEG_OSM_RESCUE_RANGELAND")
 
 
 # At ZL18+ (0.4 m/px and finer) the landcover model reads patchy meadow — the
@@ -478,6 +509,35 @@ def _veg_infer_factor(zl):
     if not _veg_flag("O4_VEG_ZL17_INFERENCE"):
         return 1
     return 2 ** max(0, int(zl) - VEG_INFER_MAX_ZL)
+
+
+# At ZL16 (2.4 m/px) SegFormer reads land use more than objects: tree clumps
+# and orchards between fields go with the fields (agriculture), garden and
+# street trees with the houses (building / developed), at under 20 % tree
+# probability. Read again enlarged UPSCALE_FACTOR times, the same model sees
+# many of them as trees while green crops stay fields (review set,
+# 2026-10-19: +3.5-6 % of a texture). Those trees are added to the tree mask
+# and win over the 1x building / road / developed exclusion. ~4x the ZL16
+# vegetation inference time (cfg veg_upscale_gap_trees).
+UPSCALE_FACTOR = 2
+UPSCALE_MAX_ZL = 16
+
+
+def _upscale_gap_trees_enabled():
+    """O4_VEG_UPSCALE_TREES=0: no second SegFormer pass on ZL16 textures enlarged 2x."""
+    return _veg_flag("O4_VEG_UPSCALE_TREES")
+
+
+def _upscaled_trees(model, device, img, proc):
+    """Tree pixels (class or tree support) of ``img`` read UPSCALE_FACTOR times larger,
+    at ``img``'s size: a pixel is tree when at least half of its enlarged pixels are."""
+    h, w = img.shape[:2]
+    big = cv2.resize(img, (w * UPSCALE_FACTOR, h * UPSCALE_FACTOR), interpolation=cv2.INTER_CUBIC)
+    cls_map, weak = SEGFORMER.run_inference(model, device, big, proc, tree_support=True)
+    tree = cls_map == SEGFORMER.CLASS_TREE
+    if weak is not None:
+        tree |= weak
+    return cv2.resize(tree.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA) >= 0.5
 
 
 # Above VEG_INFER_MAX_ZL (the airport zones) trees come from the canopy-height
@@ -657,8 +717,10 @@ def _veg_feature_sig():
         _canopy_airports_only(),
         _forest_holes_enabled(), _forest_hole_min_m2(),
         _spacing_rules_enabled(), _cell_rules(), HOLE_CERTAIN_FRAC,
-        _osm_forest_rescue_enabled(),
+        _osm_forest_rescue_enabled(), _osm_rescue_rangeland_enabled(),
+        CANOPY_LOOK_MAX_LUM, CANOPY_LOOK_MIN_EXG, CANOPY_LOOK_WINDOW_M, CANOPY_LOOK_MIN_SHARE,
         _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
+        _upscale_gap_trees_enabled(), UPSCALE_FACTOR, UPSCALE_MAX_ZL,
         _canopy_enabled(), _canopy_rule(), _canopy_seg_min_h(), CANOPY.INFER_ZL, CANOPY.LEVELS_M,
         ROW_MAX_WIDTH_M, ROW_MIN_LENGTH_M, ROW_MIN_AREA_M2,
         TREELINE_MAX_WIDTH_M, SHRUB_TREELINE_MAX_WIDTH_M,
@@ -2516,6 +2578,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 f'_z{VEG_INFER_MAX_ZL}_veg.npy',
                 f'_z{VEG_INFER_MAX_ZL}_vegtree.npy',
                 '_vegcanopy.npy',
+                '_veg2x.npy',
                 '_road.pkl',
                 '_bld.pkl',
                 '_vegaux.pkl',
@@ -3119,6 +3182,27 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         if canopy_maps is not None and not disable_cache:
                             np.save(canopy_path, canopy_maps)
 
+        # ZL16: trees SegFormer only sees with the texture enlarged.
+        upscale_trees = None
+        upscale_path = os.path.join(cache_dir, fname.replace('.dds', '_veg2x.npy'))
+        if (zl <= UPSCALE_MAX_ZL and infer_factor == 1 and _upscale_gap_trees_enabled()
+                and not mesh_water_full):
+            if not disable_cache and os.path.exists(upscale_path):
+                upscale_trees = SEGFORMER.load_tree_support(upscale_path, veg_map.shape)
+            if upscale_trees is None:
+                if img is None:
+                    img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                if img is not None:
+                    if model is None:
+                        model, proc, device = SEGFORMER.load_vegetation_model(device)
+                    _t = time.perf_counter()
+                    upscale_trees = _upscaled_trees(model, device, img, proc)
+                    timings['inference'] += time.perf_counter() - _t
+                    if upscale_trees.shape != veg_map.shape:
+                        upscale_trees = None
+                    elif not disable_cache:
+                        SEGFORMER.save_tree_support(upscale_path, upscale_trees)
+
         if disable_cache:
             veg_cache_stat = None
         else:
@@ -3131,6 +3215,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 if canopy_maps is not None:
                     _cn_st = os.stat(canopy_path)
                     veg_cache_stat += (_cn_st.st_mtime_ns, _cn_st.st_size)
+                if upscale_trees is not None:
+                    _up_st = os.stat(upscale_path)
+                    veg_cache_stat += (_up_st.st_mtime_ns, _up_st.st_size)
             except OSError:
                 veg_cache_stat = None
 
@@ -3153,6 +3240,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     tree_support.astype(np.uint8), (new_w, new_h),
                     interpolation=cv2.INTER_NEAREST,
                 ).astype(bool)
+            if upscale_trees is not None:
+                upscale_trees = cv2.resize(
+                    upscale_trees.astype(np.uint8), (new_w, new_h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
             img_h, img_w = veg_map.shape
             mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
 
@@ -3173,6 +3265,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         tree_raw = (veg_map == SEGFORMER.CLASS_TREE)
         if tree_support is not None:
             tree_raw = tree_raw | tree_support
+        if upscale_trees is not None:
+            tree_raw = tree_raw | upscale_trees
         # Where the canopy network decides the trees (None: nowhere on this texture).
         canopy_inside = None
         airport_sig = None
@@ -3199,7 +3293,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         ke = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (excl_px*2+1,)*2)
         excl_raw  = ((veg_map == SEGFORMER.CLASS_BUILDING) |
                      (veg_map == SEGFORMER.CLASS_ROAD)     |
-                     (veg_map == SEGFORMER.CLASS_DEVELOPED)).astype(np.uint8)
+                     (veg_map == SEGFORMER.CLASS_DEVELOPED))
+        if upscale_trees is not None:
+            excl_raw &= ~upscale_trees   # garden and street trees the 1x map gave to the houses
+        excl_raw = excl_raw.astype(np.uint8)
         segformer_excl_mask = cv2.dilate(excl_raw, ke)
         excl_mask = segformer_excl_mask.copy()
         if mesh_water_mask is not None and mesh_water_mask.any():
@@ -3457,6 +3554,13 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         _osm_forest = local_context_masks.get('forest')
         if _osm_forest is not None and _osm_forest_rescue_enabled():
             rescue = _osm_forest.astype(bool) & np.isin(veg_map, OSM_FOREST_RESCUE_CLASSES)
+            if _osm_rescue_rangeland_enabled():
+                range_in = _osm_forest.astype(bool) & (veg_map == SEGFORMER.CLASS_RANGELAND)
+                if range_in.any():
+                    if img is None:
+                        img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                    if img is not None:
+                        rescue |= range_in & _canopy_look(img, mpp, veg_map.shape)
             if canopy_inside is not None:
                 rescue &= ~canopy_inside
             rescue = rescue.astype(np.uint8)

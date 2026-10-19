@@ -625,6 +625,26 @@ cfg_tile_vars = {
                 "nearest the threshold 1 m shrubs. Uses forest copies in the "
                 "O4XP_Forest_Heights pack.",
     },
+    "veg_osm_rescue_rangeland": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_osm_range",
+        "hint": "Inside OpenStreetMap forests (simHeaven 7-forests), plant "
+                "trees where SegFormer sees rangeland that looks like canopy in "
+                "the ortho (dark green): it calls whole wooded hillsides "
+                "rangeland. Grass, scrub, bare ground, buildings and roads "
+                "stay open.",
+    },
+    "veg_upscale_gap_trees": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_upscale_trees",
+        "hint": "ZL16: run SegFormer a second time on each texture enlarged 2x "
+                "and add the trees it finds there: tree clumps and orchards "
+                "between fields and garden and street trees that the normal "
+                "pass gives to the fields or houses. About 4x the vegetation "
+                "inference time on ZL16 textures.",
+    },
     "veg_tropics_evergreen": {
         "type": bool,
         "default": True,
@@ -991,6 +1011,8 @@ list_veg_vars = [
     "veg_forest_heights",
     "veg_approach_heights",
     "veg_tropics_evergreen",
+    "veg_upscale_gap_trees",
+    "veg_osm_rescue_rangeland",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",
