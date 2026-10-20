@@ -550,6 +550,16 @@ cfg_tile_vars = {
                 "model rates under 2 m, while flat grass (~0 m) stays bare. "
                 "0 turns it off.",
     },
+    "veg_canopy_add_min_h_m": {
+        "type": float,
+        "default": 0.1,
+        "short_name": "veg_can_add",
+        "hint": "ZL18/19, outside airport boundaries: also plant trees where "
+                "the canopy model measures at least this height, in metres, "
+                "on top of the land-cover forests. Finds street-tree rows, "
+                "courtyard trees and gully tree lines; trees it puts on "
+                "buildings or roads are cut by the exclusions. 0 turns it off.",
+    },
     "veg_forest_holes": {
         "type": bool,
         "default": True,
@@ -1003,6 +1013,7 @@ list_veg_vars = [
     "veg_canopy",
     "veg_canopy_min_conf",
     "veg_canopy_seg_min_h_m",
+    "veg_canopy_add_min_h_m",
     "veg_forest_holes",
     "veg_point_tree_max_cells",
     "veg_hole_certain_cells",

@@ -11,7 +11,7 @@
     --obj: 255,140,40; --fac: 235,70,190; --tree: 60,210,90; --scenery: 40,215,235;
     --near: 200,200,200; --filtered: 255,70,70; --resorted: 150,120,255; --blocked: 255,230,40;
     --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --smaller: 120,255,120; --seam: 80,170,255; --placedc: 255,255,255; --other: 130,130,130;
-    --treept: 150,255,60; --vegroad: 255,40,220; --vegother: 255,110,40;
+    --treept: 150,255,60; --vegroad: 255,40,220; --vegother: 255,110,40; --vegcanopy: 120,220,255;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -132,6 +132,7 @@
     { id: "other", label: "Other", color: "--other", on: false },
     { id: "vegRoad", label: "Trees removed: road exclusion", color: "--vegroad", on: true, fillOnly: true },
     { id: "vegOther", label: "Trees removed: other exclusions", color: "--vegother", on: false, fillOnly: true },
+    { id: "vegCanopy", label: "Trees added: canopy model (ZL18/19)", color: "--vegcanopy", on: true, fillOnly: true },
   ];
   const SCEN = [
     { id: "scenery", label: "Objects & facades", color: "--scenery", on: true },
@@ -260,7 +261,7 @@
     }
     for (const v of d.veg) shapes.push({ layer: v.pt ? "treept" : "tree", info: v, rings: v.r, bb: bbox(v.r) });
     // Canopy SegFormer found that an exclusion layer then removed.
-    for (const [cut, layer] of [["road", "vegRoad"], ["other", "vegOther"]])
+    for (const [cut, layer] of [["road", "vegRoad"], ["other", "vegOther"], ["canopy", "vegCanopy"]])
       for (const r of (d.vegcut && d.vegcut[cut]) || [])
         shapes.push({ layer, info: { cut }, rings: [r], bb: bbox([r]), vcut: true });
     const diag = d.diag;
@@ -490,6 +491,8 @@
         existing_facade: "Existing facade", exclusion: "Exclusion polygon", stock_yolo: "Stock-YOLO placement (this overlay)" }[i.k] || i.k;
       return `<b class="t">${what}</b>${i.src ? `<br>pack: ${esc(i.src)}` : ""}${i.a ? `<br>${esc(i.a)}` : ""}`;
     }
+    if (s.vcut && i.cut === "canopy")
+      return `<b class="t">Trees added by the canopy model</b><br>canopy at least veg_canopy_add_min_h_m tall where SegFormer placed no forest (ZL18/19, outside airports)`;
     if (s.vcut) return i.cut === "road"
       ? `<b class="t">Trees removed by the road exclusion</b><br>canopy within a road's clearance (simHeaven network / OSM roads)`
       : `<b class="t">Trees removed by another exclusion</b><br>SegFormer road/building/developed buffer, existing buildings, water, forests or exclusion zones`;

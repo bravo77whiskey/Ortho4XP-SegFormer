@@ -22,6 +22,7 @@ NEW_VARS = (
     "veg_canopy",
     "veg_canopy_min_conf",
     "veg_canopy_seg_min_h_m",
+    "veg_canopy_add_min_h_m",
     "veg_forest_holes",
     "veg_point_tree_max_cells",
     "veg_hole_certain_cells",
@@ -51,6 +52,7 @@ class TreeSettingsTests(unittest.TestCase):
     def test_defaults_match_the_overlay_constants(self):
         self.assertEqual(CFGVARS.cfg_vars["veg_canopy_min_conf"]["default"], VEG.CANOPY_MIN_CONFIDENCE)
         self.assertEqual(CFGVARS.cfg_vars["veg_canopy_seg_min_h_m"]["default"], VEG.CANOPY_SEG_MIN_H_M)
+        self.assertEqual(CFGVARS.cfg_vars["veg_canopy_add_min_h_m"]["default"], VEG.CANOPY_ADD_MIN_H_M)
         self.assertEqual(CFGVARS.cfg_vars["veg_point_tree_max_cells"]["default"], VEG.POINT_TREE_MAX_CELLS)
         self.assertEqual(CFGVARS.cfg_vars["veg_hole_certain_cells"]["default"], VEG.HOLE_CERTAIN_CELLS)
         self.assertEqual(CFGVARS.cfg_vars["veg_hole_unsure_cells"]["default"], VEG.HOLE_UNSURE_CELLS)
@@ -67,14 +69,15 @@ class TreeSettingsTests(unittest.TestCase):
 
     def test_config_values_reach_the_overlay_switches(self):
         env = self._env_for(veg_canopy=True, veg_canopy_min_conf=0.15,
-                            veg_canopy_seg_min_h_m=0.5, veg_forest_holes=True,
-                            veg_point_tree_max_cells=3.0, veg_hole_certain_cells=0.5,
+                            veg_canopy_seg_min_h_m=0.5, veg_canopy_add_min_h_m=0.5,
+                            veg_forest_holes=True, veg_point_tree_max_cells=3.0, veg_hole_certain_cells=0.5,
                             veg_hole_unsure_cells=4.0, veg_tree_sizes=True,
                             veg_forest_heights=True, veg_approach_heights=True)
         with mock.patch.dict(os.environ, env):
             self.assertTrue(VEG._canopy_enabled())
             self.assertEqual(VEG._canopy_rule(), (2.0, 0.15))
             self.assertEqual(VEG._canopy_seg_min_h(), 0.5)
+            self.assertEqual(VEG._canopy_add_min_h(), 0.5)
             self.assertTrue(VEG._forest_holes_enabled())
             self.assertEqual(VEG._cell_rules(), (3.0, 0.5, 4.0))
             self.assertTrue(VEG._tree_sizes_enabled())
@@ -83,8 +86,8 @@ class TreeSettingsTests(unittest.TestCase):
 
     def test_zero_and_false_turn_things_off(self):
         env = self._env_for(veg_canopy=False, veg_canopy_min_conf=0.0,
-                            veg_canopy_seg_min_h_m=0.0, veg_forest_holes=False,
-                            veg_tree_sizes=False, veg_forest_heights=False,
+                            veg_canopy_seg_min_h_m=0.0, veg_canopy_add_min_h_m=0.0,
+                            veg_forest_holes=False, veg_tree_sizes=False, veg_forest_heights=False,
                             veg_approach_heights=False)
         with mock.patch.dict(os.environ, env):
             self.assertFalse(VEG._tree_sizes_enabled())
@@ -93,6 +96,7 @@ class TreeSettingsTests(unittest.TestCase):
             self.assertFalse(VEG._canopy_enabled())
             self.assertEqual(VEG._canopy_rule(), (2.0, None))   # mean height >= 2 m
             self.assertIsNone(VEG._canopy_seg_min_h())
+            self.assertIsNone(VEG._canopy_add_min_h())
             self.assertFalse(VEG._forest_holes_enabled())
 
 

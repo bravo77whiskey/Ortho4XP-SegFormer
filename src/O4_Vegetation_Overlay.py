@@ -555,6 +555,13 @@ CANOPY_MIN_CONFIDENCE = 0.2
 # SegFormer's trees are kept wherever the canopy has at least this much height,
 # so they come back and the airfield grass stays clear (VVPQ / EDDB, 2026-10).
 CANOPY_SEG_MIN_H_M = 0.25
+# Outside airport boundaries, ZL18/19 textures also plant trees wherever the
+# canopy reaches CANOPY_ADD_MIN_H_M, on top of SegFormer's forests. The
+# canopy finds street-tree rows, courtyard trees and gully tree lines that
+# SegFormer misses, but reads them low (0.5-2 m) and misses dense uniform
+# plantations, so it adds to the forests rather than replacing them (Wenzhou,
+# 2026-10-20). What it adds on buildings and roads is cut by the exclusions.
+CANOPY_ADD_MIN_H_M = 0.1
 
 
 def _canopy_seg_min_h():
@@ -566,6 +573,18 @@ def _canopy_seg_min_h():
         return float(raw) if raw else CANOPY_SEG_MIN_H_M
     except ValueError:
         return CANOPY_SEG_MIN_H_M
+
+
+def _canopy_add_min_h():
+    """O4_VEG_CANOPY_ADD_MIN_H: canopy height that adds trees outside airports; 'off' or 0: none."""
+    raw = os.environ.get("O4_VEG_CANOPY_ADD_MIN_H", "").strip().lower()
+    if raw in ("off", "none", "no", "false"):
+        return None
+    try:
+        value = float(raw) if raw else CANOPY_ADD_MIN_H_M
+    except ValueError:
+        return CANOPY_ADD_MIN_H_M
+    return value if value > 0 else None
 
 
 def _canopy_rule():
@@ -722,6 +741,7 @@ def _veg_feature_sig():
         _veg_flag("O4_VEG_ZL17_INFERENCE"), VEG_INFER_MAX_ZL,
         _upscale_gap_trees_enabled(), UPSCALE_FACTOR, UPSCALE_MAX_ZL,
         _canopy_enabled(), _canopy_rule(), _canopy_seg_min_h(), CANOPY.INFER_ZL, CANOPY.LEVELS_M,
+        _canopy_add_min_h(),
         ROW_MAX_WIDTH_M, ROW_MIN_LENGTH_M, ROW_MIN_AREA_M2,
         TREELINE_MAX_WIDTH_M, SHRUB_TREELINE_MAX_WIDTH_M,
         SEGFORMER.tree_support_enabled(),
@@ -3284,6 +3304,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             if seg_min_h is not None:
                 canopy_tree |= tree_raw & CANOPY.tree_mask(canopy_maps, (img_h, img_w), seg_min_h)
             tree_raw = np.where(canopy_inside, canopy_tree, tree_raw)
+        # Outside airports: canopy trees on top of SegFormer's.
+        canopy_added = None
+        add_min_h = _canopy_add_min_h()
+        if canopy_maps is not None and add_min_h is not None:
+            canopy_added = CANOPY.tree_mask(canopy_maps, (img_h, img_w), add_min_h) & ~tree_raw
+            if canopy_inside is not None:
+                canopy_added &= ~canopy_inside
+            tree_raw = tree_raw | canopy_added
         tree_raw = tree_raw.astype(np.uint8)
         tree_mask = _morph(tree_raw)
 
@@ -3580,6 +3608,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             }
 
         tree_mask = cv2.bitwise_and(tree_mask, cv2.bitwise_not(excl_mask))
+        if review_cuts is not None and canopy_added is not None:
+            review_cuts['canopy'] = tree_mask & canopy_added.astype(np.uint8)
 
         # Regions covered by kept higher-ZL textures emit their forests at the
         # higher ZL; blank them here so trees are not generated twice.
