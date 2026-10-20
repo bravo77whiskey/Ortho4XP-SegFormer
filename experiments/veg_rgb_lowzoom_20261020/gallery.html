@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vegetation research · ZL16/17</title>
+<style>
+*{box-sizing:border-box}body{margin:24px;background:#151a1c;color:#e2e7e8;font:16px system-ui}
+h1{font-size:26px;margin-bottom:12px}header{max-width:1200px}p{line-height:1.5}
+select,button,input{font:inherit}select,button{padding:8px;background:#293136;color:white;border:1px solid #78868c;border-radius:4px}
+button{cursor:pointer}button:hover{background:#39484f}button:focus-visible,select:focus-visible{outline:2px solid #8bd7e7}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:14px 0}select{max-width:100%}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.frame{position:relative;aspect-ratio:1;background:#080b0c;overflow:hidden;touch-action:none;cursor:grab;border:1px solid #39484f}
+.frame.dragging{cursor:grabbing}.scene{position:absolute;inset:0;transform-origin:0 0;will-change:transform}
+.scene img,.scene canvas{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
+.scene canvas{image-rendering:pixelated}
+.caption{display:flex;justify-content:space-between;margin:8px 0}
+#info,#method-note,#load-status{margin:10px 0;color:#becbd0}#load-status{min-height:22px}
+a{color:#8bd7e7}#zoom-label{font-variant-numeric:tabular-nums;min-width:50px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}body{margin:12px}h1{font-size:22px}}
+</style>
+<header>
+<h1>Vegetation at ZL16/17</h1>
+<p>A–F use image processing. G uses F inside SegFormer's forest-or-rangeland zones.
+Pink shows candidate pixels, not confirmed trees. All options use the same local imagery.</p>
+<p>Scroll over either image to zoom at the pointer. Drag to pan. Both views stay synchronized.
+Fit resets the view; 1:1 shows one source pixel per screen pixel.</p>
+</header>
+<div class="controls">
+<select id="sample" aria-label="Sample"></select>
+<select id="method" aria-label="Method"></select>
+<button id="prev">Previous</button><button id="next">Next</button>
+</div>
+<div class="controls">
+<button id="zoom-out" aria-label="Zoom out">−</button>
+<input id="zoom" aria-label="Zoom" type="range" min="1" max="16" step=".05" value="1">
+<button id="zoom-in" aria-label="Zoom in">+</button><output id="zoom-label">1.0×</output>
+<button id="fit">Fit</button><button id="native">1:1</button>
+<label><input id="toggle" type="checkbox" checked>Show overlay</label>
+<label>Opacity <input id="opacity" type="range" min="0" max="1" step=".05" value=".5"></label>
+</div>
+<div id="method-note"></div><div id="info"></div>
+<div class="grid">
+<section><div class="caption"><span>Source RGB</span><span>4096 px</span></div>
+<div class="frame" id="source-frame" aria-label="Source image viewport">
+<div class="scene"><img id="original" alt="Original satellite imagery" draggable="false"></div></div></section>
+<section><div class="caption"><span>Candidate</span><span>Native mask</span></div>
+<div class="frame" id="candidate-frame" aria-label="Candidate image viewport">
+<div class="scene"><img id="base" alt="Satellite imagery beneath candidate mask" draggable="false">
+<canvas id="mask" aria-label="Vegetation candidate mask"></canvas></div></div></section>
+</div>
+<div id="load-status" role="status"></div>
+<p><a href="metrics.json">Measurements and input hashes</a> · <a href="evaluation.json">Initial RGB spot checks</a></p>
+<script>
+'use strict';
+const records=__RECORDS_JSON__;
+const $=id=>document.getElementById(id);
+const sample=$('sample'),method=$('method'),canvas=$('mask');
+const methods=[
+ ['green','A. Green vegetation','Green vegetation includes grass, crops and some water.'],
+ ['dark','B. Dark green','Brightness helps remove bright surfaces, but dark fields and water can remain.'],
+ ['texture','C. Colour + texture + direction','Colour and texture measured at metre-based scales.'],
+ ['regions','D. Strong seeds + bounded region growth','Stricter seeds grow at most 8 metres through supported vegetation.'],
+ ['rows_diagnostic','E. Dark rows, diagnostic only','Dark linear features can be canals or shadows, not trees.'],
+ ['field_suppressed','F. Texture + wider crop-row rejection','Exploratory refinement informed by the RGB spot checks; can remove real tree rows.'],
+ ['segformer_f','G. SegFormer forest + rangeland, filled by F','G = F ∩ (SegFormer forest ∪ rangeland). Model classes define the zones; F selects pixels inside.'],
+ ['segformer_zones','SegFormer forest + rangeland zones','Diagnostic zone mask before F. Forest class 5 and rangeland class 2, native-resolution inference.']
+];
+for(const [i,r] of records.entries()){
+ const option=document.createElement('option');option.value=i;
+ option.textContent=r.set+' / '+r.key+' / ZL'+r.zl;sample.appendChild(option);
+}
+let scale=1,panX=0,panY=0,loadId=0,drag=null;
+function transform(){
+ panX=Math.max(1-scale,Math.min(0,panX));panY=Math.max(1-scale,Math.min(0,panY));
+ for(const node of document.querySelectorAll('.scene'))
+  node.style.transform=`translate(${panX*100}%,${panY*100}%) scale(${scale})`;
+ $('zoom').value=scale;$('zoom-label').textContent=scale.toFixed(1)+'×';
+}
+function zoomTo(next,u=.5,v=.5){
+ next=Math.max(1,Math.min(16,next));
+ panX=u-(u-panX)*next/scale;panY=v-(v-panY)*next/scale;scale=next;transform();
+}
+function fit(){scale=1;panX=panY=0;transform()}
+function opacity(){canvas.style.opacity=$('toggle').checked?$('opacity').value:0}
+function available(){
+ const current=method.value,rec=records[+sample.value];method.replaceChildren();
+ for(const [key,label] of methods){
+  if(rec.coverage_pct[key]===undefined)continue;
+  const option=document.createElement('option');option.value=key;option.textContent=label;method.appendChild(option);
+ }
+ method.value=Array.from(method.options).some(o=>o.value===current)?current:
+  (rec.coverage_pct.segformer_f!==undefined?'segformer_f':
+   rec.coverage_pct.field_suppressed!==undefined?'field_suppressed':'texture');
+}
+async function update(){
+ const request=++loadId,rec=records[+sample.value],key=method.value,p=rec.id+'/';
+ $('method-note').textContent=methods.find(m=>m[0]===key)[2];
+ $('info').textContent=`${rec.label} | ${rec.mpp.toFixed(2)} m/pixel | ${rec.shape.join(' × ')} | ${rec.coverage_pct[key].toFixed(2)}% marked`;
+ $('load-status').textContent='Loading native-resolution imagery and mask…';
+ canvas.style.visibility='hidden';
+ $('original').src=p+'source_native.jpg';$('base').src=p+'source_native.jpg';
+ const maskImage=new Image();maskImage.src=p+key+'_native.png';
+ try{
+  await Promise.all([maskImage.decode(),$('original').decode(),$('base').decode()]);
+  if(request!==loadId)return;
+  canvas.width=maskImage.naturalWidth;canvas.height=maskImage.naturalHeight;
+  const ctx=canvas.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(maskImage,0,0);
+  const pixels=ctx.getImageData(0,0,canvas.width,canvas.height),data=pixels.data;
+  for(let i=0;i<data.length;i+=4){const on=data[i];data[i]=255;data[i+1]=64;data[i+2]=180;data[i+3]=on}
+  ctx.putImageData(pixels,0,0);canvas.style.visibility='visible';opacity();
+  $('load-status').textContent=`Loaded ${$('original').naturalWidth} × ${$('original').naturalHeight} imagery and ${canvas.width} × ${canvas.height} mask.`;
+ }catch(error){
+  if(request===loadId)$('load-status').textContent='Could not load this image or mask. '+error.message;
+ }
+}
+function changeSample(){available();fit();update()}
+sample.addEventListener('change',changeSample);method.addEventListener('change',update);
+$('toggle').addEventListener('change',opacity);$('opacity').addEventListener('input',opacity);
+$('zoom').addEventListener('input',()=>zoomTo(+$('zoom').value));
+$('zoom-in').onclick=()=>zoomTo(scale*1.5);$('zoom-out').onclick=()=>zoomTo(scale/1.5);
+$('fit').onclick=fit;
+$('native').onclick=()=>zoomTo(records[+sample.value].shape[1]/$('source-frame').clientWidth);
+$('prev').onclick=()=>{sample.value=(+sample.value+records.length-1)%records.length;changeSample()};
+$('next').onclick=()=>{sample.value=(+sample.value+1)%records.length;changeSample()};
+for(const frame of document.querySelectorAll('.frame')){
+ frame.addEventListener('wheel',event=>{
+  event.preventDefault();const box=frame.getBoundingClientRect();
+  zoomTo(scale*Math.exp(-Math.max(-100,Math.min(100,event.deltaY))*.0025),
+   (event.clientX-box.left)/box.width,(event.clientY-box.top)/box.height);
+ },{passive:false});
+ frame.addEventListener('pointerdown',event=>{
+  if(event.button!==0||drag)return;
+  const box=frame.getBoundingClientRect();
+  drag={id:event.pointerId,x:event.clientX,y:event.clientY,px:panX,py:panY,w:box.width,h:box.height};
+  frame.setPointerCapture(event.pointerId);frame.classList.add('dragging');
+ });
+ frame.addEventListener('pointermove',event=>{
+  if(!drag||drag.id!==event.pointerId)return;
+  panX=drag.px+(event.clientX-drag.x)/drag.w;panY=drag.py+(event.clientY-drag.y)/drag.h;transform();
+ });
+ function stop(){drag=null;frame.classList.remove('dragging')}
+ frame.addEventListener('pointerup',stop);frame.addEventListener('pointercancel',stop);frame.addEventListener('lostpointercapture',stop);
+ frame.addEventListener('dblclick',event=>{event.preventDefault();fit()});
+}
+available();transform();update();
+</script>
+</html>

@@ -7,8 +7,9 @@ Pipeline
 --------
 1. Discover ZL16 DDS files in tex_dir
 2. Load cached SegFormer veg_map per DDS at native resolution (~2.4 m/px at ZL16)
-3. Per DDS: extract CLASS_TREE / CLASS_RANGELAND masks
-4. Morphological close → open (kernel sizes in metres)
+3. ZL16/17: option G (RGB F inside SegFormer forest/rangeland); other zooms:
+   existing SegFormer / canopy tree detection
+4. Other zooms: morphological close → open (kernel sizes in metres)
 5. Vectorise (OpenCV contours) → Douglas-Peucker → lat/lon polygons
 6. Per polygon: shape ratio → area-fill | treeline
 7. Leaf-type map zones (O4_Leaf_Type) split each tree mask into broad /
@@ -50,6 +51,7 @@ import O4_Bounds_Index as BBOX
 import O4_Persistent_Cache as PCACHE
 import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
+import O4_Veg_Lowzoom as LOWZOOM
 import O4_Canopy_Height as CANOPY
 import O4_Forest_Spacing as FOREST_SPACING
 import O4_Tree_Sizes as TREE_SIZES
@@ -1282,12 +1284,14 @@ def _dds_polygon_cache_key(
     forest_type_sig=None,
     covered_fracs=None,
     airport_sig=None,
+    lowzoom_sig=None,
 ):
     return {
         'version': 9,
         'forest_type_sig': forest_type_sig,
         'covered_fracs': covered_fracs,
         'airport_sig': airport_sig,
+        'lowzoom_sig': lowzoom_sig,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -2753,6 +2757,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'dsf_compile': 0.0,
         'bld_wait': 0.0,
         'canopy': 0.0,
+        'lowzoom': 0.0,
     }
 
     # ── Pre-load road / network exclusion sources ────────────────────────────
@@ -3074,6 +3079,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         til_y_top  = int(m.group(1))
         til_x_left = int(m.group(2))
         zl         = int(m.group(4))
+        use_lowzoom = LOWZOOM.applies(zl)
 
         lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
@@ -3088,7 +3094,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
             use_bld_seg = reuse_bld_seg
         tree_support_path = SEGFORMER.tree_support_cache_path(cache_path)
-        want_tree_support = SEGFORMER.tree_support_enabled()
+        want_tree_support = not use_lowzoom and SEGFORMER.tree_support_enabled()
         tree_support = None
         img = None
         veg_map = None
@@ -3202,10 +3208,10 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         if canopy_maps is not None and not disable_cache:
                             np.save(canopy_path, canopy_maps)
 
-        # ZL16: trees SegFormer only sees with the texture enlarged.
+        # Legacy enlarged-image support below ZL16; G uses native RGB at 16/17.
         upscale_trees = None
         upscale_path = os.path.join(cache_dir, fname.replace('.dds', '_veg2x.npy'))
-        if (zl <= UPSCALE_MAX_ZL and infer_factor == 1 and _upscale_gap_trees_enabled()
+        if (not use_lowzoom and zl <= UPSCALE_MAX_ZL and infer_factor == 1 and _upscale_gap_trees_enabled()
                 and not mesh_water_full):
             if not disable_cache and os.path.exists(upscale_path):
                 upscale_trees = SEGFORMER.load_tree_support(upscale_path, veg_map.shape)
@@ -3244,6 +3250,33 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         img_h, img_w = veg_map.shape
         mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
 
+        # G runs on the native image, before optional polygon-resolution scaling.
+        lowzoom_tree = None
+        lowzoom_sig = None
+        if use_lowzoom:
+            if mesh_water_full:
+                lowzoom_tree = np.zeros(veg_map.shape, np.uint8)
+            else:
+                if img is None:
+                    _t = time.perf_counter()
+                    img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                    timings['dds_load'] += time.perf_counter() - _t
+                if img is None:
+                    print(f"    [Veg] {fname}: option G needs source RGB; texture skipped", flush=True)
+                    if disable_cache:
+                        _remove_cache_files(_dds_cache_files)
+                    continue
+                _t = time.perf_counter()
+                lowzoom_tree = LOWZOOM.tree_mask(
+                    img, veg_map,
+                    LOWZOOM.metres_per_pixel(lat_n, lat_s, lon_w, lon_e, img_h, img_w),
+                    forest_class=SEGFORMER.CLASS_TREE,
+                    rangeland_class=SEGFORMER.CLASS_RANGELAND,
+                )
+                timings['lowzoom'] += time.perf_counter() - _t
+            # RGB can change independently of the reusable SegFormer cache.
+            lowzoom_sig = (LOWZOOM.SIGNATURE, hashlib.sha256(lowzoom_tree.tobytes()).hexdigest())
+
         # Optionally downsample to a coarser resolution to reduce polygon count
         if res_m is not None and res_m > mpp:
             scale   = mpp / res_m
@@ -3265,6 +3298,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     upscale_trees.astype(np.uint8), (new_w, new_h),
                     interpolation=cv2.INTER_NEAREST,
                 ).astype(bool)
+            if lowzoom_tree is not None:
+                lowzoom_tree = cv2.resize(
+                    lowzoom_tree, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
             img_h, img_w = veg_map.shape
             mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
 
@@ -3313,7 +3349,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 canopy_added &= ~canopy_inside
             tree_raw = tree_raw | canopy_added
         tree_raw = tree_raw.astype(np.uint8)
-        tree_mask = _morph(tree_raw)
+        tree_mask = lowzoom_tree.copy() if lowzoom_tree is not None else _morph(tree_raw)
 
         # ── Exclusion layer 1: SegFormer CLASS_BUILDING / CLASS_ROAD / CLASS_DEVELOPED
         # Dilate by excl_buffer_m to catch morphological bleed from close operation
@@ -3580,7 +3616,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         # Canopy SegFormer misread inside an OSM forest; the exclusions below
         # (mesh water, roads, buildings, airport zones) still cut it back.
         _osm_forest = local_context_masks.get('forest')
-        if _osm_forest is not None and _osm_forest_rescue_enabled():
+        if not use_lowzoom and _osm_forest is not None and _osm_forest_rescue_enabled():
             rescue = _osm_forest.astype(bool) & np.isin(veg_map, OSM_FOREST_RESCUE_CLASSES)
             if _osm_rescue_rangeland_enabled():
                 range_in = _osm_forest.astype(bool) & (veg_map == SEGFORMER.CLASS_RANGELAND)
@@ -3673,6 +3709,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             ),
             covered_fracs=_covered_fracs,
             airport_sig=(airport_sig, approach_sig),
+            lowzoom_sig=lowzoom_sig,
         )
         _poly_cached = None
         if not disable_cache:
@@ -3710,6 +3747,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             # Gaps whose cause is known: excluded ground, land-cover classes
             # that are clearly not tree, and flat canopy on canopy textures.
             gap_certain = excl_mask.astype(bool) | np.isin(veg_map, GAP_CERTAIN_CLASSES)
+            if lowzoom_tree is not None:
+                gap_certain |= ~lowzoom_tree.astype(bool)
             if canopy_inside is not None:
                 seg_gate = _canopy_seg_min_h() or CANOPY_SEG_MIN_H_M
                 gap_certain |= canopy_inside & ~CANOPY.tree_mask(canopy_maps, (img_h, img_w), seg_gate)
@@ -3975,7 +4014,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"dsf_text={timings['dsf_text']:.1f}s  "
         f"dsf_compile={timings['dsf_compile']:.1f}s  "
         f"bld_wait={timings['bld_wait']:.1f}s  "
-        f"canopy={timings['canopy']:.1f}s"
+        f"canopy={timings['canopy']:.1f}s  "
+        f"lowzoom_rgb={timings['lowzoom']:.1f}s"
     )
 
     _print_tile_summary(n_tree, n_grass)

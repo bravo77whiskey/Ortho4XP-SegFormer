@@ -639,21 +639,23 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "veg_osm_range",
-        "hint": "Inside OpenStreetMap forests (simHeaven 7-forests), plant "
+        "hint": "Outside ZL16/17, inside OpenStreetMap forests (simHeaven 7-forests), plant "
                 "trees where SegFormer sees rangeland that looks like canopy in "
                 "the ortho (dark green): it calls whole wooded hillsides "
                 "rangeland. Grass, scrub, bare ground, buildings and roads "
-                "stay open.",
+                "stay open. ZL16/17 use option G: RGB texture fill within "
+                "SegFormer forest and rangeland zones.",
     },
     "veg_upscale_gap_trees": {
         "type": bool,
         "default": True,
         "short_name": "veg_upscale_trees",
-        "hint": "ZL16: run SegFormer a second time on each texture enlarged 2x "
+        "hint": "Legacy support below ZL16: run SegFormer a second time on each texture enlarged 2x "
                 "and add the trees it finds there: tree clumps and orchards "
                 "between fields and garden and street trees that the normal "
                 "pass gives to the fields or houses. About 4x the vegetation "
-                "inference time on ZL16 textures.",
+                "inference time. ZL16/17 instead use option G: RGB texture fill "
+                "within SegFormer forest and rangeland zones, without this extra pass.",
     },
     "veg_tropics_evergreen": {
         "type": bool,

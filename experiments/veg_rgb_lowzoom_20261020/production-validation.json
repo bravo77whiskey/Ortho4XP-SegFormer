@@ -1,0 +1,223 @@
+{
+  "signature": "segformer-forest-rangeland-rgb-f-v1",
+  "samples": [
+    {
+      "id": "hotspots_khh_nw",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.47840860002907,
+      "pixels": 16777216,
+      "tree_pixels": 2676952
+    },
+    {
+      "id": "hotspots_khh_n",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.4036358000012115,
+      "pixels": 16777216,
+      "tree_pixels": 2917229
+    },
+    {
+      "id": "hotspots_khh_airport",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.394598599988967,
+      "pixels": 16777216,
+      "tree_pixels": 2500334
+    },
+    {
+      "id": "hotspots_szx_n",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.4140499000204727,
+      "pixels": 16777216,
+      "tree_pixels": 1174069
+    },
+    {
+      "id": "hotspots_szx_ne",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.4016417000093497,
+      "pixels": 16777216,
+      "tree_pixels": 4745539
+    },
+    {
+      "id": "hotspots_szx_e",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.4029159000492655,
+      "pixels": 16777216,
+      "tree_pixels": 6149072
+    },
+    {
+      "id": "hotspots_wnz_n",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.477595400006976,
+      "pixels": 16777216,
+      "tree_pixels": 737378
+    },
+    {
+      "id": "hotspots_wnz_airport",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.409877599973697,
+      "pixels": 16777216,
+      "tree_pixels": 537499
+    },
+    {
+      "id": "hotspots_wnz_w",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.379459899966605,
+      "pixels": 16777216,
+      "tree_pixels": 2918206
+    },
+    {
+      "id": "hotspots_wnz_sw",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.51048900000751,
+      "pixels": 16777216,
+      "tree_pixels": 1094174
+    },
+    {
+      "id": "hotspots_shouguang",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.5246877999743447,
+      "pixels": 16777216,
+      "tree_pixels": 1557647
+    },
+    {
+      "id": "hotspots_khh_z17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.39380830002483,
+      "pixels": 16777216,
+      "tree_pixels": 1115276
+    },
+    {
+      "id": "hotspots_szx_z17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.3812634000205435,
+      "pixels": 16777216,
+      "tree_pixels": 1703434
+    },
+    {
+      "id": "hotspots_wnz_z17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.3918985999771394,
+      "pixels": 16777216,
+      "tree_pixels": 851288
+    },
+    {
+      "id": "hotspots_shouguang_z17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.4005926999961957,
+      "pixels": 16777216,
+      "tree_pixels": 567389
+    },
+    {
+      "id": "taipei_+24+121_28064_54944_Arc16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.367578000004869,
+      "pixels": 16777216,
+      "tree_pixels": 12283317
+    },
+    {
+      "id": "taipei_+24+121_28080_54896_Arc16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.351673200028017,
+      "pixels": 16777216,
+      "tree_pixels": 8746404
+    },
+    {
+      "id": "taipei_+24+121_28112_54832_Arc16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.3661107000079937,
+      "pixels": 16777216,
+      "tree_pixels": 12279864
+    },
+    {
+      "id": "taipei_+24+121_28256_54784_Arc16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.38461179996375,
+      "pixels": 16777216,
+      "tree_pixels": 9107899
+    },
+    {
+      "id": "taipei_+25+121_56096_109664_BI17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.3831150999758393,
+      "pixels": 16777216,
+      "tree_pixels": 3137545
+    },
+    {
+      "id": "taipei_+25+121_56112_109680_BI17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.411022200016305,
+      "pixels": 16777216,
+      "tree_pixels": 2488008
+    },
+    {
+      "id": "gran-canaria_+27-016_54912_59904_BI17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.377291100041475,
+      "pixels": 16777216,
+      "tree_pixels": 3269860
+    },
+    {
+      "id": "gran-canaria_+27-016_54928_59920_BI17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.3786355999764055,
+      "pixels": 16777216,
+      "tree_pixels": 859717
+    },
+    {
+      "id": "gran-canaria_+27-016_54960_59872_BI17",
+      "zl": 17,
+      "differing_pixels": 0,
+      "seconds": 2.443043300008867,
+      "pixels": 16777216,
+      "tree_pixels": 2152272
+    },
+    {
+      "id": "gran-canaria_+27-016_27440_29920_BI16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.4436885000322945,
+      "pixels": 16777216,
+      "tree_pixels": 8737979
+    },
+    {
+      "id": "gran-canaria_+27-016_27472_29904_BI16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.4658972999895923,
+      "pixels": 16777216,
+      "tree_pixels": 3105056
+    },
+    {
+      "id": "gran-canaria_+28-016_27424_29920_BI16",
+      "zl": 16,
+      "differing_pixels": 0,
+      "seconds": 2.508882599999197,
+      "pixels": 16777216,
+      "tree_pixels": 5727383
+    }
+  ],
+  "all_exact": true,
+  "module_sha256": "21ac3908c38558fab0ce02cdff37ba2b1ebb3939e1de67d5fa864cbfee7794f9"
+}

@@ -85,6 +85,7 @@ OVERLAY_MODULES = [
     "O4_Tree_Sizes",
     "O4_Overlay_Logging",
     "O4_Veg_Replacement",
+    "O4_Veg_Lowzoom",
     "O4_Vegetation_Overlay",
 ]
 OVERLAY_DATA_FILES = [
