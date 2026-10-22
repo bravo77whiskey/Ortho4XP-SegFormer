@@ -73,10 +73,14 @@ from O4_Building_Overlay import (
     mask_covered_regions,
 )
 from O4_Scenery_Packs import (
+    AIRPORT_PACK_MAX_DSFS,
     ensure_cached_dsf_text,
     find_active_custom_scenery_dsfs,
     find_simheaven_forest_dsfs,
     find_simheaven_network_dsfs,
+    is_airport_scenery_pack as _is_airport_scenery_pack,
+    read_dsf_binary_properties as _read_dsf_binary_properties,
+    read_dsf_text_properties as _read_dsf_text_properties,
 )
 from O4_Region_Boundaries import asset_region_for_latlon
 
@@ -1452,23 +1456,7 @@ _EXCLUSION_PROPERTY_KEY_PREFIX = "sim/exclude_"
 # A pack counts as an airport when it defines airports (`Earth nav data/apt.dat`)
 # and stays inside a handful of degree tiles. Both halves are needed: regional
 # VFR packs ship an apt.dat too, and at least one of them (Bhutan_VFR, 15 tiles)
-# declares a whole-tile forest exclusion.
-AIRPORT_PACK_MAX_DSFS = 8
-
-
-def _is_airport_scenery_pack(package_dir):
-    """True when a scenery package is a custom airport rather than area scenery."""
-    earth_nav_data = os.path.join(package_dir, "Earth nav data")
-    if not os.path.isfile(os.path.join(earth_nav_data, "apt.dat")):
-        return False
-    n_dsf = 0
-    for _root, _dirs, files in os.walk(earth_nav_data):
-        for name in files:
-            if name.lower().endswith(".dsf"):
-                n_dsf += 1
-                if n_dsf > AIRPORT_PACK_MAX_DSFS:
-                    return False
-    return True
+# declares a whole-tile forest exclusion. (O4_Scenery_Packs.is_airport_scenery_pack)
 
 
 def _parse_exclusion_rect(value):
@@ -1672,68 +1660,6 @@ def write_grass_overlay(grass_out_dsf, lat, lon, grass_result):
         pass
     _remove_grass_overlay(grass_out_dsf, lat, lon)
     return False
-
-
-def _read_dsf_binary_properties(dsf_path):
-    """Read the header key/value properties straight out of a binary DSF.
-
-    Exclusion zones live in the HEAD/PROP atom at the very start of the file,
-    so this reads a few kilobytes instead of asking DSFTool to disassemble a
-    whole mesh tile. Returns None when the file is not a plain uncompressed
-    DSF (7z-packed global scenery, for instance) so the caller can fall back
-    to a text disassembly.
-    """
-    import struct
-
-    with open(dsf_path, "rb") as handle:
-        if handle.read(8) != b"XPLNEDSF":
-            return None
-        handle.read(4)  # format version
-        while True:
-            atom_header = handle.read(8)
-            if len(atom_header) < 8:
-                return None
-            atom_id = atom_header[:4]
-            atom_len = struct.unpack("<I", atom_header[4:])[0]
-            if atom_len < 8:
-                return None
-            if atom_id != b"DAEH":  # 'HEAD', stored little-endian
-                handle.seek(atom_len - 8, os.SEEK_CUR)
-                continue
-            head = handle.read(atom_len - 8)
-            break
-
-    offset = 0
-    while offset + 8 <= len(head):
-        sub_id = head[offset:offset + 4]
-        sub_len = struct.unpack("<I", head[offset + 4:offset + 8])[0]
-        if sub_len < 8:
-            return None
-        payload = head[offset + 8:offset + sub_len]
-        offset += sub_len
-        if sub_id != b"PORP":  # 'PROP', stored little-endian
-            continue
-        strings = payload.split(b"\0")
-        if strings and strings[-1] == b"":
-            strings.pop()
-        decoded = [item.decode("utf-8", "replace") for item in strings]
-        return list(zip(decoded[0::2], decoded[1::2]))
-    return []
-
-
-def _read_dsf_text_properties(text_path):
-    """Read header key/value properties from a DSFTool text disassembly."""
-    pairs = []
-    with open(text_path, "r", encoding="utf-8", errors="ignore") as text_file:
-        for raw_line in text_file:
-            line = raw_line.strip()
-            if not line.startswith("PROPERTY "):
-                continue
-            parts = line.split(None, 2)
-            if len(parts) < 3:
-                continue
-            pairs.append((parts[1], parts[2].strip()))
-    return pairs
 
 
 def _load_custom_scenery_forest_exclusions(custom_scenery_dir, tile_lat, tile_lon,

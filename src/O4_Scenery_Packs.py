@@ -296,6 +296,122 @@ def ensure_cached_dsf_text(dsf_path, dsftool_path, cache_dir, create_no_window=0
     return text_cache_path
 
 
+# A pack counts as a custom airport when it defines airports (`Earth nav
+# data/apt.dat`) and stays inside a handful of degree tiles: regional VFR
+# packs ship an apt.dat too. See O4_Vegetation_Overlay for why only airports'
+# exclusion zones are honoured.
+AIRPORT_PACK_MAX_DSFS = 8
+
+
+def is_airport_scenery_pack(package_dir):
+    """True when a scenery package is a custom airport rather than area scenery."""
+    earth_nav_data = os.path.join(package_dir, "Earth nav data")
+    if not os.path.isfile(os.path.join(earth_nav_data, "apt.dat")):
+        return False
+    n_dsf = 0
+    for _root, _dirs, files in os.walk(earth_nav_data):
+        for name in files:
+            if name.lower().endswith(".dsf"):
+                n_dsf += 1
+                if n_dsf > AIRPORT_PACK_MAX_DSFS:
+                    return False
+    return True
+
+
+def exclusion_zone_ring(value):
+    """Parse a ``sim/exclude_*`` property value into an open (lon, lat) ring.
+
+    Two forms exist: the plain rectangle ``west/south/east/north`` and WED's
+    polygon zone ``west/south/east/north;lon/lat,lon/lat,...`` (bounding box,
+    then the outline). Returns None for anything else.
+    """
+    head, _, outline = (value or "").partition(";")
+    if outline:
+        try:
+            ring = [tuple(float(c) for c in pt.split("/")) for pt in outline.split(",") if pt]
+        except ValueError:
+            return None
+        if any(len(pt) != 2 for pt in ring):
+            return None
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            ring.pop()
+        return ring if len(ring) >= 3 else None
+    parts = head.split("/")
+    if len(parts) != 4:
+        return None
+    try:
+        west, south, east, north = (float(part) for part in parts)
+    except ValueError:
+        return None
+    west, east = min(west, east), max(west, east)
+    south, north = min(south, north), max(south, north)
+    if east <= west or north <= south:
+        return None
+    return [(west, south), (east, south), (east, north), (west, north)]
+
+
+def read_dsf_binary_properties(dsf_path):
+    """Read the header key/value properties straight out of a binary DSF.
+
+    Exclusion zones live in the HEAD/PROP atom at the very start of the file,
+    so this reads a few kilobytes instead of asking DSFTool to disassemble a
+    whole mesh tile. Returns None when the file is not a plain uncompressed
+    DSF (7z-packed global scenery, for instance) so the caller can fall back
+    to a text disassembly.
+    """
+    import struct
+
+    with open(dsf_path, "rb") as handle:
+        if handle.read(8) != b"XPLNEDSF":
+            return None
+        handle.read(4)  # format version
+        while True:
+            atom_header = handle.read(8)
+            if len(atom_header) < 8:
+                return None
+            atom_id = atom_header[:4]
+            atom_len = struct.unpack("<I", atom_header[4:])[0]
+            if atom_len < 8:
+                return None
+            if atom_id != b"DAEH":  # 'HEAD', stored little-endian
+                handle.seek(atom_len - 8, os.SEEK_CUR)
+                continue
+            head = handle.read(atom_len - 8)
+            break
+
+    offset = 0
+    while offset + 8 <= len(head):
+        sub_id = head[offset:offset + 4]
+        sub_len = struct.unpack("<I", head[offset + 4:offset + 8])[0]
+        if sub_len < 8:
+            return None
+        payload = head[offset + 8:offset + sub_len]
+        offset += sub_len
+        if sub_id != b"PORP":  # 'PROP', stored little-endian
+            continue
+        strings = payload.split(b"\0")
+        if strings and strings[-1] == b"":
+            strings.pop()
+        decoded = [item.decode("utf-8", "replace") for item in strings]
+        return list(zip(decoded[0::2], decoded[1::2]))
+    return []
+
+
+def read_dsf_text_properties(text_path):
+    """Read header key/value properties from a DSFTool text disassembly."""
+    pairs = []
+    with open(text_path, "r", encoding="utf-8", errors="ignore") as text_file:
+        for raw_line in text_file:
+            line = raw_line.strip()
+            if not line.startswith("PROPERTY "):
+                continue
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            pairs.append((parts[1], parts[2].strip()))
+    return pairs
+
+
 # On-disk (little-endian) atom IDs of the DSF definition tables.
 _DSF_DEFINITION_ATOMS = {b"TJBO": "object", b"YLOP": "polygon"}
 

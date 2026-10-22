@@ -642,6 +642,58 @@ def _load_osm_closed_ways(osm_bz2_path, cache_dir=None):
     )
 
 
+# Scenery exclusion zones that block placement: the types this overlay emits.
+# Only custom airport packs are consulted (SCENERYPACKS.is_airport_scenery_pack);
+# regional and global packs use tile-sized zones to mark layer ownership.
+BUILDING_EXCLUSION_PROPERTY_KEYS = ("sim/exclude_obj", "sim/exclude_fac")
+
+
+def _load_custom_scenery_exclusion_zones(custom_scenery_dir, tile_lat, tile_lon,
+                                         out_dsf, dsftool_path, cache_dir):
+    """Return the active airport packs' object/facade exclusion zones as (lat, lon) rings."""
+    dsf_name = os.path.basename(out_dsf or "") or (
+        f"{'+' if tile_lat >= 0 else '-'}{abs(int(tile_lat)):02d}"
+        f"{'+' if tile_lon >= 0 else '-'}{abs(int(tile_lon)):03d}.dsf"
+    )
+    rings = []
+    seen = set()
+    for folder_name, dsf_path, package_dir in find_active_custom_scenery_dsfs(
+        custom_scenery_dir, dsf_name, skip_dsf_path=out_dsf
+    ):
+        if not SCENERYPACKS.is_airport_scenery_pack(package_dir):
+            continue
+        try:
+            pairs = SCENERYPACKS.read_dsf_binary_properties(dsf_path)
+            if pairs is None:
+                if not dsftool_path or not os.path.exists(dsftool_path):
+                    print(f"  [excl zones] {folder_name}: unreadable DSF and no DSFTool — zones ignored")
+                    continue
+                pairs = SCENERYPACKS.read_dsf_text_properties(
+                    ensure_cached_dsf_text(dsf_path, dsftool_path, cache_dir,
+                                           create_no_window=SEGFORMER._CREATE_NO_WINDOW)
+                )
+        except Exception as exc:
+            print(f"  [excl zones] failed {dsf_path}: {exc}")
+            continue
+        n_pack = 0
+        for key, value in pairs:
+            if key not in BUILDING_EXCLUSION_PROPERTY_KEYS:
+                continue
+            ring = SCENERYPACKS.exclusion_zone_ring(value)
+            if ring is None:
+                continue
+            # WED writes one property per excluded type for the same zone.
+            ring_key = tuple(round(c, 9) for pt in ring for c in pt)
+            if ring_key in seen:
+                continue
+            seen.add(ring_key)
+            rings.append([(lat, lon) for lon, lat in ring])
+            n_pack += 1
+        if n_pack:
+            verbose_print(f"  [excl zones] {folder_name}: {n_pack} object/facade zones")
+    return rings
+
+
 def _clip_polygon_to_latlon_bounds(poly, south, north, west, east):
     """Clip a lat/lon polygon to a rectangular lat/lon bounds box."""
     def _clip(points, inside, intersect):
@@ -8830,7 +8882,7 @@ class _BuildingOverlayRun:
         )
 
         # ── Exclusion data: water, airports, simHeaven buildings, railways ───────
-        self.excl_polys = []           # hard exclusions: water / airports
+        self.excl_polys = []           # hard exclusions: water / scenery exclusion zones
         self.existing_bld_polys = []   # occupancy-only blockers: simHeaven facade footprints
         # O4_BLD_REVIEW_DUMP: per-texture dumps wait for the tile-wide dedup.
         self._review_pending = []
@@ -8851,12 +8903,14 @@ class _BuildingOverlayRun:
         self.excl_rails = []           # road-style dicts for railways (simHeaven network)
         self.residential_polys = []    # no residential landuse source
 
-        for suffix in ('_water.osm.bz2', '_airports.osm.bz2'):
-            p = _osm_tile_peer_path(self.osm_roads_path, suffix) or self.osm_roads_path.replace(
-                '_big_roads.osm.bz2', suffix
-            )
-            self.excl_polys.extend(_load_osm_closed_ways(p, cache_dir=self.sidecar_cache_dir))
-        verbose_print(f"Exclusion polygons (water+airports): {len(self.excl_polys)}")
+        # Airports block placement only through their scenery packs' exclusion
+        # zones (_load_scenery_exclusions), never through OSM: aerodrome
+        # boundaries take in farmland, villages and planned extensions.
+        water_path = _osm_tile_peer_path(self.osm_roads_path, '_water.osm.bz2') or (
+            self.osm_roads_path.replace('_big_roads.osm.bz2', '_water.osm.bz2')
+        )
+        self.excl_polys.extend(_load_osm_closed_ways(water_path, cache_dir=self.sidecar_cache_dir))
+        verbose_print(f"Exclusion polygons (water): {len(self.excl_polys)}")
 
     def _resolve_settings(self):
         """Resolve model and placement settings from arguments and environment."""
@@ -9238,6 +9292,17 @@ class _BuildingOverlayRun:
         else:
             verbose_print("Custom scenery buildings: disabled")
 
+        # Airport packs' object/facade exclusion zones are hard exclusions, like
+        # water: the scenery author keeping that ground clear of autogen.
+        self._t = time.perf_counter()
+        zone_rings = _load_custom_scenery_exclusion_zones(
+            self.custom_scenery_dir, self.lat, self.lon, self.out_dsf,
+            self.dsftool_path, self.sidecar_cache_dir,
+        )
+        self.excl_polys.extend(zone_rings)
+        self.timings['custom_scenery_parse'] += time.perf_counter() - self._t
+        verbose_print(f"Scenery exclusion zones (objects/facades): {len(zone_rings)}")
+
     def _prepare_assets(self):
         """Build the asset pools placements choose from; False when there are none."""
         self.default_assets_available = True
@@ -9524,7 +9589,7 @@ class _BuildingOverlayRun:
         self.sh_network = _prepare_roads(self.sh_network)
         self.excl_polys = _prepare_polygons(self.excl_polys)
         self.excl_polys_index = BBOX.build_bounds_index(self.excl_polys)
-        self.existing_bld_polys = _prepare_polygons(self.existing_bld_polys)
+        self.existing_bld_polys =_prepare_polygons(self.existing_bld_polys)
         self.existing_bld_polys_index = BBOX.build_bounds_index(self.existing_bld_polys)
         self.residential_polys = _prepare_polygons(self.residential_polys)
         self._t = time.perf_counter()
@@ -10986,7 +11051,7 @@ class _TexturePass:
             self.run.excl_rails_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
         local_excl_polys = _polys_for_bounds(
             self.run.excl_polys_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
-        local_existing_bld_polys = _polys_for_bounds(
+        local_existing_bld_polys =_polys_for_bounds(
             self.run.existing_bld_polys_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.001)
         local_sh_bld_objects = _simheaven_objects_for_bounds(
             self.run.sh_bld_index, self.lat_n, self.lat_s, self.lon_w, self.lon_e, pad_deg=0.002)
