@@ -784,8 +784,14 @@ def ensure_MultiPolygon(input_geometry):
     elif input_geometry.geom_type == "Polygon":
         return geometry.MultiPolygon([input_geometry])
     elif "Collection" in input_geometry.geom_type:
+        # Shapely 2 needs a sequence here, not a generator; nested
+        # MultiPolygons inside the collection are flattened.
         return geometry.MultiPolygon(
-            (pol for pol in input_geometry.geoms if pol.geom_type == "Polygon")
+            [
+                pol
+                for part in input_geometry.geoms
+                for pol in ensure_MultiPolygon(part).geoms
+            ]
         )
     else:
         return geometry.MultiPolygon()
@@ -800,12 +806,14 @@ def ensure_MultiLineString(input_geometry):
     elif input_geometry.geom_type in ["LineString", "LinearRing"]:
         return geometry.MultiLineString([input_geometry])
     elif "Collection" in input_geometry.geom_type:
+        # Shapely 2 needs a sequence here, not a generator; nested
+        # MultiLineStrings inside the collection are flattened.
         return geometry.MultiLineString(
-            (
+            [
                 line
-                for line in input_geometry.geoms
-                if line.geom_type in ["LineString", "LinearRing"]
-            )
+                for part in input_geometry.geoms
+                for line in ensure_MultiLineString(part).geoms
+            ]
         )
     else:
         return geometry.MultiLineString()
