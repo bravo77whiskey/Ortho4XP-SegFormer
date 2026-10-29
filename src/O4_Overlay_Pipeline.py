@@ -790,8 +790,40 @@ def restore_veg_tile_replacement(lat, lon, keep_exclusion=False):
     return result
 
 
-def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
+def _veg_cache_cleanup(cache_dir):
+    """The vegetation overlay's end-of-run cleanup of the tile cache folder."""
+    if veg_disable_cache:
+        _purge_overlay_cache(
+            cache_dir,
+            ['*_veg.npy', '*_vegtree.npy', '*_vegcanopy.npy', '*_vegaux.pkl', '*_vegpoly.pkl',
+             '*_grasscls.npy', '*_grass1.npz'],
+            'veg',
+        )
+    else:
+        _cleanup_derived_cache(cache_dir, 'veg')
+
+
+def _bld_cache_cleanup(cache_dir):
+    """The building overlay's end-of-run cleanup of the tile cache folder."""
+    if bld_disable_cache:
+        # Leave the class maps for the vegetation pass, whose own purge
+        # removes them (O4_VEG_REUSE_BLD_SEG=0: don't).
+        _keep_seg = os.environ.get("O4_VEG_REUSE_BLD_SEG", "").strip().lower() not in ("0", "false", "no", "off")
+        _purge_overlay_cache(
+            cache_dir,
+            ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl'] +
+            ([] if _keep_seg else ['*_veg.npy', '*_vegtree.npy']),
+            'bld',
+        )
+    else:
+        _cleanup_derived_cache(cache_dir, 'bld')
+
+
+def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None, cleanup_cache=True):
     """Run the vegetation overlay for one tile.
+
+    ``cleanup_cache=False`` leaves the tile cache folder to the caller, which
+    cleans it once the overlay running alongside is done with it too.
 
     ``wait_for_bld_flag``: the building overlay runs alongside (see
     process_overlays_tile); read its class maps as they appear, and stop
@@ -910,15 +942,8 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
                 return
             raise RuntimeError(f"Vegetation overlay subprocess failed (exit {ret})")
     finally:
-        if veg_disable_cache:
-            _purge_overlay_cache(
-                cache_dir,
-                ['*_veg.npy', '*_vegtree.npy', '*_vegcanopy.npy', '*_vegaux.pkl', '*_vegpoly.pkl',
-                 '*_grasscls.npy', '*_grass1.npz'],
-                'veg',
-            )
-        else:
-            _cleanup_derived_cache(cache_dir, 'veg')
+        if cleanup_cache:
+            _veg_cache_cleanup(cache_dir)
     _finish_veg_tile_replacement(
         lat, lon, status_path, custom_scenery_dir, out_dsf,
         exclude_lower_forests, remove_embedded_trees,
@@ -926,8 +951,12 @@ def process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=None):
     print(f"[Veg] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
-def process_bld_tile(lat, lon, build_dir):
-    """Run SegFormer+SFD Global building overlay for one tile in the .venv subprocess."""
+def process_bld_tile(lat, lon, build_dir, cleanup_cache=True):
+    """Run SegFormer+SFD Global building overlay for one tile in the .venv subprocess.
+
+    ``cleanup_cache=False`` leaves the tile cache folder to the caller (see
+    process_veg_tile).
+    """
     print(f"[Bld] Starting for tile +{lat:02d}+{lon:03d} …", flush=True)
     tex_dir     = os.path.join(build_dir, 'textures')
     cache_dir   = _overlay_cache_dir(lat, lon)
@@ -1023,18 +1052,8 @@ def process_bld_tile(lat, lon, build_dir):
                 return
             raise RuntimeError(f"Building overlay subprocess failed (exit {ret})")
     finally:
-        if bld_disable_cache:
-            # Leave the class maps for the vegetation pass, whose own purge
-            # removes them (O4_VEG_REUSE_BLD_SEG=0: don't).
-            _keep_seg = os.environ.get("O4_VEG_REUSE_BLD_SEG", "").strip().lower() not in ("0", "false", "no", "off")
-            _purge_overlay_cache(
-                cache_dir,
-                ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl'] +
-                ([] if _keep_seg else ['*_veg.npy', '*_vegtree.npy']),
-                'bld',
-            )
-        else:
-            _cleanup_derived_cache(cache_dir, 'bld')
+        if cleanup_cache:
+            _bld_cache_cleanup(cache_dir)
     print(f"[Bld] Done for tile +{lat:02d}+{lon:03d}.", flush=True)
 
 
@@ -1098,18 +1117,17 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
 
     # Only class maps written by this build may be read: clear leftovers.
     _clear_class_maps()
-    # Keeps the folder non-empty: the building overlay's cache purge removes
-    # an empty tile cache folder, which the vegetation overlay still uses.
-    keep_path = os.path.join(cache_dir, 'overlays_running.keep')
-    with open(keep_path, 'w'):
-        pass
     flag_dir = tempfile.mkdtemp(prefix="o4_overlays_")
     done_flag = os.path.join(flag_dir, 'bld_done.flag')
 
+    # Both overlays share the tile cache folder, so neither cleans it up while
+    # the other may still be running: the first to finish would delete the
+    # other's files (the grass class maps, and with them all of a tile's grass).
+    # Both cleanups run here once both are done.
     def _bld():
         try:
             with PROG.step(lat, lon, "bld_overlay"):
-                process_bld_tile(lat, lon, build_dir)
+                process_bld_tile(lat, lon, build_dir, cleanup_cache=False)
             errors["bld"] = None
         except Exception as exc:
             errors["bld"] = exc
@@ -1122,17 +1140,15 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
     bld_thread.start()
     try:
         with PROG.step(lat, lon, "veg_overlay"):
-            process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=done_flag)
+            process_veg_tile(lat, lon, build_dir, wait_for_bld_flag=done_flag, cleanup_cache=False)
         errors["veg"] = None
     except Exception as exc:
         errors["veg"] = exc
     finally:
         bld_thread.join()
+        _veg_cache_cleanup(cache_dir)
+        _bld_cache_cleanup(cache_dir)
         _clear_class_maps()
-        try:
-            os.remove(keep_path)
-        except OSError:
-            pass
         shutil.rmtree(flag_dir, ignore_errors=True)
         _cleanup_empty_dirs(cache_dir)
     return errors
