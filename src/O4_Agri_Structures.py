@@ -31,8 +31,25 @@ roofs from cities and greenhouse belts; Esri ZL16):
    A long grey low supported detection with two greenhouses (from 1-3)
    within ``FIELD_RADIUS_M`` becomes one too, repeated a few times so a
    field fills in from its edges.
+5. **Ridged roofs.**  Rules 1-4 need grey film and long shapes; Korean
+   vinyl houses (Gimhae, around RKPK) are teal or blue-grey multi-span
+   blocks, often squat, with no farmland ring the landcover model can see.
+   What every covered crop block shows is its tunnel ridges: a regular
+   light/dark stripe with a 4-12 m pitch across the block.  A detection
+   whose cross-ridge profile repeats at that pitch (``ridge_pattern``),
+   and whose colour is film (grey, or teal to blue) rather than a painted
+   roof (pale, or red to green), is a greenhouse whatever its landcover,
+   provided HeightNet calls it low and it stands among fields (farmland
+   around it, or from ZL17 on hardly any streets or yards, or stripes
+   regular enough to need no surroundings): both keep apartment balconies
+   and factory skylight strips out.  From ZL17 on a box one to three
+   tunnels wide is judged by a wider window across it; weaker stripes
+   join rule 4's field growth.  Checked on 678 hand-labelled Esri ZL18
+   detections north of RKPK: score >= 0.3 found 84 of 119 greenhouse
+   blocks with 1 building before the wider windows took most of the rest.
 
-Everything is metric, so the texture zoom level does not matter.
+Everything is metric; only rule 5's looser tests depend on the texture
+resolution (``RIDGE_FINE_MAX_MPP``), because ZL16 aliases roofs into stripes.
 """
 
 from __future__ import annotations
@@ -47,6 +64,7 @@ KIND_GREENHOUSE = "greenhouse"
 KIND_GROUND = "ground"
 
 # SegFormer (OpenEarthMap) classes, as in O4_Landcover_Inference.
+CLASS_DEVELOPED = 3
 CLASS_ROAD = 4
 CLASS_AGRICULTURE = 7
 CLASS_BUILDING = 8
@@ -74,6 +92,53 @@ FIELD_MAX_HEIGHT_M = 12.0
 FIELD_RADIUS_M = 60.0     # centre distance, plus half the candidate's length
 FIELD_MIN_NEIGHBOURS = 2
 FIELD_ROUNDS = 3
+# Rule 5
+RIDGE_MIN_PERIOD_M = 4.0
+RIDGE_MAX_PERIOD_M = 12.0
+RIDGE_MIN_PERIODS = 4.0   # the profile must hold this many ridges
+RIDGE_TREND_M = 18.0      # moving average removed from the profile
+RIDGE_TRIM_M = 2.0        # dropped at each end of the profile
+RIDGE_MIN_SCORE = 0.3     # greenhouse on its own
+RIDGE_FIELD_SCORE = 0.1   # candidate for field growth (rule 4)
+RIDGE_MIN_M2 = 250.0
+RIDGE_FIELD_MIN_M2 = 60.0    # tunnel-shaped boxes; compact ones need RIDGE_MIN_M2
+# HeightNet reads big greenhouse blocks as 10-20 m; apartment slabs, whose
+# balconies and shadows also repeat, are far taller
+RIDGE_MAX_HEIGHT_M = 20.0
+# Covered crops stand among fields: at 2 m/px the skylight strips of grey
+# factory roofs repeat like tunnels too, but nothing around them is
+# farmland (Gimhae ZL16: 0 of 91 city hits had any within this radius,
+# 81-100% of greenhouse hits had at least this share)
+RIDGE_FARMLAND_RADIUS_M = 150.0
+RIDGE_MIN_FARMLAND = 0.1
+# Textures this fine (ZL17 on) resolve single tunnels; at ZL16 a tunnel is
+# 3-4 px and rows of houses or skylight strips alias into the same stripes,
+# so the looser tests below stay off there.
+RIDGE_FINE_MAX_MPP = 1.2
+# A dense belt squeezed between a river and a road has no field the model
+# sees, but no streets or yards either: on fine textures an unbuilt
+# neighbourhood will do.  Shenzhen/Kaohsiung ZL17-19 city hits are 15-30%
+# developed space + road, the Gimhae riverbank belt 3%.
+RIDGE_MAX_BUILT = 0.08
+# Blocks beside a village fail both (streets count as built); from ZL17 on
+# stripes this regular need no surroundings: 5 roofs on 6 Shenzhen and
+# Kaohsiung ZL17-19 city textures, 17 greenhouse blocks on one Gimhae ZL17
+RIDGE_SURE_SCORE = 1.2
+# Korean tunnels are 6-8 m wide: on fine textures a box narrower than this
+# (one to three tunnels) cannot hold four ridges and is judged by a window
+# this wide across it (Gimhae ZL17/18: ~370 such boxes, 2 of them houses;
+# at ZL16 nearly all were houses); boxes this elongated count as
+# tunnel-shaped
+RIDGE_CONTEXT_M = 36.0
+RIDGE_TUNNEL_MIN_ASPECT = 2.0
+# film is grey (low saturation) or teal to blue; painted roofs are pale
+# (light blue, white) or red, orange, yellow, green
+FILM_GREY_SATURATION = 40.0
+FILM_MIN_HUE = 120.0      # degrees
+FILM_MAX_HUE = 192.0      # painted blue roofs and solar panels lie above
+PAINT_MIN_VALUE = 175.0
+PAINT_PALE_VALUE = 160.0
+PAINT_PALE_SATURATION = 45.0
 
 
 def _obb_frame(points):
@@ -86,12 +151,24 @@ def _obb_frame(points):
     return pts, ux, uy
 
 
-def _obb_patch(image, points):
-    """The OBB interior resampled axis-aligned, long side along x."""
+def _obb_patch(image, points, min_short_px=0.0, shift=0, min_long_px=0.0):
+    """The OBB interior resampled axis-aligned, long side along x.
+
+    ``min_short_px`` widens a narrower OBB to that width, about its axis or,
+    with ``shift`` -1 / +1, all to one side (the OBB at the other edge);
+    ``min_long_px`` lengthens it about its centre.
+    """
     pts, ux, uy = _obb_frame(points)
     rel = pts - pts[0]
     xs, ys = rel @ ux, rel @ uy
     x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    grow = float(min_short_px) - (y1 - y0)
+    if grow > 0.0:
+        y0 -= grow * (0.5 - 0.5 * shift)
+        y1 += grow * (0.5 + 0.5 * shift)
+    grow = 0.5 * (float(min_long_px) - (x1 - x0))
+    if grow > 0.0:
+        x0, x1 = x0 - grow, x1 + grow
     w = max(2, int(round(x1 - x0)))
     h = max(2, int(round(y1 - y0)))
     src = np.float32([
@@ -115,6 +192,67 @@ def tunnel_axis(image, points):
     row_var = float(gray.mean(axis=1).std())
     col_var = float(gray.mean(axis=0).std())
     return "long" if row_var >= col_var else "short"
+
+
+def ridge_pattern(image, points, m_per_px, across_m=None, shift=0, square=False):
+    """How strongly the OBB interior repeats as tunnel ridges (0 = not at all).
+
+    Takes the mean brightness profile across each OBB axis, removes its
+    slow trend, and scores the best lag L in the ridge pitch range as
+    min(acf(L), acf(2L)) - acf(L/2): a stripe pattern correlates with
+    itself one and two pitches on and anti-correlates half a pitch on,
+    a roof's light and dark halves or a few vents do not.
+
+    With ``across_m`` the OBB is first widened to that many metres (see
+    ``_obb_patch`` for ``shift``) and only ridges along its long axis count:
+    a box one to three tunnels wide, judged by the block around it.  With
+    ``square`` as well it is widened both ways and both axes count.
+    """
+    if image is None:
+        return 0.0
+    mpp = float(m_per_px)
+    min_px = 0.0 if across_m is None else float(across_m) / mpp
+    gray = cv2.cvtColor(
+        _obb_patch(image, points, min_px, shift, min_px if square else 0.0),
+        cv2.COLOR_RGB2GRAY,
+    )
+    gray = gray.astype(np.float32)
+    profiles = (gray.mean(axis=1),) if across_m is not None and not square else (
+        gray.mean(axis=0), gray.mean(axis=1))
+    lags = np.arange(
+        max(2, int(math.floor(RIDGE_MIN_PERIOD_M / mpp))),
+        int(math.ceil(RIDGE_MAX_PERIOD_M / mpp)) + 1,
+    )
+    trend = max(3, int(round(RIDGE_TREND_M / mpp)) | 1)
+    trim = int(round(RIDGE_TRIM_M / mpp))
+    best = 0.0
+    for prof in profiles:
+        # the box edges often take in a road or field margin: drop them
+        prof = prof[trim:len(prof) - trim]
+        n = len(prof)
+        if n * mpp < RIDGE_MIN_PERIODS * RIDGE_MIN_PERIOD_M:
+            continue
+        prof = prof - np.convolve(
+            np.pad(prof, trend // 2, mode="edge"),
+            np.ones(trend, np.float32) / trend, mode="valid",
+        )
+        spread = 2.5 * 1.4826 * float(np.median(np.abs(prof - np.median(prof))))
+        if spread > 0.0:
+            prof = np.clip(prof, -spread, spread)
+        prof = prof - prof.mean()
+        den = float(np.dot(prof, prof))
+        if den <= 1e-6:
+            continue
+
+        def acf(lag):
+            lag = int(round(lag))
+            if lag <= 0 or lag >= n:
+                return 0.0
+            return float(np.dot(prof[:-lag], prof[lag:])) / den * n / (n - lag)
+
+        for lag in lags[lags * RIDGE_MIN_PERIODS <= n]:
+            best = max(best, min(acf(lag), acf(2 * lag)) - acf(lag / 2.0))
+    return best
 
 
 def detection_context(detection, veg_map, m_per_px):
@@ -168,6 +306,94 @@ def interior_colour(image, ctx):
     return float(sat.mean()), float((px[:, 2] - px[:, 0]).mean())
 
 
+def is_film_coloured(image, ctx):
+    """Grey or teal-to-blue and not pale: film, not a painted roof."""
+    x0, y0, x1, y1 = ctx["window"]
+    px = image[y0:y1, x0:x1][ctx["inside"]]
+    if px.size == 0:
+        return False
+    hsv = cv2.cvtColor(px.reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
+    sat = float(hsv[:, 1].mean())
+    val = float(hsv[:, 2].mean())
+    if val >= PAINT_MIN_VALUE or (
+        val >= PAINT_PALE_VALUE and sat >= PAINT_PALE_SATURATION
+    ):
+        return False
+    if sat < FILM_GREY_SATURATION:
+        return True
+    hue = float(np.median(hsv[:, 0])) * 2.0
+    return FILM_MIN_HUE <= hue <= FILM_MAX_HUE
+
+
+class _Countryside:
+    """Whether a pixel lies among fields: farmland within
+    RIDGE_FARMLAND_RADIUS_M, or (fine textures) hardly anything built.
+
+    The shares are built on first use from the landcover map at a few
+    metres per cell.
+    """
+
+    def __init__(self, veg_map, m_per_px):
+        self.veg_map = veg_map
+        self.m_per_px = float(m_per_px)
+        self.farmland = None
+        self.built = None
+        self.step = max(1, int(round(4.0 / self.m_per_px)))
+
+    def _share(self, mask):
+        k = int(round(2.0 * RIDGE_FARMLAND_RADIUS_M / (self.m_per_px * self.step))) | 1
+        return cv2.boxFilter(
+            mask.astype(np.float32), -1, (k, k), borderType=cv2.BORDER_REFLECT
+        )
+
+    def __call__(self, x, y):
+        cls = self.veg_map[::self.step, ::self.step]
+        if self.farmland is None:
+            self.farmland = self._share(cls == CLASS_AGRICULTURE)
+        h, w = self.farmland.shape
+        cy = min(h - 1, max(0, int(y) // self.step))
+        cx = min(w - 1, max(0, int(x) // self.step))
+        if self.farmland[cy, cx] >= RIDGE_MIN_FARMLAND:
+            return True
+        if self.m_per_px > RIDGE_FINE_MAX_MPP:
+            return False
+        if self.built is None:
+            self.built = self._share((cls == CLASS_DEVELOPED) | (cls == CLASS_ROAD))
+        return bool(self.built[cy, cx] <= RIDGE_MAX_BUILT)
+
+
+def _ridge_score(detection, ctx, image_fn, m_per_px, countryside):
+    """Rule 5 ridge score; 0 when too small, not film-coloured or not
+    among fields (``countryside``: a _Countryside)."""
+    width_m = float(detection.get("width_m") or 0.0)
+    tunnel = ctx["aspect"] >= RIDGE_TUNNEL_MIN_ASPECT
+    if ctx["area"] < (RIDGE_FIELD_MIN_M2 if tunnel else RIDGE_MIN_M2):
+        return 0.0
+    image = image_fn()
+    if image is None or not is_film_coloured(image, ctx):
+        return 0.0
+    pts = detection["points"]
+    score = ridge_pattern(image, pts, m_per_px)
+    if width_m < RIDGE_CONTEXT_M and float(m_per_px) <= RIDGE_FINE_MAX_MPP:
+        # too narrow to hold four ridges: judge it by the block around it,
+        # with the box in the middle or at either edge of the block
+        if tunnel:
+            score = max([score] + [
+                ridge_pattern(image, pts, m_per_px, across_m=RIDGE_CONTEXT_M, shift=s)
+                for s in (0, -1, 1)
+            ])
+        else:
+            score = max(score, ridge_pattern(
+                image, pts, m_per_px, across_m=RIDGE_CONTEXT_M, square=True))
+    if score < RIDGE_FIELD_SCORE:
+        return 0.0
+    if score >= RIDGE_SURE_SCORE and float(m_per_px) <= RIDGE_FINE_MAX_MPP:
+        return score
+    if not countryside(*_centre_px(detection)):
+        return 0.0
+    return score
+
+
 def _aspect(detection):
     length = float(detection.get("length_m") or 0.0)
     width = float(detection.get("width_m") or 0.0)
@@ -215,18 +441,25 @@ def _centre_px(detection):
     return np.asarray(detection["points"], dtype=np.float64).reshape(4, 2).mean(axis=0)
 
 
-def classify_detections(detections, veg_map, image_fn, m_per_px, height_fn=None):
+def classify_detections(detections, veg_map, image_fn, m_per_px, height_fn=None,
+                        seeds=()):
     """Return a list of (kind, reason) aligned with ``detections``.
 
     ``image_fn()`` returns the RGB texture (or None) and is only called when
     a verdict needs colour.  ``height_fn(dets)`` returns HeightNet heights
-    (metres, NaN when unknown) for the long grey supported candidates;
-    without it rule 3 relies on the farmland ring alone and rule 4 is off.
+    (metres, NaN when unknown) for the long grey supported candidates and
+    the ridged ones; without it rule 3 relies on the farmland ring alone,
+    rule 4 is off and rule 5 does not check heights.  ``seeds`` are
+    greenhouse detections already sorted (an earlier pass) that count as
+    neighbours for rule 4.
     """
     n = len(detections)
     out = [(KIND_BUILDING, None)] * n
     feats = [_features(d, veg_map, m_per_px) for d in detections]
+    countryside = _Countryside(veg_map, m_per_px)
     cand = []
+    ridged = []
+    strong = []
     for i, ctx in enumerate(feats):
         if ctx is None:
             continue
@@ -236,30 +469,45 @@ def classify_detections(detections, veg_map, image_fn, m_per_px, height_fn=None)
                 out[i] = verdict
         elif _is_long_grey_roof(ctx, image_fn):
             cand.append(i)
-    if not cand:
+        ridge = _ridge_score(detections[i], ctx, image_fn, m_per_px, countryside)
+        if ridge >= RIDGE_MIN_SCORE and ctx["area"] >= RIDGE_MIN_M2:
+            strong.append(i)
+        elif ridge >= RIDGE_FIELD_SCORE and out[i][0] == KIND_BUILDING:
+            ridged.append(i)
+    in_cand = set(cand)
+    ridged = [i for i in ridged if i not in in_cand]
+    asked = cand + ridged + [i for i in strong if i not in in_cand]
+    if not asked:
         return out
-    heights = np.full(len(cand), np.inf)
+    heights = np.full(len(asked), np.inf)
     if height_fn is not None:
-        got = np.asarray(height_fn([detections[i] for i in cand]), dtype=np.float64)
+        got = np.asarray(height_fn([detections[i] for i in asked]), dtype=np.float64)
         heights = np.where(np.isfinite(got), got, np.inf)
-    height = dict(zip(cand, heights))
+    height = dict(zip(asked, heights))
+    for i in strong:
+        # apartment slabs repeat as balconies and shadows: greenhouses are low
+        if height_fn is None or height[i] <= RIDGE_MAX_HEIGHT_M:
+            out[i] = (KIND_GREENHOUSE, "ridged_roof")
     for i in cand:
         ctx = feats[i]
-        if ctx["aspect"] < GH_MIN_ASPECT:
+        if out[i][0] == KIND_GREENHOUSE or ctx["aspect"] < GH_MIN_ASPECT:
             continue
         if ctx["ring_agri"] >= GH_RING_AGRI or (
             ctx["ring_agri"] > GH_SOME_AGRI and height[i] <= GH_MAX_HEIGHT_M
         ):
             out[i] = (KIND_GREENHOUSE, "long_film_roof")
-    field = [i for i in cand if height[i] <= FIELD_MAX_HEIGHT_M]
+    field = [i for i in cand + ridged if height[i] <= FIELD_MAX_HEIGHT_M]
     if not field:
         return out
     centres = np.array([_centre_px(d) for d in detections]) * float(m_per_px)
+    seed_centres = np.array(
+        [_centre_px(d) for d in seeds], dtype=np.float64
+    ).reshape(-1, 2) * float(m_per_px)
     for _ in range(FIELD_ROUNDS):
         gh = np.array([kind == KIND_GREENHOUSE for kind, _r in out])
-        if not gh.any():
+        gh_centres = np.vstack([centres[gh], seed_centres])
+        if not len(gh_centres):
             break
-        gh_centres = centres[gh]
         grown = []
         for i in field:
             if out[i][0] != KIND_BUILDING:
@@ -302,6 +550,9 @@ SOLAR_MAX_EW_DEG = 35.0
 # Solar greenhouses come in two variants (anteroom at either end); a
 # piece's variant follows from its position, so reruns place the same one.
 SOLAR_VARIANTS = ("a", "b")
+# The solar greenhouse is a north-China design.  East of China (Korea,
+# Japan) single spans are film tunnels like the rest of the block.
+SOLAR_MAX_LON = 123.5
 GREENHOUSE_LIBRARY_PREFIX = "o4xp/agri/"
 
 
@@ -350,13 +601,19 @@ def _piece(c, ax, bx, ca, cb, length_m, width_m, mpp, heading, path, **extra):
     return piece
 
 
-def greenhouse_pieces(detection, m_per_px, northern=True):
+def uses_solar_greenhouses(lon):
+    """Whether single-span detections at ``lon`` may be solar greenhouses."""
+    return float(lon) <= SOLAR_MAX_LON
+
+
+def greenhouse_pieces(detection, m_per_px, northern=True, solar=True):
     """Greenhouse objects covering one greenhouse detection.
 
     Returns a list of dicts: ``center`` (px), ``bearing`` (the OBJ heading,
     degrees clockwise from north), ``length_m``, ``width_m``, ``path``,
     ``kind`` ('tunnels' or 'solar') and the piece's pixel ``poly``.
-    ``northern`` turns solar greenhouse walls to the north (else south).
+    ``northern`` turns solar greenhouse walls to the north (else south);
+    ``solar=False`` places tunnels only.
     """
     pts, ux, uy = _obb_frame(detection["points"])
     c = pts.mean(axis=0)
@@ -377,6 +634,7 @@ def greenhouse_pieces(detection, m_per_px, northern=True):
     ew_off = abs(axis - 90.0)
     pieces = []
     if (
+        solar and
         ew_off <= SOLAR_MAX_EW_DEG and
         SOLAR_WIDTHS_M[0] - 1.0 <= across_m <= SOLAR_WIDTHS_M[-1] + 2.0 and
         along_m >= 2.0 * across_m
@@ -423,12 +681,13 @@ def greenhouse_pieces(detection, m_per_px, northern=True):
 
 
 def split_detections(detections, veg_map, image_loader, m_per_px, counts=None,
-                     height_fn=None):
+                     height_fn=None, seeds=()):
     """Split detections into (buildings, greenhouses); ground is dropped.
 
     ``image_loader`` is called at most once, lazily.  Greenhouse detections
     get ``structure='greenhouse'`` and ``tunnel_axis``.  ``counts`` (a dict)
-    receives ``agri_<kind>_<reason>`` tallies.
+    receives ``agri_<kind>_<reason>`` tallies.  ``seeds``: see
+    ``classify_detections``.
     """
     if veg_map is None or not detections:
         return list(detections or ()), []
@@ -441,7 +700,7 @@ def split_detections(detections, veg_map, image_loader, m_per_px, counts=None,
         return state["image"]
 
     verdicts = classify_detections(
-        detections, veg_map, image_fn, m_per_px, height_fn=height_fn
+        detections, veg_map, image_fn, m_per_px, height_fn=height_fn, seeds=seeds
     )
     buildings = []
     greenhouses = []

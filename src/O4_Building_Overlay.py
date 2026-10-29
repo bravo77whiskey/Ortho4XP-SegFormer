@@ -2012,8 +2012,8 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 75      # v75: dedup-fallback context in the cache
-BLD_PLACEMENT_FAST_CACHE_VERSION = 77  # v77: dedup-fallback context in the cache
+BLD_PLACEMENT_CACHE_VERSION = 76      # v76: ridged-roof greenhouses, traced outlines sorted
+BLD_PLACEMENT_FAST_CACHE_VERSION = 78  # v78: ridged-roof greenhouses, traced outlines sorted
 # Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
 # wing the detector missed) are extruded as a polygon facade traced from the
 # landcover building class (O4_Footprint_Polygons), and the smaller
@@ -8220,7 +8220,10 @@ def _place_greenhouses(
         detections, key=lambda d: -float(d.get('area_m2', 0.0))
     ):
         pieces = (
-            AGRI.greenhouse_pieces(det, m_per_px, northern=lat >= 0)
+            AGRI.greenhouse_pieces(
+                det, m_per_px, northern=lat >= 0,
+                solar=AGRI.uses_solar_greenhouses(lon),
+            )
             if tunnel_paths else []
         )
         if pieces and all(p['path'] in tunnel_paths for p in pieces):
@@ -11219,74 +11222,91 @@ class _TexturePass:
         # Farmland sorting (O4_Agri_Structures): drop open-ground
         # detections, take greenhouses out of the building flow and place
         # them as greenhouse assets before any building claims the area.
-        if (
-            self.yolo_detections and self.veg_map is not None and not self.mesh_water_full
-            and _agri_mode() != "off"
-        ):
+        self.greenhouse_detections = []
+        if self._farmland_sorting_on():
             _t_gh = time.perf_counter()
-            _agri_img = {'img': self.img, 'tried': self.img is not None}
-
-            def _agri_image():
-                if not _agri_img['tried']:
-                    _agri_img['tried'] = True
-                    _agri_img['img'] = self.run._load_source_image(
-                        self.fname, self.run._source_mode, self.run._orthophoto_dir
-                    )
-                return _agri_img['img']
-
-            def _agri_heights(dets):
-                _himg = _agri_image()
-                if self.run.height_model is None or _himg is None:
-                    return [float('nan')] * len(dets)
-                return HEIGHTMODEL.predict_detection_heights(
-                    self.run.height_model, _himg, dets, self.m_per_px
-                )
-
             _n_agri_in = len(self.yolo_detections)
-            _review_before = list(self.yolo_detections)
-            self.yolo_detections, greenhouse_detections = AGRI.split_detections(
-                self.yolo_detections, self.veg_map, _agri_image, self.m_per_px,
-                counts=self.file_counts, height_fn=_agri_heights,
-            )
-            if self.review is not None:
-                for _gh in greenhouse_detections:
-                    self.review.set(_gh, "greenhouse")
-                self.review.dropped(_review_before, self.yolo_detections, "farmland_ground")
-            self.file_counts['agri_greenhouse'] = len(greenhouse_detections)
-            self.file_counts['agri_ground'] = (
-                _n_agri_in - len(self.yolo_detections) - len(greenhouse_detections)
+            self.yolo_detections, self.greenhouse_detections = self._split_farmland(
+                self.yolo_detections, self.img
             )
             if len(self.yolo_detections) != _n_agri_in:
                 self.file_counts['yolo_detections'] = len(self.yolo_detections)
-            if greenhouse_detections:
-                # A greenhouse block the landcover model reads as roof
-                # must not be traced again as a building (segment-first,
-                # large-roof polygons): its OBB becomes farmland.
-                self.veg_map = self.veg_map.copy()
-                for _gh in greenhouse_detections:
-                    cv2.fillPoly(
-                        self.veg_map,
-                        [np.round(np.asarray(_gh['points'])).astype(np.int32)],
-                        int(AGRI.CLASS_AGRICULTURE),
-                    )
-                if _agri_mode() == "greenhouse":
-                    _place_greenhouses(
-                        greenhouse_detections,
-                        m_per_px=self.m_per_px, img_w=self.img_w, img_h=self.img_h,
-                        lat=self.run.lat, lon=self.run.lon,
-                        bounds=(self.lat_n, self.lat_s, self.lon_w, self.lon_e),
-                        static_occ_mask=self.static_occ_mask,
-                        route_excl_mask=self.route_excl_mask,
-                        building_spacing_mask=self.building_spacing_mask,
-                        fit_scratch=self.fit_scratch,
-                        tunnel_paths=self.run.greenhouse_tunnel_paths,
-                        facade_path=self.run.greenhouse_facade_path,
-                        placed_objects=self.run.placed_stock_objects,
-                        placed_facades=self.run.placed_facades,
-                        file_counts=self.file_counts,
-                    )
-            _agri_img = None
             _record_elapsed(self.run.timings, self.file_timings, 'greenhouses', _t_gh)
+
+    def _farmland_sorting_on(self):
+        return (
+            bool(self.yolo_detections) and self.veg_map is not None
+            and not self.mesh_water_full and _agri_mode() != "off"
+        )
+
+    def _split_farmland(self, detections, image, seeds=()):
+        """Sort ``detections`` into (buildings, greenhouses), dropping ground.
+
+        Greenhouses are painted into the landcover map as farmland and, in
+        greenhouse mode, placed.  ``image`` is the RGB texture or None (then
+        loaded on demand); ``seeds`` are greenhouses an earlier pass found.
+        """
+        _agri_img = {'img': image, 'tried': image is not None}
+
+        def _agri_image():
+            if not _agri_img['tried']:
+                _agri_img['tried'] = True
+                _agri_img['img'] = self.run._load_source_image(
+                    self.fname, self.run._source_mode, self.run._orthophoto_dir
+                )
+            return _agri_img['img']
+
+        def _agri_heights(dets):
+            _himg = _agri_image()
+            if self.run.height_model is None or _himg is None:
+                return [float('nan')] * len(dets)
+            return HEIGHTMODEL.predict_detection_heights(
+                self.run.height_model, _himg, dets, self.m_per_px
+            )
+
+        _review_before = list(detections)
+        buildings, greenhouse_detections = AGRI.split_detections(
+            detections, self.veg_map, _agri_image, self.m_per_px,
+            counts=self.file_counts, height_fn=_agri_heights, seeds=seeds,
+        )
+        if self.review is not None:
+            for _gh in greenhouse_detections:
+                self.review.set(_gh, "greenhouse")
+            self.review.dropped(_review_before, buildings, "farmland_ground")
+        self.file_counts['agri_greenhouse'] = (
+            self.file_counts.get('agri_greenhouse', 0) + len(greenhouse_detections)
+        )
+        self.file_counts['agri_ground'] = self.file_counts.get('agri_ground', 0) + (
+            len(detections) - len(buildings) - len(greenhouse_detections)
+        )
+        if greenhouse_detections:
+            # A greenhouse block the landcover model reads as roof
+            # must not be traced again as a building (segment-first,
+            # large-roof polygons): its OBB becomes farmland.
+            self.veg_map = self.veg_map.copy()
+            for _gh in greenhouse_detections:
+                cv2.fillPoly(
+                    self.veg_map,
+                    [np.round(np.asarray(_gh['points'])).astype(np.int32)],
+                    int(AGRI.CLASS_AGRICULTURE),
+                )
+            if _agri_mode() == "greenhouse":
+                _place_greenhouses(
+                    greenhouse_detections,
+                    m_per_px=self.m_per_px, img_w=self.img_w, img_h=self.img_h,
+                    lat=self.run.lat, lon=self.run.lon,
+                    bounds=(self.lat_n, self.lat_s, self.lon_w, self.lon_e),
+                    static_occ_mask=self.static_occ_mask,
+                    route_excl_mask=self.route_excl_mask,
+                    building_spacing_mask=self.building_spacing_mask,
+                    fit_scratch=self.fit_scratch,
+                    tunnel_paths=self.run.greenhouse_tunnel_paths,
+                    facade_path=self.run.greenhouse_facade_path,
+                    placed_objects=self.run.placed_stock_objects,
+                    placed_facades=self.run.placed_facades,
+                    file_counts=self.file_counts,
+                )
+        return buildings, greenhouse_detections
 
     def _apply_seg_first(self):
         """Replace detections with landcover-traced footprints (segment-first)."""
@@ -11310,8 +11330,24 @@ class _TexturePass:
             if self.review is not None:
                 self.review.dropped(_review_before, self.yolo_detections, "replaced_by_segments")
                 self.review.add(self.yolo_detections)
-            _seg_img = None
             _record_elapsed(self.run.timings, self.file_timings, 'seg_first', _t)
+            # Greenhouse blocks YOLO missed come back as traced roof
+            # outlines: sort those too, next to the greenhouses found so far.
+            _before_ids = {id(d) for d in _review_before}
+            _traced = [d for d in self.yolo_detections if id(d) not in _before_ids]
+            if _traced and self._farmland_sorting_on():
+                _t_gh = time.perf_counter()
+                _kept, _gh = self._split_farmland(
+                    _traced, _seg_img, seeds=self.greenhouse_detections
+                )
+                if len(_kept) != len(_traced):
+                    _keep_ids = _before_ids | {id(d) for d in _kept}
+                    self.yolo_detections = [
+                        d for d in self.yolo_detections if id(d) in _keep_ids
+                    ]
+                    self.greenhouse_detections = self.greenhouse_detections + _gh
+                _record_elapsed(self.run.timings, self.file_timings, 'greenhouses', _t_gh)
+            _seg_img = None
 
     def _trim_against_existing_scenery(self):
         """O4_BLD_TRIM_EXISTING (default on): a box whose footprint grazes only

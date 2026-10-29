@@ -278,3 +278,129 @@ def test_overlay_falls_back_to_facade_or_nothing():
         assert objects == [] and len(facades) == expect
         if expect:
             assert facades[0][1] == facade and facades[0][2] == BLD.GREENHOUSE_HEIGHT_M
+
+
+TEAL_FILM = (70, 120, 125)      # Korean vinyl house film: teal, mid-dark
+PALE_BLUE = (150, 200, 230)     # painted steel roof
+
+
+def _striped(rgb, size=300, pitch_px=4):
+    """``rgb`` with darker ridge valleys every ``pitch_px`` rows (8 m at MPP 2)."""
+    img = _image(rgb, size).astype(np.int16)
+    img[::pitch_px] -= 40
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def _low(ds):
+    return [8.0] * len(ds)
+
+
+def _block_among_fields(det, size=300):
+    veg = _veg(AGRI_CLS, size)
+    _supported(veg, det)
+    return veg
+
+
+def test_ridge_pattern_scores_stripes_not_flat_or_split_roofs():
+    det = _det(150, 150, 60, 40)
+    assert AGRI.ridge_pattern(_striped(TEAL_FILM), det["points"], MPP) >= \
+        AGRI.RIDGE_MIN_SCORE
+    assert AGRI.ridge_pattern(_image(TEAL_FILM, 300), det["points"], MPP) == 0.0
+    # a gable roof: one light and one dark half, no repeat
+    gable = _image(TEAL_FILM, 300)
+    gable[150:] = (40, 70, 75)
+    assert AGRI.ridge_pattern(gable, det["points"], MPP) < AGRI.RIDGE_FIELD_SCORE
+
+
+def test_ridged_teal_block_among_fields_is_greenhouse():
+    # squat (aspect 1.5), teal and read as roof: rules 1-4 keep it a building
+    det = _det(150, 150, 60, 40)
+    veg = _block_among_fields(det)
+    img = _striped(TEAL_FILM)
+    assert AGRI.classify_detection(det, veg, lambda: img, MPP, _low) == \
+        (AGRI.KIND_GREENHOUSE, "ridged_roof")
+    assert AGRI.classify_detection(det, veg, lambda: _image(TEAL_FILM, 300), MPP, _low)[0] \
+        == AGRI.KIND_BUILDING
+
+
+def test_ridged_block_needs_film_colour_low_height_and_fields():
+    det = _det(150, 150, 60, 40)
+    veg = _block_among_fields(det)
+    painted = _striped(PALE_BLUE)
+    assert AGRI.classify_detection(det, veg, lambda: painted, MPP, _low)[0] == \
+        AGRI.KIND_BUILDING
+    img = _striped(TEAL_FILM)
+    tall = lambda ds: [40.0] * len(ds)     # an apartment slab's balconies
+    assert AGRI.classify_detection(det, veg, lambda: img, MPP, tall)[0] == \
+        AGRI.KIND_BUILDING
+    town = _veg(BLD_CLS, 300)              # skylight strips in an industrial park
+    assert AGRI.classify_detection(det, town, lambda: img, MPP, _low)[0] == \
+        AGRI.KIND_BUILDING
+
+
+def _fine_det(cx, cy, length_m, width_m, mpp):
+    c = np.array([cx, cy], float)
+    hl, hw = length_m / 2 / mpp, width_m / 2 / mpp
+    return {"points": [(c + d).tolist() for d in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw))],
+            "center": c.tolist(), "area_m2": length_m * width_m,
+            "length_m": length_m, "width_m": width_m}
+
+
+def test_two_tunnels_at_a_block_edge_are_judged_by_the_block():
+    # ZL18-like: 16 m across holds two 8 m ridges, too few to score alone;
+    # the box sits at the block's edge, fields on its other side
+    mpp, size = 0.5, 400
+    img = _striped(TEAL_FILM, size, pitch_px=16)
+    img[:168] = (150, 120, 80)                             # field above the block
+    det = _fine_det(200, 184, 60, 16, mpp)                 # rows 168-200
+    veg = _block_among_fields(det, size)
+    assert AGRI.ridge_pattern(img, det["points"], mpp) < AGRI.RIDGE_FIELD_SCORE
+    assert AGRI.classify_detection(det, veg, lambda: img, mpp, _low) == \
+        (AGRI.KIND_GREENHOUSE, "ridged_roof")
+    # at ZL16 a block around a small box is as likely a row of houses
+    coarse = _det(150, 150, 60, 8)
+    assert AGRI.classify_detection(coarse, _block_among_fields(coarse), lambda: _striped(TEAL_FILM),
+                                   MPP, _low)[0] == AGRI.KIND_BUILDING
+
+
+def test_seeds_count_as_field_neighbours():
+    # a belt with no farmland in sight: nothing seeds the field by itself
+    size = 400
+    veg = np.full((size, size), BLD_CLS, np.int8)
+    dets = [_det(150, 40 + 15 * k, 60, 10) for k in range(4)]
+    img = _image(GREY_FILM, size)
+    kinds = [k for k, _ in AGRI.classify_detections(dets, veg, lambda: img, MPP, _low)]
+    assert AGRI.KIND_GREENHOUSE not in kinds
+    # greenhouses an earlier pass found next to it do
+    seeds = [_det(110, 40, 60, 10), _det(110, 55, 60, 10)]
+    kinds = [k for k, _ in AGRI.classify_detections(dets, veg, lambda: img, MPP, _low,
+                                                    seeds=seeds)]
+    assert kinds.count(AGRI.KIND_GREENHOUSE) == len(dets)
+
+
+def test_no_solar_greenhouses_east_of_china():
+    assert AGRI.uses_solar_greenhouses(118.7)        # Shouguang
+    assert not AGRI.uses_solar_greenhouses(128.9)    # Gimhae
+    det = _det(500, 500, 90, 14)
+    det["tunnel_axis"] = "long"
+    assert {p["kind"] for p in AGRI.greenhouse_pieces(det, MPP, solar=False)} == \
+        {"tunnels"}
+
+
+def test_fine_textures_accept_an_unbuilt_belt_without_fields():
+    # ZL18-like 0.5 m/px: a block between a river and a road, no field in
+    # sight; hardly anything built around it is enough, streets are not
+    mpp, size = 0.5, 400
+    c = np.array([200.0, 200.0])
+    hl, hw = 60 / 2 / mpp, 40 / 2 / mpp
+    det = {"points": [(c + d).tolist() for d in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw))],
+           "center": c.tolist(), "area_m2": 2400.0, "length_m": 60.0, "width_m": 40.0}
+    img = _striped(TEAL_FILM, size, pitch_px=16)       # 8 m pitch
+    river = np.full((size, size), 6, np.int8)          # water all round
+    _supported(river, det)
+    assert AGRI.classify_detection(det, river, lambda: img, mpp, _low) == \
+        (AGRI.KIND_GREENHOUSE, "ridged_roof")
+    town = np.full((size, size), AGRI.CLASS_DEVELOPED, np.int8)
+    _supported(town, det)
+    assert AGRI.classify_detection(det, town, lambda: img, mpp, _low)[0] == \
+        AGRI.KIND_BUILDING
