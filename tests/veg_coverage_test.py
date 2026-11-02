@@ -199,6 +199,31 @@ class PointTreeTests(unittest.TestCase):
         VEG._write_point_windings(f, [(120.1, 22.1), (120.2, 22.2)])
         self.assertEqual(f.getvalue().count("POLYGON_POINT"), 2)
 
+    @staticmethod
+    def _square_hole(side, n_pts):
+        """A closed n_pts ring whose area grows with side."""
+        ring = [(side * (i % 2), side * ((i // 2) % 2)) for i in range(n_pts - 1)]
+        return ring + ring[:1]
+
+    def test_clearings_stop_at_the_dsf_polygon_point_limit(self):
+        holes = [self._square_hole(1 + i, 8000) for i in range(9)]
+        kept, dropped = VEG._capped_holes(holes, 8000)
+        self.assertEqual(dropped, 2)
+        self.assertLessEqual(8000 + sum(len(h) for h in kept), VEG.MAX_POLYGON_POINTS)
+        self.assertEqual(sum(1 for h in holes[:2] if h in kept), 0)
+
+    def test_small_clearing_still_fits_after_a_big_one_does_not(self):
+        room_for_outline = VEG.MAX_POLYGON_POINTS - 8000 * 7
+        big = [self._square_hole(100 + i, 8000) for i in range(8)]
+        small = self._square_hole(1, 10)
+        kept, dropped = VEG._capped_holes(big + [small], room_for_outline - 10)
+        self.assertEqual(dropped, 1)
+        self.assertIn(small, kept)
+
+    def test_clearings_under_both_limits_are_written_in_order(self):
+        holes = [self._square_hole(3, 10), self._square_hole(9, 10)]
+        self.assertEqual(VEG._capped_holes(holes, 100), (holes, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

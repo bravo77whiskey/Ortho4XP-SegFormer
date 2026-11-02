@@ -98,6 +98,7 @@ SHRUB_TREELINE_MAX_WIDTH_M = 6.0
 TREELINE_MIN_ASPECT  = 3.0   # min length/width — compact patches stay filled forest
 MAX_RING_PTS  = 8000   # hard vertex cap per DSF winding
 MAX_POLYGON_WINDINGS = 255   # DSFTool: "too many intervals in polygon" above this
+MAX_POLYGON_POINTS = 65535   # DSFTool: "Could not sink polygon point" above this
 EXCL_BUFFER_M = 5.0    # dilation buffer around SegFormer buildings/roads before exclusion
 
 # Per-type road exclusion half-widths in metres (one side from centre).
@@ -2139,26 +2140,38 @@ def _write_point_windings(f, pts):
         f.write("END_WINDING\n")
 
 
-def _capped_holes(holes):
+def _capped_holes(holes, outline_pts):
     """The largest holes that fit beside the outline in one DSF polygon.
 
-    The smallest clearings past the cap stay forest; returns (holes, dropped).
+    A polygon holds MAX_POLYGON_WINDINGS windings and MAX_POLYGON_POINTS points.
+    The smallest clearings past either cap stay forest; returns (holes, dropped).
     """
     holes = list(holes)
     keep = MAX_POLYGON_WINDINGS - 1
-    if len(holes) <= keep:
+    room = MAX_POLYGON_POINTS - outline_pts
+    sizes = [len(_thinned_ring(h)) for h in holes]
+    if len(holes) <= keep and sum(sizes) <= room:
         return holes, 0
-    holes.sort(key=lambda h: abs(_signed_area(h[:-1])), reverse=True)
-    return holes[:keep], len(holes) - keep
+    kept = []
+    for i in sorted(range(len(holes)), key=lambda i: abs(_signed_area(holes[i][:-1])), reverse=True):
+        if len(kept) < keep and sizes[i] <= room:
+            kept.append(holes[i])
+            room -= sizes[i]
+    return kept, len(holes) - len(kept)
 
 
-def _write_winding(f, ring_pts):
-    pts = ring_pts
+def _thinned_ring(ring_pts):
+    pts = list(ring_pts)
     if len(pts) > MAX_RING_PTS + 1:
         step = max(1, len(pts) // MAX_RING_PTS)
         pts  = pts[::step]
         if pts[0] != pts[-1]:
             pts.append(pts[0])
+    return pts
+
+
+def _write_winding(f, ring_pts):
+    pts = _thinned_ring(ring_pts)
     f.write("BEGIN_WINDING\n")
     for lo, la in pts:
         f.write(f"POLYGON_POINT {lo:.7f} {la:.7f}\n")
@@ -3864,8 +3877,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             if dsf_den >= POINT_MODE:
                 _write_point_windings(f, ring)
             else:
-                _write_winding(f, list(ring))
-                holes, dropped = _capped_holes(getattr(ring, 'holes', ()))
+                outline = _thinned_ring(ring)
+                _write_winding(f, outline)
+                holes, dropped = _capped_holes(getattr(ring, 'holes', ()), len(outline))
                 if dropped:
                     n_capped += 1
                     n_dropped += dropped

@@ -726,6 +726,15 @@ def _run_inference(model, device, img_rgb, processor, tree_support):
 # DSFTool compilation
 # ─────────────────────────────────────────────────────────────────────────────
 
+_DSFTOOL_COORD_LINE = re.compile(r"-?\d+\.\d+ -?\d+\.\d+\s*")
+
+
+def _without_dsftool_coords(stdout):
+    """DSFTool dumps every point of a polygon it can't write; keep only its messages."""
+    return "\n".join(line for line in stdout.splitlines()
+                     if not _DSFTOOL_COORD_LINE.fullmatch(line))
+
+
 def compile_dsf(txt_path, dsf_path):
     """Invoke DSFTool to compile txt_path → dsf_path. Returns True on success."""
     os.makedirs(os.path.dirname(dsf_path), exist_ok=True)
@@ -734,7 +743,7 @@ def compile_dsf(txt_path, dsf_path):
                              creationflags=_CREATE_NO_WINDOW)
     if result.stdout.strip():
         output = print if result.returncode else verbose_print
-        output(f"[SegFormer] DSFTool stdout:\n{result.stdout}")
+        output(f"[SegFormer] DSFTool stdout:\n{_without_dsftool_coords(result.stdout)}")
     if result.stderr.strip():
         print(f"[SegFormer] DSFTool stderr:\n{result.stderr}")
     if result.returncode != 0:

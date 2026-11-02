@@ -208,6 +208,18 @@ class OverlayLoggingTests(unittest.TestCase):
                 self.assertEqual("compiler details" in out.getvalue(), verbose or rc != 0)
                 self.assertIn("warning", out.getvalue())
 
+    def test_dsftool_polygon_coordinate_dump_is_not_logged(self):
+        stdout = ("Converting a to b\n-41.308916 -12.983440 \n41.3 12.9\n"
+                  'ERROR: !"ERROR: Could not sink polygon point.\\n"\n')
+        out = StringIO()
+        result = SimpleNamespace(returncode=1, stdout=stdout, stderr="")
+        with (mock.patch.object(SEG.subprocess, "run", return_value=result),
+              mock.patch.object(SEG.os, "makedirs"), redirect_stdout(out)):
+            self.assertFalse(SEG.compile_dsf("source.txt", "output/tile.dsf"))
+        self.assertIn("Could not sink polygon point", out.getvalue())
+        self.assertIn("Converting a to b", out.getvalue())
+        self.assertNotIn("41.3", out.getvalue())
+
     def test_quiet_batch_message_does_not_suppress_later_verbose_run(self):
         @with_verbose_logging
         def announce(verbose_log=False):
