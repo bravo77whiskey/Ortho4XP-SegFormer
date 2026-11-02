@@ -3033,7 +3033,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             cache_path = os.path.join(cache_dir, fname.replace('.dds', '_veg.npy'))
             use_bld_seg = reuse_bld_seg
         tree_support_path = SEGFORMER.tree_support_cache_path(cache_path)
-        want_tree_support = not use_lowzoom and SEGFORMER.tree_support_enabled()
+        # ZL18+ keeps its SegFormer support and OSM rescue under the merge.
+        seg_extras = not use_lowzoom or infer_factor > 1
+        want_tree_support = seg_extras and SEGFORMER.tree_support_enabled()
         tree_support = None
         img = None
         veg_map = None
@@ -3147,7 +3149,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         if canopy_maps is not None and not disable_cache:
                             np.save(canopy_path, canopy_maps)
 
-        # Legacy enlarged-image support below ZL16; G uses native RGB at 16/17.
+        # Legacy enlarged-image support below ZL16; the RGB merge uses native RGB from ZL16.
         upscale_trees = None
         upscale_path = os.path.join(cache_dir, fname.replace('.dds', '_veg2x.npy'))
         if (not use_lowzoom and zl <= UPSCALE_MAX_ZL and infer_factor == 1 and _upscale_gap_trees_enabled()
@@ -3189,7 +3191,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         img_h, img_w = veg_map.shape
         mpp = dds_m_per_px(lat_n, lat_s, lon_w, lon_e, img_h, img_w)
 
-        # G runs on the native image, before optional polygon-resolution scaling.
+        # The RGB merge runs on the native image, before optional polygon-resolution scaling.
         lowzoom_tree = None
         lowzoom_sig = None
         if use_lowzoom:
@@ -3210,7 +3212,6 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     img, veg_map,
                     LOWZOOM.metres_per_pixel(lat_n, lat_s, lon_w, lon_e, img_h, img_w),
                     forest_class=SEGFORMER.CLASS_TREE,
-                    rangeland_class=SEGFORMER.CLASS_RANGELAND,
                 )
                 timings['lowzoom'] += time.perf_counter() - _t
             # RGB can change independently of the reusable SegFormer cache.
@@ -3288,7 +3289,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 canopy_added &= ~canopy_inside
             tree_raw = tree_raw | canopy_added
         tree_raw = tree_raw.astype(np.uint8)
-        tree_mask = lowzoom_tree.copy() if lowzoom_tree is not None else _morph(tree_raw)
+        tree_mask = _morph(tree_raw)
+        if lowzoom_tree is not None:
+            # ZL18+: the merge also keeps the canopy trees; airports stay canopy-decided.
+            merged = lowzoom_tree | tree_mask if canopy_added is not None else lowzoom_tree
+            tree_mask = np.where(canopy_inside, tree_mask, merged) if canopy_inside is not None else merged.copy()
 
         # ── Exclusion layer 1: SegFormer CLASS_BUILDING / CLASS_ROAD / CLASS_DEVELOPED
         # Dilate by excl_buffer_m to catch morphological bleed from close operation
@@ -3555,7 +3560,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         # Canopy SegFormer misread inside an OSM forest; the exclusions below
         # (mesh water, roads, buildings, airport zones) still cut it back.
         _osm_forest = local_context_masks.get('forest')
-        if not use_lowzoom and _osm_forest is not None and _osm_forest_rescue_enabled():
+        if seg_extras and _osm_forest is not None and _osm_forest_rescue_enabled():
             rescue = _osm_forest.astype(bool) & np.isin(veg_map, OSM_FOREST_RESCUE_CLASSES)
             if _osm_rescue_rangeland_enabled():
                 range_in = _osm_forest.astype(bool) & (veg_map == SEGFORMER.CLASS_RANGELAND)
@@ -3686,7 +3691,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             # Gaps whose cause is known: excluded ground, land-cover classes
             # that are clearly not tree, and flat canopy on canopy textures.
             gap_certain = excl_mask.astype(bool) | np.isin(veg_map, GAP_CERTAIN_CLASSES)
-            if lowzoom_tree is not None:
+            if lowzoom_tree is not None and canopy_added is None:
                 gap_certain |= ~lowzoom_tree.astype(bool)
             if canopy_inside is not None:
                 seg_gate = _canopy_seg_min_h() or CANOPY_SEG_MIN_H_M

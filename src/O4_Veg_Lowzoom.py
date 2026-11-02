@@ -1,8 +1,10 @@
-"""Option G for ZL16/17: RGB option F within SegFormer forest/rangeland.
+"""RGB option F merged with SegFormer forest, for ZL16 and up.
 
 Uses native RGB and the existing land-cover map, with no extra inference or
-downloads. Thresholds match the reviewed low-zoom experiment. They are image
-heuristics, not calibrated tree probabilities.
+downloads. RGB plants wherever its checks pass, so forest SegFormer calls
+farmland stays planted, and SegFormer forest fills what RGB misses. Thresholds
+match the reviewed low-zoom experiment. They are image heuristics, not
+calibrated tree probabilities.
 """
 import math
 
@@ -10,11 +12,12 @@ import cv2
 import numpy as np
 
 # Bump when the algorithm changes so polygon caches cannot replay older masks.
-SIGNATURE = "segformer-forest-rangeland-rgb-f-v1"
+SIGNATURE = "rgb-f-1m2-segformer-forest-merge-v2"
+MIN_AREA_M2 = 1
 
 
 def applies(zl):
-    return zl in (16, 17)
+    return zl >= 16
 
 
 def metres_per_pixel(lat_n, lat_s, lon_w, lon_e, height, width):
@@ -31,10 +34,10 @@ def _mean(a, metres, mpp):
     return cv2.blur(a.astype(np.float32), (size, size), borderType=cv2.BORDER_REFLECT)
 
 
-def _remove_small(mask, mpp):
+def _remove_small(mask, mpp, min_area_m2):
     _, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8)
-    keep = stats[:, cv2.CC_STAT_AREA] * mpp * mpp >= 60
+    keep = stats[:, cv2.CC_STAT_AREA] * mpp * mpp >= min_area_m2
     keep[0] = False
     return keep[labels]
 
@@ -44,17 +47,14 @@ def _coherence(gx, gy, metres, mpp):
     return np.sqrt((xx - yy) ** 2 + 4 * xy * xy) / (xx + yy + 1e-7)
 
 
-def tree_mask(rgb, classes, mpp, *, forest_class=5, rangeland_class=2):
-    """Return native uint8 0/1 G mask; do not expand it with morphology."""
+def tree_mask(rgb, classes, mpp, *, forest_class=5, min_area_m2=MIN_AREA_M2):
+    """Return native uint8 0/1 mask; do not expand it with morphology."""
     if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
         raise ValueError("Expected HxWx3 uint8 RGB")
     if classes.shape != rgb.shape[:2]:
         raise ValueError("RGB and SegFormer must use the same native image grid")
     if not math.isfinite(mpp) or mpp <= 0:
         raise ValueError("metres/pixel must be positive and finite")
-    zones = (classes == forest_class) | (classes == rangeland_class)
-    if not zones.any():
-        return np.zeros(classes.shape, np.uint8)
 
     f = rgb.astype(np.float32) / 255
     r, g, b = f.transpose(2, 0, 1)
@@ -75,7 +75,7 @@ def tree_mask(rgb, classes, mpp, *, forest_class=5, rangeland_class=2):
     eligible = green & (green_share > 0.55) & (local_mean < 0.50)
     textured = (eligible & (local_std > 0.012) & (contrast > 0.065)
                 & (detail > 0.28) & (_coherence(gx, gy, 22, mpp) < 0.80))
-    texture = _remove_small(textured, mpp)
+    texture = _remove_small(textured, mpp, min_area_m2)
 
     # Preserve the experiment's separate F pass, including its float32 luma.
     lum = f @ np.array([0.299, 0.587, 0.114], np.float32)
@@ -85,5 +85,5 @@ def tree_mask(rgb, classes, mpp, *, forest_class=5, rangeland_class=2):
     aligned = np.zeros(classes.shape, bool)
     for metres in (50, 80):
         aligned |= _coherence(gx, gy, metres, mpp) > 0.55
-    fill = _remove_small(texture & ~aligned, mpp)
-    return (fill & zones).astype(np.uint8)
+    fill = _remove_small(texture & ~aligned, mpp, min_area_m2)
+    return (fill | (classes == forest_class)).astype(np.uint8)
