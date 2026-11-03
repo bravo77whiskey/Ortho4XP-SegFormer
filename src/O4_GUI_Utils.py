@@ -180,6 +180,16 @@ class Ortho4XP_Airport_Tiles_Dialog(simpledialog.Dialog):
         self.sync_rows()
         return self.icao_entry
 
+    def buttonbox(self):
+        box = tk.Frame(self, **THEME.frame_options())
+        ttk.Button(box, text="OK", style="Primary.TButton", command=self.ok, default="active").pack(
+            side=LEFT, padx=5, pady=8
+        )
+        ttk.Button(box, text="Cancel", command=self.cancel).pack(side=LEFT, padx=5, pady=8)
+        self.bind("<Return>", self.ok)
+        self.bind("<Escape>", self.cancel)
+        box.pack()
+
     def codes(self):
         return AZONE.parse_icaos(self.icao_var.get())
 
@@ -332,8 +342,10 @@ class Ortho4XP_GUI(tk.Tk):
 
     def __init__(self):
         tk.Tk.__init__(self)
-        THEME.apply_ttk_style(ttk.Style())
-        self.option_add("*Font", "TkFixedFont")
+        THEME.init_fonts(self)
+        THEME.apply_ttk_style(ttk.Style(self))
+        THEME.style_window(self)
+        THEME.fit_to_screen(self, 1240, 860, min_width=980, min_height=560)
 
         # Let UI know ourself
         UI.gui = self
@@ -369,44 +381,28 @@ class Ortho4XP_GUI(tk.Tk):
         self.folder_icon = tk.PhotoImage(
             file=os.path.join(FNAMES.Utils_dir, "Folder.gif")
         )
-        self.earth_icon = tk.PhotoImage(
-            file=os.path.join(FNAMES.Utils_dir, "Earth.gif")
-        )
-        self.loupe_icon = tk.PhotoImage(
-            file=os.path.join(FNAMES.Utils_dir, "Loupe.gif")
-        )
-        self.config_icon = tk.PhotoImage(
-            file=os.path.join(FNAMES.Utils_dir, "Config.gif")
-        )
-        self.stop_icon = tk.PhotoImage(
-            file=os.path.join(FNAMES.Utils_dir, "Stop.gif")
-        )
-        self.exit_icon = tk.PhotoImage(
-            file=os.path.join(FNAMES.Utils_dir, "Exit.gif")
-        )
-
         # Frame instances and placement
         # Level 0
-        self.frame_top = tk.Frame(self, border=4, **THEME.frame_options())
+        self.frame_top = tk.Frame(self, border=0, **THEME.frame_options())
         self.frame_top.grid(row=0, column=0, sticky=N + S + W + E)
-        self.frame_console = tk.Frame(self, border=5, **THEME.frame_options())
+        self.frame_top.columnconfigure(0, weight=1)
+        self.frame_console = tk.Frame(self, border=0, padx=10, pady=8, **THEME.frame_options())
         self.frame_console.grid(row=1, column=0, sticky=N + S + W + E)
         # Level 1
         self.frame_tile = tk.Frame(
-            self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
+            self.frame_top, border=0, padx=10, pady=8,
+            bg=THEME.palette()["panel_background"],
         )
         self.frame_tile.grid(row=0, column=0, sticky=N + S + W + E)
+        self.frame_tile.columnconfigure(9, weight=1)
+        self.frame_tools = tk.Frame(
+            self.frame_top, border=0, padx=10, pady=8, **THEME.frame_options()
+        )
+        self.frame_tools.grid(row=1, column=0, sticky=N + S + W + E)
         self.frame_steps = tk.Frame(
-            self.frame_top, border=0, padx=5, pady=5, **THEME.frame_options()
+            self.frame_top, border=0, padx=10, pady=0, **THEME.frame_options()
         )
         self.frame_steps.grid(row=2, column=0, sticky=N + S + W + E)
-        # Level 2
-        self.frame_folder = tk.Frame(
-            self.frame_tile, border=0, padx=0, pady=0, **THEME.frame_options()
-        )
-        self.frame_folder.grid(
-            row=1, column=0, columnspan=8, sticky=N + S + W + E
-        )
 
         # Track existance of tile configuration file for active tile
         self.tile_cfg_exists = tk.BooleanVar()
@@ -416,35 +412,37 @@ class Ortho4XP_GUI(tk.Tk):
         # First row (Tile data)
         self.lat = tk.StringVar()
         self.lat.trace_add("write", self.tile_change)
-        tk.Label(self.frame_tile, text="Latitude:", **THEME.label_options()).grid(
-            row=0, column=0, padx=5, pady=5, sticky=E + W
+        band = THEME.palette()["panel_background"]
+        band_label = {"bg": band, "fg": THEME.palette()["muted"]}
+        tk.Label(self.frame_tile, text="Latitude", **band_label).grid(
+            row=0, column=0, padx=(0, 4), sticky=E
         )
         self.lat_entry = tk.Entry(
             self.frame_tile,
-            width=4,
+            width=5,
             **THEME.entry_options(),
             textvariable=self.lat,
         )
-        self.lat_entry.grid(row=0, column=1, padx=5, pady=5, sticky=W)
+        self.lat_entry.grid(row=0, column=1, padx=(0, 12), ipady=3, sticky=W)
 
         self.lon = tk.StringVar()
         self.lat.trace_add("write", self.tile_change)
-        tk.Label(
-            self.frame_tile, anchor=W, text="Longitude:", **THEME.label_options()
-        ).grid(row=0, column=2, padx=5, pady=5, sticky=E + W)
+        tk.Label(self.frame_tile, text="Longitude", **band_label).grid(
+            row=0, column=2, padx=(0, 4), sticky=E
+        )
         self.lon_entry = tk.Entry(
             self.frame_tile,
-            width=4,
+            width=5,
             **THEME.entry_options(),
             textvariable=self.lon,
         )
-        self.lon_entry.grid(row=0, column=3, padx=5, pady=5, sticky=W)
+        self.lon_entry.grid(row=0, column=3, padx=(0, 12), ipady=3, sticky=W)
 
         self.default_website = tk.StringVar()
         self.default_website.trace_add("write", self.update_website)
-        tk.Label(
-            self.frame_tile, anchor=W, text="Imagery:", **THEME.label_options()
-        ).grid(row=0, column=4, padx=5, pady=5, sticky=E + W)
+        tk.Label(self.frame_tile, text="Imagery", **band_label).grid(
+            row=0, column=4, padx=(0, 4), sticky=E
+        )
         self.img_combo = ttk.Combobox(
             self.frame_tile,
             values=self.map_list,
@@ -453,170 +451,138 @@ class Ortho4XP_GUI(tk.Tk):
             width=14,
             style="O4.TCombobox",
         )
-        self.img_combo.grid(row=0, column=5, padx=5, pady=5, sticky=W)
+        self.img_combo.grid(row=0, column=5, padx=(0, 12), sticky=W)
 
         self.default_zl = tk.StringVar()
         self.default_zl.trace_add("write", self.update_zl)
-        tk.Label(
-            self.frame_tile, anchor=W, text="Zoom Level:", **THEME.label_options()
-        ).grid(row=0, column=6, padx=5, pady=5, sticky=E + W)
+        tk.Label(self.frame_tile, text="Zoom level", **band_label).grid(
+            row=0, column=6, padx=(0, 4), sticky=E
+        )
         self.zl_combo = ttk.Combobox(
             self.frame_tile,
             values=self.zl_list,
             textvariable=self.default_zl,
             state="readonly",
-            width=3,
+            width=4,
             style="O4.TCombobox",
         )
-        self.zl_combo.grid(row=0, column=7, padx=5, pady=5, sticky=W)
+        self.zl_combo.grid(row=0, column=7, padx=(0, 12), sticky=W)
 
-        # Second row (Base Folder)
-        self.frame_folder.columnconfigure(1, weight=1)
-        tk.Label(
-            self.frame_folder, anchor=W, text="Base Folder:", **THEME.label_options()
-        ).grid(row=0, column=0, padx=5, pady=5, sticky=E + W)
+        tk.Label(self.frame_tile, text="Base folder", **band_label).grid(
+            row=0, column=8, padx=(0, 4), sticky=E
+        )
         self.custom_build_dir = tk.StringVar()
         self.custom_build_dir_entry = tk.Entry(
-            self.frame_folder,
+            self.frame_tile,
             **THEME.entry_options(),
             textvariable=self.custom_build_dir,
         )
-        self.custom_build_dir_entry.grid(
-            row=0, column=1, padx=0, pady=0, sticky=E + W
-        )
+        self.custom_build_dir_entry.grid(row=0, column=9, ipady=3, sticky=E + W)
         ttk.Button(
-            self.frame_folder,
+            self.frame_tile,
             takefocus=False,
             image=self.folder_icon,
             command=self.choose_custom_build_dir,
             style="Flat.TButton",
-        ).grid(row=0, column=2, padx=0, pady=0, sticky=N + S + E + W)
+        ).grid(row=0, column=10, padx=(4, 0))
 
-        # Button Icons on top right
+        # Windows and tools
+        for text, command in (
+            ("Tiles", self.open_earth_window),
+            ("Custom ZL", self.open_custom_zl_window),
+            ("Airports", self.select_airport_tiles),
+            ("OSM data", self.open_osm_data_manager),
+            ("Libraries", self.rescan_overlay_libraries),
+            ("Settings", self.open_config_window),
+        ):
+            ttk.Button(
+                self.frame_tools,
+                takefocus=False,
+                text=text,
+                command=command,
+                style="Flat.TButton",
+            ).pack(side=LEFT, padx=(0, 6))
         ttk.Button(
-            self.frame_tile,
+            self.frame_tools,
             takefocus=False,
-            text="Airport",
-            command=self.select_airport_tiles,
+            text="Exit",
+            command=self.exit_prg,
             style="Flat.TButton",
-        ).grid(row=0, column=8, rowspan=2, padx=5, pady=0)
+        ).pack(side=RIGHT)
         ttk.Button(
-            self.frame_tile,
+            self.frame_tools,
             takefocus=False,
-            text="OSM",
-            command=self.open_osm_data_manager,
-            style="Flat.TButton",
-        ).grid(row=0, column=9, rowspan=2, padx=5, pady=0)
-        ttk.Button(
-            self.frame_tile,
-            takefocus=False,
-            text="Libraries",
-            command=self.rescan_overlay_libraries,
-            style="Flat.TButton",
-        ).grid(row=0, column=10, rowspan=2, padx=5, pady=0)
-        ttk.Button(
-            self.frame_tile,
-            takefocus=False,
-            image=self.config_icon,
-            command=self.open_config_window,
-            style="Flat.TButton",
-        ).grid(row=0, column=11, rowspan=2, padx=5, pady=0)
-        ttk.Button(
-            self.frame_tile,
-            takefocus=False,
-            image=self.loupe_icon,
-            command=self.open_custom_zl_window,
-            style="Flat.TButton",
-        ).grid(row=0, column=12, rowspan=2, padx=5, pady=0)
-        ttk.Button(
-            self.frame_tile,
-            takefocus=False,
-            image=self.earth_icon,
-            command=self.open_earth_window,
-            style="Flat.TButton",
-        ).grid(row=0, column=13, rowspan=2, padx=5, pady=0)
+            text="Stop",
+            command=self.set_red_flag,
+            style="Danger.TButton",
+        ).pack(side=RIGHT, padx=(0, 6))
         self.pause_button = ttk.Button(
-            self.frame_tile,
+            self.frame_tools,
             takefocus=False,
             text="Pause",
             width=7,
             command=self.toggle_pause,
             style="Flat.TButton",
         )
-        self.pause_button.grid(row=0, column=14, rowspan=2, padx=5, pady=0)
-        ttk.Button(
-            self.frame_tile,
-            takefocus=False,
-            image=self.stop_icon,
-            command=self.set_red_flag,
-            style="Flat.TButton",
-        ).grid(row=0, column=15, rowspan=2, padx=5, pady=0)
-        ttk.Button(
-            self.frame_tile,
-            takefocus=False,
-            image=self.exit_icon,
-            command=self.exit_prg,
-            style="Flat.TButton",
-        ).grid(row=0, column=16, rowspan=2, padx=5, pady=0)
+        self.pause_button.pack(side=RIGHT, padx=(0, 6))
 
-        # Third row (Steps)
+        # Build steps, numbered as the log numbers them
         for i in range(7):
-            self.frame_steps.columnconfigure(i, weight=1)
+            self.frame_steps.columnconfigure(i, weight=1, uniform="steps")
         ttk.Button(
             self.frame_steps,
-            text="Assemble Vector data",
+            text="1  Vector data",
             command=self.build_poly_file,
-        ).grid(row=0, column=0, padx=5, pady=0, sticky=N + S + E + W)
+        ).grid(row=0, column=0, padx=(0, 6), sticky=N + S + E + W)
         build_mesh_button = ttk.Button(
-            self.frame_steps, text="Triangulate 3D Mesh"
+            self.frame_steps, text="2  Mesh"
         )  # ,command=self.build_mesh)
         build_mesh_button.grid(
-            row=0, column=1, padx=5, pady=0, sticky=N + S + E + W
+            row=0, column=1, padx=(0, 6), sticky=N + S + E + W
         )
         build_mesh_button.bind("<ButtonPress-1>", self.build_mesh)
         build_mesh_button.bind("<Shift-ButtonPress-1>", self.sort_mesh)
         build_mesh_button.bind("<Control-ButtonPress-1>", self.community_mesh)
         build_masks_button = ttk.Button(
-            self.frame_steps, text=" Draw Water Masks  "
+            self.frame_steps, text="2.5  Water masks"
         )  # ,command=self.build_masks)
         build_masks_button.grid(
-            row=0, column=2, padx=5, pady=0, sticky=N + S + E + W
+            row=0, column=2, padx=(0, 6), sticky=N + S + E + W
         )
         build_masks_button.bind("<ButtonPress-1>", self.build_masks)
         build_masks_button.bind("<Shift-ButtonPress-1>", self.build_masks)
         ttk.Button(
             self.frame_steps,
-            text=" Build Imagery/DSF ",
+            text="3  Imagery and DSF",
             command=self.build_tile,
-        ).grid(row=0, column=3, padx=5, pady=0, sticky=N + S + E + W)
+        ).grid(row=0, column=3, padx=(0, 6), sticky=N + S + E + W)
         ttk.Button(
             self.frame_steps,
-            text=" Building Overlay ",
+            text="Building overlay",
             command=self.build_bld_overlay,
-        ).grid(row=0, column=4, padx=5, pady=0, sticky=N + S + E + W)
+        ).grid(row=0, column=4, padx=(0, 6), sticky=N + S + E + W)
         ttk.Button(
             self.frame_steps,
-            text=" Vegetation Overlay ",
+            text="Vegetation overlay",
             command=self.build_veg_overlay,
-        ).grid(row=0, column=5, padx=5, pady=0, sticky=N + S + E + W)
+        ).grid(row=0, column=5, padx=(0, 6), sticky=N + S + E + W)
         ttk.Button(
-            self.frame_steps, text="    All in one     ", command=self.build_all
-        ).grid(row=0, column=6, padx=5, pady=0, sticky=N + S + E + W)
+            self.frame_steps,
+            text="All in one",
+            style="Primary.TButton",
+            command=self.build_all,
+        ).grid(row=0, column=6, sticky=N + S + E + W)
         # Session-only choice (deliberately not a config setting): offload
         # SegFormer/YOLO inference to the remote GPU host while it is online.
-        # Classic tk.Checkbutton like the rest of the app — the custom ttk
-        # theme does not render the ttk.Checkbutton indicator state.
         self.use_remote_gpu = tk.BooleanVar(value=False)
         self.remote_gpu_last_host = ""   # remembered for this session only
-        tk.Checkbutton(
-            self.frame_steps,
+        ttk.Checkbutton(
+            self.frame_tools,
             text="Remote GPU",
-            anchor=W,
             variable=self.use_remote_gpu,
             command=self.toggle_remote_gpu,
             takefocus=False,
-            **THEME.checkbutton_options(),
-        ).grid(row=0, column=7, padx=5, pady=0)
+        ).pack(side=LEFT, padx=(10, 0))
 
         # Progress tree with the log under it (O4_Progress_Panel)
         self.panel = PANEL.ProgressPanel(self.frame_console, on_retry=self.retry_from_panel)
@@ -1340,6 +1306,7 @@ class Ortho4XP_Remote_GPU_Picker(tk.Toplevel):
 
     def __init__(self, parent):
         tk.Toplevel.__init__(self)
+        THEME.style_window(self)
         self.parent = parent
         self.title("Remote GPU host")
         self.transient(parent)
@@ -1588,6 +1555,7 @@ class Ortho4XP_OSM_Data_Manager(tk.Toplevel):
 
     def __init__(self, parent):
         tk.Toplevel.__init__(self)
+        THEME.style_window(self)
         self.parent = parent
         self.title("Local OSM data")
         self.transient(parent)
@@ -1606,6 +1574,7 @@ class Ortho4XP_OSM_Data_Manager(tk.Toplevel):
             anchor=W,
             justify=LEFT,
             textvariable=self.info_var,
+            font="TkFixedFont",
             **THEME.label_options(),
         ).grid(row=0, column=0, columnspan=3, sticky=E + W, **pad)
 
@@ -1916,6 +1885,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
         self.polyobj_list = []
 
         tk.Toplevel.__init__(self)
+        THEME.style_window(self)
         self.title("Preview / Custom Zoom Levels")
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -1961,7 +1931,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             anchor=W,
             text="Preview params ",
             **THEME.header_options(),
-            font="Helvetica 16 bold italic",
+            font=THEME.TITLE_FONT,
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
 
@@ -2004,7 +1974,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             anchor=W,
             text="Zone params ",
             **THEME.header_options(),
-            font="Helvetica 16 bold italic",
+            font=THEME.TITLE_FONT,
         ).grid(row=row, column=0, pady=10, sticky=W + E)
         row += 1
 
@@ -2104,6 +2074,7 @@ class Ortho4XP_Custom_ZL(tk.Toplevel):
             height=750,
             width=750,
             bg=THEME.palette()["canvas_background"],
+            highlightthickness=0,
         )
         self.canvas.grid(row=0, column=0, sticky=N + S + E + W)
 
@@ -2486,6 +2457,7 @@ class Ortho4XP_Resume_Picker(tk.Toplevel):
 
     def __init__(self, parent, entries):
         tk.Toplevel.__init__(self)
+        THEME.style_window(self)
         self.title("Resume batch build")
         self.transient(parent)
         self.configure(**THEME.frame_options())
@@ -2665,6 +2637,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
 
     def __init__(self, parent, lat, lon):
         tk.Toplevel.__init__(self)
+        THEME.style_window(self)
+        THEME.fit_to_screen(self, 1400, 1020, min_width=900, min_height=600)
         self.title("Tiles Collection and Management")
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -2690,8 +2664,8 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             self, border=1, **THEME.frame_options()
         )
         self.frame_right.grid(row=0, rowspan=60, column=1, sticky=N + S + W + E)
-        self.frame_right.rowconfigure(0, weight=1, minsize=self.canvas_min_y)
-        self.frame_right.columnconfigure(0, weight=1, minsize=self.canvas_min_x)
+        self.frame_right.rowconfigure(0, weight=1)
+        self.frame_right.columnconfigure(0, weight=1)
 
         # Widgets
         row = 0
@@ -2700,7 +2674,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             anchor=W,
             text="Active tile",
             **THEME.header_options(),
-            font="Helvetica 16 bold italic",
+            font=THEME.SECTION_FONT,
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
         self.latlon_entry = tk.Entry(
@@ -2709,7 +2683,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             **THEME.entry_options(),
             textvariable=self.latlon,
         )
-        self.latlon_entry.grid(row=row, column=0, padx=5, pady=5, sticky=N + S)
+        self.latlon_entry.grid(row=row, column=0, padx=5, pady=2, sticky=N + S)
         row += 1
         # Trash
         tk.Label(
@@ -2717,21 +2691,19 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             anchor=W,
             text="Erase cached data",
             **THEME.header_options(),
-            font="Helvetica 16 bold italic",
+            font=THEME.SECTION_FONT,
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
         for item in self.list_del_ckbtn:
-            tk.Checkbutton(
+            ttk.Checkbutton(
                 self.frame_left,
                 text=item,
-                anchor=W,
                 variable=self.v_[item],
-                **THEME.checkbutton_options(),
-            ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+            ).grid(row=row, column=0, padx=5, pady=0, sticky=N + S + E + W)
             row += 1
         ttk.Button(
-            self.frame_left, text="  Batch Delete    ", command=self.trash
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+            self.frame_left, text="Batch Delete", command=self.trash
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         # Batch build
         tk.Label(
@@ -2739,44 +2711,42 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             anchor=W,
             text="Batch build tiles",
             **THEME.header_options(),
-            font="Helvetica 16 bold italic",
+            font=THEME.SECTION_FONT,
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
         for item in self.list_do_ckbtn:
-            tk.Checkbutton(
+            ttk.Checkbutton(
                 self.frame_left,
                 text=item,
-                anchor=W,
                 variable=self.v_[item],
-                **THEME.checkbutton_options(),
-            ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+            ).grid(row=row, column=0, padx=5, pady=0, sticky=N + S + E + W)
             row += 1
         ttk.Button(
-            self.frame_left, text="  Batch Build   ", command=self.batch_build
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+            self.frame_left, text="Batch Build", command=self.batch_build
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         ttk.Button(
             self.frame_left,
-            text=" Resume Build   ",
+            text="Resume Build",
             command=self.resume_build,
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         ttk.Button(
             self.frame_left,
             text="Clear Unfinished",
             command=self.clear_unfinished_builds,
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         ttk.Button(
             self.frame_left,
             text="Recover ZL Zones",
             command=self.recover_zones,
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         # Installed scenery, not build settings: these act on files already on
         # disk, which no configuration checkbox can undo.
         ttk.Separator(self.frame_left, orient=HORIZONTAL).grid(
-            row=row, column=0, padx=5, pady=5, sticky=N + S + E + W
+            row=row, column=0, padx=5, pady=2, sticky=N + S + E + W
         )
         row += 1
         tk.Label(
@@ -2784,22 +2754,22 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
             anchor=W,
             text="Installed veg scenery",
             **THEME.header_options(),
-            font="Helvetica 16 bold italic",
+            font=THEME.SECTION_FONT,
         ).grid(row=row, column=0, sticky=W + E)
         row += 1
         ttk.Button(
             self.frame_left,
             text="Restore Veg Scenery",
             command=self.restore_veg_scenery,
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         ttk.Button(
             self.frame_left,
-            text=" Veg Replace Status",
+            text="Veg Replace Status",
             command=self.veg_replacement_status,
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
-        ttk.Separator(self.frame_left, orient=HORIZONTAL).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+        ttk.Separator(self.frame_left, orient=HORIZONTAL).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row +=1
         tk.Label(
             self.frame_left,
@@ -2807,23 +2777,25 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                  "B1-double-click: Select active\n" + \
                  "Shift+B1: Select multiple tiles\nCtrl+B1: Link in Custom Scenery\n" + \
                  "O: Link overlays in Custom Scenery",
-            **THEME.label_options(),
+            font=THEME.SMALL_FONT,
+            **THEME.muted_label_options(),
             justify=LEFT
         ).grid(row=row, column=0, padx=0, pady=5, sticky=N + S + E + W)
         row += 1
         # Refresh window
         ttk.Button(
-            self.frame_left, text="    Refresh     ", command=self.refresh
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+            self.frame_left, text="Refresh", command=self.refresh
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
         # Exit
         ttk.Button(
-            self.frame_left, text="      Exit      ", command=self.exit
-        ).grid(row=row, column=0, padx=5, pady=5, sticky=N + S + E + W)
+            self.frame_left, text="Close", command=self.exit
+        ).grid(row=row, column=0, padx=5, pady=2, sticky=N + S + E + W)
         row += 1
 
         self.canvas = tk.Canvas(
-            self.frame_right, bd=0, bg=THEME.palette()["canvas_background"]
+            self.frame_right, bd=0, highlightthickness=0,
+            bg=THEME.palette()["canvas_background"],
         )
         self.canvas.grid(row=0, column=0, sticky=N + S + E + W)
 
@@ -3078,7 +3050,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                                 justify=CENTER,
                                 text=content,
                                 fill="black",
-                                font=("Helvetica", "12", "normal"),
+                                font=THEME.SMALL_FONT,
                             ),
                             dir_name,
                         )
@@ -3150,7 +3122,7 @@ class Ortho4XP_Earth_Preview(tk.Toplevel):
                             justify=CENTER,
                             text=content,
                             fill="black",
-                            font=("Helvetica", "12", "normal"),
+                            font=THEME.SMALL_FONT,
                         ),
                         dir_name,
                     )

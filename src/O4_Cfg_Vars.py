@@ -1119,3 +1119,82 @@ list_global_bld_vars = [global_prefix + item for item in list_bld_vars]
 list_global_overlay_vars = [global_prefix + item for item in list_overlay_vars]
 
 list_cfg_vars = list_tile_vars + list_global_tile_vars + list_app_vars
+
+# How the settings window groups the variables above: (section, ((group, vars), ...)).
+# tests/settings_layout_test.py keeps these in step with the lists.
+settings_sections = (
+    ("Vector data", (
+        ("Roads and airports", ("apt_smoothing_pix", "road_level", "road_banking_limit",
+                                "lane_width", "max_levelled_segs")),
+        ("Geometry", ("water_simplification", "min_area", "max_area",
+                      "clean_bad_geometries", "mesh_zl")),
+    )),
+    ("Mesh", (
+        ("Curvature", ("curvature_tol", "apt_curv_tol", "apt_curv_ext",
+                       "coast_curv_tol", "coast_curv_ext")),
+        ("Triangulation", ("limit_tris", "min_angle", "iterate")),
+        ("Water", ("sea_smoothing_mode", "water_smoothing")),
+    )),
+    ("Masks", (
+        (None, tuple(list_mask_vars)),
+    )),
+    ("Imagery and DSF", (
+        ("Airport coverage", ("cover_airports_with_highres", "cover_extent", "cover_zl",
+                              "airport_zone_icaos", "airport_zone_zl19_m",
+                              "airport_zone_zl18_m", "airport_zone_zl17_m")),
+        ("Colour", ("color_reference_year",)),
+        ("Water", ("water_tech", "ratio_bathy", "ratio_water", "sea_texture_blur")),
+        ("Terrain", ("overlay_lod", "normal_map_strength", "terrain_casts_shadows",
+                     "use_decal_on_terrain", "terrain_decal", "terrain_materials",
+                     "terrain_materials_relief")),
+    )),
+    ("Elevation", (
+        (None, tuple(list_other_vars)),
+    )),
+    ("Building overlay", (
+        ("Placement", ("bld_spacing_m", "bld_close_m", "bld_open_m", "bld_min_footprint_m2",
+                       "bld_grid_n", "bld_asset_mode", "bld_roof_color_matching",
+                       "bld_avoid_custom_scenery")),
+        ("YOLO detector", ("bld_yolo_enabled", "bld_yolo_checkpoint", "bld_yolo_conf",
+                           "bld_yolo_iou", "bld_yolo_stride", "bld_yolo_max_det",
+                           "bld_yolo_min_coverage")),
+        ("Height model", ("bld_height_checkpoint",)),
+        ("Diagnostics", ("bld_disable_cache", "bld_verbose_log")),
+    )),
+    ("Vegetation overlay", (
+        ("Tree mask", ("veg_density", "veg_close_m", "veg_open_m", "veg_min_area_m2",
+                       "veg_simplify_m", "veg_excl_buffer_m", "veg_res_m",
+                       "veg_upscale_gap_trees", "veg_osm_rescue_rangeland")),
+        ("Canopy model (ZL18+)", ("veg_canopy", "veg_canopy_min_conf",
+                                  "veg_canopy_seg_min_h_m", "veg_canopy_add_min_h_m")),
+        ("Forest shape and height", ("veg_forest_holes", "veg_point_tree_max_cells",
+                                     "veg_hole_certain_cells", "veg_hole_unsure_cells",
+                                     "veg_tree_sizes", "veg_forest_heights",
+                                     "veg_approach_heights", "veg_tropics_evergreen")),
+        ("Tree types", ("veg_use_leaf_type_maps", "veg_use_xp_forests")),
+        ("Other scenery", ("veg_use_simheaven", "veg_avoid_simheaven_buildings",
+                           "veg_simheaven_building_buffer_m", "veg_avoid_simheaven_forests",
+                           "veg_simheaven_forest_buffer_m", "veg_exclude_lower_forests",
+                           "veg_remove_embedded_trees", "veg_use_simheaven_asset_proximity")),
+        ("Grass", ("grass_enabled", "grass_airport_buffer_m", "grass_full_tile")),
+        ("SegFormer", ("segformer_patch_size", "segformer_overlap", "segformer_batch_size")),
+        ("Diagnostics", ("veg_disable_cache", "veg_verbose_log")),
+    )),
+)
+
+app_settings_sections = (
+    ("General", (
+        (None, ("ui_theme", "verbosity", "cleaning_level", "auto_link_custom_scenery")),
+    )),
+    ("Downloads", (
+        (None, ("overpass_server_choice", "skip_downloads", "skip_converts",
+                "max_download_slots", "max_convert_slots", "check_tms_response",
+                "http_timeout", "max_connect_retries", "max_baddata_retries")),
+    )),
+    ("Overlays", (
+        (None, ("ovl_exclude_pol", "ovl_exclude_net")),
+    )),
+    ("Folders", (
+        (None, tuple(gui_app_vars_long)),
+    )),
+)

@@ -98,15 +98,15 @@ class ProgressPanel:
         style.configure(
             "Progress.Treeview",
             font="TkFixedFont",
-            rowheight=20,
+            rowheight=22,
             background=palette["entry_background"],
             fieldbackground=palette["entry_background"],
             foreground=palette["foreground"],
         )
         style.map(
             "Progress.Treeview",
-            background=[("selected", palette["header_background"])],
-            foreground=[("selected", palette["header_foreground"])],
+            background=[("selected", palette["select_background"])],
+            foreground=[("selected", palette["select_foreground"])],
         )
         style.configure(
             "Progress.Treeview.Heading",
@@ -144,7 +144,7 @@ class ProgressPanel:
             bar, text="Show all", takefocus=False, style="Flat.TButton",
             command=self.show_all,
         )
-        self.console = tk.Text(log_frame, bd=0, **THEME.text_options())
+        self.console = tk.Text(log_frame, bd=0, padx=6, pady=4, font="TkFixedFont", **THEME.text_options())
         self.console.tag_configure("dim", foreground=self.colors["dim"])
         self.console.tag_configure("warn", foreground=self.colors["warn"])
         self.console.tag_configure("error", foreground=self.colors["error"])

@@ -3,7 +3,6 @@
 import ast
 import logging
 import os
-from math import ceil
 
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -46,6 +45,8 @@ from O4_Cfg_Vars import (
     list_mesh_vars,
     list_bld_vars,
     list_veg_vars,
+    app_settings_sections,
+    settings_sections,
     list_tile_vars,
     tile_only_vars,
     list_vector_vars,
@@ -416,20 +417,226 @@ class Tile:
 ################################################################################
 
 ################################################################################
+_LABEL_WORDS = {
+    "apt": "airport", "curv": "curvature", "tol": "tolerance", "ext": "extent",
+    "excl": "exclusion", "res": "resolution", "conf": "confidence", "h": "height",
+    "tris": "triangles", "det": "detections", "simheaven": "simHeaven",
+    "zl": "ZL", "dem": "DEM", "dsf": "DSF", "yolo": "YOLO", "osm": "OSM", "iou": "IoU",
+    "lod": "LOD", "xp": "X-Plane", "tms": "TMS", "http": "HTTP", "pbf": "PBF",
+    "ovl": "overlay", "dds": "DDS", "icaos": "ICAO codes", "pol": "polygons", "net": "networks",
+}
+
+
+def setting_label(name: str) -> str:
+    """Readable label for a setting: 'veg_close_m' -> 'Close (m)'."""
+    text = name
+    for prefix in ("veg_", "bld_", "grass_", "segformer_", "airport_zone_"):
+        if text.startswith(prefix) and len(text) > len(prefix):
+            text = text[len(prefix):]
+            break
+    unit = ""
+    for suffix, label in (("_m2", " (m\u00b2)"), ("_m", " (m)"), ("_pix", " (px)"), ("_cells", " (cells)")):
+        if text.endswith(suffix):
+            text, unit = text[: -len(suffix)], label
+            break
+    words = [_LABEL_WORDS.get(word, word) for word in text.split("_")]
+    text = " ".join(words)
+    return text[:1].upper() + text[1:] + unit
+
+
+class SettingsPage(tk.Frame):
+    """Sections down the left, one scrolling page of settings on the right.
+
+    The filter box searches every section by name and hint.
+    """
+
+    LABEL_WIDTH = 260
+    MAX_ROW_WIDTH = 820
+
+    def __init__(self, parent):
+        colors = THEME.palette()
+        tk.Frame.__init__(self, parent, **THEME.frame_options())
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(1, weight=1)
+
+        self.nav = tk.Frame(self, bg=colors["panel_background"], width=190)
+        self.nav.grid(row=0, column=0, sticky=N + S)
+        self.search = tk.StringVar()
+        search_label = tk.Label(
+            self.nav, text="Filter settings", anchor=W, font=THEME.SMALL_FONT,
+            bg=colors["panel_background"], fg=colors["muted"],
+        )
+        search_label.pack(fill="x", padx=12, pady=(10, 2))
+        self.search_entry = ttk.Entry(self.nav, textvariable=self.search, width=20)
+        self.search_entry.pack(fill="x", padx=12, pady=(0, 10))
+        self.current = tk.StringVar()
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=colors["background"])
+        self.canvas.grid(row=0, column=1, sticky=N + S + E + W)
+        self.scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scroll.grid(row=0, column=2, sticky=N + S)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.body = tk.Frame(self.canvas, **THEME.frame_options())
+        self.body_id = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.body.bind("<Configure>", self._on_body_size)
+        self.canvas.bind("<Configure>", self._on_canvas_size)
+
+        self.sections = []         # titles in order
+        self.entries = []          # (section, kind, widget, search text, group entry)
+        self._section = None
+        self._group = None
+        self.shown = []
+
+    # ── Building ────────────────────────────────────────────────────────────
+    def add_section(self, title):
+        self.sections.append(title)
+        self._section = title
+        self._group = None
+        ttk.Radiobutton(
+            self.nav, text=title, value=title, variable=self.current,
+            style="Nav.Toolbutton", command=self._render,
+        ).pack(fill="x")
+        widget = tk.Label(
+            self.body, text=title, anchor=W, font=THEME.TITLE_FONT, **THEME.label_options()
+        )
+        self.entries.append((title, "section", widget, "", None))
+
+    def add_group(self, title):
+        widget = tk.Label(
+            self.body, text=title, anchor=W, font=THEME.SECTION_FONT, **THEME.muted_label_options()
+        )
+        self._group = (title, "group", widget, "", None)
+        self.entries.append((self._section, "group", widget, "", None))
+
+    def add_row(self, name, spec, make_control, wide=False):
+        """One setting. ``make_control(parent)`` returns (widget, extra)."""
+        hint = spec.get("hint", "")
+        row = tk.Frame(self.body, **THEME.frame_options())
+        row.columnconfigure(1, weight=1 if wide else 0)
+        row.columnconfigure(3, weight=0 if wide else 1)
+        label = tk.Label(
+            row, text=setting_label(name), anchor=W, **THEME.label_options()
+        )
+        label.grid(row=0, column=0, sticky=W, padx=(0, 12), pady=2)
+        row.columnconfigure(0, minsize=self.LABEL_WIDTH)
+        control, extra = make_control(row)
+        control.grid(row=0, column=1, sticky=E + W if wide else W, pady=2)
+        details = tk.Label(
+            row,
+            text=f"{name}  (default: {spec.get('default', '')})\n{hint}",
+            anchor=W,
+            justify="left",
+            font=THEME.SMALL_FONT,
+            wraplength=self.MAX_ROW_WIDTH - 40,
+            **THEME.muted_label_options(),
+        )
+
+        def toggle_details():
+            if details.winfo_manager():
+                details.grid_remove()
+            else:
+                details.grid(row=1, column=0, columnspan=4, sticky=W, pady=(0, 6))
+
+        ttk.Button(
+            row, text="?", style="Hint.TButton", takefocus=False, command=toggle_details
+        ).grid(row=0, column=2, sticky=W, padx=(8, 0))
+        for widget in self._descendants(row):
+            if widget.winfo_class() == "TCombobox":
+                # A wheel over a list must scroll the page, not change the value
+                widget.bind("<MouseWheel>", self._wheel_break)
+        text = f"{name} {setting_label(name)} {hint}".lower()
+        self.entries.append((self._section, "row", row, text, None))
+        return control, extra
+
+    @staticmethod
+    def _descendants(widget):
+        found = []
+        for child in widget.winfo_children():
+            found.append(child)
+            found.extend(SettingsPage._descendants(child))
+        return found
+
+    def finish(self):
+        self.current.set(self.sections[0])
+        self.search.trace_add("write", lambda *args: self._render())
+        self.winfo_toplevel().bind("<MouseWheel>", self._on_wheel, add="+")
+        self._render()
+
+    # ── Showing ─────────────────────────────────────────────────────────────
+    def _render(self):
+        for widget in self.shown:
+            widget.pack_forget()
+        self.shown = []
+        query = self.search.get().strip().lower()
+        if query:
+            matches = [e for e in self.entries if e[1] == "row" and query in e[3]]
+            wanted = {id(e) for e in matches}
+            pending = []
+            for entry in self.entries:
+                if entry[1] == "section":
+                    pending = [entry]
+                elif entry[1] == "group":
+                    pending = pending[:1] + [entry]
+                elif id(entry) in wanted:
+                    for head in pending:
+                        self._show(head)
+                    pending = []
+                    self._show(entry)
+            if not matches:
+                self._show_none(query)
+        else:
+            for entry in self.entries:
+                if entry[0] == self.current.get():
+                    self._show(entry)
+        self.canvas.yview_moveto(0)
+
+    def _show(self, entry):
+        kind, widget = entry[1], entry[2]
+        pady = {"section": (14, 6), "group": (14, 4), "row": 0}[kind]
+        widget.pack(fill="x", padx=(20, 12), pady=pady)
+        self.shown.append(widget)
+
+    def _show_none(self, query):
+        if not hasattr(self, "none_label"):
+            self.none_label = tk.Label(self.body, anchor=W, **THEME.muted_label_options())
+        self.none_label.configure(text=f"No setting mentions \"{query}\".")
+        self.none_label.pack(fill="x", padx=20, pady=14)
+        self.shown.append(self.none_label)
+
+    # ── Scrolling ───────────────────────────────────────────────────────────
+    def _on_body_size(self, _event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_size(self, event):
+        self.canvas.itemconfigure(self.body_id, width=min(event.width, self.MAX_ROW_WIDTH))
+
+    def _scroll_by(self, delta):
+        if self.body.winfo_height() > self.canvas.winfo_height():
+            self.canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+
+    def _on_wheel(self, event):
+        if self.winfo_ismapped():
+            x, y = self.winfo_pointerxy()
+            cx, cy = self.canvas.winfo_rootx(), self.canvas.winfo_rooty()
+            if cx <= x < cx + self.canvas.winfo_width() and cy <= y < cy + self.canvas.winfo_height():
+                self._scroll_by(event.delta)
+
+    def _wheel_break(self, event):
+        self._scroll_by(event.delta)
+        return "break"
+
+
 class Ortho4XP_Config(tk.Toplevel):
     """Ortho4XP configuration window."""
     def __init__(self, parent):
 
         tk.Toplevel.__init__(self)
-        THEME.apply_ttk_style(ttk.Style())
-        self.option_add("*Font", "TkFixedFont")
-        self.title("Ortho4XP Config")
+        THEME.style_window(self)
+        self.title("Ortho4XP Settings")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        if self.winfo_screenheight() >= 1024:
-            self.pady = 5
-        else:
-            self.pady = 1
+        THEME.fit_to_screen(self, 1040, 820, min_width=760, min_height=440)
+        self.readonly_combos = []
 
         self.folder_icon = tk.PhotoImage(
             file=os.path.join(FNAMES.Utils_dir, "Folder.gif")
@@ -452,9 +659,9 @@ class Ortho4XP_Config(tk.Toplevel):
         self.app_config_frame = tk.Frame(self.notebook, **THEME.frame_options())
 
         # Add frames to the notebook
-        self.notebook.add(self.tile_config_frame, text="Tile Config")
-        self.notebook.add(self.global_config_frame, text="Global Config")
-        self.notebook.add(self.app_config_frame, text="Application Config")
+        self.notebook.add(self.tile_config_frame, text="This tile")
+        self.notebook.add(self.global_config_frame, text="All tiles (global)")
+        self.notebook.add(self.app_config_frame, text="Application")
 
         # Initialize Tkinter objects
         self.v_ = {}
@@ -483,624 +690,267 @@ class Ortho4XP_Config(tk.Toplevel):
                 f"{self.parent.lat.get()} {self.parent.lon.get()}"
             )
             state = "normal"
-            for _, value in self.tile_entry_.items():
-                value.config(state=state)
-            for _, value in self.tile_file_button_.items():
-                value.config(state=state)
-
-            self.btn_tile_dem.config(state=state)
-            self.btn_reset_tile_cfg.config(state=state)
-            self.btn_restore_tile_cfg.config(state=state)
-            self.btn_load_tile_cfg.config(state=state)
-            self.btn_write_tile_cfg.config(state=state)
-            self.btn_recover_tile_zones.config(state=state)
         else:
             self.tile_cfg_msg.set(
                 f"No tile configuration for " \
-                f"{self.parent.lat.get()}{self.parent.lon.get()}. " \
+                f"{self.parent.lat.get()} {self.parent.lon.get()}. " \
                 f"Using global configuration settings."
             )
             state = "disabled"
-            for _, value in self.tile_entry_.items():                
+        for _, value in self.tile_entry_.items():
+            if value.winfo_class() == "TCombobox" and state == "normal" and value in self.readonly_combos:
+                value.config(state="readonly")
+            else:
                 value.config(state=state)
-            for _, value in self.tile_file_button_.items():
-                value.config(state=state)
+        for _, value in self.tile_file_button_.items():
+            value.config(state=state)
+        self.btn_tile_dem.config(state=state)
+        self.btn_reset_tile_cfg.config(state=state)
+        self.btn_restore_tile_cfg.config(state=state)
+        self.btn_load_tile_cfg.config(state=state)
+        self.btn_recover_tile_zones.config(state=state)
 
-            self.btn_tile_dem.config(state=state)
-            self.btn_reset_tile_cfg.config(state=state)
-            self.btn_restore_tile_cfg.config(state=state)
-            self.btn_load_tile_cfg.config(state=state)
-            self.btn_recover_tile_zones.config(state=state)
+    def _control_for(self, parent, item, spec, entries, file_buttons):
+        """The right control for one setting: check box, list or text field."""
+        if spec["type"] == bool:
+            entries[item] = ttk.Checkbutton(
+                parent,
+                variable=self.v_[item],
+                onvalue="True",
+                offvalue="False",
+                takefocus=True,
+            )
+            return entries[item], False
+        if "values" in spec:
+            values = [str(x) for x in spec["values"]]
+            entries[item] = ttk.Combobox(
+                parent,
+                values=values,
+                textvariable=self.v_[item],
+                width=min(24, max(8, max(len(v) for v in values) + 2)),
+                state="readonly",
+                style="O4.TCombobox",
+            )
+            self.readonly_combos.append(entries[item])
+            return entries[item], False
+        if spec.get("file_picker"):
+            frame = tk.Frame(parent, **THEME.frame_options())
+            frame.columnconfigure(0, weight=1)
+            entries[item] = ttk.Entry(frame, textvariable=self.v_[item])
+            entries[item].grid(row=0, column=0, sticky=E + W)
+            file_buttons[item] = ttk.Button(
+                frame,
+                image=self.folder_icon,
+                takefocus=False,
+                command=lambda item=item: self.choose_file(item),
+                style="Flat.TButton",
+            )
+            file_buttons[item].grid(row=0, column=1, padx=(4, 0))
+            return frame, True
+        wide = spec["type"] in (str, list)
+        entries[item] = ttk.Entry(
+            parent, textvariable=self.v_[item], width=40 if wide else 10
+        )
+        return entries[item], False
+
+    def _dem_control(self, parent, item, entries, global_config=False):
+        """custom_dem: free text or a known source, plus a file picker.
+
+        Shift-click on the folder adds a further file; so does the plain click
+        when the field already holds one.
+        """
+        frame = tk.Frame(parent, **THEME.frame_options())
+        frame.columnconfigure(0, weight=1)
+        entries[item] = ttk.Combobox(
+            frame,
+            values=DEM.available_sources[1::2],
+            textvariable=self.v_[item],
+            style="O4.TCombobox",
+        )
+        entries[item].grid(row=0, column=0, sticky=E + W)
+        button = ttk.Button(
+            frame,
+            image=self.folder_icon,
+            takefocus=False,
+            command=lambda: self.choose_dem(global_config=global_config),
+            style="Flat.TButton",
+        )
+        button.grid(row=0, column=1, padx=(4, 0))
+        button.bind(
+            "<Shift-ButtonPress-1>", lambda event: self.add_dem(global_config=global_config)
+        )
+        return frame, button
+
+    def _build_settings_page(self, parent, sections, prefix, specs, entries, file_buttons):
+        """Fill a SettingsPage with the sections of O4_Cfg_Vars."""
+        page = SettingsPage(parent)
+        dem_button = None
+        for title, groups in sections:
+            page.add_section(title)
+            for group, items in groups:
+                if group:
+                    page.add_group(group)
+                for name in items:
+                    item = prefix + name
+                    if item not in specs:   # tile-only settings on the global tab
+                        continue
+                    spec = specs[item]
+                    if name == "custom_dem":
+                        control, dem_button = page.add_row(
+                            name, spec,
+                            lambda row, item=item: self._dem_control(
+                                row, item, entries, global_config=bool(prefix)
+                            ),
+                            wide=True,
+                        )
+                        continue
+                    wide = bool(spec.get("file_picker"))
+                    page.add_row(
+                        name, spec,
+                        lambda row, item=item, spec=spec: self._control_for(
+                            row, item, spec, entries, file_buttons
+                        ),
+                        wide=wide,
+                    )
+        page.finish()
+        return page, dem_button
+
+    @staticmethod
+    def _action_bar(frame):
+        bar = tk.Frame(frame, **THEME.frame_options())
+        bar.grid(row=2, column=0, sticky=E + W, padx=12, pady=10)
+        return bar
 
     def tile_config(self, frame: tk.Frame) -> None:
         """Tile configuration section."""
-        # Allow base frame to expand with window resize
-        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
-
-        main_frame = tk.Frame(frame, border=4, **THEME.frame_options())
-        frame_status = tk.Frame(main_frame, border=0, padx=5, pady=0, **THEME.frame_options())
-        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=0, **THEME.frame_options())
-        frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, **THEME.frame_options())
-        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
-        # Allow widgets to shrink and expand with window resize
-        frame_status.columnconfigure(0, weight=0)
-        frame_status.rowconfigure(0, weight=0)
-        for j in range(12):
-            frame_cfg.columnconfigure(j, weight=1)
-
-        frame_cfg.rowconfigure(0, weight=1)
-
-        for j in range(6):
-            frame_lastbtn.columnconfigure(j, weight=1)
-
-        frame_lastbtn.rowconfigure(0, weight=1)
-
-        main_frame.grid(row=0, column=0, sticky=N + S + W + E)
-        frame_status.grid(row=0, column=0, pady=10, sticky=N + S + E + W)
-        frame_cfg.grid(row=1, column=0, pady=10, sticky=N + S + E + W)
-        frame_lastbtn.grid(row=2, column=0, pady=10, sticky=S + E + W)
-        # Add a row with weight 1 to push frame_lastbtn to the bottom with window resize
-        main_frame.rowconfigure(1, weight=1)
-        main_frame.rowconfigure(2, weight=0)
-        main_frame.columnconfigure(0, weight=1)
 
         self.tile_entry_ = {}
         self.tile_file_button_ = {}
 
-        col = 0
-        next_row = 0
-
         tk.Label(
-            frame_status,
+            frame,
             textvariable=self.tile_cfg_msg,
+            anchor=W,
+            font=THEME.SECTION_FONT,
             **THEME.label_options(),
-            font="TKFixedFont 15",
-        ).grid(row=0, column=0, pady=0, sticky=N + S + W + E)
+        ).grid(row=0, column=0, sticky=E + W, padx=14, pady=(10, 6))
 
-        for (title, sub_list) in (
-            ("Vector data", list_vector_vars),
-            ("Mesh", list_mesh_vars),
-            ("Masks", list_mask_vars),
-            ("DSF/Imagery", list_dsf_vars),
-            ("Building overlay", list_bld_vars),
-            ("Vegetation overlay", list_veg_vars),
-        ):
-            tk.Label(
-                frame_cfg,
-                text=title,
-                **THEME.label_options(),
-                anchor=W,
-                font="TKFixedFont 15",
-            ).grid(
-                row=1,
-                column=col,
-                columnspan=2,
-                pady=(0, 10),
-                sticky=N + S + E + W,
-            )
-            row = 2
-            for item in sub_list:
-                text = (
-                    item
-                    if "short_name" not in cfg_tile_vars[item]
-                    else cfg_tile_vars[item]["short_name"]
-                )
-                ttk.Button(
-                    frame_cfg,
-                    text=text,
-                    takefocus=False,
-                    command=lambda item=item: self.popup(
-                        item, cfg_tile_vars[item]["hint"]
-                    ),
-                ).grid(
-                    row=row, column=col, padx=2, pady=2, sticky=E + W + N + S
-                )
-                if cfg_tile_vars[item]["type"] == bool or "values" in cfg_tile_vars[item]:
-                    values = (
-                        [True, False]
-                        if cfg_tile_vars[item]["type"] == bool
-                        else [str(x) for x in cfg_tile_vars[item]["values"]]
-                    )
-                    self.tile_entry_[item] = ttk.Combobox(
-                        frame_cfg,
-                        values=values,
-                        textvariable=self.v_[item],
-                        width=6,
-                        state="readonly",
-                        style="O4.TCombobox",
-                    )
-                else:
-                    if cfg_tile_vars[item].get("file_picker"):
-                        self._add_file_picker_entry(
-                            frame_cfg,
-                            item,
-                            self.tile_entry_,
-                            self.tile_file_button_,
-                            row,
-                            col + 1,
-                        )
-                    else:
-                        self.tile_entry_[item] = ttk.Entry(
-                            frame_cfg, textvariable=self.v_[item], width=7
-                        )
-                if item not in self.tile_file_button_:
-                    self.tile_entry_[item].grid(
-                        row=row,
-                        column=col + 1,
-                        padx=(0, 20),
-                        pady=2,
-                        sticky=N + S + W,
-                    )
-                row += 1
-            next_row = max(next_row, row)
-            col += 2
-        row = next_row
-
-        frame_dem.grid(
-            row=row, column=0, columnspan=12, sticky=N + S + W + E
+        page, self.btn_tile_dem = self._build_settings_page(
+            frame, settings_sections, "", cfg_tile_vars, self.tile_entry_, self.tile_file_button_
         )
+        page.grid(row=1, column=0, sticky=N + S + E + W)
 
-        item = "custom_dem"
-
-        ttk.Button(
-            frame_dem,
-            text=item,
-            takefocus=False,
-            command=lambda item=item: self.popup(item, cfg_tile_vars[item]["hint"]),
-        ).grid(row=0, column=0, padx=2, pady=2, sticky=E + W)
-
-        values = DEM.available_sources[1::2]
-
-        self.tile_entry_[item] = ttk.Combobox(
-            frame_dem,
-            values=values,
-            textvariable=self.v_[item],
-            width=80,
-            style="O4.TCombobox",
-        )
-        self.tile_entry_[item].grid(
-            row=0, column=1, padx=(2, 0), pady=8, sticky=N + S + W + E
-        )
-
-        self.btn_tile_dem = ttk.Button(
-            frame_dem,
-            image=self.folder_icon,
-            command=lambda: self.choose_dem(),
-            style="Flat.TButton",
-        )
-        self.btn_tile_dem.grid(row=0, column=2, padx=2, pady=0, sticky=W)
-        self.btn_tile_dem.bind("<Shift-ButtonPress-1>", lambda event: self.add_dem())
-
-        item = "fill_nodata"
-
-        ttk.Button(
-            frame_cfg,
-            text=item,
-            takefocus=False,
-            command=lambda item=item: self.popup(item, cfg_tile_vars[item]["hint"]),
-        ).grid(row=row, column=6, padx=2, pady=2, sticky=E + W)
-
-        values = [True, False]
-
-        self.tile_entry_[item] = ttk.Combobox(
-            frame_cfg,
-            values=values,
-            textvariable=self.v_[item],
-            width=6,
-            state="readonly",
-            style="O4.TCombobox",
-        )
-        self.tile_entry_[item].grid(row=row, column=7, padx=2, pady=2, sticky=W)
-        row += 1
-
-        # Bottom row buttons
+        bar = self._action_bar(frame)
         self.btn_recover_tile_zones = ttk.Button(
-            frame_lastbtn,
-            text="Recover ZL Zones",
-            command=self.recover_tile_zones,
+            bar, text="Recover ZL Zones", command=self.recover_tile_zones
         )
-        self.btn_recover_tile_zones.grid(
-            row=0, column=0, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
-        self.btn_reset_tile_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Reset to Global",
-            command=self.reset_tile_cfg,
-        )
-        self.btn_reset_tile_cfg.grid(
-            row=0, column=1, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
-        self.btn_restore_tile_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Load Backup Cfg",
-            command=self.load_backup_tile_cfg,
-        )
-        self.btn_restore_tile_cfg.grid(
-            row=0, column=2, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
-        self.btn_load_tile_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Load Tile Cfg ",
-            command=self.load_tile_cfg,
-        )
-        self.btn_load_tile_cfg.grid(
-            row=0, column=3, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
+        self.btn_recover_tile_zones.pack(side="left")
+        ttk.Button(bar, text="Close", command=self.close_window).pack(side="right")
         self.btn_write_tile_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Save Tile Config",
-            command=self.write_tile_cfg,
+            bar, text="Save Tile Config", style="Primary.TButton", command=self.write_tile_cfg
         )
-        self.btn_write_tile_cfg.grid(
-            row=0, column=4, padx=5, pady=self.pady, sticky=N + S + E + W
+        self.btn_write_tile_cfg.pack(side="right", padx=(0, 8))
+        self.btn_load_tile_cfg = ttk.Button(bar, text="Load Tile Cfg", command=self.load_tile_cfg)
+        self.btn_load_tile_cfg.pack(side="right", padx=(0, 8))
+        self.btn_restore_tile_cfg = ttk.Button(
+            bar, text="Load Backup Cfg", command=self.load_backup_tile_cfg
         )
-
-        self.btn_exit =ttk.Button(
-            frame_lastbtn, text="Exit", command=self.close_window
+        self.btn_restore_tile_cfg.pack(side="right", padx=(0, 8))
+        self.btn_reset_tile_cfg = ttk.Button(
+            bar, text="Reset to Global", command=self.reset_tile_cfg
         )
-        self.btn_exit.grid(
-            row=0, column=5, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
+        self.btn_reset_tile_cfg.pack(side="right", padx=(0, 8))
 
     def global_config(self, frame: tk.Frame) -> None:
         """Global tile configuration frame."""
-        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
-
-        main_frame = tk.Frame(frame, border=4, **THEME.frame_options())
-        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
-        frame_dem = tk.Frame(frame_cfg, border=0, padx=0, pady=self.pady, **THEME.frame_options())
-        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
-
-        for j in range(12):
-            frame_cfg.columnconfigure(j, weight=1)
-
-        frame_cfg.rowconfigure(0, weight=1)
-
-        for j in range(6):
-            frame_lastbtn.columnconfigure(j, weight=1)
-
-        frame_lastbtn.rowconfigure(0, weight=1)
-
-        main_frame.grid(row=0, column=0, sticky=N + S + W + E)
-        frame_cfg.grid(row=0, column=0, pady=10, sticky=N + S + E + W)
-        frame_lastbtn.grid(row=1, column=0, pady=10, sticky=S + E + W)
-
-        main_frame.rowconfigure(1, weight=1)
-        main_frame.rowconfigure(2, weight=0)
-        main_frame.columnconfigure(0, weight=1)
 
         self.global_entry_ = {}
         self.global_file_button_ = {}
 
-        col = 0
-        next_row = 0
-
-        for (title, sub_list) in (
-            ("Vector data", list_global_vector_vars),
-            ("Mesh", list_global_mesh_vars),
-            ("Masks", list_global_mask_vars),
-            ("DSF/Imagery", list_global_dsf_vars),
-            ("Building overlay", list_global_bld_vars),
-            ("Vegetation overlay", list_global_veg_vars),
-        ):
-            tk.Label(
-                frame_cfg,
-                text=title,
-                **THEME.label_options(),
-                anchor=W,
-                font="TKFixedFont 15",
-            ).grid(
-                row=0,
-                column=col,
-                columnspan=2,
-                pady=(0, 10),
-                sticky=N + S + E + W,
-            )
-            row = 1
-            for item in sub_list:
-                text = (
-                    item
-                    if "short_name" not in cfg_global_tile_vars[item]
-                    else cfg_global_tile_vars[item]["short_name"]
-                )
-                text = text.replace(global_prefix, "")
-                ttk.Button(
-                    frame_cfg,
-                    text=text,
-                    takefocus=False,
-                    command=lambda item=item: self.popup(
-                        item, cfg_global_tile_vars[item]["hint"]
-                    ),
-                ).grid(
-                    row=row, column=col, padx=2, pady=2, sticky=E + W + N + S
-                )
-                if cfg_global_tile_vars[item]["type"] == bool or "values" in cfg_global_tile_vars[item]:
-                    values = (
-                        [True, False]
-                        if cfg_global_tile_vars[item]["type"] == bool
-                        else [str(x) for x in cfg_global_tile_vars[item]["values"]]
-                    )
-                    self.global_entry_[item] = ttk.Combobox(
-                        frame_cfg,
-                        values=values,
-                        textvariable=self.v_[item],
-                        width=6,
-                        state="readonly",
-                        style="O4.TCombobox",
-                    )
-                else:
-                    if cfg_global_tile_vars[item].get("file_picker"):
-                        self._add_file_picker_entry(
-                            frame_cfg,
-                            item,
-                            self.global_entry_,
-                            self.global_file_button_,
-                            row,
-                            col + 1,
-                        )
-                    else:
-                        self.global_entry_[item] = ttk.Entry(
-                            frame_cfg, textvariable=self.v_[item], width=7
-                        )
-                if item not in self.global_file_button_:
-                    self.global_entry_[item].grid(
-                        row=row,
-                        column=col + 1,
-                        padx=(0, 20),
-                        pady=2,
-                        sticky=N + S + W,
-                    )
-                row += 1
-            next_row = max(next_row, row)
-            col += 2
-
-        row = next_row
-
-        frame_dem.grid(
-            row=row, column=0, columnspan=12, sticky=N + S + W + E
+        page, self.btn_global_dem = self._build_settings_page(
+            frame, settings_sections, global_prefix, cfg_global_tile_vars,
+            self.global_entry_, self.global_file_button_,
         )
+        page.grid(row=1, column=0, sticky=N + S + E + W)
 
-        text = "custom_dem"
-        item = "global_custom_dem"
-
-        ttk.Button(
-            frame_dem,
-            text=text,
-            takefocus=False,
-            command=lambda item=item: self.popup(item, cfg_global_tile_vars[item]["hint"]),
-        ).grid(row=0, column=0, padx=2, pady=2, sticky=E + W)
-
-        values = DEM.available_sources[1::2]
-        self.global_entry_[item] = ttk.Combobox(
-            frame_dem,
-            values=values,
-            textvariable=self.v_[item],
-            width=80,
-            style="O4.TCombobox",
-        )
-        self.global_entry_[item].grid(
-            row=0, column=1, padx=(2, 0), pady=8, sticky=N + S + W + E
-        )
-
-        self.btn_global_dem = ttk.Button(
-            frame_dem,
-            image=self.folder_icon,
-            command=lambda: self.choose_dem(global_config=True),
-            style="Flat.TButton",
-        )
-        self.btn_global_dem.grid(row=0, column=2, padx=2, pady=0, sticky=W)
-        self.btn_global_dem.bind("<Shift-ButtonPress-1>", lambda event: self.add_dem(global_config=True))
-
-        text = "fill_nodata"
-        item = "global_fill_nodata"
-
-        ttk.Button(
-            frame_cfg,
-            text=text,
-            takefocus=False,
-            command=lambda item=item: self.popup(item, cfg_global_tile_vars[item]["hint"]),
-        ).grid(row=row, column=6, padx=2, pady=2, sticky=E + W)
-
-        values = [True, False]
-
-        self.global_entry_[item] = ttk.Combobox(
-            frame_cfg,
-            values=values,
-            textvariable=self.v_[item],
-            width=6,
-            state="readonly",
-            style="O4.TCombobox",
-        )
-        self.global_entry_[item].grid(row=row, column=7, padx=2, pady=2, sticky=W)
-        row += 1
-
-        # Bottom row buttons
-        self.btn_reset_global_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Reset to Defaults",
-            command=self.reset_global_cfg,
-        )
-        self.btn_reset_global_cfg.grid(
-            row=0, column=2, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
-        self.btn_load_backup_global_tile_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Load Backup Cfg",
-            command=self.load_backup_global_tile_cfg,
-        )
-        self.btn_load_backup_global_tile_cfg.grid(
-            row=0, column=3, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
+        bar = self._action_bar(frame)
+        ttk.Button(bar, text="Close", command=self.close_window).pack(side="right")
         self.btn_save_global_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Save Global Config",
-            command=self.write_global_cfg,
+            bar, text="Save Global Config", style="Primary.TButton", command=self.write_global_cfg
         )
-        self.btn_save_global_cfg.grid(
-            row=0, column=4, padx=5, pady=self.pady, sticky=N + S + E + W
+        self.btn_save_global_cfg.pack(side="right", padx=(0, 8))
+        self.btn_load_backup_global_tile_cfg = ttk.Button(
+            bar, text="Load Backup Cfg", command=self.load_backup_global_tile_cfg
         )
-
-        self.btn_exit =ttk.Button(
-            frame_lastbtn, text="Exit", command=self.close_window
+        self.btn_load_backup_global_tile_cfg.pack(side="right", padx=(0, 8))
+        self.btn_reset_global_cfg = ttk.Button(
+            bar, text="Reset to Defaults", command=self.reset_global_cfg
         )
-        self.btn_exit.grid(
-            row=0, column=5, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
+        self.btn_reset_global_cfg.pack(side="right", padx=(0, 8))
 
     def app_config(self, frame: tk.Frame) -> None:
         """Application configuration frame."""
-        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
-
-        main_frame = tk.Frame(frame, border=4, **THEME.frame_options())
-        frame_cfg = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
-        frame_lastbtn = tk.Frame(main_frame, border=0, padx=5, pady=self.pady, **THEME.frame_options())
-
-        for j in range(8):
-            frame_cfg.columnconfigure(j, weight=1)
-
-        frame_cfg.rowconfigure(0, weight=1)
-
-        for j in range(6):
-            frame_lastbtn.columnconfigure(j, weight=1)
-
-        frame_lastbtn.rowconfigure(0, weight=1)
-
-        main_frame.grid(row=0, column=0, sticky=N + S + W + E)
-        frame_cfg.grid(row=0, column=0, pady=10, sticky=N + S + E + W)
-        frame_lastbtn.grid(row=1, column=0, pady=10, sticky=S + E + W)
-
-        main_frame.rowconfigure(1, weight=1)
-        main_frame.rowconfigure(2, weight=0)
-        main_frame.columnconfigure(0, weight=1)
 
         self.app_entry_ = {}
 
-        row = 2
-        col = 0
+        page = SettingsPage(frame)
+        for title, groups in app_settings_sections:
+            page.add_section(title)
+            for group, items in groups:
+                if group:
+                    page.add_group(group)
+                for item in items:
+                    spec = cfg_app_vars[item]
+                    if item in gui_app_vars_long:
+                        page.add_row(
+                            item, spec,
+                            lambda row, item=item: self._dir_control(row, item),
+                            wide=True,
+                        )
+                    else:
+                        page.add_row(
+                            item, spec,
+                            lambda row, item=item, spec=spec: self._control_for(
+                                row, item, spec, self.app_entry_, {}
+                            ),
+                        )
+        page.finish()
+        page.grid(row=1, column=0, sticky=N + S + E + W)
 
-        l = ceil((len(gui_app_vars_short)) / 4)
-        this_row = row
-        j = 0
-
-        for item in gui_app_vars_short:
-            col = 2 * (j // l)
-            row = this_row + j % l
-            text = (
-                item
-                if "short_name" not in cfg_app_vars[item]
-                else cfg_app_vars[item]["short_name"]
-            )
-            ttk.Button(
-                frame_cfg,
-                text=text,
-                takefocus=False,
-                command=lambda item=item: self.popup(
-                    item, cfg_app_vars[item]["hint"]
-                ),
-            ).grid(row=row, column=col, padx=2, pady=2, sticky=E + W + N + S)
-            if cfg_app_vars[item]["type"] == bool or "values" in cfg_app_vars[item]:
-                values = (
-                    ["True", "False"]
-                    if cfg_app_vars[item]["type"] == bool
-                    else [str(x) for x in cfg_app_vars[item]["values"]]
-                )
-                self.app_entry_[item] = ttk.Combobox(
-                    frame_cfg,
-                    values=values,
-                    textvariable=self.v_[item],
-                    width=6,
-                    state="readonly",
-                    style="O4.TCombobox",
-                )
-            else:
-                self.app_entry_[item] = tk.Entry(
-                    frame_cfg,
-                    textvariable=self.v_[item],
-                    width=7,
-                    **THEME.entry_options(),
-                )
-            self.app_entry_[item].grid(
-                row=row, column=col + 1, padx=(0, 20), pady=2, sticky=N + S + W
-            )
-            j += 1
-
-        row = this_row + l
-
-        for item in gui_app_vars_long:
-            ttk.Button(
-                frame_cfg,
-                text=item,
-                takefocus=False,
-                command=lambda item=item: self.popup(
-                    item, cfg_vars[item]["hint"]
-                ),
-            ).grid(row=row, column=0, padx=2, pady=2, sticky=E + W + N + S)
-
-            self.app_entry_[item] = tk.Entry(
-                frame_cfg,
-                textvariable=self.v_[item],
-                **THEME.entry_options(),
-            )
-            self.app_entry_[item].grid(
-                row=row,
-                column=1,
-                columnspan=5,
-                padx=(2, 0),
-                pady=2,
-                sticky=N + S + E + W,
-            )
-
-            ttk.Button(
-                frame_cfg,
-                image=self.folder_icon,
-                command=lambda item=item: self.choose_dir(item),
-                style="Flat.TButton",
-            ).grid(row=row, column=6, padx=2, pady=0, sticky=N + S + W)
-            row += 1
-
-        # Bottom row buttons
-        self.btn_reload_app_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Reset to Defaults",
-            command=self.reset_app_cfg,
-        )
-        self.btn_reload_app_cfg.grid(
-            row=0, column=2, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
-        self.btn_load_backup_app_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Load Backup Cfg",
-            command=self.load_backup_app_cfg,
-        )
-        self.btn_load_backup_app_cfg.grid(
-            row=0, column=3, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
-
+        bar = self._action_bar(frame)
+        ttk.Button(bar, text="Close", command=self.close_window).pack(side="right")
         self.btn_save_app_cfg = ttk.Button(
-            frame_lastbtn,
-            text="Save App Config",
-            command=self.write_app_cfg,
+            bar, text="Save App Config", style="Primary.TButton", command=self.write_app_cfg
         )
-        self.btn_save_app_cfg.grid(
-            row=0, column=4, padx=5, pady=self.pady, sticky=N + S + E + W
+        self.btn_save_app_cfg.pack(side="right", padx=(0, 8))
+        self.btn_load_backup_app_cfg = ttk.Button(
+            bar, text="Load Backup Cfg", command=self.load_backup_app_cfg
         )
+        self.btn_load_backup_app_cfg.pack(side="right", padx=(0, 8))
+        self.btn_reload_app_cfg = ttk.Button(
+            bar, text="Reset to Defaults", command=self.reset_app_cfg
+        )
+        self.btn_reload_app_cfg.pack(side="right", padx=(0, 8))
 
-        self.btn_exit = ttk.Button(
-            frame_lastbtn, text="Exit", command=self.close_window
-        )
-        self.btn_exit.grid(
-            row=0, column=5, padx=5, pady=self.pady, sticky=N + S + E + W
-        )
+    def _dir_control(self, parent, item):
+        frame = tk.Frame(parent, **THEME.frame_options())
+        frame.columnconfigure(0, weight=1)
+        self.app_entry_[item] = ttk.Entry(frame, textvariable=self.v_[item])
+        self.app_entry_[item].grid(row=0, column=0, sticky=E + W)
+        ttk.Button(
+            frame,
+            image=self.folder_icon,
+            takefocus=False,
+            command=lambda item=item: self.choose_dir(item),
+            style="Flat.TButton",
+        ).grid(row=0, column=1, padx=(4, 0))
+        return frame, True
 
     def load_interface_from_variables(self) -> None:
         """Load the configuration interface values for all tabs."""
