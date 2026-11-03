@@ -40,6 +40,16 @@ AVG_DAILY_DIFF_BYTES = 95_000_000
 # daily diffs are applied per pass (each pass rewrites the planet file).
 max_diffs_per_pass = int(os.environ.get("O4_PBF_DIFF_BATCH", "10"))
 max_download_tentatives = 5
+# Nested regional blocks (degrees, each a multiple of the next) cut from the
+# scenery extract and kept beside it.  osmium extract reads its whole input
+# (three times with the smart strategy), so a tile cut straight from the
+# planet-wide extract costs ~20 min on a USB HDD; cut from a cached block it
+# only reads that block.  Empty or 0 disables the blocks.
+block_degrees = [
+    int(d)
+    for d in os.environ.get("O4_PBF_BLOCK_DEGREES", "30,5").split(",")
+    if d.strip() and int(d) > 0
+]
 
 _user_agent = (
     "Ortho4XP/" + O4_Version.version
@@ -79,7 +89,7 @@ SCENERY_FILTER = [
 maintenance_lock = threading.Lock()
 maintenance_in_progress = False
 _not_ready_notified = False
-_tile_extract_cache = {}
+_tile_extract_lock = threading.Lock()
 
 _CREATE_NO_WINDOW = (
     subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -103,6 +113,10 @@ def state_path():
 
 def diffs_dir():
     return os.path.join(osm_pbf_dir, "diffs")
+
+
+def blocks_dir():
+    return os.path.join(osm_pbf_dir, "blocks")
 
 
 def _load_state():
@@ -719,7 +733,8 @@ def regenerate_extract(source=None, progress_cb=None, _lock_held=False):
         if not _replace_with_retries(new_extract, extract_path()):
             _remove_quietly(new_extract)
             return 0
-        _tile_extract_cache.clear()
+        # Blocks and tile cuts are stale now (older than the extract).
+        shutil.rmtree(blocks_dir(), ignore_errors=True)
         UI.vprint(
             1,
             "   Scenery extract ready:",
@@ -756,39 +771,103 @@ def pbf_ready():
     return True
 
 
+def _block_levels():
+    """Block sizes, largest first, dropping any that do not nest."""
+    levels = []
+    for size in sorted(set(block_degrees), reverse=True):
+        if levels and levels[-1] % size:
+            continue
+        levels.append(size)
+    return levels
+
+
+def _block_bbox(size, lat, lon):
+    lat0 = (lat // size) * size
+    lon0 = (lon // size) * size
+    return (lon0, max(lat0, -90), min(lon0 + size, 180), min(lat0 + size, 90))
+
+
+def _block_path(size, lat, lon):
+    (lon0, lat0, _, _) = _block_bbox(size, lat, lon)
+    return os.path.join(
+        blocks_dir(),
+        "%ddeg_%s.osm.pbf" % (size, FNAMES.short_latlon(lat0, lon0)),
+    )
+
+
+def _is_current(path):
+    """True when path exists and was cut after the scenery extract."""
+    try:
+        return os.path.getmtime(path) >= os.path.getmtime(extract_path())
+    except OSError:
+        return False
+
+
 def _tile_extract(lat, lon):
-    """Clip the tile bbox out of the scenery extract, once per session."""
-    key = (lat, lon)
-    cached = _tile_extract_cache.get(key)
-    if cached and os.path.isfile(cached):
-        return cached
-    osmium = osmium_path()
-    if not osmium:
-        return None
-    os.makedirs(FNAMES.Tmp_dir, exist_ok=True)
+    """Clip the tile bbox out of the scenery extract.
+
+    Reads the smallest current block holding the tile and writes the tile
+    plus every missing smaller block in that same osmium pass, so only the
+    first tile of a region pays for a full read of the scenery extract.
+    Smart-strategy cuts nest exactly: tile-from-block equals tile-from-extract.
+    """
     tile_pbf = os.path.join(
         FNAMES.Tmp_dir,
         FNAMES.short_latlon(lat, lon) + "_pbf_tile.osm.pbf",
     )
-    rc = _run_tool(
-        [
-            osmium,
-            "extract",
-            "-b",
-            "%d,%d,%d,%d" % (lon, lat, lon + 1, lat + 1),
-            "-s",
-            "smart",
-            extract_path(),
-            "-O",
-            "-o",
-            tile_pbf,
-        ]
-    )
-    if rc != 0 or not os.path.isfile(tile_pbf):
-        _remove_quietly(tile_pbf)
-        return None
-    _tile_extract_cache[key] = tile_pbf
-    return tile_pbf
+    with _tile_extract_lock:
+        if _is_current(tile_pbf):
+            return tile_pbf
+        osmium = osmium_path()
+        if not osmium:
+            return None
+        source = extract_path()
+        outputs = []
+        for size in reversed(_block_levels()):
+            block = _block_path(size, lat, lon)
+            if _is_current(block):
+                source = block
+                break
+            outputs.insert(0, (block, _block_bbox(size, lat, lon)))
+        outputs.append((tile_pbf, (lon, lat, lon + 1, lat + 1)))
+        os.makedirs(FNAMES.Tmp_dir, exist_ok=True)
+        if len(outputs) > 1:
+            os.makedirs(blocks_dir(), exist_ok=True)
+        UI.vprint(
+            1,
+            "    * Cutting the tile and",
+            len(outputs) - 1,
+            "new region block(s) out of",
+            source,
+        )
+        config_file = tile_pbf + ".extract.json"
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "extracts": [
+                        {
+                            "output": path + ".part",
+                            "output_format": "pbf",
+                            "bbox": list(bbox),
+                        }
+                        for (path, bbox) in outputs
+                    ]
+                },
+                f,
+            )
+        rc = _run_tool(
+            [osmium, "extract", "-c", config_file, "-s", "smart", source, "-O"]
+        )
+        _remove_quietly(config_file)
+        if rc != 0 or not all(
+            os.path.isfile(path + ".part") for (path, _) in outputs
+        ):
+            for (path, _) in outputs:
+                _remove_quietly(path + ".part")
+            return None
+        for (path, _) in outputs:
+            os.replace(path + ".part", path)
+        return tile_pbf
 
 
 def slice_tile_layer(lat, lon, cached_suffix):
