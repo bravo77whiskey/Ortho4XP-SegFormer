@@ -401,7 +401,7 @@ cfg_tile_vars = {
         "type": float,
         "default": -1.0,
         "short_name": "veg_den",
-        "hint": "DSF density override 0.0–1.0 (scaled to 0–255). -1 = auto-select based on how much of each polygon is covered by vegetation.",
+        "hint": "DSF density override 0.0–1.0 (scaled to 0–255). -1 = auto-select based on how much of each polygon is covered by vegetation. With veg_texture_density on, this is the density of the densest forest.",
     },
     "veg_close_m": {
         "type": float,
@@ -645,6 +645,16 @@ cfg_tile_vars = {
                 "rangeland. Grass, scrub, bare ground, buildings and roads "
                 "stay open. ZL16/17 use option G: RGB texture fill within "
                 "SegFormer forest and rangeland zones.",
+    },
+    "veg_texture_density": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_tex_den",
+        "hint": "Read how closed each forest is from the texture and plant thin "
+                "woods thinly, instead of one fixed density for everything. "
+                "The densest forest gets veg_density (auto: 90 %), nothing gets "
+                "denser. Tree rows and single trees are unchanged. Not available "
+                "with remote GPU inference.",
     },
     "veg_upscale_gap_trees": {
         "type": bool,
@@ -1026,6 +1036,7 @@ list_veg_vars = [
     "veg_tropics_evergreen",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
+    "veg_texture_density",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",
@@ -1164,7 +1175,8 @@ settings_sections = (
     ("Vegetation overlay", (
         ("Tree mask", ("veg_density", "veg_close_m", "veg_open_m", "veg_min_area_m2",
                        "veg_simplify_m", "veg_excl_buffer_m", "veg_res_m",
-                       "veg_upscale_gap_trees", "veg_osm_rescue_rangeland")),
+                       "veg_upscale_gap_trees", "veg_osm_rescue_rangeland",
+                       "veg_texture_density")),
         ("Canopy model (ZL18+)", ("veg_canopy", "veg_canopy_min_conf",
                                   "veg_canopy_seg_min_h_m", "veg_canopy_add_min_h_m")),
         ("Forest shape and height", ("veg_forest_holes", "veg_point_tree_max_cells",

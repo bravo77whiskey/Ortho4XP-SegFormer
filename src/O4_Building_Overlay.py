@@ -10488,21 +10488,22 @@ class _TextureInference:
                 if self.run.model is None:
                     self.run.model, self.run.proc, self.run.device = SEGFORMER.load_vegetation_model(self.run.device)
                 _t = time.perf_counter()
-                tree_support = None
-                if SEGFORMER.tree_support_enabled():
-                    # The vegetation overlay reads its tree-support mask from
-                    # beside the shared class-map cache written here.
-                    self.veg_map, tree_support = SEGFORMER.run_inference(
-                        self.run.model, self.run.device, self.img, self.run.proc,
-                        tree_support=True,
-                    )
-                else:
-                    self.veg_map = SEGFORMER.run_inference(self.run.model, self.run.device, self.img, self.run.proc)
+                # The vegetation overlay reads its tree-support mask and P(tree)
+                # from beside the shared class-map cache written here.
+                self.veg_map, tree_support, tree_prob = SEGFORMER.run_inference(
+                    self.run.model, self.run.device, self.img, self.run.proc,
+                    tree_support=SEGFORMER.tree_support_enabled(), tree_prob=True,
+                )
                 self._rec('segformer_inference', _t)
-                if (not self.run.disable_cache or self.run.keep_seg_for_veg) and tree_support is not None:
-                    SEGFORMER.save_tree_support(
-                        SEGFORMER.tree_support_cache_path(cache_path), tree_support
-                    )
+                if not self.run.disable_cache or self.run.keep_seg_for_veg:
+                    if tree_support is not None:
+                        SEGFORMER.save_tree_support(
+                            SEGFORMER.tree_support_cache_path(cache_path), tree_support
+                        )
+                    if tree_prob is not None:
+                        SEGFORMER.save_array_atomic(
+                            SEGFORMER.tree_prob_cache_path(cache_path), tree_prob
+                        )
             if (not self.run.disable_cache or self.run.keep_seg_for_veg) and not self.mesh_water_full:
                 _t = time.perf_counter()
                 SEGFORMER.save_array_atomic(cache_path, self.veg_map)

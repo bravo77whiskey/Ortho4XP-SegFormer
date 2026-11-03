@@ -94,6 +94,7 @@ class LowzoomPipelineTests(unittest.TestCase):
             patch(seg, "load_dds_or_none", return_value=None if missing_rgb else rgb)
             # A cached native map must not require support or enlarged inference.
             patch(seg, "tree_support_enabled", return_value=zl in (16, 17))
+            patch(VEG, "_texture_density_enabled", return_value=False)
             patch(seg, "load_vegetation_model", side_effect=AssertionError("unexpected inference"))
             patch(VEG, "_upscaled_trees", side_effect=AssertionError("unexpected upscale"))
             patch(VEG, "_canopy_enabled", return_value=airport)

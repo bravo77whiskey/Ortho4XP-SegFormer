@@ -51,6 +51,7 @@ import O4_Bounds_Index as BBOX
 import O4_Persistent_Cache as PCACHE
 import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
+import O4_Veg_Density as DENSITY
 import O4_Veg_Lowzoom as LOWZOOM
 import O4_Canopy_Height as CANOPY
 import O4_Forest_Spacing as FOREST_SPACING
@@ -171,6 +172,11 @@ def _veg_flag(name, default=True):
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _texture_density_enabled():
+    """O4_VEG_TEXTURE_DENSITY=0: forests keep the fixed density of their type."""
+    return _veg_flag("O4_VEG_TEXTURE_DENSITY")
+
+
 def _road_widths_enabled():
     """O4_VEG_ROAD_WIDTHS=0: every simHeaven segment excludes a flat 16 m."""
     return _veg_flag("O4_VEG_ROAD_WIDTHS")
@@ -289,6 +295,11 @@ def _forest_height_zones(height_map, tree_mask, m_per_px):
     zone_of = np.digitize(np.where(unknown, 0.0, height_map), FOREST_ZONE_EDGES_M) + 1
     zone_of[unknown] = len(FOREST_ZONE_EDGES_M) + 2
     zones = np.where(tree_mask > 0, zone_of, 0).astype(np.uint8)
+    return _merge_small_zones(zones, m_per_px)
+
+
+def _merge_small_zones(zones, m_per_px):
+    """Zones under FOREST_ZONE_MIN_M2 join the nearest bigger zone."""
     min_px = FOREST_ZONE_MIN_M2 / (m_per_px * m_per_px)
     small = np.zeros(zones.shape, bool)
     for z in np.unique(zones[zones > 0]):
@@ -348,16 +359,22 @@ def _process_tree_mask(mask, **kwargs):
     has heights and into approach cap levels where runway approaches limit them."""
     height_map = kwargs.get('forest_height_map')
     cap = kwargs.pop('height_cap_map', None)
+    cover = kwargs.pop('density_cover', None)
     zones = None
     if height_map is not None and kwargs.get('forest_heights') is not None:
         zones = _forest_height_zones(height_map, mask, kwargs['m_per_px'])
     levels = _cap_level_index(cap) if cap is not None else None
-    if zones is None and levels is None:
+    bands = None
+    if cover is not None:
+        bands = _merge_small_zones(DENSITY.density_bands(cover, mask), kwargs['m_per_px'])
+    if zones is None and levels is None and bands is None:
         return _process_dds_mask(mask, SEGFORMER.CLASS_TREE, **kwargs)
     key = (zones.astype(np.int32) if zones is not None else (mask > 0).astype(np.int32)) * 256
     if levels is not None:
         key += levels
         mask = np.where(levels > 0, mask, 0).astype(np.uint8)   # under the lowest cap: no tree
+    if bands is not None:
+        key += bands.astype(np.int32) * 65536
     on = mask > 0
     polys = []
     for k in np.unique(key[on]):
@@ -367,6 +384,11 @@ def _process_tree_mask(mask, **kwargs):
         level = int(k) % 256
         if levels is not None and level != _NO_CAP:
             part_kwargs['height_cap'] = FOREST_HEIGHTS.CAP_LEVELS_M[level - 1]
+        if bands is not None:
+            override = kwargs.get('density_override')
+            part_kwargs['texture_density'] = DENSITY.band_density(
+                int(k) // 65536,
+                DENSITY.FULL_DENSITY if override is None else int(round(override * 255)))
         if kwargs.get('gap_certain') is not None:
             # Another zone's forest is planted by its own polygon.
             part_kwargs['gap_certain'] = kwargs['gap_certain'] | (on & ~part_on)
@@ -1290,6 +1312,7 @@ def _dds_polygon_cache_key(
     covered_fracs=None,
     airport_sig=None,
     lowzoom_sig=None,
+    density_sig=None,
 ):
     return {
         'version': 9,
@@ -1297,6 +1320,7 @@ def _dds_polygon_cache_key(
         'covered_fracs': covered_fracs,
         'airport_sig': airport_sig,
         'lowzoom_sig': lowzoom_sig,
+        'density_sig': density_sig,
         'fname': fname,
         'bounds': tuple(round(v, 8) for v in (lat_n, lat_s, lon_w, lon_e)),
         'shape': (int(img_h), int(img_w)),
@@ -2188,8 +2212,12 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       simheaven_type_resolver=None,
                       forest_path_mapper=None,
                       forest_spacing=None, gap_certain=None, canopy_height=None,
-                      forest_heights=None, forest_height_map=None, height_cap=None):
+                      forest_heights=None, forest_height_map=None, height_cap=None,
+                      texture_density=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring).
+
+    ``texture_density`` (O4_Veg_Density) replaces the fixed density of forest
+    areas; tree rows and single trees keep theirs.
 
     ``forest_spacing`` (O4_Forest_Spacing.ForestSpacing) sizes single-tree
     patches and holes in grid cells of each polygon's forest; ``gap_certain``
@@ -2312,6 +2340,8 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         )
         if not fpath:
             continue
+        if texture_density is not None and shape == 'area':
+            dsf_den = texture_density
         if forest_path_mapper is not None and veg_cls == SEGFORMER.CLASS_TREE:
             c_lon = sum(p[0] for p in ring) / len(ring)
             c_lat = sum(p[1] for p in ring) / len(ring)
@@ -2406,7 +2436,8 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
         if shrubs:
             # Shrubs keep none of the woodland / settlement thinning: the
             # density setting, or on auto the full-forest density for the fill.
-            full = (int(round(density_override * 255)) if density_override is not None
+            full = (texture_density if texture_density is not None
+                    else int(round(density_override * 255)) if density_override is not None
                     else _BASE_DENSITY['tree'][_density_level(frac)])
             line = dsf_den - dsf_den % LINE_MODE
             if line and prepared_fill is not None and (
@@ -2540,6 +2571,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 '_vegtree.npy',
                 f'_z{VEG_INFER_MAX_ZL}_veg.npy',
                 f'_z{VEG_INFER_MAX_ZL}_vegtree.npy',
+                '_vegprob.npy',
+                f'_z{VEG_INFER_MAX_ZL}_vegprob.npy',
                 '_vegcanopy.npy',
                 '_veg2x.npy',
                 '_road.pkl',
@@ -2697,6 +2730,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         'bld_wait': 0.0,
         'canopy': 0.0,
         'lowzoom': 0.0,
+        'density': 0.0,
     }
 
     # ── Pre-load road / network exclusion sources ────────────────────────────
@@ -3010,7 +3044,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             _pre_dds_cleanup = tuple(
                 path for path in _dds_cache_files
                 if not (bld_excl_m > 0 and path.endswith('_bld.pkl'))
-                and not (reuse_bld_seg and path.endswith(('_veg.npy', '_vegtree.npy')))
+                and not (reuse_bld_seg and path.endswith(('_veg.npy', '_vegtree.npy', '_vegprob.npy')))
             )
             _remove_cache_files(
                 _pre_dds_cleanup
@@ -3037,6 +3071,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         seg_extras = not use_lowzoom or infer_factor > 1
         want_tree_support = seg_extras and SEGFORMER.tree_support_enabled()
         tree_support = None
+        tree_prob_path = SEGFORMER.tree_prob_cache_path(cache_path)
+        want_tree_prob = _texture_density_enabled()
+        tree_prob = None
         img = None
         veg_map = None
         mesh_water_mask = None
@@ -3065,16 +3102,20 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 except OSError:
                     pass
                 verbose_print(f"  [{idx}/{n_files}] {fname}  (stale all-water cache ignored)", flush=True)
-            elif want_tree_support and not mesh_water_full:
-                tree_support = SEGFORMER.load_tree_support(tree_support_path, veg_map.shape)
-                if tree_support is None:
-                    # Class map cached without its tree-support mask: infer again.
-                    veg_map = None
-                    verbose_print(f"  [{idx}/{n_files}] {fname}  (no tree-support cache; re-inferring)", flush=True)
-                else:
-                    print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
             else:
-                print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
+                if want_tree_support and not mesh_water_full:
+                    tree_support = SEGFORMER.load_tree_support(tree_support_path, veg_map.shape)
+                    if tree_support is None:
+                        # Class map cached without its tree-support mask: infer again.
+                        veg_map = None
+                        verbose_print(f"  [{idx}/{n_files}] {fname}  (no tree-support cache; re-inferring)", flush=True)
+                if veg_map is not None and want_tree_prob and not mesh_water_full:
+                    tree_prob = SEGFORMER.load_tree_prob(tree_prob_path)
+                    if tree_prob is None:
+                        veg_map = None
+                        verbose_print(f"  [{idx}/{n_files}] {fname}  (no P(tree) cache; re-inferring)", flush=True)
+                if veg_map is not None:
+                    print(f"  [{idx}/{n_files}] {fname}  (cached)", flush=True)
         if veg_map is None:
             print(f"  [{idx}/{n_files}] {fname}  (inferring…)", flush=True)
             _t = time.perf_counter()
@@ -3101,7 +3142,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 if model is None:
                     model, proc, device = SEGFORMER.load_vegetation_model(device)
                 _t = time.perf_counter()
-                if want_tree_support:
+                if want_tree_prob:
+                    veg_map, tree_support, tree_prob = SEGFORMER.run_inference_downscaled(
+                        model, device, img, proc, tree_support=want_tree_support,
+                        factor=infer_factor, tree_prob=True,
+                    )
+                elif want_tree_support:
                     veg_map, tree_support = SEGFORMER.run_inference_downscaled(
                         model, device, img, proc, tree_support=True,
                         factor=infer_factor,
@@ -3115,6 +3161,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 np.save(cache_path, veg_map)
                 if tree_support is not None:
                     SEGFORMER.save_tree_support(tree_support_path, tree_support)
+                if tree_prob is not None:
+                    SEGFORMER.save_array_atomic(tree_prob_path, tree_prob)
 
         # Grass reuses this class map instead of inferring again: with caches
         # off it is deleted once this DDS is done.
@@ -3179,6 +3227,9 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 if tree_support is not None:
                     _ts_st = os.stat(tree_support_path)
                     veg_cache_stat += (_ts_st.st_mtime_ns, _ts_st.st_size)
+                if tree_prob is not None:
+                    _tp_st = os.stat(tree_prob_path)
+                    veg_cache_stat += (_tp_st.st_mtime_ns, _tp_st.st_size)
                 if canopy_maps is not None:
                     _cn_st = os.stat(canopy_path)
                     veg_cache_stat += (_cn_st.st_mtime_ns, _cn_st.st_size)
@@ -3654,6 +3705,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             covered_fracs=_covered_fracs,
             airport_sig=(airport_sig, approach_sig),
             lowzoom_sig=lowzoom_sig,
+            density_sig=DENSITY.SIGNATURE if tree_prob is not None else None,
         )
         _poly_cached = None
         if not disable_cache:
@@ -3712,6 +3764,16 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         if height_cap_map is not None:
             kwargs['height_cap_map'] = height_cap_map
             kwargs['forest_heights'] = forest_copies
+        if tree_prob is not None:
+            if img is None:
+                _t = time.perf_counter()
+                img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                timings['dds_load'] += time.perf_counter() - _t
+            if img is not None:
+                _t = time.perf_counter()
+                kwargs['density_cover'] = DENSITY.cover_map(
+                    img, tree_prob, tree_mask, mpp, not_ground=veg_map == SEGFORMER.CLASS_WATER)
+                timings['density'] += time.perf_counter() - _t
         if simheaven_type_source_path:
             kwargs['simheaven_type_path'] = simheaven_type_source_path
         if simheaven_type_resolver is not None:
@@ -3960,7 +4022,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         f"dsf_compile={timings['dsf_compile']:.1f}s  "
         f"bld_wait={timings['bld_wait']:.1f}s  "
         f"canopy={timings['canopy']:.1f}s  "
-        f"lowzoom_rgb={timings['lowzoom']:.1f}s"
+        f"lowzoom_rgb={timings['lowzoom']:.1f}s density={timings['density']:.1f}s"
     )
 
     _print_tile_summary(n_tree, n_grass)

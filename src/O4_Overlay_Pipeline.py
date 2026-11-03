@@ -277,6 +277,7 @@ def _veg_tree_env():
         "O4_VEG_TROPICS_EVERGREEN": "1" if veg_tropics_evergreen else "0",
         "O4_VEG_UPSCALE_TREES": "1" if veg_upscale_gap_trees else "0",
         "O4_VEG_OSM_RESCUE_RANGELAND": "1" if veg_osm_rescue_rangeland else "0",
+        "O4_VEG_TEXTURE_DENSITY": "1" if veg_texture_density else "0",
     }
 
 
@@ -312,6 +313,7 @@ veg_approach_heights = True  # trees under runway approaches below the approach 
 veg_tropics_evergreen = True  # no autumn colours between the tropics
 veg_upscale_gap_trees = True   # ZL16: add the trees SegFormer finds on the texture enlarged 2x
 veg_osm_rescue_rangeland = True  # trees on SegFormer rangeland inside OSM forests
+veg_texture_density = True  # forest density from the texture instead of one fixed value
 veg_avoid_gfv2    = False
 veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False
@@ -795,7 +797,7 @@ def _veg_cache_cleanup(cache_dir):
     if veg_disable_cache:
         _purge_overlay_cache(
             cache_dir,
-            ['*_veg.npy', '*_vegtree.npy', '*_vegcanopy.npy', '*_vegaux.pkl', '*_vegpoly.pkl',
+            ['*_veg.npy', '*_vegtree.npy', '*_vegprob.npy', '*_vegcanopy.npy', '*_vegaux.pkl', '*_vegpoly.pkl',
              '*_grasscls.npy', '*_grass1.npz'],
             'veg',
         )
@@ -812,7 +814,7 @@ def _bld_cache_cleanup(cache_dir):
         _purge_overlay_cache(
             cache_dir,
             ['*_bld.pkl', '*_yolo_obb.pkl', '*_road.pkl'] +
-            ([] if _keep_seg else ['*_veg.npy', '*_vegtree.npy']),
+            ([] if _keep_seg else ['*_veg.npy', '*_vegtree.npy', '*_vegprob.npy']),
             'bld',
         )
     else:
@@ -1105,7 +1107,7 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
 
     cache_dir = _overlay_cache_dir(lat, lon)
     os.makedirs(cache_dir, exist_ok=True)
-    seg_patterns = ('*_veg.npy', '*_vegtree.npy', '*_bldseg.skip')
+    seg_patterns = ('*_veg.npy', '*_vegtree.npy', '*_vegprob.npy', '*_bldseg.skip')
 
     def _clear_class_maps():
         for pattern in seg_patterns:

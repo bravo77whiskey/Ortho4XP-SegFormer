@@ -93,6 +93,23 @@ def tree_support_cache_path(veg_cache_path):
     return veg_cache_path[:-len('_veg.npy')] + '_vegtree.npy'
 
 
+# P(tree) for the vegetation overlay's density (O4_Veg_Density), as uint8 at
+# 1/TREE_PROB_SHRINK of the texture's size: it only feeds a ~30 m blur.
+TREE_PROB_SHRINK = 4
+
+
+def tree_prob_cache_path(veg_cache_path):
+    return veg_cache_path[:-len('_veg.npy')] + '_vegprob.npy'
+
+
+def load_tree_prob(path):
+    """Return the cached P(tree) map, or None."""
+    try:
+        return np.load(path)
+    except Exception:
+        return None
+
+
 def save_array_atomic(path, array):
     """np.save under a private name, then rename: readers never see half a file.
 
@@ -480,7 +497,7 @@ def _autotune_batch_size(model, device, sample_patch, max_batch_size, patch_size
     return max_batch_size
 
 
-def run_inference(model, device, img_rgb, processor=None, tree_support=False):
+def run_inference(model, device, img_rgb, processor=None, tree_support=False, tree_prob=False):
     """
     Run patch-wise inference on a full-resolution RGB image.
 
@@ -496,39 +513,55 @@ def run_inference(model, device, img_rgb, processor=None, tree_support=False):
 
     Returns a (H, W) class-index array; with ``tree_support`` a tuple of that
     array and the boolean tree-support mask (None when inferred remotely).
+    With ``tree_prob`` a tuple of (class map, tree-support mask or None, P(tree)
+    as shrunk uint8, None when inferred remotely).
     """
     if remote_client is not None and isinstance(model, RemoteModelHandle):
         cls_map = remote_client.segformer_infer(model.kind, img_rgb)
+        if tree_prob:
+            return cls_map, None, None
         return (cls_map, None) if tree_support else cls_map
     if getattr(device, 'type', None) != 'cuda':
-        return _run_inference(model, device, img_rgb, processor, tree_support)
+        return _run_inference(model, device, img_rgb, processor, tree_support, tree_prob)
     return GPUB.call("segformer", _run_inference, model, device, img_rgb,
-                     processor, tree_support)
+                     processor, tree_support, tree_prob)
 
 
 def run_inference_downscaled(model, device, img_rgb, processor=None,
-                             tree_support=False, factor=1):
+                             tree_support=False, factor=1, tree_prob=False):
     """``run_inference`` on the image shrunk ``factor`` times, mapped back up.
 
     The class map (and tree-support mask) come back at the full image size,
     each output pixel taking the class of the shrunk pixel it falls in.
     """
     if factor <= 1:
-        return run_inference(model, device, img_rgb, processor, tree_support)
+        return run_inference(model, device, img_rgb, processor, tree_support, tree_prob)
     import cv2
     h, w = img_rgb.shape[:2]
     sw, sh = max(1, w // factor), max(1, h // factor)
     small = cv2.resize(img_rgb, (sw, sh), interpolation=cv2.INTER_AREA)
-    result = run_inference(model, device, small, processor, tree_support)
+    result = run_inference(model, device, small, processor, tree_support, tree_prob)
     rows = (np.arange(h) * sh // h)[:, None]
     cols = (np.arange(w) * sw // w)[None, :]
+    if tree_prob:
+        cls_map, weak, prob = result
+        return cls_map[rows, cols], (None if weak is None else weak[rows, cols]), prob
     if tree_support:
         cls_map, weak = result
         return cls_map[rows, cols], (None if weak is None else weak[rows, cols])
     return result[rows, cols]
 
 
-def _run_inference(model, device, img_rgb, processor, tree_support):
+def _tree_prob_uint8(prob):
+    import cv2
+    h, w = prob.shape
+    small = cv2.resize(np.asarray(prob, np.float32),
+                       (max(1, w // TREE_PROB_SHRINK), max(1, h // TREE_PROB_SHRINK)),
+                       interpolation=cv2.INTER_AREA)
+    return np.clip(small * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
+def _run_inference(model, device, img_rgb, processor, tree_support, tree_prob=False):
     import torch
     import torch.nn.functional as F
     from PIL import Image as _Image
@@ -692,14 +725,18 @@ def _run_inference(model, device, img_rgb, processor, tree_support):
             cls_map,
             torch.full_like(cls_map, -1),
         ).to(torch.int8).cpu().numpy()
-        if not tree_support:
+        if not tree_support and not tree_prob:
             return out
-        weak = (
-            ((cls_map == CLASS_TREE) & (max_prob < segformer_confidence_threshold))
-            | ((avg[CLASS_TREE] >= TREE_SUPPORT_MIN_PROB)
-               & ((cls_map == CLASS_RANGELAND) | (cls_map == CLASS_WATER)))
-        )
-        return out, weak.cpu().numpy()
+        weak = None
+        if tree_support:
+            weak = (
+                ((cls_map == CLASS_TREE) & (max_prob < segformer_confidence_threshold))
+                | ((avg[CLASS_TREE] >= TREE_SUPPORT_MIN_PROB)
+                   & ((cls_map == CLASS_RANGELAND) | (cls_map == CLASS_WATER)))
+            ).cpu().numpy()
+        if tree_prob:
+            return out, weak, _tree_prob_uint8(avg[CLASS_TREE].float().cpu().numpy())
+        return out, weak
 
     wt_sum = np.maximum(wt_sum, np.float16(1e-4))  # avoid div-by-zero; stay float16
     avg    = accum / wt_sum                          # (C, H, W) float16 — sufficient for argmax
@@ -712,13 +749,17 @@ def _run_inference(model, device, img_rgb, processor, tree_support):
         cls_map,
         -1,
     ).astype(np.int8)   # int8 sufficient for classes -1..8; 4× smaller cache files
-    if not tree_support:
+    if not tree_support and not tree_prob:
         return out
-    weak = (
-        ((cls_map == CLASS_TREE) & (max_prob < segformer_confidence_threshold))
-        | ((avg[CLASS_TREE] >= TREE_SUPPORT_MIN_PROB)
-           & ((cls_map == CLASS_RANGELAND) | (cls_map == CLASS_WATER)))
-    )
+    weak = None
+    if tree_support:
+        weak = (
+            ((cls_map == CLASS_TREE) & (max_prob < segformer_confidence_threshold))
+            | ((avg[CLASS_TREE] >= TREE_SUPPORT_MIN_PROB)
+               & ((cls_map == CLASS_RANGELAND) | (cls_map == CLASS_WATER)))
+        )
+    if tree_prob:
+        return out, weak, _tree_prob_uint8(avg[CLASS_TREE])
     return out, weak
 
 

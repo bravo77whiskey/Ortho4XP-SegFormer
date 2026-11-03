@@ -33,6 +33,7 @@ NEW_VARS = (
     "veg_tropics_evergreen",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
+    "veg_texture_density",
 )
 
 
