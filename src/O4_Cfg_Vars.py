@@ -126,6 +126,26 @@ cfg_app_vars = {
         "default": "",
         "hint": "If sceneries with overlays are not found in custom_overlay_src, set an alternate directory to search.",
     },
+    "overlay_venv_dir": {
+        "type": str,
+        "default": "",
+        "hint": "Python virtual environment the building, vegetation and colour steps run in (torch, SegFormer, YOLO). Leave empty to use the .venv folder next to Ortho4XP. A missing venv is created on the first overlay run.",
+    },
+    "overlay_temp_dir": {
+        "type": str,
+        "default": "",
+        "hint": "Folder for the overlays' short-lived work folders (parallel texture workers, caches of runs with the overlay cache disabled). Leave empty to use the system temp folder.",
+    },
+    "canopy_model_dir": {
+        "type": str,
+        "default": "",
+        "hint": "Folder holding the canopy-height model (several GB, downloaded on first use). Leave empty to keep it in _canopy_height inside the overlay cache.",
+    },
+    "remote_gpu_root": {
+        "type": str,
+        "default": "",
+        "hint": "Folder on the remote GPU host holding the synced code, its venv and uploaded checkpoints. Leave empty for ~/.ortho4xp_remote. No spaces or quotes.",
+    },
 }
 
 cfg_tile_vars = {
@@ -830,7 +850,7 @@ cfg_tile_vars = {
     },
     "bld_yolo_checkpoint": {
         "type": str,
-        "default": r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt",
+        "default": "",
         "short_name": "bld_yolo_ckpt",
         "file_picker": True,
         "file_picker_title": "Choose YOLO model checkpoint",
@@ -838,7 +858,8 @@ cfg_tile_vars = {
             ("YOLO model files", ("*.pt", "*.pth", "*.onnx", "*.engine")),
             ("All files", "*.*"),
         ],
-        "hint": "YOLO OBB checkpoint used for primary building placements.",
+        "hint": "YOLO OBB checkpoint used for primary building placements. "
+                "Leave empty to place buildings from SegFormer zones only.",
     },
     "bld_yolo_conf": {
         "type": float,
@@ -866,7 +887,7 @@ cfg_tile_vars = {
     },
     "bld_height_checkpoint": {
         "type": str,
-        "default": r"H:\model_training\models\heightnet.pt",
+        "default": "",
         "short_name": "bld_height_ckpt",
         "file_picker": True,
         "file_picker_title": "Choose HeightNet model checkpoint",
@@ -875,9 +896,8 @@ cfg_tile_vars = {
             ("All files", "*.*"),
         ],
         "hint": "HeightNet checkpoint used to predict per-building heights from "
-                "YOLO detections (second stage). Leave at the default unless you "
-                "trained a replacement. If the file is missing, buildings fall "
-                "back to class-default heights.",
+                "YOLO detections (second stage). When empty or missing, buildings "
+                "fall back to class-default heights.",
     },
     "bld_yolo_min_coverage": {
         "type": float,
@@ -936,11 +956,24 @@ list_app_vars = [
     "custom_overlay_src",
     "custom_overlay_src_alternate",
     "osm_pbf_dir",
+    "overlay_venv_dir",
+    "overlay_temp_dir",
+    "canopy_model_dir",
+    "remote_gpu_root",
 ]
 
-gui_app_vars_short = list_app_vars[:-4]
+# Folders on this machine, shown with a folder picker.
+gui_app_vars_long = [
+    "custom_scenery_dir",
+    "custom_overlay_src",
+    "custom_overlay_src_alternate",
+    "osm_pbf_dir",
+    "overlay_venv_dir",
+    "overlay_temp_dir",
+    "canopy_model_dir",
+]
 
-gui_app_vars_long = list_app_vars[-4:]
+gui_app_vars_short = [var for var in list_app_vars if var not in gui_app_vars_long]
 
 list_vector_vars = [
     "apt_smoothing_pix",
@@ -1207,6 +1240,9 @@ app_settings_sections = (
         (None, ("ovl_exclude_pol", "ovl_exclude_net")),
     )),
     ("Folders", (
-        (None, tuple(gui_app_vars_long)),
+        (None, ("custom_scenery_dir", "custom_overlay_src", "custom_overlay_src_alternate",
+                "osm_pbf_dir")),
+        ("Overlay processing", ("overlay_venv_dir", "overlay_temp_dir", "canopy_model_dir",
+                                "remote_gpu_root")),
     )),
 )

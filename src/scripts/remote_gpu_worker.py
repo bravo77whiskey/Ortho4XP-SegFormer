@@ -40,7 +40,11 @@ for _path in (_ROOT_DIR, _SRC_DIR):
 
 from O4_Remote_GPU import pack_array, unpack_array, send_msg, recv_msg  # noqa: E402
 
-_CKPT_DIR = os.path.expanduser("~/.ortho4xp_remote/checkpoints")
+# <remote root>/code/src/scripts/ holds this file; checkpoints sit beside code/.
+_CKPT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "checkpoints",
+)
 
 _yolo_models = {}          # sha256 -> ultralytics.YOLO
 _segformer_ready = set()   # model kinds already loaded

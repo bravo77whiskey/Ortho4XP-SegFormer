@@ -14,7 +14,8 @@ textures are not handled here — at their own scale the network flips whole
 patches, and running them at ZL18 scale would cost 25+ s per texture.
 
 The weights (3.1 GB + 9 MB) are downloaded once from Meta's public bucket into
-``<overlay cache>/_canopy_height`` (O4_CANOPY_MODEL_DIR overrides). Without
+``<overlay cache>/_canopy_height``, or into the canopy_model_dir setting
+(passed in as O4_CANOPY_MODEL_DIR). Without
 CUDA, or when the weights are unavailable, ``CanopyModel.load`` returns None
 and the caller keeps its SegFormer result.
 """

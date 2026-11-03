@@ -16,7 +16,7 @@ the SSH key works, the offload works. The worker exits on stdin EOF, so the
 GUI Stop button (which kills the local process tree, including ssh.exe)
 also stops the remote side.
 
-Remote layout (created on demand):
+Remote layout (created on demand, under the remote_gpu_root setting):
   ~/.ortho4xp_remote/code/         synced copy of the repo src/ tree
   ~/.ortho4xp_remote/venv/         python venv with torch(+CUDA)/transformers/ultralytics
   ~/.ortho4xp_remote/checkpoints/  YOLO .pt files uploaded by sha256
@@ -38,16 +38,34 @@ import zlib
 
 import numpy as np
 
-_REMOTE_ROOT = "~/.ortho4xp_remote"
+DEFAULT_REMOTE_ROOT = "~/.ortho4xp_remote"
+# Set from the remote_gpu_root setting by O4_Overlay_Pipeline, in the main
+# process and in the overlay subprocess alike. Used unquoted in remote shell
+# commands so that ~ expands.
+remote_root = DEFAULT_REMOTE_ROOT
 # Hosts set up before the rename keep their venv (several GB) in
 # ~/.ortho4xp_sfr; link the new name to it instead of reinstalling.
 _ADOPT_LEGACY_ROOT = (
     "[ -e ~/.ortho4xp_remote ] || [ ! -d ~/.ortho4xp_sfr ] "
     "|| ln -s .ortho4xp_sfr ~/.ortho4xp_remote"
 )
-_REMOTE_CODE = f"{_REMOTE_ROOT}/code"
-_REMOTE_VENV_PY = f"{_REMOTE_ROOT}/venv/bin/python"
-_REMOTE_WORKER = f"{_REMOTE_CODE}/src/scripts/remote_gpu_worker.py"
+
+
+def _adopt_legacy_root():
+    return _ADOPT_LEGACY_ROOT + "; " if remote_root == DEFAULT_REMOTE_ROOT else ""
+
+
+def _remote_code():
+    return f"{remote_root}/code"
+
+
+def _remote_venv_py():
+    return f"{remote_root}/venv/bin/python"
+
+
+def _remote_worker():
+    return f"{_remote_code()}/src/scripts/remote_gpu_worker.py"
+
 _REMOTE_IMPORT_CHECK = (
     "import torch, cv2, numpy, PIL, shapely, transformers, ultralytics"
 )
@@ -367,8 +385,8 @@ def _sync_code(host):
     data = buf.getvalue()
     proc = subprocess.run(
         _ssh_base()
-        + [host, f"{_ADOPT_LEGACY_ROOT}; "
-                  f"mkdir -p {_REMOTE_CODE} && tar xzf - -C {_REMOTE_CODE}"],
+        + [host, f"{_adopt_legacy_root()}"
+                  f"mkdir -p {_remote_code()} && tar xzf - -C {_remote_code()}"],
         input=data,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -382,7 +400,7 @@ def _sync_code(host):
         )
     print(
         f"[Remote GPU] Synced {n_files} source files "
-        f"({len(data) // 1024} KB) to {host}:{_REMOTE_CODE}",
+        f"({len(data) // 1024} KB) to {host}:{_remote_code()}",
         flush=True,
     )
 
@@ -394,7 +412,7 @@ def _env_ok(host, attempts=2):
         try:
             ret = subprocess.call(
                 _ssh_base()
-                + [host, f"{_REMOTE_VENV_PY} -c '{_REMOTE_IMPORT_CHECK}'"],
+                + [host, f"{_remote_venv_py()} -c '{_REMOTE_IMPORT_CHECK}'"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=90,
@@ -453,14 +471,14 @@ def _setup_env(host):
     else:
         print(f"[Remote GPU] Installing torch ({tag}) on {host} …", flush=True)
     steps = [
-        f"python3 -m venv {_REMOTE_ROOT}/venv",
-        f"{_REMOTE_VENV_PY} -m pip install --upgrade pip",
-        f"{_REMOTE_VENV_PY} -m pip install torch torchvision "
+        f"python3 -m venv {remote_root}/venv",
+        f"{_remote_venv_py()} -m pip install --upgrade pip",
+        f"{_remote_venv_py()} -m pip install torch torchvision "
         f"--index-url {index_url}",
-        f"{_REMOTE_VENV_PY} -m pip install numpy pillow opencv-python shapely "
+        f"{_remote_venv_py()} -m pip install numpy pillow opencv-python shapely "
         f"'transformers>=4.30.0' 'huggingface-hub>=0.20.0' 'ultralytics>=8.0.0'",
     ]
-    command = f"mkdir -p {_REMOTE_ROOT} && " + " && ".join(steps)
+    command = f"mkdir -p {remote_root} && " + " && ".join(steps)
     ret = _run_ssh_streamed(host, command)
     if ret != 0:
         print(
@@ -630,7 +648,7 @@ class RemoteInferenceClient:
 
     def _spawn(self):
         self._proc = subprocess.Popen(
-            _ssh_base() + [self.host, f"{_REMOTE_VENV_PY} -u {_REMOTE_WORKER}"],
+            _ssh_base() + [self.host, f"{_remote_venv_py()} -u {_remote_worker()}"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

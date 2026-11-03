@@ -179,18 +179,41 @@ for _path in (_root_dir, _src_dir):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+
+def _app_setting(name):
+    """Return an application setting from O4_Config_Utils, or '' outside the GUI."""
+    try:
+        import O4_Config_Utils as CFG
+        return (getattr(CFG, name, "") or "").strip()
+    except Exception:
+        return ""
+
+
 # ── Single shared virtual environment ────────────────────────────────────────
 # We use ONE venv for everything — the same .venv that build.py creates to run
-# PyInstaller.  It sits next to the exe (frozen) or in the repo root (source).
-# No separate .venv; no version-matching gymnastics.
-_VENV_DIR = os.path.join(_exe_dir, '.venv')
+# PyInstaller.  It sits next to the exe (frozen) or in the repo root (source)
+# unless the overlay_venv_dir setting points elsewhere. Scripts may assign
+# _VENV_DIR to override both.
+_VENV_DIR = None
+
+
+def _overlay_temp_dir():
+    """overlay_temp_dir (created on demand), or None for the system temp folder."""
+    path = _app_setting("overlay_temp_dir")
+    if path:
+        os.makedirs(path, exist_ok=True)
+    return path or None
+
+
+def _venv_dir():
+    return _VENV_DIR or _app_setting("overlay_venv_dir") or os.path.join(_exe_dir, '.venv')
 
 
 def _venv_python():
     """Return the Python executable inside the shared .venv."""
     if sys.platform.startswith('win'):
-        return os.path.join(_VENV_DIR, 'Scripts', 'python.exe')
-    return os.path.join(_VENV_DIR, 'bin', 'python')
+        return os.path.join(_venv_dir(), 'Scripts', 'python.exe')
+    return os.path.join(_venv_dir(), 'bin', 'python')
 
 
 def _venv_exists():
@@ -335,13 +358,13 @@ bld_avoid_custom_scenery = True
 bld_asset_mode = "both"
 bld_roof_color_matching = False
 bld_yolo_enabled = True
-bld_yolo_checkpoint = r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
+bld_yolo_checkpoint = ""
 bld_yolo_conf = 0.18
 bld_yolo_min_coverage = 0.80
 bld_yolo_iou = 0.5
 bld_yolo_stride = 512
 bld_yolo_max_det = 100000
-bld_height_checkpoint = r"H:\model_training\models\heightnet.pt"
+bld_height_checkpoint = ""
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 segformer_patch_size        = 512
@@ -384,6 +407,7 @@ def _resolve_remote_host():
     if not host:
         return ""
     import O4_Remote_GPU as REMOTE
+    REMOTE.remote_root = _app_setting("remote_gpu_root") or REMOTE.DEFAULT_REMOTE_ROOT
     print(f"[Overlay] Remote GPU requested — checking {host} …", flush=True)
     if REMOTE.prepare_remote(host):
         print(f"[Overlay] Model inference will run on {host}.", flush=True)
@@ -401,8 +425,10 @@ def _remote_activation_code(remote_host):
     """Lines injected into the overlay subprocess to route inference remotely."""
     if not remote_host:
         return ""
+    import O4_Remote_GPU as REMOTE
     return (
         f"import O4_Remote_GPU as _REMOTE_GPU\n"
+        f"_REMOTE_GPU.remote_root = {REMOTE.remote_root!r}\n"
         f"_REMOTE_GPU.activate({remote_host!r})\n"
     )
 
@@ -491,6 +517,11 @@ def _run_venv(code):
     env['PYTHONPATH'] = os.pathsep.join(py_paths + filtered_prev)
     # Progress and issues come back as event lines on stdout (O4_Progress).
     env[PROG.EVENT_ENV] = "1"
+    for setting, var in (("overlay_temp_dir", "O4_OVERLAY_TEMP_DIR"),
+                         ("canopy_model_dir", "O4_CANOPY_MODEL_DIR")):
+        value = _app_setting(setting)
+        if value:
+            env[var] = value
     if sys.platform.startswith('win') and os.environ.get(
         "O4_OVERLAY_SELF_NOTHROTTLE", ""
     ).strip().lower() not in ("0", "false", "no", "off"):
@@ -597,13 +628,7 @@ def _check_tile_imagery(tex_dir, lat, lon, step_name):
 
 def _scenery_paths():
     """Return the configured Custom Scenery root needed by the overlay subprocesses."""
-    custom_scenery_dir = ""
-    try:
-        import O4_Config_Utils as CFG
-        custom_scenery_dir = getattr(CFG, "custom_scenery_dir", "") or ""
-    except Exception:
-        pass
-    return custom_scenery_dir
+    return _app_setting("custom_scenery_dir")
 
 
 def _deps_ready():
@@ -1119,7 +1144,7 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
 
     # Only class maps written by this build may be read: clear leftovers.
     _clear_class_maps()
-    flag_dir = tempfile.mkdtemp(prefix="o4_overlays_")
+    flag_dir = tempfile.mkdtemp(prefix="o4_overlays_", dir=_overlay_temp_dir())
     done_flag = os.path.join(flag_dir, 'bld_done.flag')
 
     # Both overlays share the tile cache folder, so neither cleans it up while
@@ -1234,7 +1259,7 @@ def _ensure_venv():
     if _venv_exists():
         return True
 
-    print(f"[Overlay Setup] .venv not found — creating {_VENV_DIR} …")
+    print(f"[Overlay Setup] .venv not found — creating {_venv_dir()} …")
     py_cmd = _find_system_python()
     if py_cmd is None:
         print("[Overlay Setup] ERROR: Could not find a Python 3 installation on this machine.\n"
@@ -1250,7 +1275,7 @@ def _ensure_venv():
         pass
 
     try:
-        subprocess.check_call(py_cmd + ['-m', 'venv', _VENV_DIR],
+        subprocess.check_call(py_cmd + ['-m', 'venv', _venv_dir()],
                                **_no_window())
     except subprocess.CalledProcessError as exc:
         print(f"[Overlay Setup] ERROR: venv creation failed: {exc}")
@@ -1333,7 +1358,7 @@ def setup_overlay_models():
         return
 
     print("[Overlay Setup] Starting SegFormer model setup …")
-    print(f"[Overlay Setup] Using .venv: {_VENV_DIR}")
+    print(f"[Overlay Setup] Using .venv: {_venv_dir()}")
 
     # ── 1. Detect GPU and pick the right torch wheel ──────────────────────────
     index_url, build_tag = _detect_torch_index_url()

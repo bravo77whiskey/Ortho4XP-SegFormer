@@ -24,13 +24,6 @@ import O4_Building_Overlay as BLD
 import O4_Landcover_Inference as SEGFORMER
 
 
-DEFAULT_TEST_FIXTURES = (
-    r"H:\XP12 Addons\Applications\Ortho4XP\Tiles\zOrtho4XP_+36+117\textures\25680_54080_BI16.dds",
-    r"H:\XP12 Addons\Applications\Ortho4XP\Tiles\zOrtho4XP_+36+117\textures\25680_54096_BI16.dds",
-    r"F:\XP12 Addons\Custom Scenery\zOrtho4XP_+22+113\textures\28512_53472_BI16.dds",
-    r"F:\XP12 Addons\Custom Scenery\zOrtho4XP_+22+113\textures\28528_53488_BI16.dds",
-)
-
 _DDS_RE = re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*)(\d{2})\.dds$", re.IGNORECASE)
 _TILE_RE = re.compile(r"zOrtho4XP_([+-]\d{2})([+-]\d{3})", re.IGNORECASE)
 
@@ -681,11 +674,6 @@ def parse_args(argv: list[str] | None = None):
     )
     parser.add_argument("dds", nargs="*", help="DDS texture path(s) to preview.")
     parser.add_argument(
-        "--default-fixtures",
-        action="store_true",
-        help="Use the four initial project smoke-test DDS fixtures.",
-    )
-    parser.add_argument(
         "--output-dir",
         default=os.path.join("tmp", "debug_images"),
         help="Directory where per-DDS PNG outputs will be written.",
@@ -749,10 +737,8 @@ def parse_args(argv: list[str] | None = None):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     paths = list(args.dds)
-    if args.default_fixtures:
-        paths.extend(DEFAULT_TEST_FIXTURES)
     if not paths:
-        raise SystemExit("ERROR: provide DDS paths or pass --default-fixtures")
+        raise SystemExit("ERROR: provide DDS paths")
 
     if args.quick_masks_only:
         device = None

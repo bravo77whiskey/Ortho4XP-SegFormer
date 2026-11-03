@@ -72,6 +72,7 @@ from O4_Building_Overlay import (
     _simheaven_objects_for_bounds,
     covered_rects_to_px,
     mask_covered_regions,
+    overlay_temp_dir,
 )
 from O4_Scenery_Packs import (
     AIRPORT_PACK_MAX_DSFS,
@@ -2524,7 +2525,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     if disable_cache:
         import tempfile as _tempfile
         _transient_cache_ctx = _tempfile.TemporaryDirectory(
-            prefix="veg_nocache_"
+            prefix="veg_nocache_", dir=overlay_temp_dir()
         )
         sidecar_cache_dir = _transient_cache_ctx.name
 

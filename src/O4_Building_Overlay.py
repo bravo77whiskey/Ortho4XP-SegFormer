@@ -82,6 +82,15 @@ def _env_flag(name, default=False):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def overlay_temp_dir():
+    """O4_OVERLAY_TEMP_DIR (the overlay_temp_dir setting, created on demand),
+    or None for the system temp folder."""
+    path = os.environ.get("O4_OVERLAY_TEMP_DIR", "").strip()
+    if path:
+        os.makedirs(path, exist_ok=True)
+    return path or None
+
+
 def _review_dump_enabled():
     """O4_BLD_REVIEW_DUMP=1: write <stem>_review.json per DDS for visual review.
 
@@ -2319,9 +2328,9 @@ OPTIONAL_ASSET_REGION_ALIASES = {
 YOLO_OBB_CACHE_VERSION = 8
 YOLO_ANALYSIS_CACHE_VERSION = 1
 YOLO_ANALYSIS_TARGET_ZL = 16
-DEFAULT_YOLO_OBB_CHECKPOINT = (
-    r"H:\model_training\runs\yolo_obb_v1\weights\visual_candidate_step_12000.pt"
-)
+# No detector ships with Ortho4XP: the bld_yolo_checkpoint setting (or
+# O4_BLD_YOLO_CHECKPOINT) names it, and with neither YOLO is skipped.
+DEFAULT_YOLO_OBB_CHECKPOINT = ""
 DEFAULT_YOLO_OBB_IMGSZ = 512
 DEFAULT_YOLO_OBB_STRIDE = 512
 DEFAULT_YOLO_OBB_CONF = 0.18
@@ -8482,7 +8491,7 @@ class _TextureParallel:
     def start(cls, run, workers):
         import subprocess
         import tempfile
-        work_dir = tempfile.mkdtemp(prefix="bld_textures_")
+        work_dir = tempfile.mkdtemp(prefix="bld_textures_", dir=overlay_temp_dir())
         par = cls(work_dir, 0, helper=False)
         spec_path = os.path.join(work_dir, 'spec.pkl')
         _write_pickle_atomic(spec_path, {
@@ -8697,7 +8706,7 @@ class _BuildingOverlayRun:
         if self.disable_cache:
             import tempfile as _tempfile
             self._transient_cache_ctx = _tempfile.TemporaryDirectory(
-                prefix="bld_nocache_"
+                prefix="bld_nocache_", dir=overlay_temp_dir()
             )
             self.sidecar_cache_dir = self._transient_cache_ctx.name
 
@@ -9064,6 +9073,10 @@ class _BuildingOverlayRun:
         """Load the trained YOLO OBB building detector."""
         self.yolo_model = None
         yolo_allow_missing = _env_flag("O4_BLD_YOLO_ALLOW_MISSING")
+        if self.yolo_enabled and not self.yolo_checkpoint:
+            print("YOLO OBB placement: no checkpoint set (bld_yolo_checkpoint); "
+                  "using SegFormer-only fallback")
+            self.yolo_enabled = False
         self.yolo_signature = _checkpoint_signature(self.yolo_checkpoint) if self.yolo_enabled else None
         if self.yolo_enabled and self.yolo_signature is None:
             if yolo_allow_missing:
@@ -9127,6 +9140,9 @@ class _BuildingOverlayRun:
             if self.height_signature is None:
                 print(
                     f"HeightNet heights: checkpoint unavailable ({self.height_checkpoint}); "
+                    "using class-default building heights"
+                    if self.height_checkpoint else
+                    "HeightNet heights: no checkpoint set (bld_height_checkpoint); "
                     "using class-default building heights"
                 )
             else:

@@ -39,7 +39,9 @@ import O4_GPU_Budget as GPUB
 
 WINDOW_M = 64.0
 CROP_PX = 96
-DEFAULT_HEIGHT_CHECKPOINT = r"I:\building-models\heightnet.pt"
+# No model ships with Ortho4XP: bld_height_checkpoint (or
+# O4_BLD_HEIGHT_CHECKPOINT) names it.
+DEFAULT_HEIGHT_CHECKPOINT = ""
 HEIGHT_MODEL_MIN_M = 2.5
 # Batch size for the tiny CNN; 512 crops is ~18 MB of input on device.
 DEFAULT_HEIGHT_BATCH = 512
