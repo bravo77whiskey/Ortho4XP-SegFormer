@@ -141,6 +141,11 @@ cfg_app_vars = {
         "default": "",
         "hint": "Folder holding the canopy-height model (several GB, downloaded on first use). Leave empty to keep it in _canopy_height inside the overlay cache.",
     },
+    "overlay_tensorrt": {
+        "type": bool,
+        "default": True,
+        "hint": "Run the landcover SegFormer and HeightNet through NVIDIA TensorRT (fp16) in the building and vegetation overlays: about a third faster, practically the same output. The tensorrt and onnx packages install into the overlay venv on the first overlay run; each model's engine is then built once for this GPU (a few minutes) and kept in Overlay_cache/_tensorrt. Without an NVIDIA GPU, or if anything fails, the models run in torch as before.",
+    },
     "remote_gpu_root": {
         "type": str,
         "default": "",
@@ -960,6 +965,7 @@ list_app_vars = [
     "overlay_temp_dir",
     "canopy_model_dir",
     "remote_gpu_root",
+    "overlay_tensorrt",
 ]
 
 # Folders on this machine, shown with a folder picker.
@@ -1237,7 +1243,7 @@ app_settings_sections = (
                 "http_timeout", "max_connect_retries", "max_baddata_retries")),
     )),
     ("Overlays", (
-        (None, ("ovl_exclude_pol", "ovl_exclude_net")),
+        (None, ("ovl_exclude_pol", "ovl_exclude_net", "overlay_tensorrt")),
     )),
     ("Folders", (
         (None, ("custom_scenery_dir", "custom_overlay_src", "custom_overlay_src_alternate",

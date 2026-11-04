@@ -257,8 +257,13 @@ def load_height_model(checkpoint_path=None, device=None):
         head_layout = "ordinal"
         scalar_layout = V2_SCALAR_LAYOUT
     model.load_state_dict(state_dict, strict=True)
+    model.eval()
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    model._o4_tensorrt = None
+    if str(device).startswith("cuda") and arch != "v1-legacy" and _fp16_enabled():
+        model._o4_tensorrt = _tensorrt_engine(
+            model, path, arch, crop_px, len(_encode_scalars(100.0, 10.0, 0.5, scalar_layout)))
     if str(device).startswith("cuda"):
         with GPUB.step("load heightnet"):
             model.to(device)
@@ -403,6 +408,27 @@ def _detection_crop(image, det, m_per_px, half_px, crop_px, scalar_layout):
     return crop, _encode_scalars(area_m2, long_m, m_per_px, scalar_layout)
 
 
+def _tensorrt_engine(model, path, arch, crop_px, n_scalars):
+    """TensorRT fp16 engine for the fp32 CPU ``model`` (O4_TensorRT), or None."""
+    import torch
+    import O4_TensorRT as TRT
+
+    B = DEFAULT_HEIGHT_BATCH
+
+    def export(onnx_path):
+        torch.onnx.export(model, (torch.rand(B, 3, crop_px, crop_px), torch.rand(B, n_scalars)),
+                          onnx_path, input_names=["image", "scalars"], output_names=["height"],
+                          opset_version=17, dynamo=False)
+
+    st = os.stat(path)
+    source = (f"{os.path.realpath(path)}|{st.st_size}|{st.st_mtime_ns}"
+              f"|{B}x3x{crop_px}x{crop_px}+{n_scalars}")
+    runner = TRT.engine(f"heightnet_{arch}", source, export)
+    if runner is not None:
+        print("HeightNet heights: running through TensorRT (fp16 engine)")
+    return runner
+
+
 def _predict_heights_cuda(model, image, detections, m_per_px, batch_size, out,
                           half_px, crop_px, scalar_layout, device):
     """GPU path of :func:`predict_detection_heights`, same batches and maths.
@@ -419,6 +445,7 @@ def _predict_heights_cuda(model, image, detections, m_per_px, batch_size, out,
     if batch_size <= 0:
         raise ValueError("HeightNet batch_size must be positive")
     use_fp16 = _fp16_enabled()
+    trt_engine = getattr(model, "_o4_tensorrt", None) if use_fp16 else None
     n = len(detections)
     valid_idx = []
     preds = []
@@ -446,8 +473,11 @@ def _predict_heights_cuda(model, image, detections, m_per_px, batch_size, out,
             imgs = imgs.permute(0, 3, 1, 2).float().div_(divisor)
             scal = torch.from_numpy(
                 np.asarray(scalars, dtype=np.float32)).to(device)
-            with torch.autocast("cuda", dtype=torch.float16, enabled=use_fp16):
-                pending = model(imgs, scal)
+            if trt_engine is not None:
+                pending = trt_engine(imgs, scal)
+            else:
+                with torch.autocast("cuda", dtype=torch.float16, enabled=use_fp16):
+                    pending = model(imgs, scal)
             valid_idx.extend(idx)
     if not valid_idx:
         return out

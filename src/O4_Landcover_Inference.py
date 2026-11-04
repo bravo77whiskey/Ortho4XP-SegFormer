@@ -386,14 +386,7 @@ def _prepare_cuda_inference_tensor(t, torch):
     return t
 
 
-def _optimize_model_for_inference(model, device):
-    """Apply CUDA inference optimizations in one place."""
-    import torch
-
-    model = model.to(device).eval()
-    if not (hasattr(device, 'type') and device.type == 'cuda'):
-        return model
-
+def _set_cuda_backend_flags(torch):
     try:
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -403,6 +396,17 @@ def _optimize_model_for_inference(model, device):
     except Exception:
         pass
 
+
+def _optimize_model_for_inference(model, device):
+    """Apply CUDA inference optimizations in one place."""
+    import torch
+
+    model = model.to(device).eval()
+    if not (hasattr(device, 'type') and device.type == 'cuda'):
+        return model
+
+    _set_cuda_backend_flags(torch)
+
     if segformer_channels_last:
         try:
             model = model.to(memory_format=torch.channels_last)
@@ -410,6 +414,58 @@ def _optimize_model_for_inference(model, device):
             print(f"[SegFormer] channels-last model layout disabled: {exc}")
 
     return model
+
+
+_TRT_BATCH = 8   # engine batch; larger inference batches run in chunks
+
+
+class _TensorRTSegformer:
+    """The SegFormer through a TensorRT fp16 engine (O4_TensorRT), called like
+    the torch model: ``model(pixel_values=t).logits``."""
+
+    class _Out:
+        def __init__(self, logits):
+            self.logits = logits
+
+    def __init__(self, runner, config):
+        self.runner = runner
+        self.config = config
+
+    def __call__(self, pixel_values):
+        return self._Out(self.runner(pixel_values))
+
+    def eval(self):
+        return self
+
+
+def _tensorrt_model(model):
+    """TensorRT stand-in for the freshly loaded fp32 ``model``, or None."""
+    import torch
+    import O4_TensorRT as TRT
+
+    P = segformer_patch_size
+
+    class Logits(torch.nn.Module):
+        def __init__(self, m):
+            super().__init__()
+            self.m = m
+
+        def forward(self, x):
+            return self.m(pixel_values=x).logits
+
+    def export(path):
+        torch.onnx.export(Logits(model).eval(), torch.randn(_TRT_BATCH, 3, P, P), path,
+                          input_names=["pixel_values"], output_names=["logits"],
+                          opset_version=17, dynamo=False)
+
+    source = (f"{_MODEL_VEG_REPO}@{getattr(model.config, '_commit_hash', None)}"
+              f"|{_TRT_BATCH}x3x{P}x{P}")
+    runner = TRT.engine("segformer_landcover", source, export, half_io=True)
+    if runner is None:
+        return None
+    _set_cuda_backend_flags(torch)
+    print("[SegFormer] Running through TensorRT (fp16 engine).")
+    return _TensorRTSegformer(runner, model.config)
 
 
 def load_vegetation_model(device=None):
@@ -434,11 +490,13 @@ def load_vegetation_model(device=None):
         image_mean=[0.485, 0.456, 0.406],
         image_std=[0.229, 0.224, 0.225],
     )
-    _model_veg = SegformerForSemanticSegmentation.from_pretrained(_MODEL_VEG_REPO)
-    if device.type == 'cuda':
-        _model_veg = _model_veg.half()
-    with GPUB.step("load segformer"):
-        _model_veg = _optimize_model_for_inference(_model_veg, device)
+    model = SegformerForSemanticSegmentation.from_pretrained(_MODEL_VEG_REPO)
+    _model_veg = _tensorrt_model(model) if device.type == 'cuda' else None
+    if _model_veg is None:
+        if device.type == 'cuda':
+            model = model.half()
+        with GPUB.step("load segformer"):
+            _model_veg = _optimize_model_for_inference(model, device)
     print("[SegFormer] Inference model ready.")
     return _model_veg, _processor_veg, device
 

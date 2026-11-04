@@ -51,6 +51,14 @@ def _overlay_leaf_type_cache_dir():
         return os.path.join(PCACHE.cache_root(_exe_dir), '_leaf_type')
 
 
+def _overlay_tensorrt_cache_dir():
+    try:
+        import O4_File_Names as FNAMES
+        return os.path.join(FNAMES.Overlay_cache_dir, '_tensorrt')
+    except Exception:
+        return os.path.join(PCACHE.cache_root(_exe_dir), '_tensorrt')
+
+
 # Persistent sidecar caches written under the per-tile overlay cache dir by
 # PCACHE.load_or_build() / ensure_cached_dsf_text() (parsed OSM, mesh-water
 # index, disassembled DSF text, OBJ8 bounds). Unlike the per-DDS inference
@@ -187,6 +195,15 @@ def _app_setting(name):
         return (getattr(CFG, name, "") or "").strip()
     except Exception:
         return ""
+
+
+def _app_flag(name, default):
+    """Return a boolean application setting, or ``default`` outside the GUI."""
+    try:
+        import O4_Config_Utils as CFG
+        return bool(getattr(CFG, name, default))
+    except Exception:
+        return default
 
 
 # ── Single shared virtual environment ────────────────────────────────────────
@@ -522,6 +539,9 @@ def _run_venv(code):
         value = _app_setting(setting)
         if value:
             env[var] = value
+    # an O4_TENSORRT / O4_TENSORRT_DIR already in the environment wins
+    env.setdefault("O4_TENSORRT", "1" if _app_flag("overlay_tensorrt", True) else "0")
+    env.setdefault("O4_TENSORRT_DIR", _overlay_tensorrt_cache_dir())
     if sys.platform.startswith('win') and os.environ.get(
         "O4_OVERLAY_SELF_NOTHROTTLE", ""
     ).strip().lower() not in ("0", "false", "no", "off"):
@@ -656,11 +676,48 @@ def _auto_setup():
     print("[Overlay] Checking the overlay environment …", flush=True)
     if _deps_ready():
         print("[Overlay] Environment ready.", flush=True)
+        _ensure_tensorrt()
         return True
     print("[Overlay] Required packages not found in .venv — running automatic setup …")
     print("[Overlay] (This is a one-time operation; subsequent runs start immediately.)")
     setup_overlay_models()
-    return _deps_ready()
+    if not _deps_ready():
+        return False
+    _ensure_tensorrt()
+    return True
+
+
+# Tested together (docs/model_size_study_2026-11.md); onnx exports the models
+# for the engine build. O4_TensorRT falls back to torch without them.
+_TENSORRT_PACKAGES = ("tensorrt-cu12==10.9.0.34", "onnx==1.17.0")
+_tensorrt_checked = False
+
+
+def _ensure_tensorrt():
+    """Install TensorRT into .venv once, if the overlay_tensorrt setting is on
+    and there is an NVIDIA GPU. Never fails the overlay run."""
+    global _tensorrt_checked
+    if _tensorrt_checked or not _app_flag("overlay_tensorrt", True):
+        return
+    _tensorrt_checked = True
+    if sys.platform == "darwin":
+        return
+    try:
+        ret = subprocess.call(
+            [_venv_python(), '-c',
+             'import importlib.util as u, sys; '
+             'sys.exit(0 if u.find_spec("tensorrt") and u.find_spec("onnx") else 1)'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_no_window())
+        if ret == 0 or _detect_torch_index_url()[1] == 'cpu':
+            return
+        print("[Overlay Setup] Installing TensorRT into .venv (one-time, ~1.5 GB download) …",
+              flush=True)
+        _pip_install(*_TENSORRT_PACKAGES)
+        print("[Overlay Setup] TensorRT installed; each model's engine is built on first use.",
+              flush=True)
+    except Exception as exc:
+        print(f"[Overlay Setup] TensorRT not installed ({exc}); the models run in torch.",
+              flush=True)
 
 
 def veg_replacement_root():

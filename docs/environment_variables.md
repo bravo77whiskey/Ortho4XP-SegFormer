@@ -27,7 +27,9 @@ Until the cleanup in [CHANGELOG.md](../CHANGELOG.md) these were all named
 | `O4_BLD_YOLO_ENABLED` | setting | Overrides `bld_yolo_enabled` |
 | `O4_BLD_YOLO_ALLOW_MISSING` | off | Carry on without the building detector when its checkpoint is missing |
 | `O4_BLD_HEIGHT_ENABLED` | on | `0` skips HeightNet and uses class-default heights |
-| `O4_BLD_HEIGHT_FP16` | on | `0` runs HeightNet in fp32 (exact numbers for parity A/B runs) |
+| `O4_BLD_HEIGHT_FP16` | on | `0` runs HeightNet in fp32 (exact numbers for parity A/B runs); also skips its TensorRT engine |
+| `O4_TENSORRT` | setting | `0` runs SegFormer and HeightNet in torch instead of TensorRT fp16 engines; set from `overlay_tensorrt` |
+| `O4_TENSORRT_DIR` | `Overlay_cache/_tensorrt` | Where the TensorRT engines are built and kept |
 | `O4_BLD_YOLO_BATCH` | 1 | Building detector batch size; values above 1 change borderline detections |
 | `O4_STOCK_YOLO_BATCH` | 1 | Stock YOLO batch size; same caveat |
 | `O4_BLD_YOLO_FUSE` | off | Fuse detector layers before inference; changes borderline detections |
