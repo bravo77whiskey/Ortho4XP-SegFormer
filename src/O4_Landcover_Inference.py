@@ -581,7 +581,10 @@ def run_inference(model, device, img_rgb, processor=None, tree_support=False, tr
         return (cls_map, None) if tree_support else cls_map
     if getattr(device, 'type', None) != 'cuda':
         return _run_inference(model, device, img_rgb, processor, tree_support, tree_prob)
-    return GPUB.call("segformer", _run_inference, model, device, img_rgb,
+    # the engine needs far less VRAM than the torch model; a label of its own
+    # keeps the torch measurement from booking for it
+    label = "segformer trt" if isinstance(model, _TensorRTSegformer) else "segformer"
+    return GPUB.call(label, _run_inference, model, device, img_rgb,
                      processor, tree_support, tree_prob)
 
 

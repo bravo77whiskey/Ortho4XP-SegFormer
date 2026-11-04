@@ -156,6 +156,33 @@ class BudgetTest(unittest.TestCase):
                 self.assertLess(time.monotonic() - t0, 2.0)
                 self.assertLessEqual(self.cuda.fraction * TOTAL, 2048 * MB + 1)
 
+    def _cache_elsewhere(self, nbytes):
+        """Cache another live process holds and could hand back."""
+        with GPUB._ledger() as led:
+            led["procs"][str(os.getppid())] = {"alloc": 0, "reserved": int(nbytes),
+                                               "t": time.time()}
+
+    def test_small_cache_elsewhere_does_not_hold_up_a_step_it_cannot_help(self):
+        # 2 GB above the reserve, another process caches 200 MB: even handed
+        # back it leaves a 3 GB step short, so the step goes ahead after the
+        # give-back time instead of the full hopeless wait
+        self.cuda.free = 3 * 1024 * MB
+        self._cache_elsewhere(200 * MB)
+        with mock.patch.object(GPUB, "GIVE_BACK_S", 0.2), \
+                mock.patch.object(GPUB, "HOPELESS_S", 30.0):
+            t0 = time.monotonic()
+            with GPUB.step("probe", need_mb=3072):
+                self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_cache_elsewhere_that_would_close_the_gap_is_waited_for(self):
+        self.cuda.free = 3 * 1024 * MB
+        self._cache_elsewhere(3 * 1024 * MB)
+        with mock.patch.object(GPUB, "GIVE_BACK_S", 0.1), \
+                mock.patch.object(GPUB, "HOPELESS_S", 0.6):
+            t0 = time.monotonic()
+            with GPUB.step("probe", need_mb=3072):
+                self.assertGreaterEqual(time.monotonic() - t0, 0.5)
+
     def test_step_is_capped_at_its_booking(self):
         with GPUB.step("probe", need_mb=512):
             cap = self.cuda.fraction * TOTAL

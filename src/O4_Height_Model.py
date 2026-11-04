@@ -338,8 +338,9 @@ def predict_detection_heights(model, image, detections, m_per_px,
 
     device = getattr(model, "_o4_device", "cpu")
     if str(device).startswith("cuda"):
+        trt = getattr(model, "_o4_tensorrt", None) is not None and _fp16_enabled()
         return GPUB.call(
-            "heightnet", _predict_heights_cuda,
+            "heightnet trt" if trt else "heightnet", _predict_heights_cuda,
             model, image, detections, m_per_px, batch_size, out,
             half_px, crop_px, scalar_layout, device,
         )

@@ -372,11 +372,13 @@ def _admit(torch, label, need_mb, floor_bytes=0):
                     alone_since = None
                 elif alone_since is None:
                     alone_since = now
-                # nothing running and no cache elsewhere to hand back (after
-                # the watchers had a moment to see us): waiting cannot help
+                # nothing running, and the cache other processes could hand
+                # back (after the watchers had a moment to see us) would not
+                # close the gap either: waiting cannot help
                 stuck = (alone_since is not None and since is not None
                          and time.time() - since >= GIVE_BACK_S
-                         and _spare_elsewhere(led) < 64 * MB)
+                         and (_spare_elsewhere(led) < 64 * MB
+                              or want > head + _spare_elsewhere(led)))
                 hopeless = stuck or (alone_since is not None and now - alone_since >= HOPELESS_S)
                 if want <= head - ahead or (hopeless and not ahead):
                     grant = want if want <= head else max(0, head)

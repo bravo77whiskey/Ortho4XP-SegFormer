@@ -66,5 +66,47 @@ class LockTests(unittest.TestCase):
         self.assertTrue(TRT._take_lock(self.lock))
 
 
+class BookingLabelTests(unittest.TestCase):
+    """Engines book VRAM under their own label, so the VRAM guard measures
+    them apart from the torch models they replace."""
+
+    def _label(self, module, fn):
+        with mock.patch.object(module.GPUB, "call", return_value="ok") as call:
+            fn()
+        return call.call_args[0][0]
+
+    def test_segformer_engine_has_its_own_label(self):
+        import O4_Landcover_Inference as INF
+        cuda = mock.Mock(type="cuda")
+        img = mock.Mock()
+        trt_model = INF._TensorRTSegformer(mock.Mock(), mock.Mock())
+        self.assertEqual(
+            self._label(INF, lambda: INF.run_inference(trt_model, cuda, img)), "segformer trt")
+        self.assertEqual(
+            self._label(INF, lambda: INF.run_inference(mock.Mock(), cuda, img)), "segformer")
+
+    def test_heightnet_engine_has_its_own_label(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("torch not installed")
+        import numpy as np
+        import O4_Height_Model as HEIGHT
+
+        def predict(model):
+            HEIGHT.predict_detection_heights(model, np.zeros((8, 8, 3), np.uint8),
+                                             [mock.Mock()], 0.5)
+
+        model = mock.Mock(_o4_device="cuda", _o4_tensorrt=mock.Mock(),
+                          _o4_window_m=HEIGHT.WINDOW_M, _o4_crop_px=HEIGHT.CROP_PX,
+                          _o4_scalar_layout=HEIGHT.LEGACY_SCALAR_LAYOUT)
+        with mock.patch.object(HEIGHT, "_fp16_enabled", return_value=True):
+            self.assertEqual(self._label(HEIGHT, lambda: predict(model)), "heightnet trt")
+        with mock.patch.object(HEIGHT, "_fp16_enabled", return_value=False):
+            self.assertEqual(self._label(HEIGHT, lambda: predict(model)), "heightnet")
+        model._o4_tensorrt = None
+        self.assertEqual(self._label(HEIGHT, lambda: predict(model)), "heightnet")
+
+
 if __name__ == "__main__":
     unittest.main()
