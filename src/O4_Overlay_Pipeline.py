@@ -318,6 +318,8 @@ def _veg_tree_env():
         "O4_VEG_UPSCALE_TREES": "1" if veg_upscale_gap_trees else "0",
         "O4_VEG_OSM_RESCUE_RANGELAND": "1" if veg_osm_rescue_rangeland else "0",
         "O4_VEG_TEXTURE_DENSITY": "1" if veg_texture_density else "0",
+        "O4_VEG_DENSITY_HALF": "1" if veg_density_half_res else "0",
+        "O4_CANOPY_SDPA": "1" if veg_canopy_fast_attention else "0",
     }
 
 
@@ -342,6 +344,7 @@ veg_canopy        = True    # ZL18/19 trees from canopy height on the ortho
 veg_canopy_min_conf = 0.2   # 0 = mean height >= 2 m
 veg_canopy_seg_min_h_m = 0.25  # 0 = off
 veg_canopy_add_min_h_m = 0.1   # ZL18/19 canopy trees added outside airports; 0 = off
+veg_canopy_fast_attention = True  # canopy model attention through the fused kernel
 veg_forest_holes  = True
 veg_point_tree_max_cells = 2.0   # in grid cells of the forest's own spacing
 veg_hole_certain_cells = 1.0
@@ -354,6 +357,7 @@ veg_tropics_evergreen = True  # no autumn colours between the tropics
 veg_upscale_gap_trees = True   # below ZL16 only: add the trees SegFormer finds on the texture enlarged 2x
 veg_osm_rescue_rangeland = True  # trees on SegFormer rangeland inside OSM forests
 veg_texture_density = True  # forest density from the texture instead of one fixed value
+veg_density_half_res = True  # that density worked out at half resolution
 veg_avoid_gfv2    = False
 veg_gfv2_buffer_m = 0.0
 veg_use_gfv2_asset_proximity = False

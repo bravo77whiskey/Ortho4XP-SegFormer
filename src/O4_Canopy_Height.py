@@ -229,7 +229,7 @@ class _HeightNet:
 
 
 def _sdpa_enabled():
-    """O4_CANOPY_SDPA=0: the vendored network's own softmax attention."""
+    """Setting veg_canopy_fast_attention, passed in as O4_CANOPY_SDPA; 0 = the vendored attention."""
     value = os.environ.get("O4_CANOPY_SDPA", "").strip().lower()
     return value not in {"0", "false", "no", "off"}
 

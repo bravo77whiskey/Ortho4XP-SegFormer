@@ -3724,7 +3724,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             covered_fracs=_covered_fracs,
             airport_sig=(airport_sig, approach_sig),
             lowzoom_sig=lowzoom_sig,
-            density_sig=DENSITY.SIGNATURE if tree_prob is not None else None,
+            density_sig=DENSITY.signature() if tree_prob is not None else None,
         )
         _poly_cached = None
         if not disable_cache:

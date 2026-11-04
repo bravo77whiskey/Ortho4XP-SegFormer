@@ -96,10 +96,12 @@ class CoverTests(unittest.TestCase):
         img = cv2.GaussianBlur(rng.integers(20, 200, (800, 800, 3), dtype=np.uint8), (0, 0), 6)
         mask = (cv2.GaussianBlur(rng.random((800, 800)).astype(np.float32), (0, 0), 20) > 0.5).astype(np.uint8)
         prob = (rng.random((200, 200)) * 255).astype(np.uint8)
-        with mock.patch.object(DENSITY, "WORK_SCALE", 1):
+        with mock.patch.dict(os.environ, {"O4_VEG_DENSITY_HALF": "0"}):
             full = DENSITY.cover_map(img, prob, mask, 2.0)
-        with mock.patch.object(DENSITY, "WORK_SCALE", 2):
+            full_sig = DENSITY.signature()
+        with mock.patch.dict(os.environ, {"O4_VEG_DENSITY_HALF": "1"}):
             half = DENSITY.cover_map(img, prob, mask, 2.0)
+            self.assertNotEqual(DENSITY.signature(), full_sig)
         self.assertEqual(half.shape, mask.shape)
         on = mask > 0
         bands_full = DENSITY.density_bands(full, mask)[on].astype(int)

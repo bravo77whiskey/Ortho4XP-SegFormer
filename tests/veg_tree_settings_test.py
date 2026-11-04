@@ -34,6 +34,8 @@ NEW_VARS = (
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
     "veg_texture_density",
+    "veg_density_half_res",
+    "veg_canopy_fast_attention",
 )
 
 
@@ -99,6 +101,19 @@ class TreeSettingsTests(unittest.TestCase):
             self.assertIsNone(VEG._canopy_seg_min_h())
             self.assertIsNone(VEG._canopy_add_min_h())
             self.assertFalse(VEG._forest_holes_enabled())
+
+
+class SpeedSettingTests(unittest.TestCase):
+    def test_speed_settings_reach_density_and_canopy(self):
+        import O4_Canopy_Height as CANOPY
+        import O4_Veg_Density as DENSITY
+
+        for on in (True, False):
+            env = TreeSettingsTests._env_for(self, veg_density_half_res=on,
+                                             veg_canopy_fast_attention=on)
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(DENSITY.work_scale(), DENSITY.HALF_RES_SCALE if on else 1)
+                self.assertEqual(CANOPY._sdpa_enabled(), on)
 
 
 class UpscaleGapTreeTests(unittest.TestCase):

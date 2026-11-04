@@ -585,6 +585,15 @@ cfg_tile_vars = {
                 "courtyard trees and gully tree lines; trees it puts on "
                 "buildings or roads are cut by the exclusions. 0 turns it off.",
     },
+    "veg_canopy_fast_attention": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_can_fast",
+        "hint": "Run the canopy model's attention through PyTorch's fused "
+                "kernel: about 15 % faster per ZL18/19 texture, with the same "
+                "trees to within a few pixels at their edges. Off runs the "
+                "model exactly as Meta published it.",
+    },
     "veg_forest_holes": {
         "type": bool,
         "default": True,
@@ -681,6 +690,15 @@ cfg_tile_vars = {
                 "The densest forest gets veg_density (auto: 90 %), nothing gets "
                 "denser. Tree rows and single trees are unchanged. Not available "
                 "with remote GPU inference.",
+    },
+    "veg_density_half_res": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_den_half",
+        "hint": "Work out veg_texture_density at half the texture's resolution: "
+                "about 3x faster, and since the density is averaged over 32 m "
+                "anyway, 97-99 % of the forest keeps the same density band. Off "
+                "works at full resolution.",
     },
     "veg_upscale_gap_trees": {
         "type": bool,
@@ -1067,6 +1085,7 @@ list_veg_vars = [
     "veg_canopy_min_conf",
     "veg_canopy_seg_min_h_m",
     "veg_canopy_add_min_h_m",
+    "veg_canopy_fast_attention",
     "veg_forest_holes",
     "veg_point_tree_max_cells",
     "veg_hole_certain_cells",
@@ -1078,6 +1097,7 @@ list_veg_vars = [
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
     "veg_texture_density",
+    "veg_density_half_res",
     "veg_res_m",
     "grass_enabled",
     "grass_airport_buffer_m",
@@ -1217,9 +1237,10 @@ settings_sections = (
         ("Tree mask", ("veg_density", "veg_close_m", "veg_open_m", "veg_min_area_m2",
                        "veg_simplify_m", "veg_excl_buffer_m", "veg_res_m",
                        "veg_upscale_gap_trees", "veg_osm_rescue_rangeland",
-                       "veg_texture_density")),
+                       "veg_texture_density", "veg_density_half_res")),
         ("Canopy model (ZL18+)", ("veg_canopy", "veg_canopy_min_conf",
-                                  "veg_canopy_seg_min_h_m", "veg_canopy_add_min_h_m")),
+                                  "veg_canopy_seg_min_h_m", "veg_canopy_add_min_h_m",
+                                  "veg_canopy_fast_attention")),
         ("Forest shape and height", ("veg_forest_holes", "veg_point_tree_max_cells",
                                      "veg_hole_certain_cells", "veg_hole_unsure_cells",
                                      "veg_tree_sizes", "veg_forest_heights",

@@ -15,14 +15,24 @@ import os
 import cv2
 import numpy as np
 
-# cover_map works on a grid WORK_SCALE times coarser than the mask, then scales
-# back up: the cover is smoothed over COVER_SIGMA_M (32 m) anyway. At 2x it is
-# ~3x faster and 97-99 % of tree pixels keep their band, none moves two bands
-# (hotspots, 2026-11-04). O4_VEG_DENSITY_HALF=0 computes at the mask's size.
-WORK_SCALE = (1 if os.environ.get("O4_VEG_DENSITY_HALF", "").strip().lower()
-              in {"0", "false", "no", "off"} else 2)
+# cover_map works on a grid HALF_RES_SCALE times coarser than the mask, then
+# scales back up: the cover is smoothed over COVER_SIGMA_M (32 m) anyway. At 2x
+# it is ~3x faster and 97-99 % of tree pixels keep their band, none moves two
+# bands (hotspots, 2026-11-04). Setting veg_density_half_res, passed in as
+# O4_VEG_DENSITY_HALF; off computes at the mask's size.
+HALF_RES_SCALE = 2
+BASE_SIGNATURE = "density-v2"
 
-SIGNATURE = "density-v2" if WORK_SCALE == 1 else f"density-v2-scale{WORK_SCALE}"
+
+def work_scale():
+    value = os.environ.get("O4_VEG_DENSITY_HALF", "").strip().lower()
+    return 1 if value in {"0", "false", "no", "off"} else HALF_RES_SCALE
+
+
+def signature():
+    """Cache signature: changes with the working resolution."""
+    k = work_scale()
+    return BASE_SIGNATURE if k == 1 else f"{BASE_SIGNATURE}-scale{k}"
 
 UNMIX_WEIGHT = 0.5
 SOLID_RADIUS_M = 200.0
@@ -121,7 +131,7 @@ def cover_map(img, tree_prob, mask, m_per_px, not_ground=None):
     ``tree_prob`` is P(tree) as uint8 at any size; ``img`` the RGB texture.
     """
     full_h, full_w = mask.shape
-    k = WORK_SCALE
+    k = work_scale()
     if k > 1 and min(full_h, full_w) >= 64 * k:
         size = (full_w // k, full_h // k)
         mask = cv2.resize(mask.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST)
