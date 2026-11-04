@@ -1,4 +1,4 @@
-"""Option G routing and native RGB regression checks, with no model loading."""
+"""Texture tree check (ZL16+) routing and native RGB regression checks, with no model loading."""
 from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from pathlib import Path

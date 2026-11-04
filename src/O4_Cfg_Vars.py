@@ -668,8 +668,9 @@ cfg_tile_vars = {
                 "trees where SegFormer sees rangeland that looks like canopy in "
                 "the ortho (dark green): it calls whole wooded hillsides "
                 "rangeland. Grass, scrub, bare ground, buildings and roads "
-                "stay open. ZL16/17 use option G: RGB texture fill within "
-                "SegFormer forest and rangeland zones.",
+                "stay open. ZL16/17 don't use this: there the texture itself is "
+                "checked for green, leafy-looking patches, which are planted "
+                "along with SegFormer's forest.",
     },
     "veg_texture_density": {
         "type": bool,
@@ -685,12 +686,13 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "veg_upscale_trees",
-        "hint": "Legacy support below ZL16: run SegFormer a second time on each texture enlarged 2x "
+        "hint": "Textures below ZL16 only: run SegFormer a second time on each texture enlarged 2x "
                 "and add the trees it finds there: tree clumps and orchards "
                 "between fields and garden and street trees that the normal "
                 "pass gives to the fields or houses. About 4x the vegetation "
-                "inference time. ZL16/17 instead use option G: RGB texture fill "
-                "within SegFormer forest and rangeland zones, without this extra pass.",
+                "inference time. Has no effect from ZL16 up: there the texture "
+                "itself is checked for green, leafy-looking patches, which are "
+                "planted along with SegFormer's forest, with no extra pass.",
     },
     "veg_tropics_evergreen": {
         "type": bool,

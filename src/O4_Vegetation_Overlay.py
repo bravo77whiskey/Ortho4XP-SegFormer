@@ -7,8 +7,9 @@ Pipeline
 --------
 1. Discover ZL16 DDS files in tex_dir
 2. Load cached SegFormer veg_map per DDS at native resolution (~2.4 m/px at ZL16)
-3. ZL16/17: option G (RGB F inside SegFormer forest/rangeland); other zooms:
-   existing SegFormer / canopy tree detection
+3. ZL16 and up: texture tree check (O4_Veg_Lowzoom: green, leafy-looking
+   pixels of the ortho) plus SegFormer forest, and at ZL18+ also canopy
+   trees; below ZL16: SegFormer tree detection
 4. Other zooms: morphological close → open (kernel sizes in metres)
 5. Vectorise (OpenCV contours) → Douglas-Peucker → lat/lon polygons
 6. Per polygon: shape ratio → area-fill | treeline
@@ -547,8 +548,10 @@ def _veg_infer_factor(zl):
 # probability. Read again enlarged UPSCALE_FACTOR times, the same model sees
 # many of them as trees while green crops stay fields (review set,
 # 2026-10-19: +3.5-6 % of a texture). Those trees are added to the tree mask
-# and win over the 1x building / road / developed exclusion. ~4x the ZL16
+# and win over the 1x building / road / developed exclusion. ~4x the
 # vegetation inference time (cfg veg_upscale_gap_trees).
+# Since the texture tree check (O4_Veg_Lowzoom) took over ZL16 and up, this
+# pass only runs on textures below ZL16; UPSCALE_MAX_ZL is the upper cap.
 UPSCALE_FACTOR = 2
 UPSCALE_MAX_ZL = 16
 
@@ -569,7 +572,7 @@ def _load_shared_npy(path, attempts=20, delay_s=0.25):
 
 
 def _upscale_gap_trees_enabled():
-    """O4_VEG_UPSCALE_TREES=0: no second SegFormer pass on ZL16 textures enlarged 2x."""
+    """O4_VEG_UPSCALE_TREES=0: no second SegFormer pass on textures below ZL16 enlarged 2x."""
     return _veg_flag("O4_VEG_UPSCALE_TREES")
 
 
@@ -3270,7 +3273,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                     img = _load_source_image(fname, _source_mode, _orthophoto_dir)
                     timings['dds_load'] += time.perf_counter() - _t
                 if img is None:
-                    print(f"    [Veg] {fname}: option G needs source RGB; texture skipped", flush=True)
+                    print(f"    [Veg] {fname}: the texture tree check needs the source image, which could not be read; texture skipped", flush=True)
                     if disable_cache:
                         _remove_cache_files(_dds_cache_files)
                     continue

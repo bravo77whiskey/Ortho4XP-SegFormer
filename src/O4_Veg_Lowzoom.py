@@ -1,4 +1,9 @@
-"""RGB option F merged with SegFormer forest, for ZL16 and up.
+"""Texture tree check merged with SegFormer forest, for ZL16 and up.
+
+Marks pixels of the ortho that look like tree canopy: green, with uneven
+leafy texture, and not in the long parallel lines of crop rows. (The
+2026-10-20 experiment called this RGB "option F", and its merge with SegFormer
+"option G"; see experiments/veg_rgb_lowzoom_20261020/REPORT.md.)
 
 Uses native RGB and the existing land-cover map, with no extra inference or
 downloads. RGB plants wherever its checks pass, so forest SegFormer calls
