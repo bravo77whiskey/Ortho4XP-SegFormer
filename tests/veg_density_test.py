@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import cv2
 import numpy as np
 
 
@@ -36,7 +37,7 @@ class CoverTests(unittest.TestCase):
         mask = np.zeros((400, 400), np.uint8)
         mask[:, :300] = 1
         zeros = np.zeros((100, 100), np.uint8)
-        with mock.patch.object(DENSITY, "solidity", return_value=np.zeros((400, 400), np.float32)):
+        with mock.patch.object(DENSITY, "solidity", side_effect=lambda m, *a, **k: np.zeros(m.shape, np.float32)):
             cover = DENSITY.cover_map(self._texture(), zeros, mask, 2.0)
         self.assertAlmostEqual(float(cover[200, 40]), DENSITY.UNMIX_WEIGHT, delta=0.02)
         self.assertLess(cover[200, 280], cover[200, 40] - 0.1)
@@ -63,7 +64,7 @@ class CoverTests(unittest.TestCase):
         water = np.zeros((400, 400), bool)
         water[:, 200:] = True
         zeros = np.zeros((100, 100), np.uint8)
-        with mock.patch.object(DENSITY, "solidity", return_value=np.zeros((400, 400), np.float32)):
+        with mock.patch.object(DENSITY, "solidity", side_effect=lambda m, *a, **k: np.zeros(m.shape, np.float32)):
             cover = DENSITY.cover_map(img, zeros, mask, 2.0, not_ground=water)
         self.assertAlmostEqual(float(cover[200, 60]), DENSITY.UNMIX_WEIGHT, delta=0.02)
 
@@ -89,6 +90,22 @@ class CoverTests(unittest.TestCase):
         values = [DENSITY.band_density(b) for b in range(1, len(DENSITY.BAND_COVER) + 1)]
         self.assertEqual(values, sorted(values))
         self.assertEqual(len(DENSITY.BAND_COVER), len(DENSITY.BAND_EDGES) + 1)
+
+    def test_coarse_grid_keeps_size_and_bands(self):
+        rng = np.random.default_rng(1)
+        img = cv2.GaussianBlur(rng.integers(20, 200, (800, 800, 3), dtype=np.uint8), (0, 0), 6)
+        mask = (cv2.GaussianBlur(rng.random((800, 800)).astype(np.float32), (0, 0), 20) > 0.5).astype(np.uint8)
+        prob = (rng.random((200, 200)) * 255).astype(np.uint8)
+        with mock.patch.object(DENSITY, "WORK_SCALE", 1):
+            full = DENSITY.cover_map(img, prob, mask, 2.0)
+        with mock.patch.object(DENSITY, "WORK_SCALE", 2):
+            half = DENSITY.cover_map(img, prob, mask, 2.0)
+        self.assertEqual(half.shape, mask.shape)
+        on = mask > 0
+        bands_full = DENSITY.density_bands(full, mask)[on].astype(int)
+        bands_half = DENSITY.density_bands(half, mask)[on].astype(int)
+        self.assertGreater(np.mean(bands_full == bands_half), 0.9)
+        self.assertEqual(int(np.max(np.abs(bands_full - bands_half))), 1)
 
 
 class PolygonTests(unittest.TestCase):

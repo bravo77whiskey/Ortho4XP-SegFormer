@@ -159,6 +159,23 @@ class CanopyInferenceTests(unittest.TestCase):
         self.assertTrue(np.allclose(maps[0].astype(np.float32), 15.0, atol=0.1))
         self.assertTrue(np.allclose(maps[1:].astype(np.float32), 0.8, atol=0.01))
 
+    def test_sdpa_attention_matches_vendored_attention(self):
+        import O4_Canopy_Net as NET
+
+        torch.manual_seed(0)
+        block = NET.Attention(64, num_heads=4, qkv_bias=True).eval()
+        x = torch.randn(2, 17, 64)
+        with torch.no_grad():
+            ref = block(x)
+            out = CANOPY._sdpa_attention(block, x)
+        self.assertTrue(torch.allclose(ref, out, atol=1e-5))
+
+    def test_sdpa_switch(self):
+        with mock.patch.dict(os.environ, {"O4_CANOPY_SDPA": "0"}):
+            self.assertFalse(CANOPY._sdpa_enabled())
+        with mock.patch.dict(os.environ, {"O4_CANOPY_SDPA": ""}):
+            self.assertTrue(CANOPY._sdpa_enabled())
+
     def test_load_returns_none_without_cuda(self):
         logs = []
         with mock.patch.object(torch.cuda, "is_available", return_value=False):

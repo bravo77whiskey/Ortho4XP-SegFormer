@@ -10,10 +10,19 @@ forest the model misses (Shenzhen hills) is not a lawn or a grove. Models traine
 for tree cover did worse (OAM-TCD reads ~0 on real ZL16 textures). Scores and
 sheets: experiments/veg_density_20261102.
 """
+import os
+
 import cv2
 import numpy as np
 
-SIGNATURE = "density-v2"
+# cover_map works on a grid WORK_SCALE times coarser than the mask, then scales
+# back up: the cover is smoothed over COVER_SIGMA_M (32 m) anyway. At 2x it is
+# ~3x faster and 97-99 % of tree pixels keep their band, none moves two bands
+# (hotspots, 2026-11-04). O4_VEG_DENSITY_HALF=0 computes at the mask's size.
+WORK_SCALE = (1 if os.environ.get("O4_VEG_DENSITY_HALF", "").strip().lower()
+              in {"0", "false", "no", "off"} else 2)
+
+SIGNATURE = "density-v2" if WORK_SCALE == 1 else f"density-v2-scale{WORK_SCALE}"
 
 UNMIX_WEIGHT = 0.5
 SOLID_RADIUS_M = 200.0
@@ -111,6 +120,16 @@ def cover_map(img, tree_prob, mask, m_per_px, not_ground=None):
 
     ``tree_prob`` is P(tree) as uint8 at any size; ``img`` the RGB texture.
     """
+    full_h, full_w = mask.shape
+    k = WORK_SCALE
+    if k > 1 and min(full_h, full_w) >= 64 * k:
+        size = (full_w // k, full_h // k)
+        mask = cv2.resize(mask.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST)
+        if not_ground is not None:
+            not_ground = cv2.resize(not_ground.astype(np.uint8), size,
+                                    interpolation=cv2.INTER_NEAREST) > 0
+        img = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
+        m_per_px = m_per_px * full_w / size[0]
     h, w = mask.shape
     if img.shape[:2] != (h, w):
         img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
@@ -119,7 +138,10 @@ def cover_map(img, tree_prob, mask, m_per_px, not_ground=None):
     weight = UNMIX_WEIGHT + (1.0 - UNMIX_WEIGHT) * t * t * (3.0 - 2.0 * t)
     raw = prob + (1.0 - prob) * weight * unmix(img, mask, m_per_px, not_ground)
     m = (mask > 0).astype(np.float32)
-    return _blur_ratio(raw * m, m, COVER_SIGMA_M, m_per_px)
+    cover = _blur_ratio(raw * m, m, COVER_SIGMA_M, m_per_px)
+    if (h, w) != (full_h, full_w):
+        cover = cv2.resize(cover, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
+    return cover
 
 
 def density_bands(cover, mask):
