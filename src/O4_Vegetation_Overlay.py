@@ -553,6 +553,21 @@ UPSCALE_FACTOR = 2
 UPSCALE_MAX_ZL = 16
 
 
+def _load_shared_npy(path, attempts=20, delay_s=0.25):
+    """np.load a class map the building overlay may be replacing right now.
+
+    Windows refuses to open a file while os.replace swaps it in
+    (PermissionError), which used to fail the whole vegetation tile.
+    """
+    for attempt in range(attempts):
+        try:
+            return np.load(path)
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay_s)
+
+
 def _upscale_gap_trees_enabled():
     """O4_VEG_UPSCALE_TREES=0: no second SegFormer pass on ZL16 textures enlarged 2x."""
     return _veg_flag("O4_VEG_UPSCALE_TREES")
@@ -3083,7 +3098,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             _wait_for_bld_seg(cache_path)
         if (not disable_cache or use_bld_seg) and os.path.exists(cache_path):
             _t = time.perf_counter()
-            veg_map = np.load(cache_path)
+            veg_map = _load_shared_npy(cache_path)
             timings['cache_load'] += time.perf_counter() - _t
             img_h, img_w = veg_map.shape[:2]
             _t = time.perf_counter()
