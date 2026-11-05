@@ -48,7 +48,7 @@ FILL_PROVIDERS = {"BI": "GO2", "GO2": "BI"}
 # existing texture already matches the colour settings.  Bump MARK_VERSION when
 # the correction changes enough that existing textures should be redone.
 MARK = b"O4CC"
-MARK_VERSION = 2          # 2: per-year white point (no yellow cast)
+MARK_VERSION = 3          # 2: per-year white point (no yellow cast); 3: S2 2025 calibrated to Esri
 _MARK_OFFSET = 32
 FLAG_FILL = 1             # clouds removed
 FLAG_KEPT = 2             # colours kept: cloud removal without colour correction

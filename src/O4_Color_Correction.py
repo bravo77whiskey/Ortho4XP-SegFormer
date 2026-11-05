@@ -16,9 +16,13 @@ other, across climates, tiles and providers.  So, per (tile, provider, ZL):
      a patch is corrected as a unit.  Water, cloud, and haze inside the
      reference itself are kept out of the fit and take their surroundings'
      correction.
-  3. One constant "look" maps reference colours to a provider-like rendering;
-     it first takes out the reference's warm cast on near-grey colours
-     (Sentinel-2 cloudless renders streets and roofs beige to orange).
+  3. Sentinel-2 cloudless renders darker, harder and more saturated than
+     aerial imagery, reds and browns most.  For years with a calibration
+     (EOX_CALIBRATION) the reference is first mapped to the colours of
+     high-resolution imagery of the same months, and the corrected texture
+     takes those colours as they are.  Other years keep one constant "look"
+     to a provider-like rendering, which first takes out the reference's
+     warm cast on near-grey colours (streets and roofs beige to orange).
   4. Clouds are found against the reference (a cloud is much brighter and
      greyer than the reference says the ground is, so bright sand and roofs
      do not count) and filled from a second provider, corrected the same way
@@ -85,11 +89,59 @@ WARM_SHARE = 0.85
 WARM_CHROMA = 14.0
 
 
+# Sentinel-2 cloudless -> Esri World Imagery of the same months, per EOX year.
+# 2025: Kaohsiung + Shenzhen against the Esri Wayback release captured
+# Dec 2024 - Mar 2025 (the user's pick of dated references, 2026-11-05),
+# fitted on the ~38 m grid by matching distributions, water and cloud left out:
+#   L' = L_lut(L),  ab' = A (ab - mu_e) + mu_r,  then chroma per hue = C_lut(hue, C)
+# Fitted with experiments/color_reference/eox_calib_fit.py.  Hues with little
+# data there (reds, blues, purples) keep the linear map.
+EOX_CALIBRATION = {
+    2025: {
+        "L_grid": [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0],
+        "L_lut": [0.0, 7.83, 16.74, 25.79, 31.81, 36.09, 40.24, 44.48, 48.59, 52.73, 56.62, 60.37, 64.14, 67.96, 71.69, 75.64, 79.66, 83.62, 87.54, 91.47, 95.4],
+        "A": [[0.7243, 0.0445], [0.0445, 0.8324]],
+        "mu_e": [-5.662, 13.065],
+        "mu_r": [-4.03, 9.51],
+        "hue_deg": [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0],
+        "C_grid": [0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 25.0, 30.0, 40.0, 60.0, 100.0],
+        "C_lut": [
+                  [0.0, 3.97, 7.89, 11.82, 15.71, 19.84, 24.81, 29.96, 39.86, 59.86, 99.76],
+                  [0.0, 4.92, 8.83, 11.57, 14.73, 17.5, 20.39, 22.85, 34.84, 52.27, 87.11],
+                  [0.0, 4.23, 7.97, 11.46, 15.14, 18.12, 20.83, 23.57, 30.82, 46.23, 77.05],
+                  [0.0, 3.96, 7.97, 12.23, 16.93, 20.53, 25.08, 30.09, 40.13, 60.19, 100.32],
+                  [0.0, 3.92, 7.78, 11.99, 16.91, 22.32, 27.9, 33.48, 44.65, 66.97, 111.61],
+                  [0.0, 4.02, 7.27, 10.8, 15.93, 22.51, 28.14, 33.77, 45.02, 67.53, 112.56],
+                  [0.0, 4.5, 8.22, 10.1, 14.21, 20.45, 25.57, 30.68, 40.9, 61.36, 102.26],
+                  [0.0, 4.31, 8.27, 14.08, 18.77, 23.46, 29.33, 35.19, 46.92, 70.39, 117.31],
+                  [0.0, 4.01, 8.11, 12.35, 16.19, 20.22, 25.28, 30.34, 40.45, 60.67, 101.12],
+                  [0.0, 3.72, 7.4, 10.84, 14.12, 17.5, 21.87, 26.25, 36.4, 54.6, 91.0],
+                  [0.0, 3.73, 7.24, 10.73, 14.3, 17.88, 22.35, 26.82, 36.55, 54.83, 91.39],
+                  [0.0, 3.89, 7.69, 11.48, 15.3, 19.13, 23.91, 28.7, 38.26, 57.39, 95.65]],
+    },
+}
+
+
+def calibration(year):
+    return EOX_CALIBRATION.get(int(year)) if year else None
+
+
 def look(year):
-    """(G, O, S, T, grey) of the constant look for a Sentinel-2 year."""
+    """(G, O, S, T, grey) of the constant look for a Sentinel-2 year.
+
+    A calibrated year has no look (grey None, so no dewarm either): the
+    calibrated reference already has the colours the texture should get.
+    """
+    if calibration(year):
+        return 1.0, 0.0, 1.0, (0.0, 0.0), None
     G, O_, S = LOOK
     grey = REF_GREY.get(int(year), REF_GREY_OTHER) if year else REF_GREY_OTHER
     return G, O_, S, tuple(PROVIDER_GREY[i] - S * grey[i] for i in range(2)), grey
+
+
+def grey_look(lk):
+    """True when a look maps ab (uncalibrated years), False for the identity look."""
+    return lk[4] is not None
 
 
 def dewarm(ab, grey):
@@ -230,6 +282,49 @@ def lab_to_srgb(lab):
     lin = torch.einsum("ij,jhw->ihw", torch.from_numpy(np.linalg.inv(_M).astype(np.float32)).to(lab.device),
                        xyz).clamp(0, 1)
     return torch.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055).clamp(0, 1)
+
+
+def _interp_rows(x, grid, table):
+    """Linear interpolation of x on an increasing grid; table (..., len(grid)) -> (..., *x.shape)."""
+    g = torch.as_tensor(grid, dtype=x.dtype, device=x.device)
+    t_ = torch.as_tensor(table, dtype=x.dtype, device=x.device)
+    xc = x.clamp(g[0], g[-1]).contiguous()
+    j = torch.searchsorted(g, xc, right=True).clamp(1, len(g) - 1)
+    w = (xc - g[j - 1]) / (g[j] - g[j - 1])
+    return t_[..., j - 1] * (1 - w) + t_[..., j] * w
+
+
+def calibrate_lab(lab, cal):
+    """(3, H, W) Sentinel-2 cloudless Lab -> the calibrated rendering (EOX_CALIBRATION)."""
+    dev, dt = lab.device, lab.dtype
+    L = _interp_rows(lab[0], cal["L_grid"], cal["L_lut"])
+    A = torch.tensor(cal["A"], dtype=dt, device=dev)
+    mu_e = torch.tensor(cal["mu_e"], dtype=dt, device=dev)[:, None, None]
+    mu_r = torch.tensor(cal["mu_r"], dtype=dt, device=dev)[:, None, None]
+    ab = torch.einsum("ij,jhw->ihw", A, lab[1:] - mu_e) + mu_r
+    # Chroma per hue: the table along chroma for every hue row, then linear
+    # between the two rows either side of the pixel's hue.
+    C = torch.sqrt((ab * ab).sum(0))
+    hue = torch.rad2deg(torch.atan2(ab[1], ab[0])) % 360.0
+    step = cal["hue_deg"][1] - cal["hue_deg"][0]
+    k = hue / step
+    k0 = torch.floor(k).long() % len(cal["hue_deg"])
+    k1 = (k0 + 1) % len(cal["hue_deg"])
+    th = k - torch.floor(k)
+    rows = _interp_rows(C, cal["C_grid"], cal["C_lut"])          # (K, H, W)
+    Cn = rows.gather(0, k0[None])[0] * (1 - th) + rows.gather(0, k1[None])[0] * th
+    ab = ab * (Cn / C.clamp_min(1e-6))
+    return torch.cat([L[None], ab])
+
+
+def calibrate_rgb(rgb, cal, rows=512):
+    """(H, W, 3) uint8 reference mosaic -> calibrated uint8, in row strips."""
+    out = np.empty_like(rgb)
+    for y in range(0, rgb.shape[0], rows):
+        x = torch.from_numpy(rgb[y:y + rows].copy()).to(_dev()).permute(2, 0, 1).float() / 255.0
+        lab = calibrate_lab(srgb_to_lab(x), cal)
+        out[y:y + rows] = _np((lab_to_srgb(lab) * 255.0 + 0.5).clamp(0, 255).to(torch.uint8).permute(1, 2, 0))
+    return out
 
 
 def _cv_lab(mean_u8):
@@ -574,6 +669,7 @@ class Group(object):
     def __init__(self, lat, zl, provider, textures, loader, year=None):
         self.zl, self.provider = zl, provider
         self.look = look(year)
+        self.calibration = calibration(year)
         self.textures = sorted(textures)
         self.loader = loader
         self.k = 2 ** (zl - COARSE_ZL)              # texture px per coarse cell
@@ -804,13 +900,19 @@ class Group(object):
             # The fit-free candidates only seed the detection (they include
             # roofs and airport concrete); exclude what survived as cloud.
             excl = water | (self._coarse_of(alphas) > CP.coarse_alpha) | (self._coarse_of(rcs) > 0.3)
-        fields = fit_any(O, R, valid, self.px_m, mode, excl)
+        # Water and clouds are found on the reference as published (their
+        # thresholds are tuned to it); the colours come from the calibrated one.
+        Rc = R
+        if self.calibration:
+            self.ref = calibrate_rgb(self.ref, self.calibration)
+            Rc, _ = self.reference_stats()
+        fields = fit_any(O, Rc, valid, self.px_m, mode, excl)
         self.cloudy = clouds and any(a.max() > 0.02 for a in self.alpha.values())
         if self.cloudy and mode is P:
             # Near clouds the edge-aware fit copies whatever the reference has
             # under the haze; the TV fit does not.  Patch fixing matters least
             # there (it is filled anyway), so blend to TV near cloud.
-            tv = fit_tv(O, R, valid, self.px_m, TV, excl)
+            tv = fit_tv(O, Rc, valid, self.px_m, TV, excl)
             cl = torch.from_numpy(self._coarse_of(self.alpha)).to(_dev())
             near = torch.clamp(gblur((cl > 0.05).float()[None], CP.near_m / self.px_m)[0] * 4.0, 0, 1)
             fields = tuple(near * a + (1 - near) * b for a, b in zip(tv, fields))
@@ -847,10 +949,10 @@ class Group(object):
         lab = srgb_to_lab(img.float() / 255.0)
         L = up[0] * lab[0] + up[1]
         ab = up[2] * lab[1:] + up[3:5]
-        if into is None:
+        if into is None and grey_look(self.look):
             _, _, S, T, grey = self.look
             ab = S * dewarm(ab, grey) + torch.tensor(T, dtype=ab.dtype, device=ab.device)[:, None, None]
-        else:
+        elif into is not None:
             ui = into._fields_at(tx, ty)
             L = (L - ui[1]) / ui[0].clamp_min(1e-3)
             ab = (ab - ui[3:5]) / ui[2].clamp_min(1e-3)
