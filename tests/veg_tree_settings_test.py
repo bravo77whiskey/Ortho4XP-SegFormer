@@ -29,6 +29,8 @@ NEW_VARS = (
     "veg_hole_unsure_cells",
     "veg_tree_sizes",
     "veg_forest_heights",
+    "veg_forest_stands",
+    "veg_forest_stand_m",
     "veg_approach_heights",
     "veg_tropics_evergreen",
     "veg_upscale_gap_trees",
@@ -102,6 +104,21 @@ class TreeSettingsTests(unittest.TestCase):
             self.assertIsNone(VEG._canopy_seg_min_h())
             self.assertIsNone(VEG._canopy_add_min_h())
             self.assertFalse(VEG._forest_holes_enabled())
+
+
+class ForestStandSettingTests(unittest.TestCase):
+    def test_default_matches_the_stand_module(self):
+        import O4_Forest_Stands as STANDS
+        self.assertEqual(CFGVARS.cfg_vars["veg_forest_stand_m"]["default"], STANDS.STAND_M)
+
+    def test_settings_reach_the_overlay(self):
+        env = TreeSettingsTests._env_for(self, veg_forest_stands=True, veg_forest_stand_m=60.0)
+        with mock.patch.dict(os.environ, env):
+            self.assertTrue(VEG._forest_stands_enabled())
+            self.assertEqual(VEG._forest_stand_params()[0], 60.0)
+        env = TreeSettingsTests._env_for(self, veg_forest_stands=False)
+        with mock.patch.dict(os.environ, env):
+            self.assertFalse(VEG._forest_stands_enabled())
 
 
 class SpeedSettingTests(unittest.TestCase):

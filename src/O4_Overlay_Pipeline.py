@@ -313,6 +313,8 @@ def _veg_tree_env():
         "O4_VEG_HOLE_UNSURE_CELLS": repr(max(0.0, float(veg_hole_unsure_cells))),
         "O4_VEG_TREE_SIZES": "1" if veg_tree_sizes else "0",
         "O4_VEG_FOREST_HEIGHTS": "1" if veg_forest_heights else "0",
+        "O4_VEG_FOREST_STANDS": "1" if veg_forest_stands else "0",
+        "O4_VEG_FOREST_STAND_M": repr(max(5.0, float(veg_forest_stand_m))),
         "O4_VEG_APPROACH_HEIGHTS": "1" if veg_approach_heights else "0",
         "O4_VEG_TROPICS_EVERGREEN": "1" if veg_tropics_evergreen else "0",
         "O4_VEG_UPSCALE_TREES": "1" if veg_upscale_gap_trees else "0",
@@ -353,6 +355,8 @@ veg_hole_unsure_cells = 0.0   # 0 = gaps of unsure ground stay forest
 veg_forest_hole_min_m2 = 200.0   # legacy, unused
 veg_tree_sizes    = True    # ZL18/19 single trees sized from canopy height
 veg_forest_heights = True   # ZL18/19 shorter copies of the climate forests
+veg_forest_stands = True    # those heights measured per irregular stand, not per forest
+veg_forest_stand_m = 25.0   # stand width
 veg_approach_heights = True  # trees under runway approaches below the approach surface
 veg_tropics_evergreen = True  # no autumn colours between the tropics
 veg_upscale_gap_trees = True   # up to ZL16: add the trees SegFormer finds on the texture enlarged 2x

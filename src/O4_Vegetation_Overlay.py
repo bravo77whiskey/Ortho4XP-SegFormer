@@ -54,6 +54,7 @@ import O4_Persistent_Cache as PCACHE
 import O4_Progress as PROG
 import O4_Landcover_Inference as SEGFORMER
 import O4_Veg_Density as DENSITY
+import O4_Forest_Stands as STANDS
 import O4_Veg_Lowzoom as LOWZOOM
 import O4_Canopy_Height as CANOPY
 import O4_Forest_Spacing as FOREST_SPACING
@@ -250,6 +251,33 @@ def _forest_heights_enabled():
     return _veg_flag("O4_VEG_FOREST_HEIGHTS")
 
 
+# Forest stands (O4_Forest_Stands): the canopy is cut into irregular stands
+# about FOREST_STAND_M across and each stand is measured on its own, instead
+# of the 20 m Gaussian zones above, which planted a broad forest whose height
+# drifted inside one 3 m zone at one height from edge to edge. Same-height
+# patches under FOREST_STAND_MIN_M2 join the patch around them (review set
+# 2026-11-05: without it, unmeasured canopy that a few measured trees used to
+# pull down to their height went full height; at 2000 m2, as for the zones,
+# one ZL19 park became a single bigger height polygon than before stands).
+FOREST_STAND_M = STANDS.STAND_M
+FOREST_STAND_MIN_M2 = 600.0
+
+
+def _forest_stands_enabled():
+    """O4_VEG_FOREST_STANDS=0: forest heights from the smoothed zones instead of stands."""
+    return _veg_flag("O4_VEG_FOREST_STANDS")
+
+
+def _forest_stand_params():
+    """(stand size m, shape, smallest same-height patch m2); O4_VEG_FOREST_STAND_M /
+    O4_VEG_FOREST_STAND_SHAPE / O4_VEG_FOREST_STAND_MIN_M2 override."""
+    size = _env_cells("O4_VEG_FOREST_STAND_M", FOREST_STAND_M) or FOREST_STAND_M
+    shape = os.environ.get("O4_VEG_FOREST_STAND_SHAPE", "").strip().lower()
+    if shape not in STANDS.SHAPES:
+        shape = STANDS.SHAPES[0]
+    return size, shape, _env_cells("O4_VEG_FOREST_STAND_MIN_M2", FOREST_STAND_MIN_M2)
+
+
 # Outside airport boundaries the trees come from SegFormer, and where the
 # canopy network reads them flat (under CANOPY_MIN_TREE_H_M) it has not seen
 # them at all as often as they are really low: planting them as shrubs turned
@@ -291,19 +319,46 @@ def _forest_height_map(canopy_height, tree_mask, m_per_px, flat_unknown=None):
     return out
 
 
-def _forest_height_zones(height_map, tree_mask, m_per_px):
+def _forest_stand_height_map(canopy_height, tree_mask, m_per_px, flat_unknown=None, seed=0):
+    """Like _forest_height_map, but each stand's median crown-top height
+    (O4_Forest_Stands); stands with too little measured canopy take the
+    smoothed map's height (NaN where that doesn't know either)."""
+    r = max(1, int(round(CROWN_RADIUS_M / m_per_px)))
+    tops = cv2.dilate(canopy_height, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2))
+    on = tree_mask > 0
+    measured = on.copy()
+    if flat_unknown is not None:
+        measured &= ~(flat_unknown & (tops < CANOPY_MIN_TREE_H_M))
+    size, shape, _min_m2 = _forest_stand_params()
+    heights, _labels = STANDS.stand_height_map(
+        tops, on, measured, m_per_px,
+        FOREST_MEASURED_MIN_SHARE if flat_unknown is not None else 0.0,
+        stand_m=size, shape=shape, seed=seed)
+    if flat_unknown is not None:
+        # A stand with too little measured canopy for a height of its own: its
+        # measured trees keep the local estimate of the smoothed map, as
+        # before stands (else a clump of low trees in an unmeasured stand
+        # would go full height).
+        gap = np.isnan(heights) & on
+        if gap.any():
+            local = _forest_height_map(canopy_height, tree_mask, m_per_px, flat_unknown)
+            heights[gap] = local[gap]
+    return heights
+
+
+def _forest_height_zones(height_map, tree_mask, m_per_px, min_m2=None):
     """Zone index per canopy pixel, 0 elsewhere: 1..len(FOREST_ZONE_EDGES_M)+1 by
     height, one more for canopy whose height is unknown (NaN)."""
     unknown = np.isnan(height_map)
     zone_of = np.digitize(np.where(unknown, 0.0, height_map), FOREST_ZONE_EDGES_M) + 1
     zone_of[unknown] = len(FOREST_ZONE_EDGES_M) + 2
     zones = np.where(tree_mask > 0, zone_of, 0).astype(np.uint8)
-    return _merge_small_zones(zones, m_per_px)
+    return _merge_small_zones(zones, m_per_px, min_m2)
 
 
-def _merge_small_zones(zones, m_per_px):
-    """Zones under FOREST_ZONE_MIN_M2 join the nearest bigger zone."""
-    min_px = FOREST_ZONE_MIN_M2 / (m_per_px * m_per_px)
+def _merge_small_zones(zones, m_per_px, min_m2=None):
+    """Zones under min_m2 (FOREST_ZONE_MIN_M2) join the nearest bigger zone."""
+    min_px = (FOREST_ZONE_MIN_M2 if min_m2 is None else min_m2) / (m_per_px * m_per_px)
     small = np.zeros(zones.shape, bool)
     for z in np.unique(zones[zones > 0]):
         n, lab, st, _ = cv2.connectedComponentsWithStats((zones == z).astype(np.uint8), connectivity=8)
@@ -363,9 +418,12 @@ def _process_tree_mask(mask, **kwargs):
     height_map = kwargs.get('forest_height_map')
     cap = kwargs.pop('height_cap_map', None)
     cover = kwargs.pop('density_cover', None)
+    stands = kwargs.pop('forest_stands', False)
     zones = None
     if height_map is not None and kwargs.get('forest_heights') is not None:
-        zones = _forest_height_zones(height_map, mask, kwargs['m_per_px'])
+        zones = _forest_height_zones(
+            height_map, mask, kwargs['m_per_px'],
+            _forest_stand_params()[2] if stands else None)
     levels = _cap_level_index(cap) if cap is not None else None
     bands = None
     if cover is not None:
@@ -790,6 +848,7 @@ def _veg_feature_sig():
         _point_trees_enabled(),
         _tree_sizes_enabled(), CROWN_RADIUS_M, CROWN_HEIGHT_OFFSET_M, TREE_SIZES.SIGNATURE,
         _forest_heights_enabled(), FOREST_ZONE_SIGMA_M, FOREST_ZONE_EDGES_M, FOREST_ZONE_MIN_M2,
+        _forest_stands_enabled(), _forest_stand_params(), STANDS.SIGNATURE,
         FOREST_HEIGHTS.SIGNATURE,
         FOREST_HEIGHTS.BAND_HEIGHTS_M, FOREST_HEIGHTS.MIN_GAIN_M,
         _approach_heights_enabled(), FOREST_HEIGHTS.CAP_LEVELS_M, APPROACH.SIGNATURE,
@@ -3788,10 +3847,16 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 canopy_maps[0].astype(np.float32), (img_w, img_h), interpolation=cv2.INTER_LINEAR)
             if forest_heights is not None:
                 kwargs['forest_heights'] = forest_heights
-                kwargs['forest_height_map'] = _forest_height_map(
-                    kwargs['canopy_height'], tree_mask, mpp,
-                    flat_unknown=(~canopy_inside if canopy_inside is not None
-                                  else np.ones(tree_mask.shape, bool)))
+                flat_unknown = (~canopy_inside if canopy_inside is not None
+                                else np.ones(tree_mask.shape, bool))
+                if _forest_stands_enabled():
+                    kwargs['forest_height_map'] = _forest_stand_height_map(
+                        kwargs['canopy_height'], tree_mask, mpp, flat_unknown=flat_unknown,
+                        seed=STANDS.texture_seed(fname))
+                    kwargs['forest_stands'] = True
+                else:
+                    kwargs['forest_height_map'] = _forest_height_map(
+                        kwargs['canopy_height'], tree_mask, mpp, flat_unknown=flat_unknown)
         if height_cap_map is not None:
             kwargs['height_cap_map'] = height_cap_map
             kwargs['forest_heights'] = forest_copies

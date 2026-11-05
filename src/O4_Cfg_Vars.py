@@ -656,6 +656,25 @@ cfg_tile_vars = {
                 "copies are written into the O4XP_Forest_Heights library pack in "
                 "Custom Scenery.",
     },
+    "veg_forest_stands": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_stands",
+        "hint": "ZL18/19, with veg_forest_heights: cut forests into irregular "
+                "stands about veg_forest_stand_m across before measuring their "
+                "height, so each stand gets the canopy height measured on it "
+                "instead of one height for a whole forest. Stand edges follow "
+                "real height steps in the canopy and wander where there are none. "
+                "Forests the canopy model can't measure stay full height.",
+    },
+    "veg_forest_stand_m": {
+        "type": float,
+        "default": 25.0,
+        "short_name": "veg_stand_m",
+        "hint": "Typical width of a forest stand in metres (veg_forest_stands). "
+                "Smaller follows the canopy more closely but starts to follow the "
+                "canopy model's own noise.",
+    },
     "veg_approach_heights": {
         "type": bool,
         "default": True,
@@ -1100,6 +1119,8 @@ list_veg_vars = [
     "veg_hole_unsure_cells",
     "veg_tree_sizes",
     "veg_forest_heights",
+    "veg_forest_stands",
+    "veg_forest_stand_m",
     "veg_approach_heights",
     "veg_tropics_evergreen",
     "veg_upscale_gap_trees",
@@ -1254,6 +1275,7 @@ settings_sections = (
         ("Forest shape and height", ("veg_forest_holes", "veg_point_tree_max_cells",
                                      "veg_hole_certain_cells", "veg_hole_unsure_cells",
                                      "veg_tree_sizes", "veg_forest_heights",
+                                     "veg_forest_stands", "veg_forest_stand_m",
                                      "veg_approach_heights", "veg_tropics_evergreen")),
         ("Tree types", ("veg_use_leaf_type_maps", "veg_use_xp_forests")),
         ("Other scenery", ("veg_use_simheaven", "veg_avoid_simheaven_buildings",
