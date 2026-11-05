@@ -123,6 +123,7 @@ class OverlayLoggingTests(unittest.TestCase):
                 mock.patch.object(SEG, "tree_support_enabled", return_value=False),
                 mock.patch.object(VEG, "_texture_density_enabled", return_value=False),
                 mock.patch.object(SEG, "load_dds_or_none", return_value=np.zeros((32, 32, 3), np.uint8)),
+                mock.patch.object(VEG, "_texture_tree_check_enabled", return_value=True),
                 mock.patch.object(VEG.LOWZOOM, "tree_mask", return_value=(classes == SEG.CLASS_TREE).astype(np.uint8)),
                 mock.patch.object(SEG, "load_vegetation_model", side_effect=AssertionError("uncached inference")),
                 mock.patch.object(VEG, "_load_mesh_water_index", return_value=None),

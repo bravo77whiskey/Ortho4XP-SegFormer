@@ -33,6 +33,7 @@ NEW_VARS = (
     "veg_tropics_evergreen",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
+    "veg_texture_tree_check",
     "veg_texture_density",
     "veg_density_half_res",
     "veg_canopy_fast_attention",
@@ -114,6 +115,26 @@ class SpeedSettingTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env):
                 self.assertEqual(DENSITY.work_scale(), DENSITY.HALF_RES_SCALE if on else 1)
                 self.assertEqual(CANOPY._sdpa_enabled(), on)
+
+
+class TextureTreeCheckTests(unittest.TestCase):
+    def test_off_by_default(self):
+        self.assertFalse(CFGVARS.cfg_vars["veg_texture_tree_check"]["default"])
+        with mock.patch.dict(os.environ, {"O4_VEG_TEXTURE_TREES": ""}):
+            self.assertFalse(VEG._texture_tree_check_enabled())
+            self.assertFalse(VEG._use_texture_tree_check(16))
+            self.assertFalse(VEG._use_texture_tree_check(19))
+
+    def test_setting_turns_it_on_from_zl16(self):
+        env = TreeSettingsTests._env_for(self, veg_texture_tree_check=True)
+        with mock.patch.dict(os.environ, env):
+            self.assertTrue(VEG._texture_tree_check_enabled())
+            self.assertFalse(VEG._use_texture_tree_check(15))
+            self.assertTrue(VEG._use_texture_tree_check(16))
+            self.assertTrue(VEG._use_texture_tree_check(18))
+        env = TreeSettingsTests._env_for(self, veg_texture_tree_check=False)
+        with mock.patch.dict(os.environ, env):
+            self.assertFalse(VEG._use_texture_tree_check(16))
 
 
 class UpscaleGapTreeTests(unittest.TestCase):

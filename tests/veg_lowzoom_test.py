@@ -67,7 +67,8 @@ class LowzoomMaskTests(unittest.TestCase):
 
 
 class LowzoomPipelineTests(unittest.TestCase):
-    def run_texture(self, zl, *, res_m=None, missing_rgb=False, extra_gap=False, airport=False):
+    def run_texture(self, zl, *, res_m=None, missing_rgb=False, extra_gap=False, airport=False,
+                    check=True):
         """Capture the mask handed to production polygonization."""
         seg = VEG.SEGFORMER
         name = f"34336_26384_BI{zl}.dds"
@@ -93,7 +94,9 @@ class LowzoomPipelineTests(unittest.TestCase):
             patch(VEG, "dds_bounds", return_value=(47.003, 47.0, 8.0, 8.004))
             patch(seg, "load_dds_or_none", return_value=None if missing_rgb else rgb)
             # A cached native map must not require support or enlarged inference.
-            patch(seg, "tree_support_enabled", return_value=zl in (16, 17))
+            patch(VEG, "_texture_tree_check_enabled", return_value=check)
+            patch(seg, "tree_support_enabled", return_value=check and zl in (16, 17))
+            patch(VEG, "_upscale_gap_trees_enabled", return_value=check)
             patch(VEG, "_texture_density_enabled", return_value=False)
             patch(seg, "load_vegetation_model", side_effect=AssertionError("unexpected inference"))
             patch(VEG, "_upscaled_trees", side_effect=AssertionError("unexpected upscale"))
@@ -158,6 +161,15 @@ class LowzoomPipelineTests(unittest.TestCase):
         calc.assert_not_called()
         self.assertEqual(masks, [])
         self.assertEqual(keys, [])
+
+    def test_setting_off_leaves_zl16_to_segformer(self):
+        for zl in (16, 17):
+            calc, masks, keys, _ = self.run_texture(zl, check=False)
+            calc.assert_not_called()
+            self.assertIsNone(keys[0]["lowzoom_sig"])
+            result = masks[0]
+            self.assertFalse(result[40:55, 40:55].any())   # buildings stay open
+            self.assertTrue(result[60:80, 60:80].all())    # OSM forest rescue is back
 
     def test_rgb_mask_changes_invalidate_polygon_cache(self):
         _, _, first, _ = self.run_texture(16)

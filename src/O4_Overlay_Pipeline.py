@@ -317,6 +317,7 @@ def _veg_tree_env():
         "O4_VEG_TROPICS_EVERGREEN": "1" if veg_tropics_evergreen else "0",
         "O4_VEG_UPSCALE_TREES": "1" if veg_upscale_gap_trees else "0",
         "O4_VEG_OSM_RESCUE_RANGELAND": "1" if veg_osm_rescue_rangeland else "0",
+        "O4_VEG_TEXTURE_TREES": "1" if veg_texture_tree_check else "0",
         "O4_VEG_TEXTURE_DENSITY": "1" if veg_texture_density else "0",
         "O4_VEG_DENSITY_HALF": "1" if veg_density_half_res else "0",
         "O4_CANOPY_SDPA": "1" if veg_canopy_fast_attention else "0",
@@ -354,8 +355,9 @@ veg_tree_sizes    = True    # ZL18/19 single trees sized from canopy height
 veg_forest_heights = True   # ZL18/19 shorter copies of the climate forests
 veg_approach_heights = True  # trees under runway approaches below the approach surface
 veg_tropics_evergreen = True  # no autumn colours between the tropics
-veg_upscale_gap_trees = True   # below ZL16 only: add the trees SegFormer finds on the texture enlarged 2x
+veg_upscale_gap_trees = True   # up to ZL16: add the trees SegFormer finds on the texture enlarged 2x
 veg_osm_rescue_rangeland = True  # trees on SegFormer rangeland inside OSM forests
+veg_texture_tree_check = False  # ZL16+: green, leafy-looking texture patches planted with SegFormer forest
 veg_texture_density = True  # forest density from the texture instead of one fixed value
 veg_density_half_res = True  # that density worked out at half resolution
 veg_avoid_gfv2    = False

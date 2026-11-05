@@ -673,13 +673,22 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "veg_osm_range",
-        "hint": "Outside ZL16/17, inside OpenStreetMap forests (simHeaven 7-forests), plant "
+        "hint": "Inside OpenStreetMap forests (simHeaven 7-forests), plant "
                 "trees where SegFormer sees rangeland that looks like canopy in "
                 "the ortho (dark green): it calls whole wooded hillsides "
                 "rangeland. Grass, scrub, bare ground, buildings and roads "
-                "stay open. ZL16/17 don't use this: there the texture itself is "
-                "checked for green, leafy-looking patches, which are planted "
-                "along with SegFormer's forest.",
+                "stay open. With veg_texture_tree_check on, ZL16/17 don't use "
+                "this: the texture tree check plants them instead.",
+    },
+    "veg_texture_tree_check": {
+        "type": bool,
+        "default": False,
+        "short_name": "veg_tex_trees",
+        "hint": "ZL16 and up: check the texture itself for green, leafy-looking "
+                "patches that aren't in crop-row lines, and plant them along "
+                "with SegFormer's forest, even where SegFormer calls them "
+                "farmland. Off: SegFormer decides the trees (with the 2x pass "
+                "at ZL16 and the OSM forest rescue), plus canopy trees at ZL18+.",
     },
     "veg_texture_density": {
         "type": bool,
@@ -704,13 +713,12 @@ cfg_tile_vars = {
         "type": bool,
         "default": True,
         "short_name": "veg_upscale_trees",
-        "hint": "Textures below ZL16 only: run SegFormer a second time on each texture enlarged 2x "
+        "hint": "Textures up to ZL16: run SegFormer a second time on each texture enlarged 2x "
                 "and add the trees it finds there: tree clumps and orchards "
                 "between fields and garden and street trees that the normal "
                 "pass gives to the fields or houses. About 4x the vegetation "
-                "inference time. Has no effect from ZL16 up: there the texture "
-                "itself is checked for green, leafy-looking patches, which are "
-                "planted along with SegFormer's forest, with no extra pass.",
+                "inference time. With veg_texture_tree_check on, ZL16 skips "
+                "this pass: the texture tree check covers it.",
     },
     "veg_tropics_evergreen": {
         "type": bool,
@@ -1096,6 +1104,7 @@ list_veg_vars = [
     "veg_tropics_evergreen",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
+    "veg_texture_tree_check",
     "veg_texture_density",
     "veg_density_half_res",
     "veg_res_m",
@@ -1237,7 +1246,8 @@ settings_sections = (
         ("Tree mask", ("veg_density", "veg_close_m", "veg_open_m", "veg_min_area_m2",
                        "veg_simplify_m", "veg_excl_buffer_m", "veg_res_m",
                        "veg_upscale_gap_trees", "veg_osm_rescue_rangeland",
-                       "veg_texture_density", "veg_density_half_res")),
+                       "veg_texture_tree_check", "veg_texture_density",
+                       "veg_density_half_res")),
         ("Canopy model (ZL18+)", ("veg_canopy", "veg_canopy_min_conf",
                                   "veg_canopy_seg_min_h_m", "veg_canopy_add_min_h_m",
                                   "veg_canopy_fast_attention")),

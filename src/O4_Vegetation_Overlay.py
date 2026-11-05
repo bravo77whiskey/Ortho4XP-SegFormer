@@ -7,9 +7,10 @@ Pipeline
 --------
 1. Discover ZL16 DDS files in tex_dir
 2. Load cached SegFormer veg_map per DDS at native resolution (~2.4 m/px at ZL16)
-3. ZL16 and up: texture tree check (O4_Veg_Lowzoom: green, leafy-looking
-   pixels of the ortho) plus SegFormer forest, and at ZL18+ also canopy
-   trees; below ZL16: SegFormer tree detection
+3. SegFormer tree detection, and at ZL18+ also canopy trees. With
+   veg_texture_tree_check on (default off), ZL16 and up instead use the
+   texture tree check (O4_Veg_Lowzoom: green, leafy-looking pixels of the
+   ortho) plus SegFormer forest
 4. Other zooms: morphological close → open (kernel sizes in metres)
 5. Vectorise (OpenCV contours) → Douglas-Peucker → lat/lon polygons
 6. Per polygon: shape ratio → area-fill | treeline
@@ -550,8 +551,9 @@ def _veg_infer_factor(zl):
 # 2026-10-19: +3.5-6 % of a texture). Those trees are added to the tree mask
 # and win over the 1x building / road / developed exclusion. ~4x the
 # vegetation inference time (cfg veg_upscale_gap_trees).
-# Since the texture tree check (O4_Veg_Lowzoom) took over ZL16 and up, this
-# pass only runs on textures below ZL16; UPSCALE_MAX_ZL is the upper cap.
+# With the texture tree check (O4_Veg_Lowzoom, veg_texture_tree_check) on,
+# ZL16 is left to it and this pass only runs below ZL16; UPSCALE_MAX_ZL is
+# the upper cap either way.
 UPSCALE_FACTOR = 2
 UPSCALE_MAX_ZL = 16
 
@@ -572,8 +574,18 @@ def _load_shared_npy(path, attempts=20, delay_s=0.25):
 
 
 def _upscale_gap_trees_enabled():
-    """O4_VEG_UPSCALE_TREES=0: no second SegFormer pass on textures below ZL16 enlarged 2x."""
+    """O4_VEG_UPSCALE_TREES=0: no second SegFormer pass on textures up to UPSCALE_MAX_ZL enlarged 2x."""
     return _veg_flag("O4_VEG_UPSCALE_TREES")
+
+
+def _texture_tree_check_enabled():
+    """Setting veg_texture_tree_check, passed in as O4_VEG_TEXTURE_TREES; off unless 1."""
+    return _veg_flag("O4_VEG_TEXTURE_TREES", default=False)
+
+
+def _use_texture_tree_check(zl):
+    """ZL16 and up get the green-texture tree check when the setting is on."""
+    return LOWZOOM.applies(zl) and _texture_tree_check_enabled()
 
 
 def _upscaled_trees(model, device, img, proc):
@@ -3071,7 +3083,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         til_y_top  = int(m.group(1))
         til_x_left = int(m.group(2))
         zl         = int(m.group(4))
-        use_lowzoom = LOWZOOM.applies(zl)
+        use_lowzoom = _use_texture_tree_check(zl)
 
         lat_n, lat_s, lon_w, lon_e = dds_bounds(til_y_top, til_x_left, zl)
 
@@ -3216,7 +3228,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         if canopy_maps is not None and not disable_cache:
                             np.save(canopy_path, canopy_maps)
 
-        # Legacy enlarged-image support below ZL16; the RGB merge uses native RGB from ZL16.
+        # Enlarged-image support up to ZL16, unless the texture tree check covers the texture.
         upscale_trees = None
         upscale_path = os.path.join(cache_dir, fname.replace('.dds', '_veg2x.npy'))
         if (not use_lowzoom and zl <= UPSCALE_MAX_ZL and infer_factor == 1 and _upscale_gap_trees_enabled()
