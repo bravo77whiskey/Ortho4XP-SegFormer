@@ -384,6 +384,7 @@ bld_verbose_log   = False
 bld_avoid_custom_scenery = True
 bld_asset_mode = "both"
 bld_roof_color_matching = False
+bld_approach_heights = True  # buildings under runway approaches below the approach surface
 bld_yolo_enabled = True
 bld_yolo_checkpoint = ""
 bld_yolo_conf = 0.18
@@ -1082,6 +1083,7 @@ def process_bld_tile(lat, lon, build_dir, cleanup_cache=True):
             f"min_coverage={bld_yolo_min_coverage!r} "
             f"asset_mode={bld_asset_mode!r} "
             f"roof_color_matching={bld_roof_color_matching!r} "
+            f"approach_heights={bld_approach_heights!r} "
             f"disable_cache={bld_disable_cache!r} "
             f"verbose_log={bld_verbose_log!r} "
             f"out_dsf={out_dsf!r}",
@@ -1091,6 +1093,7 @@ def process_bld_tile(lat, lon, build_dir, cleanup_cache=True):
     code = (
         f"import os\n"
         f"os.environ['O4_BLD_ASSET_MODE'] = {bld_asset_mode!r}\n"
+        f"os.environ['O4_BLD_APPROACH_HEIGHTS'] = {'1' if bld_approach_heights else '0'!r}\n"
         f"import O4_Landcover_Inference as SEG\n"
         f"SEG.segformer_patch_size = {segformer_patch_size!r}\n"
         f"SEG.segformer_overlap    = {segformer_overlap!r}\n"

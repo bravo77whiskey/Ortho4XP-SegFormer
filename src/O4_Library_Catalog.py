@@ -72,6 +72,30 @@ def measure_obj8_bounds(obj_path):
     return (float(min_x), float(max_x), float(min_z), float(max_z))
 
 
+def measure_obj8_height(obj_path):
+    """Return the highest OBJ8 vertex (Y, metres above the object's origin), or None."""
+    top = float("-inf")
+    try:
+        handle = open(obj_path, "r", encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    with handle:
+        for raw_line in handle:
+            line = raw_line.lstrip()
+            if not line.startswith("VT"):
+                continue
+            parts = line.split()
+            if len(parts) < 4 or parts[0] != "VT":
+                continue
+            try:
+                y = float(parts[2])
+            except ValueError:
+                continue
+            if y > top:
+                top = y
+    return float(top) if top != float("-inf") else None
+
+
 def _dir_key(path):
     return os.path.normcase(os.path.abspath(path))
 
@@ -341,6 +365,33 @@ class LibraryCatalog:
                     export.resolved_path,
                 )
         return index
+
+    def object_variants(self, target_virtual_paths):
+        """Return ``{normalized virtual path: [OBJ, ...]}``: every physical OBJ any
+        active or default library exports for these paths (all variants X-Plane may
+        pick, EXPORT_EXTEND included); every exported path when ``target_virtual_paths``
+        is None."""
+        targets = None if target_virtual_paths is None else {
+            ASSETINV.normalize_library_path(path)
+            for path in target_virtual_paths
+            if path
+        }
+        out = {}
+        keys = [_dir_key(package_dir) for _name, package_dir in self.active]
+        keys += list(self.default_order)
+        for key in dict.fromkeys(keys):
+            record = self.packages.get(key)
+            if record is None:
+                continue
+            for export in record["exports"]:
+                if not export.resolved_path or not export.physical_path.lower().endswith(".obj"):
+                    continue
+                vpath = ASSETINV.normalize_library_path(export.virtual_path)
+                if targets is None or vpath in targets:
+                    variants = out.setdefault(vpath, [])
+                    if export.resolved_path not in variants:
+                        variants.append(export.resolved_path)
+        return out
 
     def default_exports(self, target_virtual_paths, suffixes=(".obj",)):
         """Return default-scenery exports for these virtual paths.

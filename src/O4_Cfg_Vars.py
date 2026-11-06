@@ -894,6 +894,17 @@ cfg_tile_vars = {
         "short_name": "bld_roof_color",
         "hint": "Prefer object assets whose analyzed roof texture color matches each detected rooftop. Disabled by default. Existing fit, containment, occupancy, height, and fallback selection rules remain authoritative.",
     },
+    "bld_approach_heights": {
+        "type": bool,
+        "default": True,
+        "short_name": "bld_approach_h",
+        "hint": "Keep buildings under runway approaches below the ICAO approach "
+                "surface (the same surface as veg_approach_heights, with its "
+                "second section for taller buildings): facades are lowered to "
+                "fit, objects too tall for it give way to a shorter asset or a "
+                "facade, and nothing is placed where the limit is under one "
+                "storey, right before the threshold.",
+    },
     "bld_yolo_enabled": {
         "type": bool,
         "default": True,
@@ -1160,6 +1171,7 @@ list_bld_vars = [
     "bld_avoid_custom_scenery",
     "bld_asset_mode",
     "bld_roof_color_matching",
+    "bld_approach_heights",
     "bld_yolo_enabled",
     "bld_yolo_checkpoint",
     "bld_yolo_conf",
@@ -1256,7 +1268,7 @@ settings_sections = (
     ("Building overlay", (
         ("Placement", ("bld_spacing_m", "bld_close_m", "bld_open_m", "bld_min_footprint_m2",
                        "bld_grid_n", "bld_asset_mode", "bld_roof_color_matching",
-                       "bld_avoid_custom_scenery")),
+                       "bld_avoid_custom_scenery", "bld_approach_heights")),
         ("YOLO detector", ("bld_yolo_enabled", "bld_yolo_checkpoint", "bld_yolo_conf",
                            "bld_yolo_iou", "bld_yolo_stride", "bld_yolo_max_det",
                            "bld_yolo_min_coverage")),

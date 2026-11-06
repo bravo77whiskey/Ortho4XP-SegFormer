@@ -61,6 +61,8 @@ import O4_Agri_Structures as AGRI
 import O4_Texture_Selection as TEXSEL
 import O4_Bld_Seams as SEAMS
 import O4_Bld_Overlap_Facades as OVLFAC
+import O4_Approach_Heights as APPROACH
+import O4_Apt_Pavement as APT
 from O4_Scenery_Packs import (
     active_scenery_pack_dirs,
     dsf_may_hold_buildings,
@@ -1296,6 +1298,155 @@ def _library_obj_bounds(obj_path, cache_dir=None):
             return None
         return _LIBRARY_CATALOG.bounds_for(obj_path)
     return _read_obj8_bounds(obj_path, cache_dir)
+
+
+# ── Runway approach height limits ────────────────────────────────────────────
+# Nothing placed under a runway end's ICAO approach surface may reach it
+# (O4_Approach_Heights, the same surfaces that cap trees, here with their
+# second section too). Detections under a surface get their height cut to the
+# limit, so objects too tall for it give way to a shorter asset or the facade
+# fallback; a final check before the DSF is written lowers facades and drops
+# objects whose measured mesh still reaches the surface. Between the threshold
+# and the inner edge, and wherever the limit is under one storey, nothing is
+# placed. O4_BLD_APPROACH_HEIGHTS=0 turns it off.
+APPROACH_MIN_BUILDING_H_M = 3.0
+# Objects may top the surface by this much (mesh rounding, antennas).
+APPROACH_OBJECT_TOLERANCE_M = 0.5
+_OBJECT_HEIGHTS = {}
+_OBJECT_VARIANTS = {}
+
+
+def _approach_heights_enabled():
+    """O4_BLD_APPROACH_HEIGHTS=0: buildings under runway approaches keep their height."""
+    return _env_flag("O4_BLD_APPROACH_HEIGHTS", True)
+
+
+def _object_variant_paths(obj_path):
+    """Every physical OBJ X-Plane may pick for a library path (empty when unknown)."""
+    catalog = _LIBRARY_CATALOG
+    if catalog is None:
+        return ()
+    if _OBJECT_VARIANTS.get('_catalog') is not catalog:
+        _OBJECT_VARIANTS.clear()
+        _OBJECT_VARIANTS['_catalog'] = catalog
+        _OBJECT_VARIANTS['index'] = catalog.object_variants(None)
+    return _OBJECT_VARIANTS['index'].get(_norm_library_path(obj_path), ())
+
+
+def _object_height_m(obj_path):
+    """Tallest variant of an object in metres: measured from its OBJ files, else
+    estimated from its name; None when neither is known."""
+    try:
+        return _OBJECT_HEIGHTS[obj_path]
+    except KeyError:
+        pass
+    files = list(_object_variant_paths(obj_path))
+    if not files and obj_path and os.path.isabs(obj_path) and os.path.isfile(obj_path):
+        files = [obj_path]
+    heights = []
+    for rp in files:
+        if _LIBRARY_CATALOG is not None:
+            h = _LIBRARY_CATALOG.cached(
+                "obj8-height-v1", rp, lambda rp=rp: LIBCAT.measure_obj8_height(rp)
+            )
+        else:
+            h = LIBCAT.measure_obj8_height(rp)
+        if h is not None:
+            heights.append(float(h))
+    height = max(heights) if heights else _object_estimated_height_m(obj_path)
+    _OBJECT_HEIGHTS[obj_path] = height
+    return height
+
+
+def _object_footprint_bounds_m(obj_path):
+    """Footprint bounds covering every variant of an object, or None."""
+    files = _object_variant_paths(obj_path)
+    if files:
+        bounds = _bounds_union(_library_obj_bounds(rp) for rp in files)
+        if bounds is not None:
+            return bounds
+    return _bounds_for_object_path(obj_path)
+
+
+def _object_fits_under(obj_path, cap_m):
+    height = _object_height_m(obj_path)
+    return height is not None and height <= float(cap_m) + APPROACH_OBJECT_TOLERANCE_M
+
+
+def _detection_approach_cap_m(detection):
+    try:
+        cap = detection.get('approach_cap_m')
+    except AttributeError:
+        return None
+    return None if cap is None else float(cap)
+
+
+def _local_m(lat):
+    return 111320.0 * math.cos(math.radians(lat)), APPROACH.EARTH_M_PER_DEG_LAT
+
+
+def _ring_samples(lonlat_ring, step_m=2.0):
+    """(lons, lats) covering a lon/lat polygon: its vertices, points along its
+    edges and a grid inside, about ``step_m`` apart."""
+    pts = np.asarray(lonlat_ring, dtype=np.float64).reshape(-1, 2)
+    lon0, lat0 = float(pts[0, 0]), float(pts[0, 1])
+    kx, ky = _local_m(lat0)
+    xy = np.column_stack(((pts[:, 0] - lon0) * kx, (pts[:, 1] - lat0) * ky))
+    span = float(max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]), 1.0))
+    step = max(float(step_m), span / 256.0)
+    samples = [xy]
+    for a, b in zip(xy, np.roll(xy, -1, axis=0)):
+        n = int(math.hypot(*(b - a)) / step)
+        if n > 1:
+            t = (np.arange(1, n) / n)[:, None]
+            samples.append(a + (b - a) * t)
+    lo = xy.min(axis=0)
+    grid = np.rint((xy - lo) / step).astype(np.int32)
+    w, h = int(grid[:, 0].max()) + 1, int(grid[:, 1].max()) + 1
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [grid], 1)
+    gy, gx = np.nonzero(mask)
+    if gx.size:
+        samples.append(np.column_stack((gx * step + lo[0], gy * step + lo[1])))
+    xy = np.concatenate(samples)
+    return xy[:, 0] / kx + lon0, xy[:, 1] / ky + lat0
+
+
+def _object_samples(o_lon, o_lat, heading_deg, bounds_m, step_m=2.0):
+    """(lons, lats) covering an object's footprint at its placed heading (OBJ8:
+    +X east and -Z north at heading 0, heading clockwise from north)."""
+    if bounds_m is None:
+        return np.array([o_lon]), np.array([o_lat])
+    xmin, xmax, zmin, zmax = (float(v) for v in bounds_m)
+    nx = max(1, int(math.ceil((xmax - xmin) / step_m)))
+    nz = max(1, int(math.ceil((zmax - zmin) / step_m)))
+    x, z = np.meshgrid(np.linspace(xmin, xmax, nx + 1), np.linspace(zmin, zmax, nz + 1))
+    x, z = x.ravel(), z.ravel()
+    h = math.radians(float(heading_deg))
+    east = x * math.cos(h) - z * math.sin(h)
+    north = -x * math.sin(h) - z * math.cos(h)
+    kx, ky = _local_m(o_lat)
+    return o_lon + east / kx, o_lat + north / ky
+
+
+def _surface_boxes(surfaces):
+    """(surface, (west, east, south, north)) of each surface's limited part."""
+    out = []
+    for s in surfaces:
+        ring = APPROACH.surface_ring(s, np.inf)
+        lons = [p[0] for p in ring]
+        lats = [p[1] for p in ring]
+        out.append((s, (min(lons), max(lons), min(lats), max(lats))))
+    return out
+
+
+def _surfaces_near(boxes, lons, lats):
+    lon_lo, lon_hi = float(np.min(lons)), float(np.max(lons))
+    lat_lo, lat_hi = float(np.min(lats)), float(np.max(lats))
+    return [
+        s for s, (w, e, so, n) in boxes
+        if w <= lon_hi and e >= lon_lo and so <= lat_hi and n >= lat_lo
+    ]
 
 
 def rescan_library_catalog(custom_scenery_dir, library_cache_dir):
@@ -3482,15 +3633,22 @@ def _randomized_facade_height_m(rng, height_priors_by_class, placement_cls):
 
 
 def _yolo_facade_height_m(detection, rng, height_priors_by_class, placement_cls):
-    """Return YOLO/HeightNet detection height, falling back to class priors."""
+    """Return YOLO/HeightNet detection height, falling back to class priors;
+    never above the detection's runway approach limit."""
+    height_m = None
     if detection:
         try:
             height_m = float(detection.get('height_m'))
-            if math.isfinite(height_m) and height_m > 0.0:
-                return height_m
+            if not (math.isfinite(height_m) and height_m > 0.0):
+                height_m = None
         except (AttributeError, TypeError, ValueError):
-            pass
-    return _randomized_facade_height_m(rng, height_priors_by_class, placement_cls)
+            height_m = None
+    if height_m is None:
+        height_m = _randomized_facade_height_m(rng, height_priors_by_class, placement_cls)
+    cap = _detection_approach_cap_m(detection) if detection else None
+    if cap is not None and height_m > cap:
+        height_m = float(math.floor(cap))
+    return height_m
 
 
 def _capped_detection_height_m(detection, height_m):
@@ -6296,6 +6454,37 @@ def _apply_regional_height_fallbacks(detections, region):
         detection['height_prior_region'] = prior.region
 
 
+def _poly_min(values, points, center=None):
+    """Lowest finite value of ``values`` under a pixel polygon (or at ``center``
+    when the polygon is degenerate); None when every value there is infinite."""
+    h, w = values.shape
+    try:
+        poly = np.rint(np.asarray(points, dtype=np.float64).reshape(-1, 2)).astype(np.int32)
+    except (TypeError, ValueError):
+        poly = np.zeros((0, 2), np.int32)
+    if poly.shape[0] >= 3:
+        x0 = max(0, int(poly[:, 0].min()))
+        x1 = min(w, int(poly[:, 0].max()) + 1)
+        y0 = max(0, int(poly[:, 1].min()))
+        y1 = min(h, int(poly[:, 1].max()) + 1)
+        if x0 < x1 and y0 < y1:
+            window = values[y0:y1, x0:x1]
+            if not np.isfinite(window).any():
+                return None
+            mask = np.zeros(window.shape, np.uint8)
+            cv2.fillPoly(mask, [poly - np.array([x0, y0], np.int32)], 1)
+            under = window[mask > 0]
+            if under.size:
+                low = float(under.min())
+                return low if math.isfinite(low) else None
+    if center is None:
+        return None
+    cx, cy = center
+    if 0 <= cx < w and 0 <= cy < h and math.isfinite(float(values[cy, cx])):
+        return float(values[cy, cx])
+    return None
+
+
 def _detection_center_px(detection):
     """Return a detection center without requiring prepared placement state."""
     try:
@@ -7186,6 +7375,7 @@ def _select_yolo_object_candidate_once(
     # out of its street; skip it so a shorter fit or the facade fallback,
     # which extrudes the detection's own height, takes the footprint.
     height_gate_m = _detection_height_gate_m(detection)
+    approach_cap_m = _detection_approach_cap_m(detection)
     # Height fit: same-footprint assets differing only in floors share
     # coverage AND aspect, so ranking height error between aspect_error and
     # static_rank picks the floor variant nearest the detection's (HeightNet)
@@ -7239,6 +7429,9 @@ def _select_yolo_object_candidate_once(
                 height_known_list[idx] and
                 height_list[idx] > height_gate_m + 1e-6
             ):
+                counters['height_reject'] += 1
+                continue
+            if approach_cap_m is not None and not _object_fits_under(asset['path'], approach_cap_m):
                 counters['height_reject'] += 1
                 continue
             group.append((
@@ -7339,6 +7532,7 @@ def _select_yolo_object_candidate_once(
 # caches), not the whole detection.
 _DEDUP_FALLBACK_DET_KEYS = (
     'length_m', 'width_m', 'area_m2', 'placement_class', 'height_gate_max_m',
+    'approach_cap_m',
 )
 
 
@@ -7396,6 +7590,7 @@ def _smaller_object_alternatives(
     height_list = bundle['height_list']
     height_known_list = bundle.get('height_known_list')
     height_gate_m = _detection_height_gate_m(detection)
+    approach_cap_m = _detection_approach_cap_m(detection)
     viable = np.flatnonzero(
         (bundle['req_l'] <= length_m + 1e-6) & (bundle['req_w'] <= width_m + 1e-6) &
         (bundle['cov_area'] >= float(min_coverage) * detection_area_m2 - 1e-12)
@@ -7411,6 +7606,8 @@ def _smaller_object_alternatives(
             height_gate_m is not None and height_known_list is not None and
             height_known_list[idx] and height_list[idx] > height_gate_m + 1e-6
         ):
+            continue
+        if approach_cap_m is not None and not _object_fits_under(asset['path'], approach_cap_m):
             continue
         bounds_m = asset['bounds_m']
         footprint_m2 = (float(bounds_m[1]) - float(bounds_m[0])) * (float(bounds_m[3]) - float(bounds_m[2]))
@@ -8682,6 +8879,7 @@ class _BuildingOverlayRun:
         self._load_height_model()
         self._load_stock_yolo_model()
         self._load_scenery_exclusions()
+        self._load_approach_surfaces()
         if not self._prepare_assets():
             return 0
         self._prepare_tile_vectors()
@@ -9227,6 +9425,27 @@ class _BuildingOverlayRun:
             except Exception:
                 pass
         self._predecode = None
+
+    def _load_approach_surfaces(self):
+        """Approach surfaces of the runways near this tile (runway approach limits)."""
+        self.approach_surfaces = []
+        if not (_approach_heights_enabled() and self.custom_scenery_dir):
+            return
+        try:
+            airports = APT.airports_for_tile(
+                os.path.dirname(os.path.abspath(self.custom_scenery_dir)),
+                int(math.floor(self.lat)), int(math.floor(self.lon)),
+                self.cache_dir, log=verbose_print,
+            )
+        except Exception as exc:
+            print(f"[Bld] airports unreadable ({exc!r}): no runway approach height limits", flush=True)
+            return
+        self.approach_surfaces = APPROACH.runway_surfaces(airports)
+        if self.approach_surfaces:
+            verbose_print(
+                f"Runway approach height limits: {len(self.approach_surfaces)} runway ends "
+                f"at {len(airports)} airports"
+            )
 
     def _load_scenery_exclusions(self):
         """Read the simHeaven network/buildings and other installed scenery."""
@@ -9804,6 +10023,10 @@ class _BuildingOverlayRun:
             # v81: placed objects always mark the spacing mask, so the facade
             #      fallback stops covering them.
             "objects-mark-spacing",
+        ) + (
+            # Runway approach limits: only tiles with runways in reach change key.
+            (APPROACH.building_signature(self.approach_surfaces),)
+            if getattr(self, 'approach_surfaces', None) else ()
         )
 
     def _prepare_dds_inference(self, fi, fname, m):
@@ -10090,6 +10313,66 @@ class _BuildingOverlayRun:
         )
         return [(path, final_heading) for path, final_heading, _area in alts]
 
+    def _enforce_approach_caps(self):
+        """Lower facades and drop objects that reach a runway approach surface.
+
+        Covers every placement path (cached textures, stock-YOLO objects and
+        facades, polygon roofs, the dedup fallback); detections were already cut
+        to the limit before placing, so this mostly catches what they could not
+        see: object meshes taller than their names say, stock-YOLO landmarks and
+        facade rings beyond the detection box.
+        """
+        if not getattr(self, 'approach_surfaces', None):
+            return
+        _t = time.perf_counter()
+        boxes = _surface_boxes(self.approach_surfaces)
+        lowered = dropped_fac = dropped_obj = 0
+        facades = []
+        for placement in self.placed_facades:
+            ring, path, height_m = placement
+            lons, lats = _ring_samples(ring)
+            near = _surfaces_near(boxes, lons, lats)
+            cap = float(APPROACH.cap_at(near, lons, lats).min()) if near else math.inf
+            if cap >= float(height_m):
+                facades.append(placement)
+            elif cap < APPROACH_MIN_BUILDING_H_M:
+                dropped_fac += 1
+            else:
+                facades.append((ring, path, float(math.floor(cap))))
+                lowered += 1
+        self.placed_facades = facades
+        objects = []
+        for placement in self.placed_stock_objects:
+            o_lon, o_lat, heading, path = placement
+            # no object reaches 200 m from its origin: skip the footprint lookup
+            near = _surfaces_near(
+                boxes, (o_lon - 0.003, o_lon + 0.003), (o_lat - 0.002, o_lat + 0.002)
+            )
+            if near:
+                lons, lats = _object_samples(
+                    o_lon, o_lat, heading, _object_footprint_bounds_m(path)
+                )
+                near = _surfaces_near([b for b in boxes if b[0] in near], lons, lats)
+            if near:
+                cap = float(APPROACH.cap_at(near, lons, lats).min())
+                if math.isfinite(cap) and not _object_fits_under(path, cap):
+                    dropped_obj += 1
+                    review = self._review_placements.get(id(placement))
+                    if review is not None:
+                        review[0].set(review[1], "dropped_approach_surface")
+                    continue
+            objects.append(placement)
+        self.placed_stock_objects = objects
+        self.timings['approach_caps'] = self.timings.get('approach_caps', 0.0) + (
+            time.perf_counter() - _t
+        )
+        if lowered or dropped_fac or dropped_obj:
+            print(
+                f"[Bld] Runway approaches: {lowered:,} facades lowered, "
+                f"{dropped_fac:,} facades and {dropped_obj:,} objects removed",
+                flush=True,
+            )
+
     def _write_review_dumps(self):
         """O4_BLD_REVIEW_DUMP: write each texture's dump once all outcomes are final."""
         for path, tracker, img_w, img_h, payload in self._review_pending:
@@ -10172,6 +10455,7 @@ class _BuildingOverlayRun:
                         _tracker.set(_det, "dropped_tile_dedup")
         if self._dedup_fallback:
             self._dedup_fallback.clear()  # one context per placed object; done with them
+        self._enforce_approach_caps()
         self._write_review_dumps()
 
         texture_time = time.time() - self.t_start
@@ -11538,6 +11822,7 @@ class _TexturePass:
     def _start_placement(self):
         """Height gates, placement order and the incremental occupancy masks."""
         _assign_height_gates(self.yolo_detections, self.run.natural_asset_region)
+        self._apply_approach_caps()
         self.file_counts['height_context_capped'] = sum(
             1 for _d in self.yolo_detections
             if _d.get('height_adjustment') == 'context_cap'
@@ -11580,6 +11865,47 @@ class _TexturePass:
         # smaller detections on that roof are skipped below.
         self.large_roof_mask = None
         self._poly_refine = _env_flag("O4_BLD_FOOTPRINT_POLYGONS", True)
+
+    def _apply_approach_caps(self):
+        """Cut each detection under a runway approach surface to the surface's
+        lowest point over its box; drop it where that is under one storey."""
+        surfaces = getattr(self.run, 'approach_surfaces', None)
+        if not surfaces or not self.yolo_detections:
+            return
+        cap = APPROACH.cap_map(
+            surfaces, self.lat_n, self.lat_s, self.lon_w, self.lon_e,
+            self.img_h, self.img_w, max_h=np.inf,
+        )
+        if cap is None:
+            return
+        kept = []
+        n_cut = n_drop = 0
+        for det in self.yolo_detections:
+            limit = _poly_min(cap, det.get('points'), _detection_center_px(det))
+            if limit is None:
+                kept.append(det)
+                continue
+            if limit < APPROACH_MIN_BUILDING_H_M:
+                n_drop += 1
+                self._review_fate(det, "dropped_approach_surface")
+                continue
+            det['approach_cap_m'] = round(limit, 3)
+            try:
+                height_m = float(det.get('height_m'))
+            except (TypeError, ValueError):
+                height_m = None
+            if height_m is not None and math.isfinite(height_m) and height_m > limit:
+                det['height_m'] = limit
+                det['height_adjustment'] = 'approach_cap'
+                n_cut += 1
+            gate = _detection_height_gate_m(det)
+            det['height_gate_max_m'] = limit if gate is None else min(gate, limit)
+            kept.append(det)
+        self.yolo_detections = kept
+        if n_cut:
+            self.file_counts['approach_height_cut'] = n_cut
+        if n_drop:
+            self.file_counts['approach_dropped'] = n_drop
 
     def _resolve_overlap_facades(self):
         """O4_BLD_OVERLAP_FACADES (default on): turn grazing pairs kept by suppression into

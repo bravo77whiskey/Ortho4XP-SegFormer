@@ -18,6 +18,12 @@ finds (O4_Tree_Sizes.SHRUB_FLOOR_M).
 
 Heights are taken above the ground under the tree, not above the threshold:
 the terrain is treated as flat.
+
+Buildings (O4_Building_Overlay) are taller, so they also use the second
+section of the surfaces that have one (SECOND_SECTIONS): it continues the
+first at a steeper slope, to 150 m above the threshold for code 3/4 runways.
+The horizontal section beyond it is left out: real cities keep charted towers
+above 150 m there.
 """
 
 from __future__ import annotations
@@ -50,14 +56,25 @@ SURFACES = {
     ("precision", 3): (300.0, 60.0, 0.15, 0.02, 3000.0),
     ("precision", 4): (300.0, 60.0, 0.15, 0.02, 3000.0),
 }
+# Annex 14 Table 4-1, second section: (length m, slope), after the first.
+SECOND_SECTIONS = {
+    ("nonprecision", 3): (3600.0, 0.025),
+    ("nonprecision", 4): (3600.0, 0.025),
+    ("precision", 1): (12000.0, 0.03),
+    ("precision", 2): (12000.0, 0.03),
+    ("precision", 3): (3600.0, 0.025),
+    ("precision", 4): (3600.0, 0.025),
+}
 # apt.dat runway marking codes (6 and 7: the EASA non-precision and precision
 # markings of X-Plane 12).
 _PRECISION_MARKS = (3, 5, 7)
 _NONPRECISION_MARKS = (2, 4, 6)
 
 # One approach surface: threshold position, unit vector pointing away from
-# the runway (east, north), and the Table 4-1 values.
-Surface = namedtuple("Surface", "icao end lat lon ux uy inner_half offset divergence slope length")
+# the runway (east, north), the Table 4-1 values of the first section and the
+# later sections as ((length, slope), ...).
+Surface = namedtuple("Surface", "icao end lat lon ux uy inner_half offset divergence slope length later",
+                     defaults=((),))
 
 
 def _kx(lat):
@@ -83,9 +100,24 @@ def approach_kind(marking):
     return "visual"
 
 
+def _sections(surface):
+    return ((surface.length, surface.slope),) + tuple(surface.later or ())
+
+
+def _limited_m(surface, max_h):
+    """Distance beyond the inner edge where the surface reaches ``max_h`` (or ends)."""
+    along = top = 0.0
+    for length, slope in _sections(surface):
+        if top + slope * length >= max_h:
+            return along + (max_h - top) / slope
+        along += length
+        top += slope * length
+    return along
+
+
 def reach_m(surface, max_h=MAX_TREE_H_M):
     """Distance before the threshold from which the tallest tree clears the surface."""
-    return surface.offset + min(surface.length, max_h / surface.slope)
+    return surface.offset + _limited_m(surface, max_h)
 
 
 def runway_surfaces(airports):
@@ -107,15 +139,17 @@ def runway_surfaces(airports):
                 # The threshold sits the displaced length into the runway.
                 t_lon = lon - sx * disp / _kx(lat)
                 t_lat = lat - sy * disp / EARTH_M_PER_DEG_LAT
-                inner, offset, div, slope, sect = SURFACES[(approach_kind(mark), code)]
+                kind = approach_kind(mark)
+                inner, offset, div, slope, sect = SURFACES[(kind, code)]
+                later = (SECOND_SECTIONS[(kind, code)],) if (kind, code) in SECOND_SECTIONS else ()
                 out.append(Surface(airport.icao, end, t_lat, t_lon, sx, sy,
-                                   0.5 * inner, offset, div, slope, sect))
+                                   0.5 * inner, offset, div, slope, sect, later))
     return out
 
 
 def surface_ring(surface, max_h=MAX_TREE_H_M):
     """(lon, lat) corners of the part of a surface where trees are limited."""
-    s_end = min(surface.length, max_h / surface.slope)
+    s_end = _limited_m(surface, max_h)
     near, far = 0.0, surface.offset + s_end           # from the threshold out
     half_far = surface.inner_half + surface.divergence * s_end
     px, py = -surface.uy, surface.ux
@@ -141,6 +175,38 @@ def surfaces_in(surfaces, lat_n, lat_s, lon_w, lon_e, max_h=MAX_TREE_H_M):
     return out
 
 
+def _limit(s, e, n, max_h):
+    """Height limit (float32, ``inf`` where none) at east/north offsets in metres
+    from the threshold of surface ``s``."""
+    out_d = e * s.ux + n * s.uy                   # metres beyond the threshold
+    side = np.abs(e * -s.uy + n * s.ux)
+    beyond = out_d - s.offset                     # metres beyond the inner edge
+    limit = np.full(np.broadcast(out_d, side).shape, np.inf, np.float32)
+    before_edge = (out_d >= 0.0) & (beyond < 0.0) & (side <= s.inner_half)
+    along = top = 0.0
+    for length, slope in _sections(s):
+        under = ((beyond >= along) & (beyond <= along + length)
+                 & (side <= s.inner_half + s.divergence * beyond) & ~np.isfinite(limit))
+        limit[under] = (top + slope * (beyond[under] - along)).astype(np.float32)
+        along += length
+        top += slope * length
+    limit[before_edge] = 0.0
+    limit[limit >= max_h] = np.inf
+    return limit
+
+
+def cap_at(surfaces, lons, lats, max_h=np.inf):
+    """Height limit in metres at each (lon, lat), ``inf`` where no surface limits it."""
+    lons = np.asarray(lons, np.float64)
+    lats = np.asarray(lats, np.float64)
+    cap = np.full(lons.shape, np.inf, np.float32)
+    for s in surfaces:
+        e = (lons - s.lon) * _kx(s.lat)
+        n = (lats - s.lat) * EARTH_M_PER_DEG_LAT
+        np.minimum(cap, _limit(s, e, n, max_h), out=cap)
+    return cap
+
+
 def cap_map(surfaces, lat_n, lat_s, lon_w, lon_e, img_h, img_w, max_h=MAX_TREE_H_M):
     """Height limit in metres per pixel (rows linear in latitude, as the overlay maps
     pixels), ``inf`` where no surface limits trees; None when nothing does."""
@@ -157,23 +223,21 @@ def cap_map(surfaces, lat_n, lat_s, lon_w, lon_e, img_h, img_w, max_h=MAX_TREE_H
             continue
         e = ((lon_w + (np.arange(x0, x1) + 0.5) * lon_px) - s.lon) * _kx(s.lat)
         n = ((lat_n - (np.arange(y0, y1) + 0.5) * lat_px) - s.lat) * EARTH_M_PER_DEG_LAT
-        e, n = e[None, :], n[:, None]
-        out_d = e * s.ux + n * s.uy                   # metres beyond the threshold
-        side = np.abs(e * -s.uy + n * s.ux)
-        beyond = out_d - s.offset                     # metres beyond the inner edge
-        limit = np.full(out_d.shape, np.inf, np.float32)
-        before_edge = (out_d >= 0.0) & (beyond < 0.0) & (side <= s.inner_half)
-        under = ((beyond >= 0.0) & (beyond <= s.length)
-                 & (side <= s.inner_half + s.divergence * beyond))
-        limit[under] = (s.slope * beyond[under]).astype(np.float32)
-        limit[before_edge] = 0.0
-        limit[limit >= max_h] = np.inf
+        limit = _limit(s, e[None, :], n[:, None], max_h)
         if not np.isfinite(limit).any():
             continue
         if cap is None:
             cap = np.full((img_h, img_w), np.inf, np.float32)
         np.minimum(cap[y0:y1, x0:x1], limit, out=cap[y0:y1, x0:x1])
     return cap
+
+
+def building_signature(surfaces):
+    """Cache-key part for building caps (all sections, no height ceiling)."""
+    return ("approach-heights-bld-v1", tuple(sorted(
+        (s.icao, s.end, round(s.lat, 7), round(s.lon, 7), round(s.ux, 6), round(s.uy, 6),
+         s.inner_half, s.offset, s.divergence, round(s.slope, 6), s.length, tuple(s.later or ()))
+        for s in surfaces)))
 
 
 def signature(surfaces):
