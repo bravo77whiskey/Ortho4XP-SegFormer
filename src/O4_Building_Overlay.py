@@ -58,6 +58,7 @@ import O4_Height_Model as HEIGHTMODEL
 import O4_Height_Priors as HEIGHTPRIORS
 import O4_Footprint_Polygons as FOOTPRINTS
 import O4_Agri_Structures as AGRI
+import O4_Greenhouse_Map as GHMAP
 import O4_Texture_Selection as TEXSEL
 import O4_Bld_Seams as SEAMS
 import O4_Bld_Overlap_Facades as OVLFAC
@@ -2172,8 +2173,8 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 76      # v76: ridged-roof greenhouses, traced outlines sorted
-BLD_PLACEMENT_FAST_CACHE_VERSION = 78  # v78: ridged-roof greenhouses, traced outlines sorted
+BLD_PLACEMENT_CACHE_VERSION = 77      # v77: greenhouse fields + solar-panel ground
+BLD_PLACEMENT_FAST_CACHE_VERSION = 79  # v79: greenhouse fields + solar-panel ground
 # Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
 # wing the detector missed) are extruded as a polygon facade traced from the
 # landcover building class (O4_Footprint_Polygons), and the smaller
@@ -3793,6 +3794,12 @@ def _agri_mode():
     if raw == "drop":
         return "drop"
     return "greenhouse"
+
+
+def _greenhouse_fields_on():
+    """O4_BLD_GH_FIELDS: join sorted greenhouses into fields and fill them
+    (O4_Agri_Structures.greenhouse_fields).  On by default; 0 turns it off."""
+    return _env_flag("O4_BLD_GH_FIELDS", True)
 
 
 def _seg_first_mode():
@@ -9133,6 +9140,7 @@ class _BuildingOverlayRun:
             'trained_yolo_inference': 0.0,
             'yolo_suppress': 0.0,
             'heightnet': 0.0,
+            'greenhouse_fields': 0.0,
             'footprint_polygons': 0.0,
             'overlap_facades': 0.0,
             'seg_first': 0.0,
@@ -11570,44 +11578,70 @@ class _TexturePass:
             detections, self.veg_map, _agri_image, self.m_per_px,
             counts=self.file_counts, height_fn=_agri_heights, seeds=seeds,
         )
+        fill_detections = []
+        if not seeds and _greenhouse_fields_on() and (
+                greenhouse_detections or GHMAP.map_dir() is not None):
+            _t_f = time.perf_counter()
+            _prior = None
+            try:
+                _prior = GHMAP.texture_mask(
+                    self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w)
+            except Exception as _e:
+                verbose_print(f"Greenhouse map unreadable ({_e}); texture only.", flush=True)
+            if _prior is not None:
+                self.file_counts['greenhouse_map_px'] = int(np.count_nonzero(_prior))
+            buildings, _members, fill_detections = AGRI.greenhouse_fields(
+                greenhouse_detections, buildings, self.veg_map, _agri_image(),
+                self.m_per_px, height_fn=_agri_heights,
+                solar=AGRI.uses_solar_greenhouses(self.run.lon),
+                counts=self.file_counts, prior=_prior,
+            )
+            greenhouse_detections = greenhouse_detections + _members
+            _record_elapsed(self.run.timings, self.file_timings, 'greenhouse_fields', _t_f)
         if self.review is not None:
             for _gh in greenhouse_detections:
                 self.review.set(_gh, "greenhouse")
             self.review.dropped(_review_before, buildings, "farmland_ground")
+            for _gh in fill_detections:
+                self.review.set(_gh, "greenhouse_fill")
         self.file_counts['agri_greenhouse'] = (
             self.file_counts.get('agri_greenhouse', 0) + len(greenhouse_detections)
         )
         self.file_counts['agri_ground'] = self.file_counts.get('agri_ground', 0) + (
             len(detections) - len(buildings) - len(greenhouse_detections)
         )
-        if greenhouse_detections:
+        if greenhouse_detections or fill_detections:
             # A greenhouse block the landcover model reads as roof
             # must not be traced again as a building (segment-first,
             # large-roof polygons): its OBB becomes farmland.
             self.veg_map = self.veg_map.copy()
-            for _gh in greenhouse_detections:
+            for _gh in greenhouse_detections + fill_detections:
                 cv2.fillPoly(
                     self.veg_map,
                     [np.round(np.asarray(_gh['points'])).astype(np.int32)],
                     int(AGRI.CLASS_AGRICULTURE),
                 )
             if _agri_mode() == "greenhouse":
-                _place_greenhouses(
-                    greenhouse_detections,
-                    m_per_px=self.m_per_px, img_w=self.img_w, img_h=self.img_h,
-                    lat=self.run.lat, lon=self.run.lon,
-                    bounds=(self.lat_n, self.lat_s, self.lon_w, self.lon_e),
-                    static_occ_mask=self.static_occ_mask,
-                    route_excl_mask=self.route_excl_mask,
-                    building_spacing_mask=self.building_spacing_mask,
-                    fit_scratch=self.fit_scratch,
-                    tunnel_paths=self.run.greenhouse_tunnel_paths,
-                    facade_path=self.run.greenhouse_facade_path,
-                    placed_objects=self.run.placed_stock_objects,
-                    placed_facades=self.run.placed_facades,
-                    file_counts=self.file_counts,
-                )
-        return buildings, greenhouse_detections
+                # detected greenhouses first: the fill only takes what they leave
+                for _batch in (greenhouse_detections, fill_detections):
+                    if not _batch:
+                        continue
+                    _place_greenhouses(
+                        _batch,
+                        m_per_px=self.m_per_px, img_w=self.img_w, img_h=self.img_h,
+                        lat=self.run.lat, lon=self.run.lon,
+                        bounds=(self.lat_n, self.lat_s, self.lon_w, self.lon_e),
+                        static_occ_mask=self.static_occ_mask,
+                        route_excl_mask=self.route_excl_mask,
+                        building_spacing_mask=self.building_spacing_mask,
+                        fit_scratch=self.fit_scratch,
+                        tunnel_paths=self.run.greenhouse_tunnel_paths,
+                        facade_path=self.run.greenhouse_facade_path,
+                        placed_objects=self.run.placed_stock_objects,
+                        placed_facades=self.run.placed_facades,
+                        file_counts=self.file_counts,
+                    )
+        return buildings, greenhouse_detections + fill_detections
 
     def _apply_seg_first(self):
         """Replace detections with landcover-traced footprints (segment-first)."""

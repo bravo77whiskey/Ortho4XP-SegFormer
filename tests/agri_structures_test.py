@@ -4,6 +4,7 @@ import math
 import os
 import sys
 
+import cv2
 import numpy as np
 import pytest
 
@@ -404,3 +405,149 @@ def test_fine_textures_accept_an_unbuilt_belt_without_fields():
     _supported(town, det)
     assert AGRI.classify_detection(det, town, lambda: img, mpp, _low)[0] == \
         AGRI.KIND_BUILDING
+
+
+# ── greenhouse fields ──────────────────────────────────────────────────────
+
+def _solar_rows(n_rows=20, mpp=1.0, size=600):
+    img = np.zeros((size, size, 3), np.uint8)
+    img[:] = (150, 110, 70)  # tan soil lanes
+    rows = []
+    for k in range(n_rows):
+        y = 20 + k * 18
+        for xs in (40, 200, 360):
+            img[y:y + 10, xs:xs + 120] = (150, 160, 160)  # grey film
+            rows.append((xs, y))
+    return img, rows
+
+
+def _box(xs, y, length=120, width=10):
+    pts = np.array([[xs, y], [xs + length, y], [xs + length, y + width], [xs, y + width]],
+                   np.float32)
+    return {"points": pts, "length_m": float(length), "width_m": float(width),
+            "area_m2": float(length * width), "tunnel_axis": "long"}
+
+
+def test_greenhouse_fields_fill_missed_solar_rows():
+    img, rows = _solar_rows()
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    seeds = [_box(xs, y) for i, (xs, y) in enumerate(rows) if i % 2 == 0]
+    kept, members, fills = AGRI.greenhouse_fields(seeds, [], veg, img, 1.0)
+    assert kept == [] and members == []
+    film = img[..., 1] == 160
+    seeded = np.zeros(film.shape, np.uint8)
+    for d in seeds:
+        cv2.fillPoly(seeded, [np.round(d["points"]).astype(np.int32)], 1)
+    cover = np.zeros(film.shape, np.uint8)
+    for d in fills:
+        cv2.fillPoly(cover, [np.round(d["points"]).astype(np.int32)], 1)
+    missing = film & (seeded == 0)
+    assert (missing & (cover > 0)).sum() >= 0.8 * missing.sum()
+    # rows, not a slab: the soil lanes stay mostly bare
+    assert (cover.astype(bool) & ~film).sum() <= 0.15 * cover.sum()
+    kinds = {p["kind"] for d in fills for p in AGRI.greenhouse_pieces(d, 1.0)}
+    assert kinds == {"solar"}
+
+
+def test_greenhouse_fields_need_a_few_seeds():
+    img, rows = _solar_rows()
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    kept, members, fills = AGRI.greenhouse_fields([_box(*rows[0])], [], veg, img, 1.0)
+    assert fills == [] and members == []
+
+
+def test_greenhouse_fields_keep_painted_buildings():
+    img, rows = _solar_rows()
+    img[200:215, 200:215] = (200, 40, 40)  # red-roofed house among the rows
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    seeds = [_box(xs, y) for (xs, y) in rows[::2]]
+    house = _box(195, 195, 25, 25)
+    kept, members, fills = AGRI.greenhouse_fields(
+        seeds, [house], veg, img, 1.0, height_fn=lambda dets: [6.0] * len(dets))
+    assert kept == [house] and members == []
+    cover = np.zeros(img.shape[:2], np.uint8)
+    for d in fills:
+        cv2.fillPoly(cover, [np.round(d["points"]).astype(np.int32)], 1)
+    assert cover[195:220, 195:220].sum() == 0
+
+
+def test_greenhouse_fields_fill_a_row_off_the_field_phase():
+    # a missed row a few metres off the field's regular spacing still fills
+    img = np.zeros((300, 300, 3), np.uint8)
+    img[:] = (150, 110, 70)
+    seeds = []
+    for k in range(12):
+        y = 20 + k * 20 + (6 if k == 6 else 0)
+        img[y:y + 10, 40:200] = (150, 160, 160)
+        if k != 6:
+            seeds.append(_box(40, y, length=160))
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    _kept, _members, fills = AGRI.greenhouse_fields(seeds, [], veg, img, 1.0)
+    cover = np.zeros(img.shape[:2], np.uint8)
+    for d in fills:
+        cv2.fillPoly(cover, [np.round(d["points"]).astype(np.int32)], 1)
+    row = cover[146:156, 40:200]
+    assert row.mean() >= 0.8
+
+
+def test_greenhouse_fields_grow_over_kept_film_rows():
+    # the rules kept the far rows as buildings: the field still reaches them
+    img, rows = _solar_rows()
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    edge = 20 + 6 * 18
+    seeds = [_box(xs, y) for (xs, y) in rows if y < edge]
+    near = [_box(xs, y) for (xs, y) in rows if edge <= y < edge + 4 * 18]
+    far = [_box(xs, y) for (xs, y) in rows if y >= edge + 10 * 18]
+    kept, members, fills = AGRI.greenhouse_fields(
+        seeds, near + far, veg, img, 1.0, height_fn=lambda dets: [5.0] * len(dets))
+    assert all(any(m is d for m in members) for d in near)
+    # growth is bounded: a field does not chain on through long grey roofs
+    assert all(any(k is d for k in kept) for d in far)
+
+
+def test_greenhouse_fields_keep_painted_blue_roofs():
+    img, rows = _solar_rows()
+    # a blue steel roof striped with grey seams among the rows
+    img[200:215, 200:320] = (150, 160, 160)
+    img[200:215, 200:320:3] = (60, 110, 200)
+    img[200:215, 201:320:3] = (60, 110, 200)
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    seeds = [_box(xs, y) for (xs, y) in rows[::2]]
+    shed = _box(200, 200, 120, 15)
+    kept, members, _fills = AGRI.greenhouse_fields(
+        seeds, [shed], veg, img, 1.0, height_fn=lambda dets: [6.0] * len(dets))
+    assert kept == [shed] and members == []
+
+
+def test_greenhouse_fields_do_not_fill_developed_ground():
+    img, rows = _solar_rows()
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    veg[:, 300:] = AGRI.CLASS_DEVELOPED  # a grey yard east of the field
+    img[:, 300:] = (150, 160, 160)
+    seeds = [_box(xs, y) for (xs, y) in rows if xs < 300]
+    _kept, _members, fills = AGRI.greenhouse_fields(seeds, [], veg, img, 1.0)
+    assert all(np.asarray(d["points"])[:, 0].mean() < 300 for d in fills)
+
+
+def test_solar_panels_on_farmland_are_ground_not_greenhouses():
+    det, veg = _det(100, 100, 60, 20), _veg(AGRI_CLS)
+    # dark blue-grey panels (Wenzhou PV farm) vs green-leaning teal film
+    assert AGRI.classify_detection(det, veg, lambda: _image((96, 102, 104)), MPP) == \
+        (AGRI.KIND_GROUND, "solar_panels")
+    assert _kind(det, veg, _image((96, 120, 108))) == AGRI.KIND_GREENHOUSE
+
+
+def test_solar_panel_check_can_be_switched_off(monkeypatch):
+    monkeypatch.setenv("O4_BLD_GH_PANELS", "0")
+    assert _kind(_det(100, 100, 60, 20), _veg(AGRI_CLS), _image((96, 102, 104))) == \
+        AGRI.KIND_GREENHOUSE
+
+
+def test_greenhouse_fields_do_not_fill_between_solar_panels():
+    img, rows = _solar_rows()
+    img[:, :] = np.where((img == (150, 160, 160)).all(axis=2)[..., None],
+                         np.array((96, 102, 104), np.uint8), img)
+    veg = np.full(img.shape[:2], AGRI_CLS, np.uint8)
+    seeds = [_box(xs, y) for i, (xs, y) in enumerate(rows) if i % 2 == 0]
+    _kept, _members, fills = AGRI.greenhouse_fields(seeds, [], veg, img, 1.0)
+    assert fills == []

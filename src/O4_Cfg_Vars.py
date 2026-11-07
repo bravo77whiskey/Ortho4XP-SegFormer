@@ -141,6 +141,11 @@ cfg_app_vars = {
         "default": "",
         "hint": "Folder holding the canopy-height model (several GB, downloaded on first use). Leave empty to keep it in _canopy_height inside the overlay cache.",
     },
+    "greenhouse_map_dir": {
+        "type": str,
+        "default": "",
+        "hint": "Folder of greenhouse maps made from multispectral satellite data (GeoTIFF, EPSG:4326, e.g. the Global-PCG-10 1x1 degree tiles). The building overlay then also fills mapped greenhouse land it finds film-coloured on the texture. Leave empty to find greenhouses from the texture alone.",
+    },
     "overlay_tensorrt": {
         "type": bool,
         "default": True,
@@ -1022,6 +1027,7 @@ list_app_vars = [
     "overlay_venv_dir",
     "overlay_temp_dir",
     "canopy_model_dir",
+    "greenhouse_map_dir",
     "remote_gpu_root",
     "overlay_tensorrt",
 ]
@@ -1035,6 +1041,7 @@ gui_app_vars_long = [
     "overlay_venv_dir",
     "overlay_temp_dir",
     "canopy_model_dir",
+    "greenhouse_map_dir",
 ]
 
 gui_app_vars_short = [var for var in list_app_vars if var not in gui_app_vars_long]
@@ -1316,6 +1323,6 @@ app_settings_sections = (
         (None, ("custom_scenery_dir", "custom_overlay_src", "custom_overlay_src_alternate",
                 "osm_pbf_dir")),
         ("Overlay processing", ("overlay_venv_dir", "overlay_temp_dir", "canopy_model_dir",
-                                "remote_gpu_root")),
+                                "greenhouse_map_dir", "remote_gpu_root")),
     )),
 )

@@ -20,7 +20,8 @@ roofs from cities and greenhouse belts; Esri ZL16):
    agriculture.  Real buildings there are small compact farm sheds (19 of
    21 labelled were <= 250 m2 and aspect <= 2.5), so those stay buildings;
    anything larger is a greenhouse when its interior is desaturated (film),
-   otherwise open ground.
+   otherwise open ground.  Dark blue-grey interiors are solar panels
+   (``looks_like_solar_panels``), also ground.
 2. **Unsupported on a road.**  Mostly road class inside: ground.
 3. **Supported, greenhouse-shaped, beside farmland.**  The landcover model
    reads long film roofs as buildings.  Long (aspect >= 3.5), >= 400 m2,
@@ -55,6 +56,7 @@ resolution (``RIDGE_FINE_MAX_MPP``), because ZL16 aliases roofs into stripes.
 from __future__ import annotations
 
 import math
+import os
 
 import cv2
 import numpy as np
@@ -66,6 +68,8 @@ KIND_GROUND = "ground"
 # SegFormer (OpenEarthMap) classes, as in O4_Landcover_Inference.
 CLASS_DEVELOPED = 3
 CLASS_ROAD = 4
+CLASS_TREE = 5
+CLASS_WATER = 6
 CLASS_AGRICULTURE = 7
 CLASS_BUILDING = 8
 
@@ -139,6 +143,14 @@ FILM_MAX_HUE = 192.0      # painted blue roofs and solar panels lie above
 PAINT_MIN_VALUE = 175.0
 PAINT_PALE_VALUE = 160.0
 PAINT_PALE_SATURATION = 45.0
+# Solar panels on farmland are dark, grey and blue-tinted; greenhouse film,
+# even teal film, leans green (B < G) or is more saturated.  Measured on a
+# Wenzhou reclaimed-land PV farm against Shouguang, Wenzhou and Gimhae
+# greenhouses (Esri/Bing ZL16-18).
+PANEL_MAX_VALUE = 115.0       # mean HSV value (0-255)
+PANEL_MIN_BLUE_RED = -8.0     # mean B - R
+PANEL_MIN_BLUE_GREEN = -6.5   # mean B - G
+PANEL_MAX_SATURATION = 34.0   # mean HSV saturation (0-255)
 
 
 def _obb_frame(points):
@@ -325,6 +337,29 @@ def is_film_coloured(image, ctx):
     return FILM_MIN_HUE <= hue <= FILM_MAX_HUE
 
 
+def _panels_on():
+    return os.environ.get("O4_BLD_GH_PANELS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def looks_like_solar_panels(image, ctx):
+    """Dark blue-grey interior: a solar farm, not greenhouse film."""
+    if not _panels_on():
+        return False
+    x0, y0, x1, y1 = ctx["window"]
+    return _panel_pixels(image[y0:y1, x0:x1][ctx["inside"]])
+
+
+def _panel_pixels(px):
+    """Solar-panel test on the mean colour of RGB pixels (N x 3)."""
+    if px.size == 0:
+        return False
+    hsv = cv2.cvtColor(px.reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
+    r, g, b = px.astype(np.float32).mean(axis=0)
+    _h, sat, val = hsv.astype(np.float32).mean(axis=0)
+    return bool(val < PANEL_MAX_VALUE and sat < PANEL_MAX_SATURATION and
+                b - r > PANEL_MIN_BLUE_RED and b - g > PANEL_MIN_BLUE_GREEN)
+
+
 class _Countryside:
     """Whether a pixel lies among fields: farmland within
     RIDGE_FARMLAND_RADIUS_M, or (fine textures) hardly anything built.
@@ -422,6 +457,8 @@ def _unsupported_kind(ctx, image_fn):
         return KIND_GROUND, "farmland"
     saturation, _ = interior_colour(image, ctx)
     if saturation < FILM_MAX_SATURATION:
+        if looks_like_solar_panels(image, ctx):
+            return KIND_GROUND, "solar_panels"
         return KIND_GREENHOUSE, "farmland_film"
     return KIND_GROUND, "farmland"
 
@@ -678,6 +715,396 @@ def greenhouse_pieces(detection, m_per_px, northern=True, solar=True):
         if bays_left <= 0:
             break
     return pieces
+
+
+# ── Greenhouse fields ───────────────────────────────────────────────────────
+# YOLO finds a greenhouse belt piecemeal: some tunnels and solar houses come
+# out as boxes, others not at all, others as buildings.  Placed box by box,
+# a belt turns into a patchwork of greenhouses, bare ground and houses.
+# Following the delineation chain of Koc-San & Sonmez (ISPRS 2016:
+# classify, then closing and a sieve, then trace the field outline), the
+# sorted greenhouses are joined into fields by a morphological closing;
+# inside a field, film-coloured ground no box covers is tiled with rows
+# laid out like the greenhouses around it, and low film-coloured buildings
+# become greenhouses too.
+FIELDS_CLOSE_M = 20.0       # bridges lanes and a missed solar row or a few tunnels
+FIELDS_HOLE_M2 = 10000.0    # enclosed holes up to this are part of the field
+FIELDS_MIN_SEEDS = 3        # greenhouses a field needs before it is filled
+FIELDS_GROW_ROUNDS = 4      # growth through film-coloured ground, FIELDS_CLOSE_M a round
+FIELDS_OPEN_M = 2.0         # slivers thinner than about twice this are dropped
+FIELDS_SMOOTH_M = 3.0       # colour is judged on the texture blurred this much
+FIELDS_MIN_GAP_M2 = 150.0   # uncovered film patches smaller than this stay bare
+FIELDS_KEEP_OUT_M = 3.0     # clearance kept around remaining buildings
+FIELDS_NEAR_M = 40.0        # greenhouses this close set a patch's row layout
+FIELDS_RUN_COVER = 0.7      # share of a strip column that must be film
+FIELDS_TUNNEL_BAYS = 2      # tunnel fill strips are this many bays wide
+FIELDS_MEMBER_COVER = 0.8   # buildings this much inside a field may convert
+FIELDS_MEMBER_FILM = 0.45   # ...when this share of their roof is film-coloured
+FIELDS_MEMBER_PAINT = 0.15  # ...and less than this is painted blue
+FIELDS_PRIOR_MIN_M2 = 2000.0  # mapped film area that makes a field with one greenhouse in it
+
+
+def _film_pixels(image, m_per_px):
+    """Per-pixel film colour (grey, or teal to blue, not pale paint) on the
+    texture smoothed over FIELDS_SMOOTH_M."""
+    k = max(1, int(round(FIELDS_SMOOTH_M / float(m_per_px)))) | 1
+    img = cv2.blur(image, (k, k)) if k > 1 else image
+    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    hue = hsv[..., 0].astype(np.float32) * 2.0
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
+    pale = (val >= PAINT_MIN_VALUE + 25) | (
+        (val >= PAINT_PALE_VALUE) & (sat >= PAINT_PALE_SATURATION))
+    grey = sat < FILM_GREY_SATURATION + 5
+    tinted = (hue >= FILM_MIN_HUE) & (hue <= FILM_MAX_HUE + 8) & (sat < 120)
+    return (grey | tinted) & ~pale & (val >= 45)
+
+
+def _det_axis(det):
+    """Unit vector (image px) of the greenhouse rows' long direction."""
+    pts, ux, uy = _obb_frame(det["points"])
+    return uy if det.get("tunnel_axis") == "short" else ux
+
+
+def _axis_angle(vecs, weights=None):
+    """Mean undirected angle (radians, image frame) of unit vectors."""
+    v = np.asarray(vecs, dtype=np.float64).reshape(-1, 2)
+    a2 = 2.0 * np.arctan2(v[:, 1], v[:, 0])
+    w = np.ones(len(v)) if weights is None else np.asarray(weights, dtype=np.float64)
+    return 0.5 * math.atan2(float((np.sin(a2) * w).sum()), float((np.cos(a2) * w).sum()))
+
+
+def _row_layout(seeds, angle, m_per_px, solar):
+    """(strip width m, pitch m, phase m, rotated-frame across unit) for a patch.
+
+    Solar houses stand in rows with soil between: width and pitch come from
+    the neighbouring greenhouses.  Tunnel blocks are contiguous.
+    """
+    mpp = float(m_per_px)
+    across = np.array([-math.sin(angle), math.cos(angle)])
+    offs, widths = [], []
+    for det in seeds:
+        pts = np.asarray(det["points"], dtype=np.float64).reshape(4, 2) * mpp
+        proj = pts @ across
+        offs.append((float(proj.min()), float(proj.max())))
+        widths.append(float(proj.max() - proj.min()))
+    if not solar:
+        w = FIELDS_TUNNEL_BAYS * TUNNEL_PITCH_M
+        # strip centres half a strip in from the greenhouses' edges
+        phase = (float(np.median([o[0] for o in offs])) + 0.5 * w) % w if offs else 0.0
+        return w, w, phase, across
+    w = float(np.clip(np.median(widths), SOLAR_WIDTHS_M[0], SOLAR_WIDTHS_M[-1]))
+    centres = np.sort(np.array([0.5 * (a + b) for a, b in offs]))
+    diffs = np.diff(centres)
+    diffs = diffs[(diffs >= 0.9 * w) & (diffs <= 4.0 * w)]
+    pitch = float(np.percentile(diffs, 25)) if len(diffs) >= 2 else 1.8 * w
+    pitch = max(pitch, w + 2.0)
+    # phase: circular median of the row centres modulo the pitch
+    ang = 2.0 * math.pi * (centres % pitch) / pitch
+    phase = (math.atan2(float(np.sin(ang).mean()), float(np.cos(ang).mean()))
+             / (2.0 * math.pi) * pitch) % pitch
+    return w, pitch, phase, across
+
+
+def _strip_runs(mask, angle, width_m, pitch_m, phase_m, m_per_px, offset_px):
+    """Rectangles (image px corner lists) tiling ``mask`` in strips.
+
+    Strips run along ``angle``, ``width_m`` wide every ``pitch_m``, their
+    centres at ``phase_m`` modulo the pitch (metres along the across axis,
+    in texture coordinates offset by ``offset_px``); ``phase_m`` None tries
+    phases about a pixel apart and keeps the one whose strips cover the most
+    of ``mask``.  A run is a stretch of strip columns at least
+    FIELDS_RUN_COVER film and TUNNEL_MIN_LENGTH_M long.
+    """
+    mpp = float(m_per_px)
+    h, w = mask.shape
+    ca, sa = math.cos(angle), math.sin(angle)
+    ux = np.array([ca, sa])
+    uy = np.array([-sa, ca])
+    corners = np.array([[0, 0], [w, 0], [0, h], [w, h]], dtype=np.float64)
+    px = corners @ ux
+    py = corners @ uy
+    x0, y0 = float(px.min()), float(py.min())
+    W = int(math.ceil(px.max() - x0)) + 1
+    H = int(math.ceil(py.max() - y0)) + 1
+    # rotated frame (u, v) -> image: p = u*ux + v*uy, with u = x0 + col
+    m = np.array([[ux[0], uy[0], x0 * ux[0] + y0 * uy[0]],
+                  [ux[1], uy[1], x0 * ux[1] + y0 * uy[1]]], dtype=np.float64)
+    rot = cv2.warpAffine(mask.astype(np.uint8), m, (W, H),
+                         flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                         borderValue=0)
+    if not rot.any():
+        return []
+    # the across coordinate of row v in texture metres
+    off = np.asarray(offset_px, dtype=np.float64)
+    v_texture_m = (y0 + off @ uy) * mpp
+    wp = width_m / mpp
+    min_len = TUNNEL_MIN_LENGTH_M / mpp
+    rows = np.nonzero(rot.any(axis=1))[0]
+    # column sums of any band of rows: cum[rb] - cum[ra]
+    cum = np.zeros((H + 1, W), np.int32)
+    np.cumsum(rot, axis=0, out=cum[1:])
+
+    def runs(phase):
+        k0 = int(math.floor(((rows[0] * mpp + v_texture_m) - phase) / pitch_m)) - 1
+        k1 = int(math.ceil(((rows[-1] * mpp + v_texture_m) - phase) / pitch_m)) + 1
+        found, covered = [], 0
+        for k in range(k0, k1 + 1):
+            vc = (phase + k * pitch_m - v_texture_m) / mpp
+            va, vb = vc - wp / 2.0, vc + wp / 2.0
+            ra, rb = max(0, int(round(va))), min(H, int(round(vb)))
+            if rb - ra < max(1.0, 0.6 * wp):
+                continue
+            band = cum[rb] - cum[ra]
+            cover = band >= FIELDS_RUN_COVER * (rb - ra)
+            if not cover.any():
+                continue
+            d = np.diff(np.concatenate([[0], cover.astype(np.int8), [0]]))
+            for s, e in zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]):
+                if e - s < min_len:
+                    continue
+                covered += int(band[s:e].sum())
+                quad = np.array([[s, va], [e, va], [e, vb], [s, vb]], dtype=np.float64)
+                found.append((quad[:, :1] + x0) * ux + (quad[:, 1:] + y0) * uy + off)
+        return found, covered
+
+    if phase_m is not None:
+        return runs(float(phase_m))[0]
+    step = max(mpp, float(pitch_m) / 40.0)
+    best, best_cov = [], 0
+    for ph in np.arange(0.0, float(pitch_m), step):
+        found, covered = runs(float(ph))
+        if covered > best_cov:
+            best, best_cov = found, covered
+    return best
+
+
+def _fill_detection(pts, m_per_px):
+    p = np.asarray(pts, dtype=np.float64).reshape(4, 2)
+    along = float(np.linalg.norm(p[1] - p[0])) * float(m_per_px)
+    across = float(np.linalg.norm(p[3] - p[0])) * float(m_per_px)
+    return {
+        "points": p.astype(np.float32),
+        "confidence": 0.0,
+        "length_m": max(along, across),
+        "width_m": min(along, across),
+        "area_m2": along * across,
+        "structure": KIND_GREENHOUSE,
+        "tunnel_axis": "long" if along >= across else "short",
+        "greenhouse_fill": True,
+    }
+
+
+def _grow_field(seed, cand, mpp):
+    """Field mask: the greenhouses closed over FIELDS_CLOSE_M, grown a few
+    rounds through film-coloured ground (``cand``) within that reach, and
+    with enclosed holes up to FIELDS_HOLE_M2 filled.  Worked at >= 1 m/px."""
+    h, w = seed.shape
+    f = max(1, int(1.0 / mpp))
+    wm = mpp * f
+    if f > 1:
+        size = (w // f, h // f)
+        seed_s = (cv2.resize(seed, size, interpolation=cv2.INTER_AREA) > 0).astype(np.uint8)
+        cand_s = (cv2.resize(cand, size, interpolation=cv2.INTER_AREA) > 0).astype(np.uint8)
+    else:
+        seed_s, cand_s = seed, cand
+    r = max(1, int(round(FIELDS_CLOSE_M / wm)))
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    field = cv2.morphologyEx(seed_s, cv2.MORPH_CLOSE, disk)
+    for _ in range(FIELDS_GROW_ROUNDS):
+        reach = cv2.dilate(field, disk)
+        grown = cv2.morphologyEx(field | (cand_s & reach), cv2.MORPH_CLOSE, disk)
+        if np.array_equal(grown, field):
+            break
+        field = grown
+    hh, ww = field.shape
+    inv = (1 - field).astype(np.uint8)
+    n, lab, stats, _c = cv2.connectedComponentsWithStats(inv, connectivity=4)
+    x, y, bw, bh, area = (stats[:, j] for j in range(5))
+    hole = ((area <= FIELDS_HOLE_M2 / (wm * wm)) & (x > 0) & (y > 0) &
+            (x + bw < ww) & (y + bh < hh))
+    hole[0] = False
+    field = field | hole[lab].astype(np.uint8)
+    if f > 1:
+        field = cv2.resize(field, (w, h), interpolation=cv2.INTER_NEAREST)
+    return field
+
+
+def greenhouse_fields(greenhouses, buildings, veg_map, image, m_per_px,
+                      height_fn=None, solar=True, counts=None, prior=None):
+    """Join greenhouses into fields and complete them.
+
+    Returns (buildings kept, buildings turned greenhouse, fill detections).
+    Fill detections are OBB-like dicts (``greenhouse_fill`` True) placed
+    like any greenhouse detection; converted buildings get
+    ``structure='greenhouse'`` and a ``tunnel_axis``.  ``prior`` is an
+    optional uint8 mask of mapped greenhouse land (O4_Greenhouse_Map): its
+    film-coloured ground seeds fields too.
+    """
+    if prior is not None and not prior.any():
+        prior = None
+    if image is None or veg_map is None or (
+            prior is None and len(greenhouses) < FIELDS_MIN_SEEDS):
+        return list(buildings), [], []
+    mpp = float(m_per_px)
+    h, w = veg_map.shape[:2]
+    seed = np.zeros((h, w), np.uint8)
+    for det in greenhouses:
+        cv2.fillPoly(seed, [np.round(np.asarray(det["points"])).astype(np.int32)], 1)
+    film = _film_pixels(image, mpp)
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    painted = ((hsv[..., 0] > (FILM_MAX_HUE + 8.0) / 2.0) & (hsv[..., 1] > 50))
+    del hsv
+
+    def filmy(ctx):
+        # bright film fails is_film_coloured's paint test; the smoothed
+        # per-pixel film share inside the box tells it from paint too.
+        # Painted blue steel roofs are never film.
+        x0, y0, x1, y1 = ctx["window"]
+        inside = ctx["inside"]
+        if float(painted[y0:y1, x0:x1][inside].mean()) >= FIELDS_MEMBER_PAINT:
+            return False
+        return (float(film[y0:y1, x0:x1][inside].mean()) >= FIELDS_MEMBER_FILM
+                or is_film_coloured(image, ctx))
+
+    bld = np.zeros((h, w), np.uint8)
+    rowlike = np.zeros((h, w), np.uint8)
+    for det in buildings:
+        poly = [np.round(np.asarray(det["points"])).astype(np.int32)]
+        cv2.fillPoly(bld, poly, 1)
+        # long film-coloured roofs the rules kept: the field may grow over
+        # them, so a row of missed greenhouses can still join it
+        if _aspect(det) >= FIELD_MIN_ASPECT:
+            ctx = _features(det, veg_map, mpp)
+            if ctx is not None and filmy(ctx):
+                cv2.fillPoly(rowlike, poly, 1)
+    # car parks and yards are grey too: film ground is never road, water,
+    # trees or developed land
+    ground_ok = ~np.isin(veg_map, (CLASS_ROAD, CLASS_WATER, CLASS_TREE, CLASS_DEVELOPED))
+    cand = (film & ground_ok & (bld == 0)).astype(np.uint8)
+    grow = cand | rowlike
+    mapped = None
+    if prior is not None:
+        mapped = (prior.astype(bool) & cand.astype(bool)).astype(np.uint8)
+        ro = max(1, int(round(FIELDS_OPEN_M / mpp)))
+        mapped = cv2.morphologyEx(mapped, cv2.MORPH_OPEN,
+                                  np.ones((2 * ro + 1, 2 * ro + 1), np.uint8))
+    field = _grow_field(seed if mapped is None else (seed | mapped), grow, mpp)
+    # fields need a few greenhouses: one stray seed fills nothing
+    n, lab, stats, _c = cv2.connectedComponentsWithStats(field, connectivity=8)
+    seeds_per = np.zeros(n, np.int32)
+    for det in greenhouses:
+        cx, cy = _centre_px(det)
+        seeds_per[int(lab[min(h - 1, max(0, int(cy))), min(w - 1, max(0, int(cx)))])] += 1
+    good = seeds_per >= FIELDS_MIN_SEEDS
+    if mapped is not None:
+        # the map is years older than the imagery (2020 Sentinel-2): mapped
+        # land needs one sign of greenhouses today too, a detected one or a
+        # long film roof, or a drained lagoon would fill
+        mapped_px = np.bincount(lab[mapped > 0].ravel(), minlength=n)
+        row_px = np.bincount(lab[rowlike > 0].ravel(), minlength=n)
+        good |= ((mapped_px * mpp * mpp >= FIELDS_PRIOR_MIN_M2) &
+                 ((seeds_per >= 1) | (row_px > 0)))
+    good[0] = False
+    field = good[lab].astype(np.uint8)
+    if not field.any():
+        return list(buildings), [], []
+
+    # buildings standing inside a field: low film-coloured roofs join it
+    kept, converted = [], []
+    asked = []
+    for det in buildings:
+        ctx = _features(det, field, mpp)
+        if ctx is None:
+            kept.append(det)
+            continue
+        x0, y0, x1, y1 = ctx["window"]
+        inside = float(field[y0:y1, x0:x1][ctx["inside"]].mean())
+        if (inside >= FIELDS_MEMBER_COVER and
+                not (ctx["area"] <= SHED_MAX_M2 and ctx["aspect"] <= SHED_MAX_ASPECT) and
+                filmy(ctx)):
+            asked.append(det)
+        else:
+            kept.append(det)
+    if asked:
+        heights = np.full(len(asked), -np.inf)
+        if height_fn is not None:
+            got = np.asarray(height_fn(asked), dtype=np.float64)
+            heights = np.where(np.isfinite(got), got, -np.inf)
+        for det, hgt in zip(asked, heights):
+            if hgt <= FIELD_MAX_HEIGHT_M:
+                det["structure"] = KIND_GREENHOUSE
+                det["tunnel_axis"] = tunnel_axis(image, det["points"])
+                converted.append(det)
+            else:
+                kept.append(det)
+
+    # what to fill: film-coloured field ground no greenhouse or building covers
+    covered = seed.copy()
+    for det in converted:
+        cv2.fillPoly(covered, [np.round(np.asarray(det["points"])).astype(np.int32)], 1)
+    covered = cv2.dilate(covered, np.ones((3, 3), np.uint8))
+    blocked = np.zeros((h, w), np.uint8)
+    for det in kept:
+        cv2.fillPoly(blocked, [np.round(np.asarray(det["points"])).astype(np.int32)], 1)
+    ko = max(1, int(round(FIELDS_KEEP_OUT_M / mpp)))
+    blocked = cv2.dilate(blocked, np.ones((2 * ko + 1, 2 * ko + 1), np.uint8))
+    gap = (field.astype(bool) & film & ground_ok & ~covered.astype(bool) & ~blocked.astype(bool))
+    gap = gap.astype(np.uint8)
+    ro = max(1, int(round(FIELDS_OPEN_M / mpp)))
+    gap = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((2 * ro + 1, 2 * ro + 1), np.uint8))
+
+    all_gh = list(greenhouses) + converted
+    centres = np.array([_centre_px(d) for d in all_gh], dtype=np.float64).reshape(-1, 2)
+    axes = [_det_axis(d) for d in all_gh]
+    solar_kind = [
+        bool(solar) and any(p["kind"] == "solar" for p in greenhouse_pieces(d, mpp)[:1])
+        for d in all_gh
+    ]
+    near_px = FIELDS_NEAR_M / mpp
+    min_gap_px = FIELDS_MIN_GAP_M2 / (mpp * mpp)
+    n, lab, stats, _c = cv2.connectedComponentsWithStats(gap, connectivity=8)
+    fills = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if area < min_gap_px:
+            continue
+        sel = []
+        for grow in (1, 4):
+            # a hole deep in a field looks further for its neighbours
+            pad = int(math.ceil(near_px * grow))
+            wx0, wy0 = x - pad, y - pad
+            wx1, wy1 = x + bw + pad, y + bh + pad
+            sel = np.nonzero(
+                (centres[:, 0] >= wx0) & (centres[:, 0] < wx1) &
+                (centres[:, 1] >= wy0) & (centres[:, 1] < wy1))[0].tolist()
+            if sel:
+                break
+        near = [all_gh[j] for j in sel]
+        sub = (lab[y:y + bh, x:x + bw] == i)
+        if _panels_on() and _panel_pixels(image[y:y + bh, x:x + bw][sub]):
+            continue  # a solar farm between panel boxes, not missed film
+        if near:
+            angle = _axis_angle([axes[j] for j in sel],
+                                [float(all_gh[j].get("area_m2") or 1.0) for j in sel])
+        else:
+            # mapped land with no greenhouse box anywhere: rows along the patch
+            ys, xs = np.nonzero(sub)
+            (_cx, _cy), (rw, rh), ra = cv2.minAreaRect(
+                np.column_stack([xs, ys]).astype(np.float32))
+            angle = math.radians(ra if rw >= rh else ra + 90.0)
+        is_solar = bool(sel) and sum(solar_kind[j] for j in sel) * 2 > len(sel)
+        width_m, pitch_m, _phase, _across = _row_layout(near, angle, mpp, is_solar)
+        # the neighbours give width and pitch; the rows' position comes from
+        # the gap itself (a missed row rarely sits on the field's mean phase)
+        for pts in _strip_runs(sub, angle, width_m, pitch_m, None, mpp, (x, y)):
+            fills.append(_fill_detection(pts, mpp))
+    if counts is not None:
+        counts["agri_greenhouse_field_member"] = (
+            counts.get("agri_greenhouse_field_member", 0) + len(converted))
+        counts["agri_greenhouse_field_fill"] = (
+            counts.get("agri_greenhouse_field_fill", 0) + len(fills))
+    return kept, converted, fills
 
 
 def split_detections(detections, veg_map, image_loader, m_per_px, counts=None,

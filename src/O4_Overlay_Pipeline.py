@@ -546,7 +546,8 @@ def _run_venv(code):
     # Progress and issues come back as event lines on stdout (O4_Progress).
     env[PROG.EVENT_ENV] = "1"
     for setting, var in (("overlay_temp_dir", "O4_OVERLAY_TEMP_DIR"),
-                         ("canopy_model_dir", "O4_CANOPY_MODEL_DIR")):
+                         ("canopy_model_dir", "O4_CANOPY_MODEL_DIR"),
+                         ("greenhouse_map_dir", "O4_GREENHOUSE_MAP_DIR")):
         value = _app_setting(setting)
         if value:
             env[var] = value
