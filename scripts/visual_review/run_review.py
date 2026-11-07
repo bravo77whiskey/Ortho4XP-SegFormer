@@ -252,6 +252,10 @@ def dds_from_jpg(jpg, dds):
     # Same conversion Ortho4XP applies to a downloaded orthophoto (BC1, fast).
     subprocess.run([IMG.dds_convert_cmd, "-bc1", "-fast", jpg, dds],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Stamp it with the source's time: an unchanged texture is not "rebuilt",
+    # so overlay caches kept on purpose (--cfg bld_disable_cache=False) survive.
+    st = os.stat(jpg)
+    os.utime(dds, (st.st_atime, st.st_mtime))
 
 
 def parse_dsf_text(path):
@@ -447,7 +451,11 @@ def run_group(group):
         key, value = override.split("=", 1)
         key, value = key.strip(), value.strip()
         kind = CFGVARS.cfg_vars[key]["type"]
-        setattr(tile, key, (value.lower() in ("1", "true", "yes")) if kind is bool else kind(value))
+        value = (value.lower() in ("1", "true", "yes")) if kind is bool else kind(value)
+        setattr(tile, key, value)
+        if key in CFGVARS.list_app_vars:
+            # application settings (folders, venv) are read from the module
+            setattr(CFG, key, value)
     names = f"{len(group['keys'])} textures" if group.get("tile_dir") else " ".join(group["keys"])
     print(f"== {provider} {names} (tile {lat:+03d}{lon:+04d}, ZL{zl})", flush=True)
     cache_dir = FNAMES.overlay_cache_dir(lat, lon)

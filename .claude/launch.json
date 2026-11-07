@@ -6,6 +6,12 @@
       "runtimeExecutable": "G:\\Dev\\Ortho4XP-SegFormer\\.venv\\Scripts\\python.exe",
       "runtimeArgs": ["-m", "http.server", "8791", "--bind", "127.0.0.1", "--directory", "E:\\Ortho4XP_Review"],
       "port": 8791
+    },
+    {
+      "name": "overlay-review-g",
+      "runtimeExecutable": "G:\\Dev\\Ortho4XP-SegFormer\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "http.server", "8792", "--bind", "127.0.0.1", "--directory", "G:\\Ortho4XP_Review"],
+      "port": 8792
     }
   ]
 }
