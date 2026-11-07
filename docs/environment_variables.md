@@ -49,7 +49,7 @@ Until the cleanup in [CHANGELOG.md](../CHANGELOG.md) these were all named
 | `O4_BLD_SEG_FIRST` | `guarded` | Landcover-first footprints: `off`, `guarded` (regular outlines only) or `all` |
 | `O4_BLD_SEG_FIRST_GROUND` | on | Ground test for landcover-first footprints |
 | `O4_BLD_FOOTPRINT_POLYGONS` | on | Polygon footprints for large irregular buildings |
-| `O4_BLD_AGRI` | `greenhouse` | Farmland handling: `greenhouse`, `drop` or `off` |
+| `O4_BLD_AGRI` | `block` | Farmland handling: `block` (greenhouse areas get no objects or facades), `greenhouse` (place greenhouse assets), `drop` (greenhouses dropped, area left open) or `off`. Set from the `bld_block_greenhouses` setting (on = `block`, off = `greenhouse`) unless already in the environment |
 | `O4_BLD_HEIGHT_GATE` | on | Drop detections taller than their regional height limit |
 | `O4_BLD_HEIGHT_CONTEXT` | on | Lower heights that stand out from their neighbourhood |
 | `O4_BLD_EVIDENCE_GATE` | 1 | `0` disables the evidence gate for very large detections |

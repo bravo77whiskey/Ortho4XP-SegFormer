@@ -141,7 +141,7 @@
   const FATE_CAT = f =>
     f === "below_conf" ? "near"
     : ["below_min_footprint", "oversize_reject", "suppressed_overlap", "covered_by_higher_zl", "dropped_overlap_trim"].includes(f) ? "filtered"
-    : ["center_on_existing", "overlaps_existing", "inside_placed_roof"].includes(f) ? "blocked"
+    : ["center_on_existing", "overlaps_existing", "inside_placed_roof", "center_on_greenhouse", "overlaps_greenhouse"].includes(f) ? "blocked"
     : f === "center_on_road" ? "road"
     : f === "dropped_tile_dedup" ? "dedup"
     : f === "dropped_seam_piece" ? "seam"
@@ -160,8 +160,10 @@
     overlaps_existing: "Footprint overlaps existing scenery",
     inside_placed_roof: "Inside a roof already placed as one polygon",
     center_on_road: "Centre lies on a road",
+    center_on_greenhouse: "Centre lies in a greenhouse area (kept free of buildings)",
+    overlaps_greenhouse: "Footprint overlaps a greenhouse area (kept free of buildings)",
     farmland_ground: "Classified as open farmland",
-    greenhouse: "Placed as a greenhouse",
+    greenhouse: "Greenhouse (its area is kept free of objects and facades)",
     greenhouse_fill: "Greenhouse field fill (no detection)",
     replaced_by_segments: "Replaced by segmented outline pieces",
     placed_object: "Placed as an object",

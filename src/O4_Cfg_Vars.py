@@ -910,6 +910,17 @@ cfg_tile_vars = {
                 "facade, and nothing is placed where the limit is under one "
                 "storey, right before the threshold.",
     },
+    "bld_block_greenhouses": {
+        "type": bool,
+        "default": True,
+        "short_name": "bld_block_gh",
+        "hint": "Keep greenhouses and greenhouse fields free of buildings: no "
+                "object or facade is placed on them, and no greenhouse models "
+                "either, so the ortho shows through. A building is skipped when "
+                "its centre or more than 15 % of it lies on a greenhouse. Off: "
+                "greenhouse models from the O4XP greenhouse library are placed "
+                "instead.",
+    },
     "bld_yolo_enabled": {
         "type": bool,
         "default": True,
@@ -1179,6 +1190,7 @@ list_bld_vars = [
     "bld_asset_mode",
     "bld_roof_color_matching",
     "bld_approach_heights",
+    "bld_block_greenhouses",
     "bld_yolo_enabled",
     "bld_yolo_checkpoint",
     "bld_yolo_conf",
@@ -1275,7 +1287,8 @@ settings_sections = (
     ("Building overlay", (
         ("Placement", ("bld_spacing_m", "bld_close_m", "bld_open_m", "bld_min_footprint_m2",
                        "bld_grid_n", "bld_asset_mode", "bld_roof_color_matching",
-                       "bld_avoid_custom_scenery", "bld_approach_heights")),
+                       "bld_avoid_custom_scenery", "bld_approach_heights",
+                       "bld_block_greenhouses")),
         ("YOLO detector", ("bld_yolo_enabled", "bld_yolo_checkpoint", "bld_yolo_conf",
                            "bld_yolo_iou", "bld_yolo_stride", "bld_yolo_max_det",
                            "bld_yolo_min_coverage")),

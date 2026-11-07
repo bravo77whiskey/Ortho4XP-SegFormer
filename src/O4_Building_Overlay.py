@@ -2217,11 +2217,18 @@ SEG_FIRST_YOLO_MATCH_IOU = 0.6
 #   (FOOTPRINTS.looks_like_ground: soil-coloured and flat, or flat and no
 #   contrast with the surroundings); 0 disables.
 SEG_FIRST_CLAIM_FRAC = 0.5
-# Farmland sorting (O4_Agri_Structures, O4_BLD_AGRI): greenhouse
-# detections become greenhouse assets; this facade is the fallback when the
-# O4XP greenhouse library is not installed.  Facade wall height.
+# Farmland sorting (O4_Agri_Structures, O4_BLD_AGRI): by default greenhouse
+# areas are kept free of buildings; with O4_BLD_AGRI=greenhouse they become
+# greenhouse assets, and this facade is the fallback when the O4XP
+# greenhouse library is not installed.  Facade wall height.
 GREENHOUSE_FACADE_PATHS = ("facades/agricultural/greenhouse_1.fac",)
 GREENHOUSE_HEIGHT_M = 4.0
+# O4_BLD_AGRI=block: a building is blocked when its centre lies on a
+# greenhouse or more than this share of its box does.  Greenhouse polygons
+# and YOLO boxes are both loose, so houses beside a greenhouse field graze
+# them (review 2026-11-07: half the boxes a zero-tolerance gate blocked
+# overlapped a greenhouse by <15 %).
+GREENHOUSE_BLOCK_OVERLAP_FRAC = 0.15
 # Settings of the retired candidate-grid placement. Only the placement-cache
 # key still carries them (see _BuildingOverlayRun._building_cache_params).
 BLD_MAX_CANDIDATES_PER_DDS = 180_000
@@ -3782,18 +3789,21 @@ def _apply_height_context_caps(detections, m_per_px):
 
 
 def _agri_mode():
-    """O4_BLD_AGRI: greenhouse (default) | drop | off.
+    """O4_BLD_AGRI: block (default) | greenhouse | drop | off.
 
-    ``greenhouse`` drops farmland ground detections and places greenhouse
-    assets on greenhouse detections; ``drop`` drops both; ``off`` keeps the
-    old behaviour (everything is a building).
+    All modes but ``off`` drop farmland ground detections and take
+    greenhouses out of the building flow.  ``block`` then keeps the
+    greenhouse areas (detections and field fills) free of every object and
+    facade; ``greenhouse`` places greenhouse assets on them; ``drop`` leaves
+    them open to other buildings.  ``off`` keeps the old behaviour
+    (everything is a building).
     """
-    raw = os.environ.get("O4_BLD_AGRI", "greenhouse").strip().lower()
+    raw = os.environ.get("O4_BLD_AGRI", "block").strip().lower()
     if raw in {"0", "off", "false", "no", "none"}:
         return "off"
-    if raw == "drop":
-        return "drop"
-    return "greenhouse"
+    if raw in ("drop", "greenhouse"):
+        return raw
+    return "block"
 
 
 def _greenhouse_fields_on():
@@ -9612,7 +9622,9 @@ class _BuildingOverlayRun:
             self.greenhouse_facade_path,
             GREENHOUSE_HEIGHT_M,
         )
-        if _agri_mode() == "greenhouse":
+        if _agri_mode() == "block":
+            verbose_print("Greenhouses: kept free of objects and facades", flush=True)
+        elif _agri_mode() == "greenhouse":
             verbose_print(
                 "Greenhouses: "
                 + (
@@ -11532,6 +11544,7 @@ class _TexturePass:
         # detections, take greenhouses out of the building flow and place
         # them as greenhouse assets before any building claims the area.
         self.greenhouse_detections = []
+        self.greenhouse_block_mask = None
         if self._farmland_sorting_on():
             _t_gh = time.perf_counter()
             _n_agri_in = len(self.yolo_detections)
@@ -11621,7 +11634,9 @@ class _TexturePass:
                     [np.round(np.asarray(_gh['points'])).astype(np.int32)],
                     int(AGRI.CLASS_AGRICULTURE),
                 )
-            if _agri_mode() == "greenhouse":
+            if _agri_mode() == "block":
+                self._block_greenhouse_area(greenhouse_detections + fill_detections)
+            elif _agri_mode() == "greenhouse":
                 # detected greenhouses first: the fill only takes what they leave
                 for _batch in (greenhouse_detections, fill_detections):
                     if not _batch:
@@ -11642,6 +11657,36 @@ class _TexturePass:
                         file_counts=self.file_counts,
                     )
         return buildings, greenhouse_detections + fill_detections
+
+    def _block_greenhouse_area(self, detections):
+        """O4_BLD_AGRI=block: no object or facade lands on a greenhouse.
+
+        The greenhouse polygons join placement_occ_mask, which every
+        candidate centre is tested against, and greenhouse_block_mask, which
+        rejects boxes and outlines more than GREENHOUSE_BLOCK_OVERLAP_FRAC
+        on a greenhouse (_on_greenhouse).
+        """
+        area = np.zeros(self.static_occ_mask.shape, dtype=np.uint8)
+        cv2.fillPoly(area, [
+            np.round(np.asarray(_d['points'])).astype(np.int32) for _d in detections
+        ], 1)
+        if not area.any():
+            return
+        self.greenhouse_block_mask = (
+            area if self.greenhouse_block_mask is None
+            else (self.greenhouse_block_mask | area)
+        )
+        self.placement_occ_mask = (
+            self.placement_occ_mask | area.astype(self.placement_occ_mask.dtype))
+        if not self.run.strict_fit:
+            self.placement_occ_integral = cv2.integral(self.placement_occ_mask, sdepth=cv2.CV_32S)
+        self.file_counts['greenhouse_blocked_px'] = int(np.count_nonzero(self.greenhouse_block_mask))
+
+    def _on_greenhouse(self, poly, bbox=None):
+        """True when more than GREENHOUSE_BLOCK_OVERLAP_FRAC of ``poly`` is greenhouse."""
+        return self.greenhouse_block_mask is not None and _poly_mask_overlap_frac(
+            self.greenhouse_block_mask, poly, self.fit_scratch, bbox=bbox,
+        ) > GREENHOUSE_BLOCK_OVERLAP_FRAC
 
     def _apply_seg_first(self):
         """Replace detections with landcover-traced footprints (segment-first)."""
@@ -12091,6 +12136,8 @@ class _TexturePass:
                         self.static_occ_integral,
                     ):
                         continue
+                    if self._on_greenhouse(ring_i):
+                        continue
                     if (
                         self.route_excl_mask is not None and
                         _poly_mask_overlap_frac(
@@ -12194,6 +12241,10 @@ class _TexturePass:
                 self.file_counts['yolo_blocked'] = self.file_counts.get('yolo_blocked', 0) + 1
                 self._review_fate(
                     detection,
+                    "center_on_greenhouse" if (
+                        self.greenhouse_block_mask is not None
+                        and self.greenhouse_block_mask[jy, jx]
+                    ) else
                     "center_on_existing" if self.static_occ_mask[jy, jx] else "center_on_road",
                 )
                 if self._blkdbg is not None:
@@ -12228,6 +12279,12 @@ class _TexturePass:
                 self._review_fate(detection, "overlaps_existing")
                 if self._blkdbg is not None:
                     self._blkdbg.append(('static_footprint', jx, jy, yolo_poly))
+                continue
+            if self._on_greenhouse(yolo_poly, yolo_bbox):
+                self.file_counts['greenhouse_blocked'] = (
+                    self.file_counts.get('greenhouse_blocked', 0) + 1
+                )
+                self._review_fate(detection, "overlaps_greenhouse")
                 continue
             if (
                 self.large_roof_mask is not None and

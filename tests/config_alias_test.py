@@ -148,6 +148,13 @@ class ConfigAliasTests(unittest.TestCase):
         self.assertFalse(CFG.global_bld_roof_color_matching)
         self.assertFalse(CFG.Tile(12, 34, "").bld_roof_color_matching)
 
+    def test_block_greenhouses_is_enabled_by_default(self):
+        self.assertTrue(CFG.cfg_tile_vars["bld_block_greenhouses"]["default"])
+        self.assertTrue(
+            CFG.cfg_global_tile_vars["global_bld_block_greenhouses"]["default"]
+        )
+        self.assertTrue(CFG.Tile(12, 34, "").bld_block_greenhouses)
+
 
 if __name__ == "__main__":
     unittest.main()
