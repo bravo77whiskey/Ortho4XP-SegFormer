@@ -249,6 +249,29 @@ class SfdBuildingAssetTests(unittest.TestCase):
         self.assertEqual(stock.placed_facades, [])
         self.assertEqual(len(stock.occupied_px_polys), 1)
 
+    def test_stock_objects_centred_on_osm_roads_are_dropped(self):
+        stock = type("StockRes", (), {})()
+        stock.placed_objects = [
+            (0.0, 0.0, 0.0, "lib/cars/car_static.obj"),   # on the road -> dropped
+            (0.0, 0.0, 0.0, "lib/cars/bus_static.obj"),   # beside it -> kept
+        ]
+        stock.placed_facades = [([(0, 0), (1, 0), (1, 1)], "simheaven/facades/tank.fac", 10.0)]
+        stock.placed_draped = []
+        stock.occupied_px_polys = [
+            np.array([[40, 48], [60, 48], [60, 56], [40, 56]], dtype=np.int32),
+            np.array([[40, 80], [60, 80], [60, 88], [40, 88]], dtype=np.int32),
+            np.array([[40, 48], [60, 48], [60, 56], [40, 56]], dtype=np.int32),
+        ]
+        stock.occupied_owner = [("object", 0), ("object", 1), ("facade", 0)]
+        route = np.zeros((128, 128), dtype=np.uint8)
+        route[45:60, :] = 1
+        dropped = BLD._filter_stock_objects_on_routes(stock, route)
+        self.assertEqual(dropped, 1)
+        self.assertEqual([p[3] for p in stock.placed_objects], ["lib/cars/bus_static.obj"])
+        # Facades (storage tanks) keep their own footprint rules.
+        self.assertEqual(len(stock.placed_facades), 1)
+        self.assertEqual(stock.occupied_owner, [("object", 0), ("facade", 0)])
+
     def test_mask_covered_regions_blanks_rects(self):
         mask = np.ones((8, 8), dtype=np.uint8)
         BLD.mask_covered_regions(mask, ((4, 4, 8, 8),))
@@ -3057,3 +3080,39 @@ class RoadExclusionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StockFootprintAndDedupOrientationTests(unittest.TestCase):
+    SHIP = "lib/ships/bulk_carriers/BulkCarrier_155A.agp"
+
+    def test_stock_assets_have_their_own_footprints(self):
+        xmin, xmax, zmin, zmax = BLD._bounds_for_object_path("lib/cars/car_static.obj")
+        self.assertAlmostEqual(zmax - zmin, 4.8)
+        self.assertAlmostEqual(xmax - xmin, 1.9)
+        self.assertEqual(BLD._bounds_for_object_path("CDB-Library/ship/ship_pesca.obj"),
+                         (-0.79, 64.21, -5.38, 5.32))
+        b = BLD._bounds_for_object_path(self.SHIP)
+        self.assertAlmostEqual(b[3] - b[2], 156.0)
+
+    def test_north_up_footprint_is_not_mirrored(self):
+        pts = BLD._footprint_poly_metres(0.0, 0.0, (0.0, 10.0, -0.01, 0.01), 30.0, north_up=True)
+        # +X at heading 30 points to bearing 120: east and south.
+        self.assertAlmostEqual(float(pts[1, 0]), 8.66, places=2)
+        self.assertAlmostEqual(float(pts[1, 1]), -5.0, places=1)
+        img = BLD._footprint_poly_metres(0.0, 0.0, (0.0, 10.0, -0.01, 0.01), 30.0)
+        self.assertAlmostEqual(float(img[1, 1]), 5.0, places=1)   # image y grows south
+
+    def test_tile_dedup_overlaps_follow_the_real_heading(self):
+        lat, lon = 22.0, 120.0
+        mlat = 110540.0
+        mlon = 111320.0 * math.cos(math.radians(lat + 0.5))
+        d = 60.0 / math.sqrt(2.0)   # 60 m to the north-east
+        a = (lon + 0.5, lat + 0.5, 45.0, self.SHIP)
+        b = (lon + 0.5 + d / mlon, lat + 0.5 + d / mlat, 45.0, self.SHIP)
+        # Two 156 m hulls on one north-east line overlap: one is a duplicate.
+        kept, dropped = BLD._dedupe_overlapping_placements([a, b], lat, lon)
+        self.assertEqual(dropped, 1)
+        # Side by side across that line (60 m apart, 25 m beams) they do not.
+        c = (lon + 0.5 + d / mlon, lat + 0.5 - d / mlat, 45.0, self.SHIP)
+        kept, dropped = BLD._dedupe_overlapping_placements([a, c], lat, lon)
+        self.assertEqual(dropped, 0)

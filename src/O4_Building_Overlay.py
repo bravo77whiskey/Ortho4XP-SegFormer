@@ -277,6 +277,7 @@ def _print_dds_timing(fname, file_timings, total_elapsed, file_counts=None):
         ("yolo_suppress", "yolo_suppress"),
         ("heightnet", "heightnet"),
         ("stock_yolo", "stock_yolo_inference"),
+        ("stock_dior", "stock_dior_inference"),
         ("lookup", "lookup"),
         ("road", "road_raster"),
         ("meshwater", "mesh_water"),
@@ -2173,7 +2174,7 @@ BLD_EVIDENCE_GREEN_FRAC = 0.45
 # counts as grass; lush pitch turf sits far above, grey/blue/metal roofs at or
 # below zero. Deliberately high enough that olive/dry scrub does not trigger.
 BLD_EVIDENCE_GREEN_EXG = 40
-BLD_PLACEMENT_CACHE_VERSION = 77      # v77: greenhouse fields + solar-panel ground
+BLD_PLACEMENT_CACHE_VERSION = 79      # v79: stock asset footprints + north-up tile de-dup; v78: moored ships + DIOR parked vehicles; v77: v77: greenhouse fields + solar-panel ground
 BLD_PLACEMENT_FAST_CACHE_VERSION = 79  # v79: greenhouse fields + solar-panel ground
 # Large detections whose roof is not the OBB rectangle (L/U/T/courtyard, or a
 # wing the detector missed) are extruded as a polygon facade traced from the
@@ -3411,7 +3412,8 @@ def _bounds_for_object_path(obj_path):
         return bounds_m
     dims = OBJ_DIMS.get(obj_path)
     if dims is None:
-        return None
+        # Stock-YOLO cars, trucks and boats are not in the building inventory.
+        return STOCKYOLO.stock_asset_bounds(obj_path)
     return _bounds_from_dimensions(dims[0], dims[1])
 
 
@@ -6018,6 +6020,31 @@ def _filter_stock_results_by_blockers(stock_res, blocker_mask):
     return dropped
 
 
+def _filter_stock_objects_on_routes(stock_res, route_mask):
+    """Drop stock-YOLO object placements centred on an OSM road or rail.
+
+    Same centre-disc test as the addon blockers, applied to 'object'
+    placements only (cars, ships, pools); storage-tank facades keep their own
+    footprint rules. Returns the number dropped.
+    """
+    if (stock_res is None or route_mask is None
+            or not stock_res.occupied_px_polys or not route_mask.any()):
+        return 0
+    records = _stock_owner_records(stock_res)
+    if records is None:
+        return 0
+    kept = []
+    dropped = 0
+    for kind, entry, quad in records:
+        if kind == 'object' and _stock_quad_blocked(quad, kind, route_mask):
+            dropped += 1
+        else:
+            kept.append((kind, entry, quad))
+    if dropped:
+        _store_stock_records(stock_res, kept)
+    return dropped
+
+
 def crop_fully_covered(x, y, stride, img_w, img_h, rects_px):
     """True when the crop window lies entirely inside one covered rect."""
     cx1 = min(x + stride, img_w)
@@ -7976,13 +8003,16 @@ def _suppress_overlapping_yolo_detections(
     return kept, dropped
 
 
-def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg):
+def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg, north_up=False):
     """Return an object's 4-point footprint polygon in local metres.
 
     Matches the basis used by :func:`_footprint_poly_with_bbox` (right=(cos,sin),
     forward=(sin,-cos)) but in metric space, so cross-tile placements can be
     overlap-tested without a raster mask. ``bounds_m`` are local object bounds
     (xmin, xmax, zmin, zmax) relative to the object origin placed at (x_m, y_m).
+    That basis is image space (y grows south); ``north_up=True`` is for callers
+    whose y grows north, which would otherwise get every non-axis-aligned
+    footprint mirrored (heading h tested as -h).
     """
     rad = math.radians(float(heading_deg))
     c = math.cos(rad)
@@ -7991,7 +8021,8 @@ def _footprint_poly_metres(x_m, y_m, bounds_m, heading_deg):
     pts = np.empty((4, 2), dtype=np.float32)
     for idx, (lx, lz) in enumerate(((xmin, zmin), (xmax, zmin), (xmax, zmax), (xmin, zmax))):
         pts[idx, 0] = x_m + (lx * c + lz * s)
-        pts[idx, 1] = y_m + (lx * s - lz * c)
+        dy = lx * s - lz * c
+        pts[idx, 1] = y_m - dy if north_up else y_m + dy
     return pts
 
 
@@ -8135,7 +8166,7 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
             continue  # unmeasurable -> always keep (area 0 sorts first)
         x = (float(o_lon) - float(lon)) * mlon
         y = (float(o_lat) - float(lat)) * mlat
-        poly = _footprint_poly_metres(x, y, b, heading)
+        poly = _footprint_poly_metres(x, y, b, heading, north_up=True)
         polys[i] = poly
         bboxes[i] = (
             float(poly[:, 0].min()), float(poly[:, 1].min()),
@@ -8208,7 +8239,7 @@ def _dedupe_overlapping_placements(placements, lat, lon, cell_m=64.0,
                 b = _bounds(alt_path)
                 if b is None:
                     continue
-                alt_poly = _footprint_poly_metres(x, y, b, alt_heading)
+                alt_poly = _footprint_poly_metres(x, y, b, alt_heading, north_up=True)
                 alt_bbox = (
                     float(alt_poly[:, 0].min()), float(alt_poly[:, 1].min()),
                     float(alt_poly[:, 0].max()), float(alt_poly[:, 1].max()),
@@ -9156,6 +9187,7 @@ class _BuildingOverlayRun:
             'seg_first': 0.0,
             'greenhouses': 0.0,
             'stock_yolo_inference': 0.0,
+            'stock_dior_inference': 0.0,
             'lookup': 0.0,
             'road_raster': 0.0,
             'mesh_water': 0.0,
@@ -9403,6 +9435,23 @@ class _BuildingOverlayRun:
         except Exception as exc:
             print(f"Stock YOLO OBB unavailable ({exc}); skipping pre-step", flush=True)
             self.stock_yolo_model = None
+        # Second stock model: DIOR YOLOv8s-OBB for parked vehicles (DOTA's
+        # vehicle classes miss nearly every car on these orthos). Fetched once
+        # from a pinned Hugging Face revision and rebuilt without unpickling
+        # foreign code; O4_STOCK_DIOR=0 turns it off.
+        self.dior_model = None
+        if STOCKYOLO.stock_dior_enabled():
+            try:
+                _t_dior = time.perf_counter()
+                self.dior_model = STOCKYOLO.load_dior_model(STOCKYOLO.DEFAULT_DIOR_CHECKPOINT)
+                verbose_print(
+                    f"Stock YOLO OBB (DIOR vehicles): loaded {STOCKYOLO.DEFAULT_DIOR_CHECKPOINT} "
+                    f"in {time.perf_counter() - _t_dior:.1f}s",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"Stock YOLO OBB (DIOR vehicles) unavailable ({exc}); no vehicles placed", flush=True)
+                self.dior_model = None
 
     def _start_dsf_predecode(self):
         """Disassemble every scenery DSF this tile reads, in parallel, while the models load."""
@@ -9645,6 +9694,13 @@ class _BuildingOverlayRun:
             cls for cls in STOCKYOLO.STATIC_DOTA_CLASSES
             if cls in self.stock_yolo_asset_map
         )
+        self.dior_static_classes = tuple(
+            cls for cls in STOCKYOLO.STATIC_DIOR_CLASSES
+            if cls in self.stock_yolo_asset_map
+        )
+        if getattr(self, 'dior_model', None) is not None and not self.dior_static_classes:
+            print("Stock YOLO OBB (DIOR vehicles): no vehicle assets installed; skipping", flush=True)
+            self.dior_model = None
         if self.stock_yolo_model is not None:
             if self.stock_yolo_static_classes:
                 verbose_print(
@@ -9669,7 +9725,7 @@ class _BuildingOverlayRun:
                 )
             if dropped_stock_classes:
                 labels = ", ".join(
-                    f"{cls}:{STOCKYOLO.DOTA_CLASS_NAMES.get(cls, cls)}"
+                    f"{cls}:{STOCKYOLO.STOCK_CLASS_NAMES.get(cls, cls)}"
                     for cls in dropped_stock_classes
                 )
                 verbose_print(
@@ -9998,6 +10054,9 @@ class _BuildingOverlayRun:
                 )
                 for cls, (ptype, paths, height_m) in self.stock_yolo_asset_map.items()
             )),
+            # v78: moored ships, DIOR parked vehicles (size ladders, road and
+            #      water rules), OSM road filter on stock objects.
+            ('stock_dior', getattr(self, 'dior_model', None) is not None),
             # v27: metre-accurate per-class road/rail exclusion of placed
             #      building footprints (loose detection OBBs unaffected);
             #      replaces the retired all-or-nothing
@@ -10594,6 +10653,7 @@ class _BuildingOverlayRun:
             f"segformer={self.timings['segformer_inference']:.1f}s  "
             f"trained_yolo={self.timings['trained_yolo_inference']:.1f}s  "
             f"stock_yolo={self.timings['stock_yolo_inference']:.1f}s  "
+            f"stock_dior={self.timings['stock_dior_inference']:.1f}s  "
             f"road_raster={self.timings['road_raster']:.1f}s  "
             f"mesh_water={self.timings['mesh_water']:.1f}s  "
             f"existing_bld_excl={self.timings['existing_bld_excl']:.1f}s  "
@@ -11015,28 +11075,42 @@ class _TextureInference:
                         self.yolo_detections = []
 
     def _detect_stock_objects(self):
-        """Stock DOTA YOLO pass for tanks and pools."""
-        # ── Stock YOLO-OBB pre-step (DOTAv1 static objects) ──────────────
+        """Stock YOLO passes: DOTA (tanks, pools, moored ships), DIOR (parked vehicles)."""
         # Runs on the same loaded image; the main thread merges the returned
-        # placements and OBB pixel quads in file order.
-        if self.run.stock_yolo_model is not None and self.img is not None:
+        # placements and OBB pixel quads in file order. Both passes get the
+        # mesh water and SegFormer class map: ships must be moored on water,
+        # vehicles must be off water and off SegFormer road (OSM roads are
+        # filtered later in _build_masks).
+        if self.img is None:
+            return
+        _masks = dict(
+            mesh_water_mask=self.mesh_water_mask,
+            class_map=self.veg_map,
+            water_class=SEGFORMER.CLASS_WATER,
+            road_class=SEGFORMER.CLASS_ROAD,
+        )
+        _common = dict(
+            img_w=self.img_w, img_h=self.img_h,
+            lat=self.run.lat, lon=self.run.lon,
+            lat_n=self.lat_n, lat_s=self.lat_s, lon_w=self.lon_w, lon_e=self.lon_e,
+            m_per_px=self.m_per_px,
+            device=("0" if torch.cuda.is_available() else "cpu"),
+            batch_size=self.run.stock_yolo_batch_size,
+            asset_map=self.run.stock_yolo_asset_map,
+            **({'skip_rects_px': self._stock_skip_rects_px} if self._stock_skip_rects_px else {}),
+            **_masks,
+        )
+        stock_res = None
+        if self.run.stock_yolo_model is not None:
             try:
                 _t = time.perf_counter()
                 stock_res = _run_stock_yolo_pass_compat(
                     self.img,
                     model=self.run.stock_yolo_model,
-                    img_w=self.img_w, img_h=self.img_h,
-                    lat=self.run.lat, lon=self.run.lon,
-                    lat_n=self.lat_n, lat_s=self.lat_s, lon_w=self.lon_w, lon_e=self.lon_e,
-                    m_per_px=self.m_per_px,
-                    device=("0" if torch.cuda.is_available() else "cpu"),
-                    batch_size=self.run.stock_yolo_batch_size,
-                    asset_map=self.run.stock_yolo_asset_map,
                     static_classes=self.run.stock_yolo_static_classes,
-                    **({'skip_rects_px': self._stock_skip_rects_px} if self._stock_skip_rects_px else {}),
+                    **_common,
                 )
                 self._rec('stock_yolo_inference', _t)
-                self.prep['stock_res'] = stock_res
                 _stock_effective_batch, _stock_batch_fell_back = (
                     _stock_yolo_batch_metadata(stock_res, self.run.stock_yolo_batch_size)
                 )
@@ -11044,16 +11118,51 @@ class _TextureInference:
                 self.prep['stock_yolo_batch_fell_back'] = _stock_batch_fell_back
                 if _stock_batch_fell_back:
                     self.file_counts['stock_yolo_batch_fallback'] = 1
-                if stock_res.counts_by_class:
-                    self.file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
-                    if self.run.verbose_log:
-                        _summary = " ".join(
-                            f"{STOCKYOLO.DOTA_CLASS_NAMES.get(c, c)}={n}"
-                            for c, n in sorted(stock_res.counts_by_class.items())
-                        )
-                        print(f"    [Bld stage] {self.fname} stock YOLO: {_summary}", flush=True)
             except Exception as exc:
                 print(f"    [Bld stage] {self.fname} stock YOLO failed: {exc}", flush=True)
+                stock_res = None
+        dior_model = getattr(self.run, 'dior_model', None)
+        dior_classes = tuple(getattr(self.run, 'dior_static_classes', ()) or ())
+        if dior_model is not None and any(
+                float(self.m_per_px) <= STOCKYOLO._MAX_M_PER_PX.get(c, float('inf'))
+                for c in dior_classes):
+            try:
+                _t = time.perf_counter()
+                dior_res = _run_stock_yolo_pass_compat(
+                    self.img,
+                    model=dior_model,
+                    static_classes=dior_classes,
+                    class_offset=STOCKYOLO.DIOR_CLASS_OFFSET,
+                    stride=STOCKYOLO.DIOR_STRIDE,
+                    imgsz=STOCKYOLO.DIOR_IMGSZ,
+                    **_common,
+                )
+                self._rec('stock_dior_inference', _t)
+                stock_res = (
+                    dior_res if stock_res is None
+                    else STOCKYOLO.merge_stock_results(stock_res, dior_res)
+                )
+            except Exception as exc:
+                print(f"    [Bld stage] {self.fname} DIOR vehicle pass failed: {exc}", flush=True)
+        if stock_res is None:
+            return
+        self.prep['stock_res'] = stock_res
+        if stock_res.counts_by_class:
+            self.file_counts['stock_yolo_detections'] = sum(stock_res.counts_by_class.values())
+        rejected = dict(getattr(stock_res, 'rejected', None) or {})
+        for _reason, _n in sorted(rejected.items()):
+            self.file_counts[f'stock_yolo_rejected_{_reason}'] = int(_n)
+        if self.run.verbose_log and (stock_res.counts_by_class or rejected):
+            _summary = " ".join(
+                f"{STOCKYOLO.STOCK_CLASS_NAMES.get(c, c)}={n}"
+                for c, n in sorted(stock_res.counts_by_class.items())
+            )
+            _rej = " ".join(f"{k}={v}" for k, v in sorted(rejected.items()))
+            print(
+                f"    [Bld stage] {self.fname} stock YOLO: {_summary or 'none'}"
+                + (f" (rejected {_rej})" if _rej else ""),
+                flush=True,
+            )
 
     def _filter_detections(self):
         """Coverage, evidence-gate, overlap and min-footprint filtering."""
@@ -11438,11 +11547,28 @@ class _TexturePass:
             )
             _record_elapsed(self.run.timings, self.file_timings, 'existing_bld_excl', _t)
 
+        # True-width road/rail surface (OSM). Rasterised here, ahead of the
+        # stock merge, because stock objects (parked vehicles above all) must
+        # not sit on a carriageway either.
+        _t_excl = time.perf_counter()
+        self.route_excl_mask = None
+        if not self.run.allow_road_overlap:
+            self.route_excl_mask = _rasterize_route_exclusion(
+                local_separator_roads, local_rails,
+                self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w, self.m_per_px)
+        _record_elapsed(self.run.timings, self.file_timings, 'road_raster', _t_excl)
+
         # Merge the stock YOLO pre-step placements in file order, after
         # dropping detections that overlap scenery objects other addons
         # already place (simHeaven / custom overlay objects, existing
-        # building footprints).
+        # building footprints) and objects centred on an OSM road or rail.
         if self.stock_res is not None:
+            if self.route_excl_mask is not None and self.route_excl_mask.any():
+                _stock_on_route = _filter_stock_objects_on_routes(
+                    self.stock_res, self.route_excl_mask
+                )
+                if _stock_on_route:
+                    self.file_counts['stock_yolo_on_road'] = int(_stock_on_route)
             _addon_blocker_mask = None
             for _m in (self.sh_bld_mask, self.custom_bld_mask, self.existing_bld_mask):
                 if _m is not None and _m.any():
@@ -11509,13 +11635,7 @@ class _TexturePass:
         # detection OBB keeps checking static_occ_mask only. Narrow lanes
         # exclude just their own few metres of pavement, so dense blocks
         # keep their placements while buildings stay off the streets.
-        _t_excl = time.perf_counter()
-        self.route_excl_mask = None
-        if not self.run.allow_road_overlap:
-            self.route_excl_mask = _rasterize_route_exclusion(
-                local_separator_roads, local_rails,
-                self.lat_n, self.lat_s, self.lon_w, self.lon_e, self.img_h, self.img_w, self.m_per_px)
-        _record_elapsed(self.run.timings, self.file_timings, 'road_raster', _t_excl)
+        # (route_excl_mask itself is rasterised before the stock merge above.)
         if self.route_excl_mask is not None and self.route_excl_mask.any():
             self.placement_occ_mask = self.static_occ_mask | self.route_excl_mask
             self.placement_occ_integral = (

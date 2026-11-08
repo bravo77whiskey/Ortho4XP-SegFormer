@@ -25,9 +25,11 @@ class StockYoloAssetMapTests(unittest.TestCase):
         self.assertGreaterEqual(STOCK.DEFAULT_STOCK_YOLO_BATCH, 1)
 
     def test_static_dota_classes_excludes_moving_and_already_rendered(self):
-        # Moving (plane, ship, vehicles, helicopter) and already-rendered
-        # (bridge, roundabout) must never appear in the placement map.
-        forbidden = {0, 1, 8, 9, 10, 11, 12}
+        # Aircraft (X-Plane parks its own), harbour (asset mismatch), DOTA's
+        # vehicle classes (vehicles come from DIOR) and already-rendered
+        # bridge / roundabout must never be placed. Ships (1) are placed, but
+        # only when moored (see the ship rule tests).
+        forbidden = {0, 7, 8, 9, 10, 11, 12}
         self.assertFalse(
             forbidden.intersection(STOCK.STATIC_DOTA_CLASSES),
             f"STATIC_DOTA_CLASSES includes forbidden classes: "
@@ -75,6 +77,7 @@ class StockYoloAssetMapTests(unittest.TestCase):
             "opensceneryx/",      # OpenSceneryX
             "MisterX_Library/",   # MisterX Library
             "objects/",           # world-models
+            "CDB-Library/",       # CDB-Library
         )
         for cls, (_kind, paths, _h) in STOCK.STOCK_YOLO_ASSET_MAP.items():
             for p in paths:
@@ -581,6 +584,273 @@ class StockYoloOomFallbackTests(unittest.TestCase):
                 batch_size=1,
                 **self._common_kwargs(),
             )
+
+
+def _fake_model(quads, cls, conf=0.9):
+    """A YOLO stand-in returning one result with the given crop-pixel quads."""
+
+    class FakeObb:
+        def __init__(self):
+            self.xyxyxyxy = torch.tensor(np.asarray(quads, dtype=np.float32))
+            self.conf = torch.tensor([float(conf)] * len(quads))
+            self.cls = torch.tensor([float(cls)] * len(quads))
+
+    class FakeResult:
+        def __init__(self):
+            self.obb = FakeObb()
+
+    class FakeYolo:
+        def predict(self, **_kwargs):
+            return iter((FakeResult(),))
+
+    return FakeYolo()
+
+
+def _rect(cx, cy, long_px, short_px):
+    hl, hs = long_px / 2.0, short_px / 2.0
+    return [[cx - hl, cy - hs], [cx + hl, cy - hs], [cx + hl, cy + hs], [cx - hl, cy + hs]]
+
+
+class StockYoloBlacklistTests(unittest.TestCase):
+    def test_dior_contributes_vehicles_only(self):
+        self.assertEqual(STOCK.STATIC_DIOR_CLASSES, (STOCK.VEHICLE_CLASS,))
+        self.assertEqual(STOCK.STOCK_CLASS_NAMES[STOCK.VEHICLE_CLASS], "vehicle")
+
+    def test_no_blacklisted_dior_twin_is_mapped(self):
+        # airplane, bridge, chimney, harbour, overpass, sports, windmill ...
+        for dior_cls in (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 14, 16, 17, 19):
+            cls = STOCK.DIOR_CLASS_OFFSET + dior_cls
+            self.assertNotIn(cls, STOCK.STOCK_YOLO_ASSET_MAP)
+            self.assertNotIn(cls, STOCK.STATIC_DIOR_CLASSES)
+
+    def test_ladder_paths_are_all_in_the_asset_map(self):
+        for cls, ladder in STOCK._SIZE_LADDERS_M.items():
+            mapped = set(STOCK.STOCK_YOLO_ASSET_MAP[cls][1])
+            for rung in ladder:
+                for path in rung[1]:
+                    self.assertIn(path, mapped)
+                    self.assertTrue(path.endswith((".obj", ".agp")), path)
+
+    def test_never_uses_dynamic_multi_part_ship_exports(self):
+        for path in STOCK.STOCK_YOLO_ASSET_MAP[STOCK.SHIP_DOTA_CLASS][1]:
+            if path.startswith("lib/ships/") and path.endswith(".obj"):
+                self.assertTrue(path.startswith("lib/ships/powered/"), path)
+
+
+class StockYoloSizeLadderTests(unittest.TestCase):
+    def _pick(self, cls, long_m, kind=None):
+        paths = STOCK.STOCK_YOLO_ASSET_MAP[cls][1]
+        return STOCK._pick_sized_variant(cls, long_m, paths, 22.5, 120.3, 10, 10, kind=kind)
+
+    def test_car_and_bus_lengths_pick_matching_models(self):
+        self.assertEqual(self._pick(STOCK.VEHICLE_CLASS, 4.6), "lib/cars/car_static.obj")
+        self.assertEqual(self._pick(STOCK.VEHICLE_CLASS, 12.5), "lib/cars/bus_static.obj")
+
+    def test_no_rung_within_tolerance_places_nothing(self):
+        self.assertIsNone(self._pick(STOCK.VEHICLE_CLASS, 30.0))
+        # A 95 m ferry sits between the 65 m yacht and the 156 m carriers.
+        self.assertIsNone(self._pick(STOCK.SHIP_DOTA_CLASS, 95.0))
+
+    def test_ship_kind_prefers_matching_rungs(self):
+        container = self._pick(STOCK.SHIP_DOTA_CLASS, 158.0, kind="container")
+        cargo = self._pick(STOCK.SHIP_DOTA_CLASS, 158.0, kind="cargo")
+        self.assertIn("Container", container)
+        self.assertIn("BulkCarrier_155", cargo)
+
+    def test_only_installed_paths_are_picked(self):
+        only = ("lib/ships/powered/over_10mt/Cruiser_1200_any.obj",)
+        got = STOCK._pick_sized_variant(STOCK.SHIP_DOTA_CLASS, 12.0, only, 0, 0, 0, 0)
+        self.assertEqual(got, only[0])
+        self.assertIsNone(STOCK._pick_sized_variant(STOCK.SHIP_DOTA_CLASS, 200.0, only, 0, 0, 0, 0))
+
+
+class StockYoloHeadingTests(unittest.TestCase):
+    def test_image_vectors_map_to_compass_headings(self):
+        self.assertAlmostEqual(STOCK._image_vector_heading(0, -1), 0.0)    # up = north
+        self.assertAlmostEqual(STOCK._image_vector_heading(1, 0), 90.0)    # right = east
+        self.assertAlmostEqual(STOCK._image_vector_heading(0, 1), 180.0)
+        self.assertAlmostEqual(STOCK._image_vector_heading(-1, 0), 270.0)
+        # Diagonals are not mirrored (the old 90 - angle formula gave 135 here).
+        self.assertAlmostEqual(STOCK._image_vector_heading(1, -1), 45.0)
+
+    def test_quad_heading_follows_long_axis(self):
+        quad = np.array([[0, 0], [30, 30], [25, 35], [-5, 5]], dtype=np.float32)
+        _cx, _cy, long_m, _short_m, heading = STOCK._quad_geometry(quad, 1.0)
+        self.assertGreater(long_m, 40.0)
+        self.assertAlmostEqual(heading % 180.0, 135.0, places=3)
+
+    def _offset_m(self, lon, lat, lon0, lat0):
+        east = (lon - lon0) * 111320.0 * math.cos(math.radians(lat0))
+        north = (lat - lat0) * 111320.0
+        return east, north
+
+    def test_centred_minus_z_models_are_placed_as_detected(self):
+        lon, lat, h = STOCK.model_origin_for_centre(120.3, 22.6, 37.0, "lib/cars/car_static.obj")
+        self.assertEqual((lon, lat, h), (120.3, 22.6, 37.0))
+        _lon, _lat, h = STOCK.model_origin_for_centre(
+            120.3, 22.6, 37.0, "opensceneryx/objects/vehicles/boats_ships/fishing/2.obj")
+        self.assertAlmostEqual(h, 217.0)
+
+    def test_off_centre_x_axis_ships_put_the_hull_on_the_detection(self):
+        lat0 = 22.6
+        # Freighter, bow north: bow is +X, origin at the stern 31.7 m south.
+        lon, lat, h = STOCK.model_origin_for_centre(120.3, lat0, 0.0, "CDB-Library/ship/ship_pesca.obj")
+        self.assertAlmostEqual(h, 270.0)
+        east, north = self._offset_m(lon, lat, 120.3, lat0)
+        self.assertAlmostEqual(north, -31.71, places=1)
+        self.assertAlmostEqual(east, 0.03, places=1)
+        # Tug, bow east: bow is -X, so the origin (near the bow) lies east of the centre.
+        lon, lat, h = STOCK.model_origin_for_centre(
+            120.3, lat0, 90.0, "CDB-Library/ship/ship_trawler1_senza_scia.obj")
+        self.assertAlmostEqual(h, 180.0)
+        east, north = self._offset_m(lon, lat, 120.3, lat0)
+        self.assertAlmostEqual(east, 22.37, places=1)
+        self.assertAlmostEqual(north, 5.93, places=1)
+
+    def test_moored_mid_size_hulls_get_working_boats_not_the_yacht(self):
+        ladder_paths = {p for rung in STOCK._SIZE_LADDERS_M[STOCK.SHIP_DOTA_CLASS] for p in rung[1]}
+        self.assertFalse(any("Luxury_Yacht" in p for p in ladder_paths))
+        for path in ("CDB-Library/ship/ship_pesca.obj", "CDB-Library/ship/ship_trawler1_senza_scia.obj"):
+            self.assertIn(path, ladder_paths)
+            self.assertIn(path, STOCK._MODEL_FRAME)
+
+
+class StockYoloSeamTests(unittest.TestCase):
+    def test_inner_seam_cuts_but_image_edge_does_not(self):
+        box = [[0, 50], [100, 50], [100, 70], [0, 70]]
+        # Touching the crop's left edge: a seam only when a crop lies left.
+        self.assertTrue(STOCK.touches_inner_crop_seam(box, 1024, 0, 1024, 1024, 4096, 4096))
+        self.assertFalse(STOCK.touches_inner_crop_seam(box, 0, 0, 1024, 1024, 4096, 4096))
+        inside = [[100, 50], [200, 50], [200, 70], [100, 70]]
+        self.assertFalse(STOCK.touches_inner_crop_seam(inside, 1024, 1024, 1024, 1024, 4096, 4096))
+
+
+@unittest.skipIf(torch is None, "torch not installed")
+class StockYoloShipAndVehicleRuleTests(unittest.TestCase):
+    SIZE = 256
+
+    def _run(self, model, *, m_per_px=0.3, class_offset=0, mesh_water=None, class_map=None):
+        return STOCK.run_stock_yolo_pass(
+            np.full((self.SIZE, self.SIZE, 3), 90, dtype=np.uint8),
+            model=model,
+            img_w=self.SIZE, img_h=self.SIZE,
+            lat=0, lon=0, lat_n=1.0, lat_s=0.0, lon_w=0.0, lon_e=1.0,
+            m_per_px=m_per_px, stride=self.SIZE, imgsz=self.SIZE, device="cpu",
+            class_offset=class_offset,
+            mesh_water_mask=mesh_water, class_map=class_map,
+            water_class=6, road_class=4,
+        )
+
+    def _harbour(self):
+        water = np.zeros((self.SIZE, self.SIZE), dtype=bool)
+        water[:, 60:] = True              # quay at x < 60
+        class_map = np.where(water, 6, 1).astype(np.int8)
+        return water, class_map
+
+    def test_moored_ship_is_placed_with_a_sized_boat(self):
+        water, class_map = self._harbour()
+        # 12 m boat (40 px at 0.3 m/px) alongside the quay.
+        model = _fake_model([_rect(85, 120, 40, 12)], STOCK.SHIP_DOTA_CLASS)
+        res = self._run(model, mesh_water=water, class_map=class_map)
+        self.assertEqual(len(res.placed_objects), 1, res.rejected)
+        self.assertIn(res.placed_objects[0][3], STOCK.STOCK_YOLO_ASSET_MAP[1][1])
+
+    def test_ship_far_from_land_is_under_way(self):
+        water = np.ones((self.SIZE, self.SIZE), dtype=bool)
+        class_map = np.full((self.SIZE, self.SIZE), 6, dtype=np.int8)
+        model = _fake_model([_rect(128, 128, 40, 12)], STOCK.SHIP_DOTA_CLASS)
+        res = self._run(model, mesh_water=water, class_map=class_map)
+        self.assertEqual(res.placed_objects, [])
+        self.assertEqual(res.rejected.get("ship_under_way"), 1)
+
+    def test_ship_on_land_and_without_water_data_are_dropped(self):
+        water, class_map = self._harbour()
+        model = _fake_model([_rect(25, 120, 30, 10)], STOCK.SHIP_DOTA_CLASS)
+        res = self._run(model, mesh_water=water, class_map=class_map)
+        self.assertEqual(res.rejected.get("ship_on_land"), 1)
+        res = self._run(_fake_model([_rect(85, 120, 40, 12)], STOCK.SHIP_DOTA_CLASS))
+        self.assertEqual(res.rejected.get("ship_no_water_data"), 1)
+
+    def test_parked_car_is_placed_from_the_dior_offset_class(self):
+        class_map = np.ones((self.SIZE, self.SIZE), dtype=np.int8)
+        model = _fake_model([_rect(100, 100, 15, 6)], 18)   # DIOR vehicle, 4.5 m
+        res = self._run(model, class_offset=STOCK.DIOR_CLASS_OFFSET, class_map=class_map)
+        self.assertEqual([p[3] for p in res.placed_objects], ["lib/cars/car_static.obj"])
+        self.assertEqual(res.counts_by_class, {STOCK.VEHICLE_CLASS: 1})
+
+    def test_vehicle_on_road_or_water_is_dropped(self):
+        class_map = np.ones((self.SIZE, self.SIZE), dtype=np.int8)
+        class_map[90:110, :] = 4                            # SegFormer road
+        class_map[200:, :] = 6                              # water
+        model = _fake_model([_rect(100, 100, 15, 6), _rect(100, 220, 15, 6)], 18)
+        res = self._run(model, class_offset=STOCK.DIOR_CLASS_OFFSET, class_map=class_map)
+        self.assertEqual(res.placed_objects, [])
+        self.assertEqual(res.rejected, {"vehicle_on_road": 1, "vehicle_on_water": 1})
+
+    def test_vehicles_skipped_on_coarse_textures(self):
+        model = _fake_model([_rect(100, 100, 5, 2)], 18)
+        res = self._run(model, m_per_px=1.2, class_offset=STOCK.DIOR_CLASS_OFFSET,
+                        class_map=np.ones((self.SIZE, self.SIZE), dtype=np.int8))
+        self.assertEqual(res.placed_objects, [])
+
+    def test_dota_vehicle_ids_are_not_placed(self):
+        # DOTA 'small vehicle' (10) is not a static class even with masks.
+        model = _fake_model([_rect(100, 100, 15, 6)], 10)
+        res = self._run(model, class_map=np.ones((self.SIZE, self.SIZE), dtype=np.int8))
+        self.assertEqual(res.placed_objects, [])
+
+
+class StockYoloMergeTests(unittest.TestCase):
+    def test_merge_rebases_owner_indices(self):
+        a = STOCK.StockYoloResults()
+        a.placed_objects = [(0, 0, 0, "a.obj")]
+        a.occupied_px_polys = [np.zeros((4, 2), np.int32)]
+        a.occupied_owner = [("object", 0)]
+        a.counts_by_class = {14: 1}
+        b = STOCK.StockYoloResults()
+        b.placed_objects = [(1, 1, 0, "b.obj"), (2, 2, 0, "c.obj")]
+        b.occupied_px_polys = [np.zeros((4, 2), np.int32)] * 2
+        b.occupied_owner = [("object", 0), ("object", 1)]
+        b.counts_by_class = {STOCK.VEHICLE_CLASS: 2}
+        b.rejected = {"vehicle_on_road": 3}
+        merged = STOCK.merge_stock_results(a, b)
+        self.assertEqual(merged.occupied_owner, [("object", 0), ("object", 1), ("object", 2)])
+        self.assertEqual([p[3] for p in merged.placed_objects], ["a.obj", "b.obj", "c.obj"])
+        self.assertEqual(merged.counts_by_class, {14: 1, STOCK.VEHICLE_CLASS: 2})
+        self.assertEqual(merged.rejected, {"vehicle_on_road": 3})
+
+
+class _Evil:
+    """Pickles to a call of open(marker, 'w'); a real unpickle creates it."""
+
+    marker = None
+
+    def __reduce__(self):
+        return (open, (self.marker, "w"))
+
+
+@unittest.skipIf(torch is None, "torch not installed")
+class SafeCheckpointRebuildTests(unittest.TestCase):
+    def test_rebuild_loads_weights_without_running_pickled_code(self):
+        from ultralytics.nn.tasks import OBBModel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            net = OBBModel(cfg="yolov8n-obb.yaml", nc=3, verbose=False)
+            marker = tmp / "pwned.txt"
+            evil = _Evil()
+            evil.marker = str(marker)
+            src = tmp / "foreign.pt"
+            torch.save({"model": net, "ema": None, "payload": evil}, src)
+            self.assertFalse(marker.exists())
+            dst = tmp / "rebuilt.pt"
+            names = STOCK.rebuild_checkpoint_safely(str(src), str(dst))
+            self.assertFalse(marker.exists(), "foreign pickle code ran")
+            self.assertEqual(len(names), 3)
+            rebuilt = torch.load(dst, map_location="cpu", weights_only=False)["model"]
+            for (k, v), (k2, v2) in zip(net.state_dict().items(), rebuilt.state_dict().items()):
+                self.assertEqual(k, k2)
+                self.assertTrue(torch.allclose(v.float(), v2.float(), atol=1e-2), k)
 
 
 if __name__ == "__main__":
