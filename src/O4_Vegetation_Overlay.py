@@ -2776,12 +2776,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         except Exception as exc:
             print(f"[Veg] airports unreadable ({exc!r}): no airport boundaries or approach caps")
             tile_airports = []
-    approach_surfaces = APPROACH.runway_surfaces(tile_airports) if _approach_heights_enabled() else []
+    approach_surfaces = (APPROACH.runway_surfaces(tile_airports, _mesh_file_for_tile(tex_dir, lat, lon))
+                         if _approach_heights_enabled() else [])
     if approach_surfaces:
         verbose_print(
             f"approach tree heights: {len(approach_surfaces)} runway ends at "
             f"{len(tile_airports)} airports, limited up to "
-            f"{max(APPROACH.reach_m(s) for s in approach_surfaces):.0f} m before the threshold")
+            f"{max(APPROACH.reach_m(s) for s in approach_surfaces):.0f} m before the threshold, "
+            f"{sum(s.ground is not None for s in approach_surfaces)} on mesh terrain")
     # Shorter forest copies: measured heights (forest_heights) and approach caps.
     forest_copies = None
     tropics_evergreen = _tropics_evergreen_enabled() and _tile_reaches_tropics(lat)

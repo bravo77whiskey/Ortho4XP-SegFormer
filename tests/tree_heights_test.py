@@ -594,7 +594,7 @@ class ApproachSurfaceTests(unittest.TestCase):
         self.assertEqual(len(surfaces), 2)
         west = next(s for s in surfaces if s.end == 1)
         self.assertAlmostEqual(west.ux, -1.0, places=6)
-        self.assertEqual((west.inner_half, west.offset, west.slope), (150.0, 60.0, 0.02))
+        self.assertEqual((west.inner_half, west.offset, west.slope), (92.5, 60.0, 1.0 / 30.0))
         # A texture west of the runway, 0.05 deg square, 1000 px.
         lat_n, lat_s, lon_w, lon_e = 0.025, -0.025, 9.95, 10.0
         cap = APPROACH.cap_map(surfaces, lat_n, lat_s, lon_w, lon_e, 1000, 1000)
@@ -606,15 +606,15 @@ class ApproachSurfaceTests(unittest.TestCase):
             return float(cap[y, x])
 
         self.assertEqual(at(30.0), 0.0)                        # between threshold and inner edge
-        self.assertAlmostEqual(at(1060.0), 20.0, delta=0.3)    # 1000 m beyond the inner edge
-        self.assertAlmostEqual(at(560.0), 10.0, delta=0.3)
+        self.assertAlmostEqual(at(1060.0), 33.33, delta=0.3)   # 1000 m beyond the inner edge
+        self.assertAlmostEqual(at(560.0), 16.67, delta=0.3)
         self.assertTrue(np.isinf(at(2500.0)))                  # the tallest tree clears it
-        self.assertTrue(np.isinf(at(560.0, side_m=400.0)))     # beside the surface
-        self.assertAlmostEqual(at(1060.0, side_m=290.0), 20.0, delta=0.3)   # 150 m + 15 % of 1000
+        self.assertTrue(np.isinf(at(560.0, side_m=160.0)))     # beside the surface (92.5 + 50)
+        self.assertAlmostEqual(at(1060.0, side_m=190.0), 33.33, delta=0.3)  # 92.5 m + 10 % of 1000
 
     def test_short_visual_strips_get_steeper_narrower_surfaces(self):
         strip = APPROACH.runway_surfaces([self._airport(mark=0, length_deg=0.006)])[0]
-        self.assertEqual((strip.inner_half, strip.offset, strip.slope), (30.0, 30.0, 0.05))
+        self.assertEqual((strip.inner_half, strip.offset, strip.slope), (50.0, 30.0, 0.05))  # 45 m wide
         self.assertAlmostEqual(APPROACH.reach_m(strip), 30.0 + 45.0 / 0.05)
 
     def test_runways_are_read_from_apt_dat(self):

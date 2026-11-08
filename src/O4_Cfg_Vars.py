@@ -685,11 +685,14 @@ cfg_tile_vars = {
         "default": True,
         "short_name": "veg_approach_h",
         "hint": "Keep trees under runway approaches below the ICAO approach "
-                "surface: from the inner edge 30-60 m before the threshold the "
-                "allowed height rises with the surface's slope (2-5 % by runway "
-                "length and approach type), so trees get gradually shorter "
-                "towards the runway; the tallest trees fit from about 2.3 km "
-                "out. Under 9 m they become shrubs of the size that fits, and "
+                "surface (Annex 14 obstacle free surface, widening 10 % on "
+                "each side): from the inner edge 30-60 m before the "
+                "threshold the allowed height rises with the surface's slope "
+                "(3.33-5 % by runway length and approach type), measured from "
+                "the threshold's elevation down to the mesh ground, so trees "
+                "get gradually shorter towards the runway; on level ground the "
+                "tallest trees fit from about 1.4 km out. Under 9 m they become "
+                "shrubs of the size that fits, and "
                 "nearest the threshold 1 m shrubs. Uses forest copies in the "
                 "O4XP_Forest_Heights pack.",
     },
@@ -904,8 +907,8 @@ cfg_tile_vars = {
         "default": True,
         "short_name": "bld_approach_h",
         "hint": "Keep buildings under runway approaches below the ICAO approach "
-                "surface (the same surface as veg_approach_heights, with its "
-                "second section for taller buildings): facades are lowered to "
+                "surface (the same surface as veg_approach_heights, out to its "
+                "end, 4.5 km and 150 m on instrument runways): facades are lowered to "
                 "fit, objects too tall for it give way to a shorter asset or a "
                 "facade, and nothing is placed where the limit is under one "
                 "storey, right before the threshold.",

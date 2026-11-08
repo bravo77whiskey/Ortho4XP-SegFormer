@@ -2,7 +2,9 @@
 
 import collections
 import math
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,11 +18,11 @@ if str(SRC) not in sys.path:
 import O4_Approach_Heights as APPROACH
 import O4_Building_Overlay as BLD
 
-Runway = collections.namedtuple("Runway", "lat1 lon1 lat2 lon2 disp1 disp2 mark1 mark2")
+Runway = collections.namedtuple("Runway", "width lat1 lon1 lat2 lon2 disp1 disp2 mark1 mark2")
 Airport = collections.namedtuple("Airport", "icao runways")
 
-# ~3.1 km runway: end 1 precision (code 4, two sections), end 2 visual.
-AIRPORT = Airport("TEST", [Runway(22.570, 120.330, 22.578, 120.360, 0, 0, 3, 0)])
+# ~3.1 km x 45 m runway (design group IV): end 1 precision, end 2 visual.
+AIRPORT = Airport("TEST", [Runway(45.0, 22.570, 120.330, 22.578, 120.360, 0, 0, 3, 0)])
 
 
 def _out(surface, along_m, side_m=0.0):
@@ -31,37 +33,106 @@ def _out(surface, along_m, side_m=0.0):
     return surface.lon + e / kx, surface.lat + n / APPROACH.EARTH_M_PER_DEG_LAT
 
 
+def _cap(surface, along, side=0.0):
+    lon, lat = _out(surface, along, side)
+    return float(APPROACH.cap_at([surface], [lon], [lat])[0])
+
+
 class SurfaceTest(unittest.TestCase):
     def setUp(self):
         surfaces = APPROACH.runway_surfaces([AIRPORT])
         self.precision = next(s for s in surfaces if s.end == 1)
         self.visual = next(s for s in surfaces if s.end == 2)
 
-    def cap(self, surface, along, side=0.0):
-        lon, lat = _out(surface, along, side)
-        return float(APPROACH.cap_at([surface], [lon], [lat])[0])
-
-    def test_precision_profile_has_second_section(self):
+    def test_instrument_surface_is_the_amendment_18_ofs(self):
         s = self.precision
-        self.assertEqual(s.later, ((3600.0, 0.025),))
-        self.assertEqual(self.cap(s, 30.0), 0.0)            # before the inner edge
-        self.assertAlmostEqual(self.cap(s, 1060.0), 20.0, places=2)
-        self.assertAlmostEqual(self.cap(s, 3060.0), 60.0, places=2)
-        self.assertAlmostEqual(self.cap(s, 4860.0), 105.0, places=2)
-        self.assertTrue(math.isinf(self.cap(s, 7000.0)))    # no horizontal section
+        self.assertEqual((s.inner_half, s.offset, s.divergence, s.length), (92.5, 60.0, 0.10, 4500.0))
+        self.assertEqual(_cap(s, 30.0), 0.0)                 # before the inner edge
+        self.assertAlmostEqual(_cap(s, 1060.0), 1000.0 / 30.0, places=2)
+        self.assertAlmostEqual(_cap(s, 4560.0), 150.0, places=2)
+        self.assertTrue(math.isinf(_cap(s, 4600.0)))         # surface ends at 150 m
 
-    def test_visual_end_has_first_section_only(self):
-        self.assertEqual(self.visual.later, ())
-        self.assertTrue(math.isinf(self.cap(self.visual, 3100.0)))
+    def test_visual_end_is_shorter(self):
+        s = self.visual
+        self.assertEqual((s.inner_half, s.length), (67.5, 2500.0))
+        self.assertTrue(math.isinf(_cap(s, 2600.0)))
 
-    def test_surface_widens_by_divergence(self):
-        # 60 m beyond the inner edge: half width 150 + 0.15 * 60 = 159 m
-        self.assertTrue(math.isfinite(self.cap(self.precision, 120.0, 158.0)))
-        self.assertTrue(math.isinf(self.cap(self.precision, 120.0, 170.0)))
+    def test_surface_widens_by_ten_percent(self):
+        # 60 m beyond the inner edge: half width 92.5 + 0.10 * 60 = 98.5 m
+        self.assertTrue(math.isfinite(_cap(self.precision, 120.0, 97.0)))
+        self.assertTrue(math.isinf(_cap(self.precision, 120.0, 100.0)))
 
     def test_tree_caps_stop_at_tree_height(self):
         cap = APPROACH.cap_map([self.precision], 22.60, 22.52, 120.25, 120.34, 256, 256)
         self.assertLess(float(cap[np.isfinite(cap)].max()), APPROACH.MAX_TREE_H_M)
+
+    def test_design_groups_and_inner_edges(self):
+        self.assertEqual(APPROACH.design_group(600.0, 18.0), "I")
+        self.assertEqual(APPROACH.design_group(1000.0, 30.0), "IIA-IIB")
+        self.assertEqual(APPROACH.design_group(1500.0, 30.0), "IIC")
+        self.assertEqual(APPROACH.design_group(3000.0, 40.0), "III")
+        self.assertEqual(APPROACH.design_group(3000.0, 45.0), "IV")
+        self.assertEqual(APPROACH.design_group(3800.0, 60.0), "V")
+        self.assertEqual(APPROACH.inner_edge_m("instrument", "I", 30.0), 110.0)
+        self.assertEqual(APPROACH.inner_edge_m("instrument", "I", 45.0), 125.0)
+        self.assertEqual(APPROACH.inner_edge_m("instrument", "IIC", 30.0), 140.0)
+        self.assertEqual(APPROACH.inner_edge_m("instrument", "IIC", 45.0), 155.0)
+        self.assertEqual(APPROACH.inner_edge_m("visual", "I", 25.0), 80.0)
+        self.assertEqual(APPROACH.inner_edge_m("visual", "V", 60.0), 150.0)
+
+
+class TerrainTest(unittest.TestCase):
+    """Heights are above the ground: threshold elevation minus ground elevation."""
+
+    def setUp(self):
+        self.flat = next(s for s in APPROACH.runway_surfaces([AIRPORT]) if s.end == 1)
+
+    def _on(self, ground_fn):
+        s = self.flat
+        kx = 111320.0 * math.cos(math.radians(s.lat))
+        along, side = np.meshgrid(np.arange(-500.0, 5200.0, 50.0), np.arange(-800.0, 801.0, 50.0))
+        e = s.ux * along - s.uy * side
+        n = s.uy * along + s.ux * side
+        verts = np.column_stack((s.lon + e.ravel() / kx, s.lat + n.ravel() / APPROACH.EARTH_M_PER_DEG_LAT,
+                                 ground_fn(along.ravel())))
+        return APPROACH.mesh_ground([s], verts)[0]
+
+    def test_platform_allows_taller_below(self):
+        # Threshold on a 100 m platform, ground 20 m lower from 550 m out.
+        s = self._on(lambda along: np.where(along < 525.0, 100.0, 80.0))
+        self.assertAlmostEqual(s.elev, 100.0, places=3)
+        self.assertEqual(s.rise, 0.0)
+        self.assertAlmostEqual(_cap(s, 1060.0), 1000.0 / 30.0 + 20.0, places=1)
+        self.assertLess(APPROACH.reach_m(s), APPROACH.reach_m(self.flat) + 1.0)
+
+    def test_hill_lowers_the_cap(self):
+        # Ground rising 1 m per 100 m out from the threshold.
+        s = self._on(lambda along: 50.0 + np.maximum(along, 0.0) * 0.01)
+        self.assertAlmostEqual(_cap(s, 1060.0), 1000.0 / 30.0 - 10.6, places=1)
+        self.assertGreater(s.rise, 40.0)
+        self.assertGreater(APPROACH.reach_m(s), APPROACH.reach_m(self.flat) + 100.0)
+        self.assertEqual(_cap(s, 30.0), 0.0)                 # never under 0
+
+    def test_off_mesh_threshold_stays_level(self):
+        verts = np.array([[0.0, 0.0, 5.0], [0.01, 0.0, 5.0], [0.0, 0.01, 5.0]])
+        self.assertIsNone(APPROACH.mesh_ground([self.flat], verts)[0].ground)
+
+    def test_mesh_vertices_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "Data+22+120.mesh")
+            with open(path, "w") as f:
+                f.write("MeshVersionFormatted 2\nDimension 3\n\nVertices\n2\n"
+                        "120.5 22.5 0.00012345 0\n120.6 22.6 0.001 0\n\nNormals\n2\n0 0 0\n0 0 0\n")
+            xyz = APPROACH.mesh_vertices(path)
+        self.assertEqual(xyz.shape, (2, 3))
+        self.assertAlmostEqual(xyz[0, 2], 12.345, places=6)
+        self.assertAlmostEqual(xyz[1, 2], 100.0, places=6)
+
+    def test_signature_follows_the_ground(self):
+        a = self._on(lambda along: np.full(along.shape, 10.0))
+        b = self._on(lambda along: np.where(along < 525.0, 10.0, 0.0))
+        self.assertNotEqual(APPROACH.building_signature([a]), APPROACH.building_signature([b]))
+        self.assertNotEqual(APPROACH.signature([a]), APPROACH.signature([b]))
 
 
 class BuildingHelpersTest(unittest.TestCase):

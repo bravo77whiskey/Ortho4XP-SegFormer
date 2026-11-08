@@ -1304,8 +1304,8 @@ def _library_obj_bounds(obj_path, cache_dir=None):
 
 # ── Runway approach height limits ────────────────────────────────────────────
 # Nothing placed under a runway end's ICAO approach surface may reach it
-# (O4_Approach_Heights, the same surfaces that cap trees, here with their
-# second section too). Detections under a surface get their height cut to the
+# (O4_Approach_Heights, the same surfaces that cap trees, here to their far
+# end, measured above the mesh ground). Detections under a surface get their height cut to the
 # limit, so objects too tall for it give way to a shorter asset or the facade
 # fallback; a final check before the DSF is written lowers facades and drops
 # objects whose measured mesh still reaches the surface. Between the threshold
@@ -9509,11 +9509,13 @@ class _BuildingOverlayRun:
         except Exception as exc:
             print(f"[Bld] airports unreadable ({exc!r}): no runway approach height limits", flush=True)
             return
-        self.approach_surfaces = APPROACH.runway_surfaces(airports)
+        self.approach_surfaces = APPROACH.runway_surfaces(
+            airports, _mesh_file_for_tile(self.tex_dir, self.lat, self.lon))
         if self.approach_surfaces:
+            on_mesh = sum(s.ground is not None for s in self.approach_surfaces)
             verbose_print(
                 f"Runway approach height limits: {len(self.approach_surfaces)} runway ends "
-                f"at {len(airports)} airports"
+                f"at {len(airports)} airports ({on_mesh} on mesh terrain)"
             )
 
     def _load_scenery_exclusions(self):
