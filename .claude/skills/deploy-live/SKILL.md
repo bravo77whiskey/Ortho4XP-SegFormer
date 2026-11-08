@@ -27,7 +27,7 @@ The live app is `G:\Dev\Ortho4XP` (exe + `_internal`, CUDA venv in `.venv`). The
 ## What the script guarantees (don't "simplify" it away)
 
 - **It refuses while the live app or any process from its venv is running.** The user's builds use that python, and a half-copied module would break them. Wait. Never kill processes by name, only by PID, and only if the user says so.
-- **`_internal/Ortho4XP_Data` is never written.** It holds `Ortho4XP.cfg`, logs, `build_state`, caches, the stock YOLO/DIOR models, and symlinks (Tiles, Providers, Patches...) into the H: install. Copying into it writes into another install. The script also fails if `Ortho4XP.cfg` changed during the deploy.
+- **`_internal/Ortho4XP_Data` is never written.** It holds `Ortho4XP.cfg`, logs, `build_state`, caches, and symlinks (Tiles, Providers, Patches...) into the H: install. Copying into it writes into another install. The script also fails if `Ortho4XP.cfg` changed during the deploy.
 - **Nothing else in the live folder is deleted.** It keeps about 4 GB of legacy packages from older builds. Only entries present in the build are replaced.
 - **Verification** is a byte compare of every copied entry plus the exe, ignoring runtime `__pycache__`. It also imports every loose `overlay_scripts/src/O4_*.py` with the live venv.
 
@@ -35,5 +35,6 @@ The live app is `G:\Dev\Ortho4XP` (exe + `_internal`, CUDA venv in `.venv`). The
 
 - **A new module that loose overlay files import must be in `Ortho4XP.spec`, in both `added_datas` and `hiddenimports`.** Otherwise every live run dies with ModuleNotFoundError. `tests/spec_bundles_sfr_modules_test.py` guards this.
 - **Some modules are frozen inside the exe PYZ** (e.g. `O4_Cfg_Vars`, `O4_Overlay_Pipeline`, `O4_DSF_Utils`, `O4_Tile_Utils`). Changes to them reach live only through a full build, so never copy a single loose file as a "quick deploy".
+- **Model files are never part of a deploy.** Every model is a path setting (`bld_yolo_checkpoint`, `bld_height_checkpoint`, `bld_stock_yolo_checkpoint`, `bld_vehicle_checkpoint`, ...), and the files live in `G:\Ortho Models`, which the live `Ortho4XP.cfg` points at. A change that adds a model adds a setting for it, and the file goes there, not into the app or the repo.
 - **Live `Ortho4XP_Data\Providers` is a symlink into H:.** Provider `.lay` edits don't reach live through a deploy. Editing the H: file needs the user's OK.
 - **Settings in tile cfgs** (`H:\...\Tiles\zOrtho4XP_*\*.cfg`) are user data. A deploy never changes them. Ask before editing one.

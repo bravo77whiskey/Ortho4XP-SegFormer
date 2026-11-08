@@ -978,6 +978,36 @@ cfg_tile_vars = {
                 "YOLO detections (second stage). When empty or missing, buildings "
                 "fall back to class-default heights.",
     },
+    "bld_stock_yolo_checkpoint": {
+        "type": str,
+        "default": "",
+        "short_name": "bld_stock_ckpt",
+        "file_picker": True,
+        "file_picker_title": "Choose stock object model (yolo26x-obb.pt)",
+        "filetypes": [
+            ("YOLO model files", ("*.pt", "*.pth")),
+            ("All files", "*.*"),
+        ],
+        "hint": "Stock DOTA YOLO-OBB model (yolo26x-obb.pt) that finds storage "
+                "tanks, swimming pools and moored ships. Downloaded from "
+                "Ultralytics to this path when the file is missing. Empty = "
+                "Ortho4XP_Data/yolo26x-obb.pt.",
+    },
+    "bld_vehicle_checkpoint": {
+        "type": str,
+        "default": "",
+        "short_name": "bld_vehicle_ckpt",
+        "file_picker": True,
+        "file_picker_title": "Choose vehicle model (dior-yolov8s-obb.pt)",
+        "filetypes": [
+            ("YOLO model files", ("*.pt", "*.pth")),
+            ("All files", "*.*"),
+        ],
+        "hint": "DIOR YOLOv8s-OBB model that finds parked cars, trucks and "
+                "buses. Downloaded (pinned, hash-checked) and rebuilt safely "
+                "to this path when the file is missing. Empty = "
+                "Ortho4XP_Data/dior-yolov8s-obb.pt.",
+    },
     "bld_yolo_min_coverage": {
         "type": float,
         "default": 0.80,
@@ -1199,6 +1229,8 @@ list_bld_vars = [
     "bld_yolo_max_det",
     "bld_yolo_min_coverage",
     "bld_height_checkpoint",
+    "bld_stock_yolo_checkpoint",
+    "bld_vehicle_checkpoint",
 ]
 
 list_overlay_vars = list_veg_vars + list_bld_vars
@@ -1293,6 +1325,7 @@ settings_sections = (
                            "bld_yolo_iou", "bld_yolo_stride", "bld_yolo_max_det",
                            "bld_yolo_min_coverage")),
         ("Height model", ("bld_height_checkpoint",)),
+        ("Stock object models", ("bld_stock_yolo_checkpoint", "bld_vehicle_checkpoint")),
         ("Diagnostics", ("bld_disable_cache", "bld_verbose_log")),
     )),
     ("Vegetation overlay", (

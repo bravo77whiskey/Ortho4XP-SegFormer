@@ -70,10 +70,12 @@ import O4_GPU_Budget as GPUB
 
 
 # ── Stock YOLO checkpoint location ───────────────────────────────────────────
-# yolo26x-obb.pt (DOTAv1-trained Ultralytics OBB) lives in the repository root,
-# or in a packaged build in _internal/Ortho4XP_Data: overlay_scripts/ is
-# replaced on every update, which would throw the downloaded file away.
-# Override via environment if needed.
+# The settings bld_stock_yolo_checkpoint / bld_vehicle_checkpoint name the
+# model files; these defaults apply only when they are empty: yolo26x-obb.pt
+# (DOTAv1-trained Ultralytics OBB) in the repository root, or in a packaged
+# build in _internal/Ortho4XP_Data (overlay_scripts/ is replaced on every
+# update, which would throw a downloaded file away).  Either model is
+# downloaded to its path when missing.
 STOCK_YOLO_CHECKPOINT_NAME = "yolo26x-obb.pt"
 _MODULE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

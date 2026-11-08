@@ -3116,3 +3116,42 @@ class StockFootprintAndDedupOrientationTests(unittest.TestCase):
         c = (lon + 0.5 + d / mlon, lat + 0.5 - d / mlat, 45.0, self.SHIP)
         kept, dropped = BLD._dedupe_overlapping_placements([a, c], lat, lon)
         self.assertEqual(dropped, 0)
+
+
+class StockModelCheckpointSettingTests(unittest.TestCase):
+    """bld_stock_yolo_checkpoint / bld_vehicle_checkpoint pick the model files."""
+
+    def _load(self, stock, vehicle):
+        run = object.__new__(BLD._BuildingOverlayRun)
+        run.stock_yolo_batch_size = 1
+        loaded = []
+        with mock.patch.object(BLD.STOCKYOLO, "load_stock_yolo_model",
+                               side_effect=lambda p: loaded.append(("stock", p)) or object()), \
+                mock.patch.object(BLD.STOCKYOLO, "load_dior_model",
+                                  side_effect=lambda p: loaded.append(("dior", p)) or object()), \
+                mock.patch.object(BLD.STOCKYOLO, "stock_dior_enabled", return_value=True):
+            run.stock_yolo_checkpoint = stock or BLD.STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT
+            run.vehicle_checkpoint = vehicle or BLD.STOCKYOLO.DEFAULT_DIOR_CHECKPOINT
+            run._load_stock_yolo_model()
+        return loaded
+
+    def test_set_paths_are_loaded(self):
+        self.assertEqual(self._load("X:/m/stock.pt", "X:/m/cars.pt"),
+                         [("stock", "X:/m/stock.pt"), ("dior", "X:/m/cars.pt")])
+
+    def test_empty_settings_use_the_built_in_location(self):
+        self.assertEqual(self._load("", ""),
+                         [("stock", BLD.STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT),
+                          ("dior", BLD.STOCKYOLO.DEFAULT_DIOR_CHECKPOINT)])
+
+    def test_settings_reach_the_overlay_run(self):
+        import O4_Cfg_Vars as CFGV
+        import O4_Overlay_Pipeline as OP
+        for name in ("bld_stock_yolo_checkpoint", "bld_vehicle_checkpoint"):
+            self.assertIn(name, CFGV.list_bld_pipeline_vars)
+            self.assertTrue(hasattr(OP, name))
+            self.assertEqual(CFGV.cfg_tile_vars[name]["default"], "")
+        import inspect
+        params = inspect.signature(BLD.run).parameters
+        self.assertIn("stock_yolo_checkpoint", params)
+        self.assertIn("vehicle_checkpoint", params)

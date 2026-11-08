@@ -8861,6 +8861,7 @@ class _BuildingOverlayRun:
         yolo_enabled, yolo_checkpoint, yolo_conf, yolo_iou, yolo_stride,
         yolo_max_det, yolo_imgsz, yolo_min_coverage, height_checkpoint,
         roof_color_matching, library_cache_dir,
+        stock_yolo_checkpoint=None, vehicle_checkpoint=None,
     ):
         # Texture-parallel helpers rebuild an identical run from these.
         self._init_kwargs = {k: v for k, v in locals().items() if k != 'self'}
@@ -8897,6 +8898,9 @@ class _BuildingOverlayRun:
         self.height_checkpoint = height_checkpoint
         self.roof_color_matching = roof_color_matching
         self.library_cache_dir = library_cache_dir
+        # Empty = the built-in location (Ortho4XP_Data, or the repo root).
+        self.stock_yolo_checkpoint = stock_yolo_checkpoint or STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT
+        self.vehicle_checkpoint = vehicle_checkpoint or STOCKYOLO.DEFAULT_DIOR_CHECKPOINT
 
     @with_verbose_logging
     def execute(self):
@@ -9423,12 +9427,10 @@ class _BuildingOverlayRun:
         # absent locally, so first-run installs don't need a manual sync step.
         self.stock_yolo_model = None
         try:
-            self.stock_yolo_model = STOCKYOLO.load_stock_yolo_model(
-                STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT
-            )
+            self.stock_yolo_model = STOCKYOLO.load_stock_yolo_model(self.stock_yolo_checkpoint)
             verbose_print(
                 f"Stock YOLO OBB (DOTAv1): loaded "
-                f"{STOCKYOLO.DEFAULT_STOCK_YOLO_CHECKPOINT}; "
+                f"{self.stock_yolo_checkpoint}; "
                 f"batch={self.stock_yolo_batch_size}",
                 flush=True,
             )
@@ -9443,9 +9445,9 @@ class _BuildingOverlayRun:
         if STOCKYOLO.stock_dior_enabled():
             try:
                 _t_dior = time.perf_counter()
-                self.dior_model = STOCKYOLO.load_dior_model(STOCKYOLO.DEFAULT_DIOR_CHECKPOINT)
+                self.dior_model = STOCKYOLO.load_dior_model(self.vehicle_checkpoint)
                 verbose_print(
-                    f"Stock YOLO OBB (DIOR vehicles): loaded {STOCKYOLO.DEFAULT_DIOR_CHECKPOINT} "
+                    f"Stock YOLO OBB (DIOR vehicles): loaded {self.vehicle_checkpoint} "
                     f"in {time.perf_counter() - _t_dior:.1f}s",
                     flush=True,
                 )
@@ -13094,6 +13096,8 @@ def run(
     height_checkpoint=None,
     roof_color_matching=False,
     library_cache_dir=None,
+    stock_yolo_checkpoint=None,
+    vehicle_checkpoint=None,
     **legacy_kwargs,
 ):
     """Generate the building overlay DSF for one tile.
@@ -13149,6 +13153,8 @@ def run(
         height_checkpoint=height_checkpoint,
         roof_color_matching=roof_color_matching,
         library_cache_dir=library_cache_dir,
+        stock_yolo_checkpoint=stock_yolo_checkpoint,
+        vehicle_checkpoint=vehicle_checkpoint,
     ).execute()
 
 

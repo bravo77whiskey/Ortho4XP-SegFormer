@@ -394,6 +394,8 @@ bld_yolo_iou = 0.5
 bld_yolo_stride = 512
 bld_yolo_max_det = 100000
 bld_height_checkpoint = ""
+bld_stock_yolo_checkpoint = ""  # empty = Ortho4XP_Data/yolo26x-obb.pt
+bld_vehicle_checkpoint = ""     # empty = Ortho4XP_Data/dior-yolov8s-obb.pt
 
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 segformer_patch_size        = 512
@@ -1080,6 +1082,8 @@ def process_bld_tile(lat, lon, build_dir, cleanup_cache=True):
             f"yolo_enabled={bld_yolo_enabled!r} "
             f"checkpoint={bld_yolo_checkpoint!r} "
             f"height_checkpoint={bld_height_checkpoint!r} "
+            f"stock_yolo_checkpoint={bld_stock_yolo_checkpoint!r} "
+            f"vehicle_checkpoint={bld_vehicle_checkpoint!r} "
             f"conf={bld_yolo_conf!r} iou={bld_yolo_iou!r} "
             f"stride={bld_yolo_stride!r} max_det={bld_yolo_max_det!r} "
             f"min_coverage={bld_yolo_min_coverage!r} "
@@ -1143,6 +1147,8 @@ def process_bld_tile(lat, lon, build_dir, cleanup_cache=True):
         f"    yolo_max_det             = {bld_yolo_max_det!r},\n"
         f"    yolo_min_coverage        = {bld_yolo_min_coverage!r},\n"
         f"    height_checkpoint        = {bld_height_checkpoint!r},\n"
+        f"    stock_yolo_checkpoint    = {bld_stock_yolo_checkpoint!r},\n"
+        f"    vehicle_checkpoint       = {bld_vehicle_checkpoint!r},\n"
         f")\n"
     )
     ret = None
