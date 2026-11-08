@@ -19,7 +19,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "src"))
-DATA = os.environ.get("O4_REVIEW_DATA", r"E:\Ortho4XP_Review")
+DATA = os.environ.get("O4_REVIEW_DATA", r"G:\Ortho4XP_Review")
 TILES_ROOT = r"H:\XP12 Addons\Applications\Ortho4XP 1.4\_internal\Ortho4XP_Data\Tiles"
 
 import O4_Texture_Selection as TEXSEL  # noqa: E402

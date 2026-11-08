@@ -7,7 +7,7 @@ Shenzhen N->E of SZX (OSM-poor areas), Wenzhou N->SW of WNZ and Shouguang
 (greenhouses). ZL16 sector textures (~9 km each) plus one nested
 ZL17/18/19 texture per location, saved as
 <DATA>/sets/hotspots/<PROVIDER>/<til_y>_<til_x>_<PROVIDER><ZL>.jpg like Ortho4XP
-does. DATA defaults to E:\\Ortho4XP_Review (override with O4_REVIEW_DATA).
+does. DATA defaults to G:\\Ortho4XP_Review (override with O4_REVIEW_DATA).
 """
 import json
 import os
@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 # Review data (textures, runs, caches, logs, the served viewer) lives outside
 # the repo and off C:. Override with the O4_REVIEW_DATA environment variable.
-DATA = os.environ.get("O4_REVIEW_DATA", r"E:\Ortho4XP_Review")
+DATA = os.environ.get("O4_REVIEW_DATA", r"G:\Ortho4XP_Review")
 os.chdir(REPO)
 sys.path.insert(0, os.path.join(REPO, "src"))
 

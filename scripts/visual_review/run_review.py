@@ -12,7 +12,7 @@ exception: each tile is built complete, every zoom level together, exactly
 like a real build. Groups are spread over --workers parallel worker
 processes, each with its own cache folder. Settings come from the installed
 Ortho4XP global config (read-only); nothing is linked into or changed in
-Custom Scenery. Output goes under DATA (default E:\\Ortho4XP_Review, override
+Custom Scenery. Output goes under DATA (default G:\\Ortho4XP_Review, override
 with O4_REVIEW_DATA): runs/RUN_NAME/<provider>/<sample>.js per texture,
 runs/RUN_NAME/data_<provider>.js, runs_index.js and a copy of index.html, the
 viewer, which is served from DATA.
@@ -31,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 # Review data (textures, runs, caches, logs, the served viewer) lives outside
 # the repo and off C:. Override with the O4_REVIEW_DATA environment variable.
-DATA = os.environ.get("O4_REVIEW_DATA", r"E:\Ortho4XP_Review")
+DATA = os.environ.get("O4_REVIEW_DATA", r"G:\Ortho4XP_Review")
 LIVE_CFG = r"G:\Dev\Ortho4XP\_internal\Ortho4XP_Data\Ortho4XP.cfg"
 CUDA_VENV = r"G:\Dev\Ortho4XP\.venv"
 

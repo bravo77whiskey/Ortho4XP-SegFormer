@@ -12,8 +12,8 @@ The user judges overlay quality **only by eye**: placed buildings and trees draw
 | What | Where |
 |---|---|
 | Code (committed) | `scripts/visual_review/` - `run_review.py`, `fetch_set.py`, `index.html` (viewer) |
-| Data (never on C:) | `E:\Ortho4XP_Review` (override with env `O4_REVIEW_DATA`): `sets/`, `runs/`, `_cache/w0,w1`, `_tmp/`, `runs_index.js`, served `index.html`, `_tools/` |
-| Viewer server | `.claude/launch.json` config **overlay-review** -> `http://localhost:8791` (port 8765 is the user's own meet_recorder - never use it) |
+| Data (never on C:) | `G:\Ortho4XP_Review` (override with env `O4_REVIEW_DATA`): `sets/`, `runs/`, `_cache/w0,w1`, `_tmp/`, `runs_index.js`, served `index.html` |
+| Viewer server | `.claude/launch.json` config **overlay-review** -> `http://localhost:8792` (port 8765 is the user's own meet_recorder - never use it) |
 | Settings used | The **installed** global config `G:\Dev\Ortho4XP\_internal\Ortho4XP_Data\Ortho4XP.cfg`, read-only, plus per-run `--cfg` overrides |
 | Overlay GPU env | `G:\Dev\Ortho4XP\.venv` (CUDA). Run the scripts themselves with the repo `.venv` |
 
@@ -50,14 +50,14 @@ Changes that act across textures or tiles (seams, tile edges, tile-wide passes) 
    - Use short kebab-case names that say what changed: `conf-0.02`, `overlap-tiles-25pct`, `dedup-smaller-asset`.
    - `--samples key ...` re-runs part of a run and keeps the rest.
    - `--workers N` sets the parallelism (default 2, GPU-shared).
-4. **While it runs**, check the worker logs at `E:\Ortho4XP_Review\runs\<run>\_logs\worker_*.log` if anything looks stuck. The orchestrator prints per-texture counts and `done in N s` at the end.
-5. **Show it**: start the `overlay-review` preview server (or tell the user to reload `http://localhost:8791`). The viewer opens with A = newest baseline and B = newest other run. Tell the user which run is B, what it changed, and a short per-location placement count comparison. Then point them at where to look: the textures where counts moved most, and the layers that explain the change.
+4. **While it runs**, check the worker logs at `G:\Ortho4XP_Review\runs\<run>\_logs\worker_*.log` if anything looks stuck. The orchestrator prints per-texture counts and `done in N s` at the end.
+5. **Show it**: start the `overlay-review` preview server (or tell the user to reload `http://localhost:8792`). The viewer opens with A = newest baseline and B = newest other run. Tell the user which run is B, what it changed, and a short per-location placement count comparison. Then point them at where to look: the textures where counts moved most, and the layers that explain the change.
 
 Why the runner works the way it does (don't "simplify" it away):
 - **Textures sharing a tile and zoom level are built together**, like a real tile build.
 - **Different zoom levels never share a build.** The overlay drops lower-ZL detections that lie under higher-ZL textures, which would corrupt results.
 - **Each worker has its own cache folder** so parallel workers never write the same file.
-- **`TMP`/`TEMP` point at `E:\...\_tmp`** so transient caches stay off C:.
+- **`TMP`/`TEMP` point at `G:\...\_tmp`** so transient caches stay off C:.
 
 ## What the viewer shows
 
@@ -89,12 +89,12 @@ Display rules the user set: blockers are fill only with no border, and placed ou
 
 - The review data comes from `O4_BLD_REVIEW_DUMP=1` (set by the runner), plus `O4_BLD_REVIEW_CONF` for the near-miss floor.
 - The data is written per texture as `<stem>_review.json`, only after the tile-wide de-dup has run.
-- It must never change what is placed. After touching `src/O4_Building_Overlay.py`, prove that with the parity harness against the last commit, keeping its work files on E::
+- It must never change what is placed. After touching `src/O4_Building_Overlay.py`, prove that with the parity harness against the last commit, keeping its work files on G::
   ```
-  mkdir -p /e/Ortho4XP_Review/_parity/old && git archive HEAD src | tar -x -C /e/Ortho4XP_Review/_parity/old   # Git Bash: tar reads "E:" as a remote host, so use /e/
-  .venv/Scripts/python.exe scripts/building_overlay_parity_harness.py run --src E:/Ortho4XP_Review/_parity/old/src --out E:/Ortho4XP_Review/_parity/out_old --work E:/Ortho4XP_Review/_parity/work --dsftool G:/Dev/Ortho4XP-SegFormer/Utils/win/DSFTool.exe
-  .venv/Scripts/python.exe scripts/building_overlay_parity_harness.py run --src src --out E:/Ortho4XP_Review/_parity/out_new --work E:/Ortho4XP_Review/_parity/work --dsftool G:/Dev/Ortho4XP-SegFormer/Utils/win/DSFTool.exe
-  .venv/Scripts/python.exe scripts/building_overlay_parity_harness.py compare E:/Ortho4XP_Review/_parity/out_old E:/Ortho4XP_Review/_parity/out_new
+  mkdir -p /g/Ortho4XP_Review/_parity/old && git archive HEAD src | tar -x -C /g/Ortho4XP_Review/_parity/old   # Git Bash: tar reads "G:" as a remote host, so use /g/
+  .venv/Scripts/python.exe scripts/building_overlay_parity_harness.py run --src G:/Ortho4XP_Review/_parity/old/src --out G:/Ortho4XP_Review/_parity/out_old --work G:/Ortho4XP_Review/_parity/work --dsftool G:/Dev/Ortho4XP-SegFormer/Utils/win/DSFTool.exe
+  .venv/Scripts/python.exe scripts/building_overlay_parity_harness.py run --src src --out G:/Ortho4XP_Review/_parity/out_new --work G:/Ortho4XP_Review/_parity/work --dsftool G:/Dev/Ortho4XP-SegFormer/Utils/win/DSFTool.exe
+  .venv/Scripts/python.exe scripts/building_overlay_parity_harness.py compare G:/Ortho4XP_Review/_parity/out_old G:/Ortho4XP_Review/_parity/out_new
   ```
   All scenarios must report IDENTICAL. `--work` must be the same path for both runs. `--dsftool` must be the absolute Windows path.
 - Edit the viewer in `scripts/visual_review/index.html`. The runner copies it to the data root on every run; copy it by hand to see an edit without running.
@@ -104,5 +104,5 @@ Display rules the user set: blockers are fill only with no border, and placed ou
 - **Never stop processes by name.** The user's own Ortho4XP builds use the same CUDA python. Stop by PID or process tree only, after identifying it from its command line.
 - **Review runs and a real build compete for the GPU.** If the user has a build going, run with `--workers 1` or wait.
 - **An old page needs a reload.** The viewer cache-busts its data on each load.
-- **Pass Windows paths (`G:/...`, `E:/...`) to Python, not Git Bash `/g/...` paths.**
-- **Run deletion:** removing a run means deleting `E:\Ortho4XP_Review\runs\<run>` and rebuilding `runs_index.js`. The next `run_review.py` call rewrites the index, or rebuild it from the `data_*.js` files.
+- **Pass Windows paths (`G:/...`) to Python, not Git Bash `/g/...` paths.**
+- **Run deletion:** removing a run means deleting `G:\Ortho4XP_Review\runs\<run>` and rebuilding `runs_index.js`. The next `run_review.py` call rewrites the index, or rebuild it from the `data_*.js` files.
