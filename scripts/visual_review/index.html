@@ -76,6 +76,8 @@
     <label class="row"><input type="checkbox" id="lySeams">YOLO window seams (512 px)</label>
     <label class="row"><input type="checkbox" id="lyTreeH" checked>Colour trees by height</label>
     <div id="treeHLegend" class="hint"></div>
+    <label class="row"><input type="checkbox" id="lyTreeT">Paint trees in their leaf colour</label>
+    <div class="hint">Forests drawn opaque in the summer leaf colour they were given (O4_Forest_Tint bucket, at canopy-like lightness; untinted runs in X-Plane's own green); hold H for the photo. Overrides height colours.</div>
     <div class="hint">Overlay opacity</div>
     <input type="range" id="opacity" min="0.1" max="1" step="0.05" value="0.55">
     <h2>Keys</h2>
@@ -296,6 +298,26 @@
   $("treeHLegend").innerHTML = TREE_H.map(([top, c], i) =>
     `<span class="sw" style="background:rgb(${c})"></span> ${i ? TREE_H[i - 1][0] : 0}${top === Infinity ? "+" : "-" + top} m`
   ).join("&nbsp; ");
+  // Leaf colour buckets (O4_Forest_Tint.BUCKETS order): summer leaf colour at L* 30.
+  const TINT_RGB = ["69,74,38", "69,73,42", "70,73,48", "70,72,52", "61,75,41", "62,75,45", "64,74,50", "66,73,54", "53,77,46", "55,76,49", "58,75,53", "61,74,57", "44,78,52", "48,77,54", "53,76,57", "56,75,60"];
+  function treeTintDraw(g, layer) {
+    const key = layer + "_t";
+    if (!g.paths[key]) {
+      const groups = {};
+      for (const s of g.byLayer[layer] || []) {
+        const m = /^o4xp\/forests\/(?:[^/]*-)?t(\d+)\//.exec(s.info.a || "");
+        // No colour bucket: X-Plane's own leaf colour (bucket 5, O4_Forest_Tint.STOCK).
+        const c = m ? TINT_RGB[+m[1]] : TINT_RGB[5];
+        if (!c) continue;
+        const p = groups[c] || (groups[c] = new Path2D());
+        for (const r of s.rings) { r.forEach(([x, y], i) => i ? p.lineTo(x, y) : p.moveTo(x, y)); p.closePath(); }
+      }
+      g.paths[key] = Object.entries(groups);
+    }
+    if (!g.paths[key].length) return false;
+    for (const [rgb, p] of g.paths[key]) { ctx.fillStyle = `rgb(${rgb})`; ctx.fill(p, "evenodd"); }
+    return true;
+  }
   function treeHeightDraw(g, layer, op, fill) {
     const key = layer + "_h";
     if (!g.paths[key]) {
@@ -374,6 +396,7 @@
       const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
       for (const layer of order) {
         if (!on(layer)) continue;
+        if ((layer === "tree" || layer === "treept") && $("lyTreeT").checked && treeTintDraw(g, layer)) continue;
         if ((layer === "tree" || layer === "treept") && $("lyTreeH").checked && treeHeightDraw(g, layer, op, fill)) continue;
         const { p, n } = layerPath(g, layer, nearMin);
         if (!n) continue;
@@ -583,7 +606,7 @@
   });
   $("runB").onchange = () => { showNotes();
     loadRun($("runB").value).then(() => sample && loadSample($("runB").value, sample)).then(draw); };
-  for (const id of ["lyFill", "lyBounds", "lySeams", "lyTreeH", "opacity", "nearMin"]) $(id).oninput = draw;
+  for (const id of ["lyFill", "lyBounds", "lySeams", "lyTreeH", "lyTreeT", "opacity", "nearMin"]) $(id).oninput = draw;
 
   let drag = null;
   cv.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; cv.classList.add("drag"); });

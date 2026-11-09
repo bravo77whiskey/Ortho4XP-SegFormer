@@ -7,6 +7,8 @@ saved situation (Reload Scenery is not trusted to pick up every change).
     python scripts/sim_ab.py mat 2048|1024|off --tile +22+120
     python scripts/sim_ab.py trees-build --tile +22+120  (after build)
     python scripts/sim_ab.py trees off|on      --tile +22+120
+    python scripts/sim_ab.py tint-build [off|on] --tile +22+120   (after build)
+    python scripts/sim_ab.py tint off|on       --tile +22+120
     python scripts/sim_ab.py status    --tile +22+120
     python scripts/sim_ab.py uninstall --tile +22+120      (X-Plane closed)
 
@@ -25,7 +27,8 @@ install links both packs into Custom Scenery, puts each above its real pack
 in scenery_packs.ini and disables the real veg pack (trees would be drawn
 twice otherwise; tiles other than <tile> have no trees while it is
 installed).  uninstall undoes exactly that.  scenery_packs.ini is backed up
-to _ab/ first.
+to _ab/ first.  Several tiles can be installed at once: they share the _AB
+veg pack and forest library, which the last uninstall takes down.
 
 The grass swap expects the grass inside the veg DSF, i.e. a tile built before
 the grass got its own pack (yOrtho4XP_Grass_Overlays, 890d523b).
@@ -43,6 +46,15 @@ rest of the tile, grass included, stays as built.  The shorter forests come
 from an O4XP_Forest_Heights library written under --out; install links it
 into Custom Scenery too (uninstall removes it).  A later 'grass' swap
 replaces the trees variant and the other way round.
+
+tint-build regenerates the whole tile's trees with THIS checkout's vegetation
+overlay, twice: 'off' = X-Plane's one leaf colour (veg_forest_tint off), 'on'
+= each forest in the leaf colour nearest the canopy on the ortho, summer
+forests without the autumn blend (O4_Forest_Tint).  Everything else is the
+installed settings, so the two differ only in leaf colour.  The tinted
+copies and their atlases go into the same O4XP_Forest_Heights library under
+--out.  A tint swap replaces the whole veg DSF (grass inside an old tile's
+veg DSF is not rebuilt).
 """
 
 import argparse
@@ -60,11 +72,12 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 import O4_Terrain_Materials as TMAT  # noqa: E402
 
 DEFAULT_CS = r"D:\SteamLibrary\steamapps\common\X-Plane 12\Custom Scenery"
-DEFAULT_OUT = r"E:\Ortho4XP_Review\sim_ab"
+DEFAULT_OUT = r"G:\Ortho4XP_Review\sim_ab"   # E: retired 2026-11-08
 CUDA_PYTHON = r"G:\Dev\Ortho4XP\.venv\Scripts\python.exe"
 INSTALLED_CFG = r"G:\Dev\Ortho4XP\_internal\Ortho4XP_Data\Ortho4XP.cfg"
-CANOPY_MODEL_DIR = r"E:\Ortho4XP_Review\veg_alt\chm_model\ckpt"
-LEAF_TYPE_CACHE = r"E:\Ortho4XP_Review\_cache\w0\_leaf_type"
+# The live app's canopy model (read only); leaf-type downloads go to the review cache.
+CANOPY_MODEL_DIR = r"H:\XP12 Addons\Applications\Ortho4XP 1.4\_internal\Ortho4XP_Data\SFR_cache\_canopy_height"
+LEAF_TYPE_CACHE = r"G:\Ortho4XP_Review\_cache\w0\_leaf_type"
 FOREST_PACK = "O4XP_Forest_Heights"
 # A real O4XP_Forest_Heights written by tile builds is moved here while the
 # A/B is installed (the real veg pack, its only user, is disabled meanwhile).
@@ -428,11 +441,84 @@ def cmd_trees_build(n, args):
     print(f"trees built in {time.time() - t0:.0f}s; swapped to 'trees off'")
 
 
+TINT_VARIANTS = {"off": {"O4_VEG_FOREST_TINT": "0"}, "on": {"O4_VEG_FOREST_TINT": "1"}}
+
+
+def installed_veg_env():
+    """The O4_VEG_* switches a tile build sets from the installed config (tree rules,
+    canopy, heights, density ...), so a variant differs from a real build only in
+    what it swaps."""
+    import O4_Cfg_Vars as CFGVARS
+    import O4_Overlay_Pipeline as PIPELINE
+    with open(INSTALLED_CFG, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if "=" not in line:
+                continue
+            k, v = line.strip().split("=", 1)
+            if not hasattr(PIPELINE, k) or k not in CFGVARS.cfg_vars:
+                continue
+            typ = CFGVARS.cfg_vars[k]["type"]
+            try:
+                val = (v == "True") if typ is bool else typ(v) if typ in (int, float) else v
+            except ValueError:
+                continue
+            setattr(PIPELINE, k, val)
+    return {k: v for k, v in PIPELINE._veg_tree_env().items() if k.startswith(("O4_VEG_", "O4_CANOPY_"))}
+
+
+def cmd_tint_build(n, args):
+    if not load_state(n):
+        sys.exit("build first")
+    lat, lon = int(n.tile[:3]), int(n.tile[3:])
+    tex = os.path.join(n.tile_dir, "textures")
+    settings = installed_veg_settings()
+    t0 = time.time()
+    if args.mode and args.mode not in TINT_VARIANTS:
+        sys.exit("tint-build takes no mode, or one of: off on (rebuild only that variant)")
+    for variant, env in TINT_VARIANTS.items():
+        if args.mode and variant != args.mode:
+            continue
+        out = os.path.join(n.ab, f"veg_tint_{variant}.dsf")
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {os.path.join(ROOT, 'src')!r})\n"
+            "import O4_Landcover_Inference as SEG\n"
+            f"SEG._dsftool = {DSFTOOL!r}\n"
+            "import O4_Vegetation_Overlay as V\n"
+            f"V.run(tex_dir={tex!r}, lat={lat}, lon={lon}, out_dsf={out!r},\n"
+            f"      cache_dir={os.path.join(n.ab, 'tint_cache')!r}, make_viz=False,\n"
+            f"      dsftool_path={DSFTOOL!r}, custom_scenery_dir={n.cs!r},\n"
+            f"      leaf_type_cache_dir={LEAF_TYPE_CACHE!r}, grass_settings=None,\n"
+            f"      **{settings!r})\n"
+        )
+        run_env = dict(os.environ, **installed_veg_env())
+        run_env.update(O4_CANOPY_MODEL_DIR=CANOPY_MODEL_DIR, O4_FOREST_HEIGHTS_PACK=n.forest_dir, **env)
+        print(f"tint {variant}: building the tile's trees ...", flush=True)
+        rc = subprocess.call([CUDA_PYTHON, "-c", code], env=run_env, cwd=os.path.join(ROOT, "src"))
+        if rc != 0 or not os.path.isfile(out):
+            sys.exit(f"vegetation overlay failed for tint {variant}")
+    s = load_state(n)
+    s["tint_built"] = time.strftime("%Y-%m-%d %H:%M")
+    save_state(n, s)
+    set_tint(n, "off")
+    print(f"tint variants built in {time.time() - t0:.0f}s; swapped to 'tint off'")
+
+
+def set_tint(n, mode):
+    shutil.copyfile(os.path.join(n.ab, f"veg_tint_{mode}.dsf"), n.veg_dsf(n.veg_dir))
+    state = load_state(n)
+    state["tint"] = mode
+    state.pop("trees", None)                         # the tint variants carry the whole tile's trees
+    state.pop("grass", None)
+    save_state(n, state)
+
+
 def set_trees(n, mode):
     shutil.copyfile(os.path.join(n.ab, f"veg_trees_{mode}.dsf"), n.veg_dsf(n.veg_dir))
     state = load_state(n)
     state["trees"] = mode
     state["grass"] = "on"                            # the trees variants keep the built grass
+    state.pop("tint", None)
     save_state(n, state)
 
 
@@ -442,6 +528,7 @@ def set_grass(n, mode):
     state = load_state(n)
     state["grass"] = mode
     state.pop("trees", None)                         # the grass variants carry the trees as built
+    state.pop("tint", None)
     save_state(n, state)
 
 
@@ -469,7 +556,7 @@ def cmd_status(n, args):
     if not s:
         sys.exit("not built")
     print(f"tile {n.tile}: grass {s.get('grass')}, material maps {s.get('mat')}, "
-          f"trees {s.get('trees', 'as built')}"
+          f"trees {s.get('trees', 'as built')}, tint {s.get('tint', 'as built')}"
           f" ({'installed' if s.get('installed') else 'NOT installed'}); GPU memory used {gpu_memory()}")
 
 
@@ -488,6 +575,26 @@ def write_ini(n, path, lines):
         f.write(n.ini_eol.join(lines) + n.ini_eol)
 
 
+_SHARED_FLAGS = ("veg_disabled_by_us", "forest_real_hidden", "forest_line_existed", "forest_pack_installed")
+
+
+def other_installed(n):
+    """Tiles other than n.tile installed from the same --out: they share the _AB veg
+    pack and the forest library, so only the last uninstall takes those down."""
+    root = os.path.join(n.out, "_ab")
+    found = []
+    for tile in sorted(os.listdir(root)) if os.path.isdir(root) else ():
+        if tile == n.tile:
+            continue
+        try:
+            with open(os.path.join(root, tile, "state.json")) as f:
+                if json.load(f).get("installed"):
+                    found.append(tile)
+        except (OSError, ValueError):
+            pass
+    return found
+
+
 def cmd_install(n, args):
     if xplane_running():
         sys.exit("quit X-Plane first (it reads scenery_packs.ini at start)")
@@ -495,6 +602,7 @@ def cmd_install(n, args):
     if not s:
         sys.exit("build first")
     forest = os.path.isfile(os.path.join(n.forest_dir, "library.txt"))
+    others = other_installed(n)   # their veg pack line is already above the disabled real one
     path, lines = read_ini(n)
     if forest:
         real = os.path.join(n.cs, FOREST_PACK)
@@ -517,12 +625,14 @@ def cmd_install(n, args):
             continue                                   # re-install: placed again below
         if line.strip() == n.ini_line(n.real_tile_pack):
             out.append(n.ini_line(n.tile_pack))
-        elif line.strip() == n.ini_line(VEG_PACK):
+        elif line.strip() == n.ini_line(VEG_PACK) or (
+                others and line.strip() == n.ini_line(VEG_PACK, enabled=False)):
             if forest:
                 out.append(n.ini_line(FOREST_PACK))    # a library: its place does not matter
             out.append(n.ini_line(n.veg_pack))
+            if line.strip() == n.ini_line(VEG_PACK):
+                s["veg_disabled_by_us"] = True
             line = n.ini_line(VEG_PACK, enabled=False)
-            s["veg_disabled_by_us"] = True
         out.append(line)
     if n.ini_line(n.tile_pack) not in out or n.ini_line(n.veg_pack) not in out:
         sys.exit(f"{n.real_tile_pack} or {VEG_PACK} not found enabled in scenery_packs.ini; nothing changed")
@@ -538,6 +648,26 @@ def cmd_uninstall(n, args):
     if xplane_running():
         sys.exit("quit X-Plane first")
     s = load_state(n)
+    others = other_installed(n)
+    if others:
+        # The veg pack, forest library and disabled real veg pack stay for the other
+        # tile(s); hand over what has to be undone at the last uninstall.
+        path, lines = read_ini(n)
+        out = [ln for ln in lines if ln.strip() != n.ini_line(n.tile_pack)]
+        if out != lines:
+            write_ini(n, path, out)
+        link = os.path.join(n.cs, n.tile_pack)
+        if os.path.isdir(link) and os.path.realpath(link) != os.path.abspath(link):
+            os.rmdir(link)
+        heir = Names(argparse.Namespace(tile=others[0], custom_scenery=n.cs, out=n.out))
+        hs = load_state(heir)
+        for k in _SHARED_FLAGS:
+            hs[k] = bool(hs.get(k) or s.get(k))
+        save_state(heir, hs)
+        s.update(installed=False, **{k: False for k in _SHARED_FLAGS})
+        save_state(n, s)
+        print(f"uninstalled {n.tile_pack}; the shared veg pack and forest library stay for {', '.join(others)}")
+        return
     path, lines = read_ini(n)
     out = []
     for line in lines:
@@ -570,27 +700,30 @@ def cmd_uninstall(n, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command", choices=["build", "install", "uninstall", "status", "grass", "mat",
-                                        "trees-build", "trees"])
+                                        "trees-build", "trees", "tint-build", "tint"])
     ap.add_argument("mode", nargs="?")
     ap.add_argument("--tile", required=True, help="e.g. +22+120")
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--custom-scenery", default=DEFAULT_CS)
     args = ap.parse_args()
     n = Names(args)
-    if args.command in ("grass", "mat", "trees"):
-        modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off"), "trees": ("off", "on")}[args.command]
+    if args.command in ("grass", "mat", "trees", "tint"):
+        modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off"), "trees": ("off", "on"),
+                 "tint": ("off", "on")}[args.command]
         if args.mode not in modes:
             sys.exit(f"{args.command} needs one of: {' '.join(modes)}")
         if not load_state(n):
             sys.exit("build first")
         if args.command == "trees" and not os.path.isfile(os.path.join(n.ab, "veg_trees_on.dsf")):
             sys.exit("trees-build first")
-        {"grass": set_grass, "mat": set_mat, "trees": set_trees}[args.command](n, args.mode)
+        if args.command == "tint" and not os.path.isfile(os.path.join(n.ab, "veg_tint_on.dsf")):
+            sys.exit("tint-build first")
+        {"grass": set_grass, "mat": set_mat, "trees": set_trees, "tint": set_tint}[args.command](n, args.mode)
         cmd_status(n, args)
         print("now restart X-Plane (or start it) to load this variant")
         return
     {"build": cmd_build, "install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status,
-     "trees-build": cmd_trees_build}[args.command](n, args)
+     "trees-build": cmd_trees_build, "tint-build": cmd_tint_build}[args.command](n, args)
 
 
 if __name__ == "__main__":

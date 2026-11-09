@@ -757,6 +757,19 @@ cfg_tile_vars = {
                 "temperate-band forests (planted on tropical highlands) turn "
                 "autumn brown in October. Uses the O4XP_Forest_Heights pack.",
     },
+    "veg_forest_tint": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_tint",
+        "hint": "Give each forest the leaf colour nearest the canopy on the ortho "
+                "under it: one of 16 recoloured copies of X-Plane's summer and "
+                "spring leaf textures (greener, yellower, more or less "
+                "saturated; lightness unchanged), so the trees blend with the "
+                "photo instead of sitting on it in X-Plane's one green. Summer "
+                "forests also lose X-Plane's blend toward autumn colours. Uses "
+                "the O4XP_Forest_Heights pack (about 14 MB of textures per "
+                "colour used).",
+    },
     "veg_avoid_gfv2": {
         "type": bool,
         "default": False,
@@ -1185,6 +1198,7 @@ list_veg_vars = [
     "veg_forest_stand_m",
     "veg_approach_heights",
     "veg_tropics_evergreen",
+    "veg_forest_tint",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
     "veg_texture_tree_check",
@@ -1344,7 +1358,8 @@ settings_sections = (
                                      "veg_hole_certain_cells", "veg_hole_unsure_cells",
                                      "veg_tree_sizes", "veg_forest_heights",
                                      "veg_forest_stands", "veg_forest_stand_m",
-                                     "veg_approach_heights", "veg_tropics_evergreen")),
+                                     "veg_approach_heights", "veg_tropics_evergreen",
+                                     "veg_forest_tint")),
         ("Tree types", ("veg_use_leaf_type_maps", "veg_use_xp_forests")),
         ("Other scenery", ("veg_use_simheaven", "veg_avoid_simheaven_buildings",
                            "veg_simheaven_building_buffer_m", "veg_avoid_simheaven_forests",

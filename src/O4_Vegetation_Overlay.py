@@ -60,6 +60,7 @@ import O4_Canopy_Height as CANOPY
 import O4_Forest_Spacing as FOREST_SPACING
 import O4_Tree_Sizes as TREE_SIZES
 import O4_Forest_Heights as FOREST_HEIGHTS
+import O4_Forest_Tint as FOREST_TINT
 import O4_Approach_Heights as APPROACH
 import O4_Apt_Pavement as APT
 import O4_Texture_Selection as TEXSEL
@@ -251,6 +252,12 @@ def _forest_heights_enabled():
     return _veg_flag("O4_VEG_FOREST_HEIGHTS")
 
 
+def _forest_tint_enabled():
+    """O4_VEG_FOREST_TINT=0: forests keep X-Plane's leaf colour (and its summer autumn blend)
+    instead of the leaf colour bucket nearest the canopy on the ortho (O4_Forest_Tint)."""
+    return _veg_flag("O4_VEG_FOREST_TINT")
+
+
 # Forest stands (O4_Forest_Stands): the canopy is cut into irregular stands
 # about FOREST_STAND_M across and each stand is measured on its own, instead
 # of the 20 m Gaussian zones above, which planted a broad forest whose height
@@ -419,6 +426,12 @@ def _process_tree_mask(mask, **kwargs):
     cap = kwargs.pop('height_cap_map', None)
     cover = kwargs.pop('density_cover', None)
     stands = kwargs.pop('forest_stands', False)
+    tints = kwargs.pop('tint_zones', None)
+    forest_copies = kwargs.pop('forest_copies', None)
+    if tints is not None and forest_copies is not None:
+        tints = np.where(mask > 0, tints, 0).astype(np.uint8)   # zones already merged (O4_Forest_Tint)
+    else:
+        tints = None
     zones = None
     if height_map is not None and kwargs.get('forest_heights') is not None:
         zones = _forest_height_zones(
@@ -428,14 +441,16 @@ def _process_tree_mask(mask, **kwargs):
     bands = None
     if cover is not None:
         bands = _merge_small_zones(DENSITY.density_bands(cover, mask), kwargs['m_per_px'])
-    if zones is None and levels is None and bands is None:
+    if zones is None and levels is None and bands is None and tints is None:
         return _process_dds_mask(mask, SEGFORMER.CLASS_TREE, **kwargs)
-    key = (zones.astype(np.int32) if zones is not None else (mask > 0).astype(np.int32)) * 256
+    key = (zones.astype(np.int64) if zones is not None else (mask > 0).astype(np.int64)) * 256
     if levels is not None:
         key += levels
         mask = np.where(levels > 0, mask, 0).astype(np.uint8)   # under the lowest cap: no tree
     if bands is not None:
-        key += bands.astype(np.int32) * 65536
+        key += bands.astype(np.int64) * 65536
+    if tints is not None:
+        key += tints.astype(np.int64) << 32
     on = mask > 0
     polys = []
     for k in np.unique(key[on]):
@@ -448,12 +463,16 @@ def _process_tree_mask(mask, **kwargs):
         if bands is not None:
             override = kwargs.get('density_override')
             part_kwargs['texture_density'] = DENSITY.band_density(
-                int(k) // 65536,
+                (int(k) & 0xFFFFFFFF) // 65536,
                 DENSITY.FULL_DENSITY if override is None else int(round(override * 255)))
         if kwargs.get('gap_certain') is not None:
             # Another zone's forest is planted by its own polygon.
             part_kwargs['gap_certain'] = kwargs['gap_certain'] | (on & ~part_on)
-        polys.extend(_process_dds_mask(part, SEGFORMER.CLASS_TREE, **part_kwargs))
+        part_polys = _process_dds_mask(part, SEGFORMER.CLASS_TREE, **part_kwargs)
+        tint = (int(k) >> 32) - 1 if tints is not None else -1
+        if tint >= 0:
+            part_polys = [(forest_copies.tint_path(p, tint), d, r) for p, d, r in part_polys]
+        polys.extend(part_polys)
     return polys
 
 
@@ -851,6 +870,8 @@ def _veg_feature_sig():
         _forest_stands_enabled(), _forest_stand_params(), STANDS.SIGNATURE,
         FOREST_HEIGHTS.SIGNATURE,
         FOREST_HEIGHTS.BAND_HEIGHTS_M, FOREST_HEIGHTS.MIN_GAIN_M,
+        _forest_tint_enabled(), FOREST_TINT.SIGNATURE, FOREST_TINT.ZONES_VERSION, FOREST_TINT.BUCKETS, FOREST_TINT.REFERENCE_AB,
+        FOREST_TINT.SIGMA_M, FOREST_TINT.MIN_ZONE_M2, FOREST_TINT.GRID_M,
         _approach_heights_enabled(), FOREST_HEIGHTS.CAP_LEVELS_M, APPROACH.SIGNATURE,
         _canopy_airports_only(),
         _forest_holes_enabled(), _forest_hole_min_m2(),
@@ -2787,7 +2808,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     # Shorter forest copies: measured heights (forest_heights) and approach caps.
     forest_copies = None
     tropics_evergreen = _tropics_evergreen_enabled() and _tile_reaches_tropics(lat)
-    if custom_scenery_dir and (_forest_heights_enabled() or approach_surfaces or tropics_evergreen):
+    if custom_scenery_dir and (_forest_heights_enabled() or approach_surfaces or tropics_evergreen
+                               or _forest_tint_enabled()):
         forest_copies = FOREST_HEIGHTS.ForestHeights(custom_scenery_dir, log=verbose_print)
         if not forest_copies.available:
             forest_copies = None
@@ -3872,6 +3894,14 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                 kwargs['density_cover'] = DENSITY.cover_map(
                     img, tree_prob, tree_mask, mpp, not_ground=veg_map == SEGFORMER.CLASS_WATER)
                 timings['density'] += time.perf_counter() - _t
+        if _forest_tint_enabled() and forest_copies is not None:
+            if img is None:
+                _t = time.perf_counter()
+                img = _load_source_image(fname, _source_mode, _orthophoto_dir)
+                timings['dds_load'] += time.perf_counter() - _t
+            if img is not None:
+                kwargs['tint_zones'] = FOREST_TINT.tint_zones(img, tree_mask, mpp)
+                kwargs['forest_copies'] = forest_copies
         if simheaven_type_source_path:
             kwargs['simheaven_type_path'] = simheaven_type_source_path
         if simheaven_type_resolver is not None:
@@ -4000,9 +4030,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     if banded and not (forest_copies is not None and forest_copies.ensure(banded)):
         # No pack to plant them from: measured bands fall back to their
         # full-height originals; approach caps leave those trees out.
-        capped = {p for p in banded
-                  if (FOREST_HEIGHTS.parse_virtual(p) or ("", "h", 0))[1] == "c"
-                  or (FOREST_HEIGHTS.parse_virtual(p) or ("", "h", 0))[1:] > ("s", 0.0)}
+        capped = {p for p in banded if FOREST_HEIGHTS.is_capped(p)}
         n_before = len(polygons)
         polygons = [(FOREST_HEIGHTS.source_path(p), d, r) for p, d, r in polygons if p not in capped]
         if capped:
@@ -4012,8 +4040,11 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
         for_paths = sorted(set(p for p, _, _ in polygons))
     elif banded:
         n_cap = sum(1 for p in banded if (FOREST_HEIGHTS.parse_virtual(p) or ("", "h"))[1] == "c")
-        print(f"  [ForestHeights] {len(banded)} shorter forest(s) from {FOREST_HEIGHTS.PACK_NAME}"
-              f" ({n_cap} for runway approaches)", flush=True)
+        tints = {FOREST_HEIGHTS.tint_of(p) for p in banded} - {None}
+        print(f"  [ForestHeights] {len(banded)} forest copies from {FOREST_HEIGHTS.PACK_NAME}"
+              f" ({n_cap} for runway approaches"
+              + (f", leaf colours {', '.join(f't{t}' for t in sorted(tints))}" if tints else "")
+              + ")", flush=True)
     for_idx   = {p: i for i, p in enumerate(for_paths)}
     lat_i = int(math.floor(lat)); lon_i = int(math.floor(lon))
 

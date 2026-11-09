@@ -58,6 +58,8 @@ import sys
 import time
 from collections import namedtuple
 
+import O4_Forest_Tint as TINT
+
 PACK_NAME = "O4XP_Forest_Heights"
 VIRTUAL_PREFIX = "o4xp/forests/"
 # Canopy-layer mean heights of the band copies, metres.
@@ -380,34 +382,85 @@ def _split_virtual(path):
     return parts if len(parts) == 2 else None
 
 
-def parse_virtual(path):
-    """(source forest path, kind 'h', 'c', 's' or 'e', height) of a copy's path, else None.
+_TINT_TOKEN_RE = re.compile(r"^t(\d+)$")
 
-    An evergreen copy of an h/c/s copy parses as that copy (is_evergreen tells them
-    apart); a plain evergreen copy is kind 'e', height 0.
+
+def _seg_parts(seg):
+    """(base, evergreen, tint bucket or None) of a kind segment.
+
+    ``<kind><height>`` (h/c/s copies, or nothing), then ``-ev`` for an
+    evergreen copy, then ``-t<k>`` for leaf colour bucket k (O4_Forest_Tint);
+    a copy with no height change is ``ev``, ``t<k>`` or ``ev-t<k>``.
+    """
+    tokens = seg.split("-")
+    base, mods = tokens[0], tokens[1:]
+    evergreen, tint = False, None
+    if base == EVERGREEN_KIND:
+        base, evergreen = "", True
+    elif _TINT_TOKEN_RE.match(base):
+        mods.insert(0, base)
+        base = ""
+    for tok in mods:
+        m = _TINT_TOKEN_RE.match(tok)
+        if tok == EVERGREEN_SUFFIX[1:]:
+            evergreen = True
+        elif m:
+            tint = int(m.group(1))
+    return base, evergreen, tint
+
+
+def _seg_join(base, evergreen, tint):
+    parts = [base] if base else []
+    if evergreen:
+        parts.append(EVERGREEN_KIND)
+    if tint is not None:
+        parts.append(f"t{tint}")
+    return "-".join(parts)
+
+
+def parse_virtual(path):
+    """(source forest path, kind 'h', 'c', 's', 'e' or 't', height) of a copy's path, else None.
+
+    An evergreen or tinted copy of an h/c/s copy parses as that copy
+    (is_evergreen / tint_of tell them apart); a plain evergreen copy is kind
+    'e', a plain tinted one kind 't', both height 0.
     """
     parts = _split_virtual(path)
     if not parts:
         return None
     seg, rest = parts
     source = ("lib/vegetation/" if rest.startswith("trees/") else "lib/g8/") + rest
-    if seg == EVERGREEN_KIND:
-        return source, "e", 0.0
-    if seg.endswith(EVERGREEN_SUFFIX):
-        seg = seg[:-len(EVERGREEN_SUFFIX)]
-    if len(seg) < 2 or seg[0] not in "hcs":
+    base, evergreen, tint = _seg_parts(seg)
+    if not base:
+        if evergreen:
+            return source, "e", 0.0
+        return (source, "t", 0.0) if tint is not None else None
+    if len(base) < 2 or base[0] not in "hcs":
         return None
     try:
-        height = float(seg[1:])
+        height = float(base[1:])
     except ValueError:
         return None
-    return source, seg[0], height
+    return source, base[0], height
 
 
 def is_evergreen(path):
     """True for an evergreen copy's path."""
     parts = _split_virtual(path)
-    return bool(parts) and (parts[0] == EVERGREEN_KIND or parts[0].endswith(EVERGREEN_SUFFIX))
+    return bool(parts) and _seg_parts(parts[0])[1]
+
+
+def tint_of(path):
+    """Leaf colour bucket of a copy's path (O4_Forest_Tint.BUCKETS index), else None."""
+    parts = _split_virtual(path)
+    return _seg_parts(parts[0])[2] if parts else None
+
+
+def is_capped(path):
+    """True for copies that only exist to keep trees under a height cap
+    (approach caps, cut shrubs): without the pack their trees are left out."""
+    parsed = parse_virtual(path)
+    return bool(parsed) and (parsed[1] == "c" or (parsed[1] == "s" and parsed[2] > 0))
 
 
 def evergreen_virtual_path(path):
@@ -417,8 +470,19 @@ def evergreen_virtual_path(path):
         return path
     parts = _split_virtual(path)
     if parts:
-        return f"{VIRTUAL_PREFIX}{parts[0]}{EVERGREEN_SUFFIX}/{parts[1]}"
+        base, _ev, tint = _seg_parts(parts[0])
+        return f"{VIRTUAL_PREFIX}{_seg_join(base, True, tint)}/{parts[1]}"
     return f"{VIRTUAL_PREFIX}{EVERGREEN_KIND}/{_copy_name(path)}"
+
+
+def tinted_virtual_path(path, bucket):
+    """The copy of an X-Plane forest or of one of its copies with leaf colour ``bucket``."""
+    path = str(path)
+    parts = _split_virtual(path)
+    if parts:
+        base, evergreen, _tint = _seg_parts(parts[0])
+        return f"{VIRTUAL_PREFIX}{_seg_join(base, evergreen, bucket)}/{parts[1]}"
+    return f"{VIRTUAL_PREFIX}t{bucket}/{_copy_name(path)}"
 
 
 def source_path(path):
@@ -515,6 +579,13 @@ class ForestHeights:
         """The evergreen copy of ``path`` where X-Plane changes it with the seasons, else ``path``."""
         return evergreen_virtual_path(path) if self.is_seasonal(path) else path
 
+    def tint_path(self, path, bucket):
+        """``path`` with leaf colour ``bucket`` (O4_Forest_Tint) when it is one of X-Plane's
+        forests or a copy of one, else ``path``."""
+        if bucket is None or source_path(path) not in self.exports:
+            return path
+        return tinted_virtual_path(path, bucket)
+
     def stock_height(self, g8_path):
         """Canopy mean height of the forest X-Plane exports at ``g8_path`` (summer), or None."""
         stats = self.stats(g8_path) if os.path.basename(g8_path).startswith(_FAMILIES) else None
@@ -605,6 +676,14 @@ class ForestHeights:
             return False, False
         g8_path, kind, height = parsed
         evergreen = is_evergreen(virtual)
+        tint = tint_of(virtual)
+        if tint is not None:
+            if not 0 <= tint < len(TINT.BUCKETS):
+                self.log(f"  [ForestHeights] no leaf colour {tint}: {virtual}")
+                return False, False
+            if tint != TINT.STOCK:
+                TINT.write_textures(os.path.join(self.xp_dir, "textures"),
+                                    os.path.join(self.pack_dir, TINT.texture_dir(tint)), tint)
         seasons = self.exports.get(g8_path)
         stock = self.stock_height(g8_path) if kind == "h" else None
         if not seasons or (kind == "h" and not stock):
@@ -633,6 +712,8 @@ class ForestHeights:
                     text = shrub_trees(text, height or None, suffix)
                 elif kind == "c":
                     text = cap_trees(text, height, suffix)
+                if tint is not None:
+                    text = TINT.tint_for_text(text, tint, season)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 tmp = dst + ".tmp"
                 with open(tmp, "w", encoding="utf-8", newline="") as f:
