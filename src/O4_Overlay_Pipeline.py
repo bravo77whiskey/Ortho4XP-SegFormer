@@ -81,6 +81,9 @@ _DERIVED_FILE_PATTERNS = (
     "*_grasscls.npy",     # class maps the grass step keeps until it is done
     "*_grass1.npz",       # grass masks between its two passes
 )
+# Heights the overlays hand to the relief stage (O4_Height_Relief); they
+# outlive the overlays' own cleanup and go once that stage is done.
+_RELIEF_FILE_PATTERNS = ("*_relief_dets.pkl", "*_relief_dets.pkl.tmp", "*_relief_canopy.npy")
 _DISABLED_TILE_FILE_PATTERNS = (
     "*.osm.bz2",
 )
@@ -399,6 +402,11 @@ bld_height_checkpoint = ""
 bld_stock_yolo_checkpoint = ""  # empty = Ortho4XP_Data/yolo26x-obb.pt
 bld_vehicle_checkpoint = ""     # empty = Ortho4XP_Data/dior-yolov8s-obb.pt
 
+# ── Relief from real heights (after the overlays, O4_Height_Relief) ──────────
+terrain_materials = True
+terrain_materials_relief = 0.15
+terrain_materials_heights = True
+
 # ── SegFormer inference settings (shared by veg and bld) ─────────────────────
 segformer_patch_size        = 512
 segformer_overlap           = 64
@@ -559,6 +567,8 @@ def _run_venv(code):
     # an O4_TENSORRT / O4_TENSORRT_DIR already in the environment wins
     env.setdefault("O4_TENSORRT", "1" if _app_flag("overlay_tensorrt", True) else "0")
     env.setdefault("O4_TENSORRT_DIR", _overlay_tensorrt_cache_dir())
+    # The overlays hand their heights to the relief stage (process_overlays_tile).
+    env["O4_RELIEF_SIDECARS"] = "1" if _relief_wanted() else "0"
     if sys.platform.startswith('win') and os.environ.get(
         "O4_OVERLAY_SELF_NOTHROTTLE", ""
     ).strip().lower() not in ("0", "false", "no", "off"):
@@ -1186,8 +1196,73 @@ def overlays_run_together():
     )
 
 
+def _clear_relief_sidecars(cache_dir):
+    import glob
+    for pattern in _RELIEF_FILE_PATTERNS:
+        for path in glob.glob(os.path.join(cache_dir, pattern)):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    _cleanup_empty_dirs(cache_dir)
+
+
+def _relief_wanted():
+    """Whether the overlays feed relief from real heights into the material maps."""
+    return bool(terrain_materials and terrain_materials_heights)
+
+
+def _dds_converter():
+    try:
+        import O4_Imagery_Utils as IMG
+        return IMG.dds_convert_cmd
+    except Exception:
+        return ""
+
+
+def process_relief_tile(lat, lon, build_dir, cache_dir):
+    """Relief from real heights: remake the tile's material maps with the
+    building and canopy heights the overlays handed over (O4_Height_Relief)."""
+    converter = _dds_converter()
+    if not converter:
+        print("[Relief] No DDS converter; material maps left as they are.", flush=True)
+        return
+    try:
+        import O4_Config_Utils as CFG
+        workers = max(1, int(getattr(CFG, "max_convert_slots", 4)))
+    except Exception:
+        workers = 4
+    code = (
+        "import O4_Height_Relief as HR\n"
+        "HR.run(\n"
+        f"    {build_dir!r}, {cache_dir!r}, {int(lat)!r}, {int(lon)!r},\n"
+        f"    relief={max(0.0, float(terrain_materials_relief))!r},\n"
+        f"    converter={converter!r},\n"
+        f"    height_checkpoint={bld_height_checkpoint!r},\n"
+        f"    workers={workers!r},\n"
+        "    log=lambda m: print(m, flush=True),\n"
+        ")\n"
+    )
+    ret = _run_venv(code)
+    if ret != 0 and not _red_flag_set():
+        raise RuntimeError(f"Relief from real heights failed (exit {ret})")
+
+
+def _relief_step(lat, lon, build_dir, cache_dir, errors):
+    """The relief stage after the overlays: needs the building overlay this run
+    (buildings exist at every zoom level; the canopy comes along when the
+    vegetation overlay ran too). A failure is logged, never fatal."""
+    if not (_relief_wanted() and "bld" in errors) or _red_flag_set():
+        return
+    try:
+        process_relief_tile(lat, lon, build_dir, cache_dir)
+    except Exception as exc:
+        print(f"[Relief] {exc}; material maps left as they are.", flush=True)
+
+
 def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
-    """Building and vegetation overlays for one tile.
+    """Building and vegetation overlays for one tile, then relief from real
+    heights in the material maps (_relief_step).
 
     Apply both overlays' tile settings first. When both are wanted they run
     side by side (see overlays_run_together), otherwise one after the other.
@@ -1196,17 +1271,21 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
     """
     errors = {}
     if not (do_bld and do_veg and overlays_run_together()):
-        for key, wanted, step in (("bld", do_bld, process_bld_tile), ("veg", do_veg, process_veg_tile)):
-            if not wanted:
-                continue
-            try:
-                with PROG.step(lat, lon, f"{key}_overlay"):
-                    step(lat, lon, build_dir)
-                errors[key] = None
-            except Exception as exc:
-                errors[key] = exc
-            if _red_flag_set():
-                break
+        try:
+            for key, wanted, step in (("bld", do_bld, process_bld_tile), ("veg", do_veg, process_veg_tile)):
+                if not wanted:
+                    continue
+                try:
+                    with PROG.step(lat, lon, f"{key}_overlay"):
+                        step(lat, lon, build_dir)
+                    errors[key] = None
+                except Exception as exc:
+                    errors[key] = exc
+                if _red_flag_set():
+                    break
+            _relief_step(lat, lon, build_dir, _overlay_cache_dir(lat, lon), errors)
+        finally:
+            _clear_relief_sidecars(_overlay_cache_dir(lat, lon))
         return errors
 
     import glob
@@ -1256,6 +1335,10 @@ def process_overlays_tile(lat, lon, build_dir, do_bld=True, do_veg=True):
         errors["veg"] = exc
     finally:
         bld_thread.join()
+        try:
+            _relief_step(lat, lon, build_dir, cache_dir, errors)
+        finally:
+            _clear_relief_sidecars(cache_dir)
         _veg_cache_cleanup(cache_dir)
         _bld_cache_cleanup(cache_dir)
         _clear_class_maps()

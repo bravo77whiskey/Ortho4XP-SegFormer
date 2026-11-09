@@ -5,8 +5,8 @@ roughness and no base reflectance, so sunlight can only brighten it.  Every
 land texture gets a companion map in X-Plane's normal-map layout, referenced
 from its .ter file:
 
-  R, G   tangent-space normal X, Y (128 = flat) - micro-relief from a
-         luminance high-pass of the orthophoto
+  R, G   tangent-space normal, R = +east, G = +north (128 = flat) -
+         micro-relief from a luminance high-pass of the orthophoto
   B      base reflectance F0 (the .ter says NORMAL_METALNESS)
   A      gloss (255 = smooth, 0 = rough)
 
@@ -31,6 +31,7 @@ retrofit_tile() adds maps and .ter lines to a tile built before this existed
 Imports nothing from Ortho4XP: the colour-correction worker uses it from the
 overlay .venv python.
 """
+import math
 import os
 import re
 import struct
@@ -55,13 +56,25 @@ MATERIALS = {
 _GLOSS = np.array([v[0] for v in MATERIALS.values()], np.float32)
 _F0 = np.array([v[1] for v in MATERIALS.values()], np.float32)
 
-# Maps carry a stamp in DDS_HEADER.dwReserved1[0..2] (like the colour
+# Maps carry a stamp in DDS_HEADER.dwReserved1[0..3] (like the colour
 # correction stamp on the textures): version and relief, so a rebuild knows
-# whether an existing map matches the settings.  Bump MARK_VERSION when the
-# map itself changes.
+# whether an existing map matches the settings, and the HEIGHT_RELIEF_VERSION
+# its relief from real heights was made with (0 = none).  Bump MARK_VERSION
+# when the map itself changes.
 MARK = b"O4MT"
-MARK_VERSION = 1
+MARK_VERSION = 2   # 2: relief north-south sign fixed
 _MARK_OFFSET = 32
+
+# Relief from real heights (O4_Height_Relief, after the overlays): tree canopy
+# and building heights add their true slopes, smoothed over HEIGHT_FINE_M, plus
+# a broad copy smoothed over HEIGHT_BROAD_M at HEIGHT_BROAD_GAIN.  The broad part
+# gives each tree stand and building a wide band on its side away from the sun
+# that deepens as the sun gets lower (a map cannot cast a shadow; this is the
+# stand-in).  Chosen in the sim on RCKH, 2026-11-09 ("long").
+HEIGHT_RELIEF_VERSION = 1
+HEIGHT_FINE_M = 1.5
+HEIGHT_BROAD_M = 10.0
+HEIGHT_BROAD_GAIN = 1.5
 
 TEXTURE_RE = re.compile(r"^(\d+)_(\d+)_([A-Za-z][A-Za-z0-9_]*?)(\d{2})\.dds$", re.IGNORECASE)
 # Land .ter only: water / sea / overlay .ter names end in a suffix, not the ZL.
@@ -141,8 +154,37 @@ def surface_weights(rgb):
     return np.stack(ws, -1) / total[..., None]
 
 
-def material_map(rgb, relief=RELIEF_DEFAULT, blur=1.5):
-    """RGBA uint8 material map from an orthophoto (float 0..1, HxWx3)."""
+def texture_m_per_px(texture_file_name, width):
+    """Ground metres per pixel of an Ortho4XP texture <til_y>_<til_x>_<prov><zl>.dds
+    (16 x 16 web-mercator tiles of its ZL) at ``width`` px, or None."""
+    m = TEXTURE_RE.match(os.path.basename(texture_file_name))
+    if not m:
+        return None
+    zl = int(m.group(4))
+    y = math.pi - 2 * math.pi * (int(m.group(1)) + 8) / 2 ** zl
+    lat = math.atan(math.sinh(y))
+    return 40075016.686 * math.cos(lat) / 2 ** zl * 16 / width
+
+
+def _smoothed_slopes(heights, m_per_px, smooth_m):
+    import cv2   # relief from heights runs in the overlay venv (O4_Height_Relief)
+    h = cv2.GaussianBlur(np.asarray(heights, np.float32), (0, 0), max(0.5, smooth_m / m_per_px))
+    gy, gx = np.gradient(h, m_per_px)                  # gy: per metre down the image (south)
+    return gx, -gy
+
+
+def height_slopes(heights, m_per_px):
+    """East and north surface slopes (dz/dx, dz/dy) from a height map in metres."""
+    fx, fy = _smoothed_slopes(heights, m_per_px, HEIGHT_FINE_M)
+    bx, by = _smoothed_slopes(heights, m_per_px, HEIGHT_BROAD_M)
+    return fx + bx * HEIGHT_BROAD_GAIN, fy + by * HEIGHT_BROAD_GAIN
+
+
+def material_map(rgb, relief=RELIEF_DEFAULT, blur=1.5, heights=None, m_per_px=None):
+    """RGBA uint8 material map from an orthophoto (float 0..1, HxWx3).
+
+    With ``heights`` (metres, the map's size) and ``m_per_px``, the slopes of
+    that surface are added to the relief (relief from real heights)."""
     rgb = np.asarray(rgb, np.float32)
     ws, total = _weights(rgb)
     gloss = sum(w * v for w, v in zip(ws, _GLOSS)) / total
@@ -155,10 +197,16 @@ def material_map(rgb, relief=RELIEF_DEFAULT, blur=1.5):
         base = np.asarray(img.filter(ImageFilter.GaussianBlur(8)), np.float32) / 255
         fine = np.asarray(img.filter(ImageFilter.GaussianBlur(blur)), np.float32) / 255
         height = fine - base                                 # high-pass: local relief only
-        gy, gx = np.gradient(height)
-        nx, ny = -gx * (relief * 20), -gy * (relief * 20)
+        gy, gx = np.gradient(height)                         # gy: down the image = south
+        # X-Plane reads R as +east and G as +north (dome test in the sim,
+        # 2026-11-09), so the north component is +d(height)/d(row).
+        nx, ny = -gx * (relief * 20), gy * (relief * 20)
     else:
         nx = ny = np.zeros((h, wd), np.float32)
+    if heights is not None and m_per_px:
+        # nx, ny above are minus the slopes east and north: add the real ones.
+        sx, sy = height_slopes(heights, m_per_px)
+        nx, ny = nx - sx, ny - sy
     nz = 1 / np.sqrt(1 + nx * nx + ny * ny)
     out = np.empty((h, wd, 4), np.uint8)
     for i, ch in enumerate(((nx * nz) * 0.5 + 0.5, (ny * nz) * 0.5 + 0.5, f0, gloss)):
@@ -225,14 +273,28 @@ def map_width(path):
     return struct.unpack_from("<I", head, 16)[0] if len(head) == 20 else None
 
 
-def _stamp(path, relief):
+def map_heights(path):
+    """HEIGHT_RELIEF_VERSION a map's relief from real heights was made with, 0 for none."""
+    if map_mark(path) is None:
+        return 0
+    try:
+        with open(path, "rb") as f:
+            f.seek(_MARK_OFFSET + 12)
+            raw = f.read(4)
+    except OSError:
+        return 0
+    return struct.unpack("<I", raw)[0] if len(raw) == 4 else 0
+
+
+def _stamp(path, relief, heights=0):
     with open(path, "r+b") as f:
         f.seek(_MARK_OFFSET)
-        f.write(struct.pack("<4sII", MARK, MARK_VERSION, _relief_code(relief)))
+        f.write(struct.pack("<4sIII", MARK, MARK_VERSION, _relief_code(relief), int(heights)))
 
 
-def encode_dds(rgba, out_dds, converter, relief):
-    """RGBA uint8 -> BC3 DDS with mipmaps, written atomically; True on success."""
+def encode_dds(rgba, out_dds, converter, relief, heights=0):
+    """RGBA uint8 -> BC3 DDS with mipmaps, written atomically; True on success.
+    ``heights``: the HEIGHT_RELIEF_VERSION stamped into it (0 = no real heights)."""
     tool = os.path.basename(converter).lower()
     tmp_dds = out_dds + ".mat.tmp"
     if tool.startswith("nvcompress"):
@@ -250,7 +312,7 @@ def encode_dds(rgba, out_dds, converter, relief):
             rc = subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                                  creationflags=_CREATE_NO_WINDOW)
             if rc == 0 and os.path.isfile(tmp_dds):
-                _stamp(tmp_dds, relief)
+                _stamp(tmp_dds, relief, heights)
                 os.replace(tmp_dds, out_dds)
                 ok = True
                 break

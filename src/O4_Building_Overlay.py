@@ -56,6 +56,7 @@ import O4_Library_Catalog as LIBCAT
 import O4_Roof_Color as ROOFCOLOR
 import O4_Height_Model as HEIGHTMODEL
 import O4_Height_Priors as HEIGHTPRIORS
+import O4_Height_Relief as HRELIEF
 import O4_Footprint_Polygons as FOOTPRINTS
 import O4_Agri_Structures as AGRI
 import O4_Greenhouse_Map as GHMAP
@@ -11981,6 +11982,11 @@ class _TexturePass:
                 self.file_counts['heightnet_dets'] = len(_height_dets)
             _height_dets = None
             _record_elapsed(self.run.timings, self.file_timings, 'heightnet', _t)
+        # Relief from real heights (O4_Height_Relief, after the overlays):
+        # every detection with the heights predicted so far.
+        HRELIEF.save_building_sidecar(
+            self.run.cache_dir, self.fname, self.yolo_detections, self.img_w, self.img_h
+        )
 
     def _passes_static_gates(self, detection, trimmed_ok=True):
         """The static gates at the top of _place_each_detection: valid shape,

@@ -152,6 +152,64 @@ class CachePurgeTests(unittest.TestCase):
             self.assertTrue(seen["grass_kept"], "building overlay purged the running grass class maps")
             self.assertFalse(os.path.exists(cache_dir), "tile cache not cleaned up after both overlays")
 
+    def _overlays_with_relief(self, together, relief_on=True):
+        """Run both overlays (stubbed); return the venv code calls, what the relief stage
+        saw in the cache folder, and the folder."""
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmpdir, True)
+        cache_dir = os.path.join(tmpdir, "SFR_cache", "+12+034")
+        os.makedirs(cache_dir)
+        calls, seen = [], {}
+
+        def _venv(code):
+            if "bld_overlay.run" in code:
+                calls.append("bld")
+                self._make(cache_dir, "1_2_BI16_yolo_obb.pkl")
+                self._make(cache_dir, "1_2_BI16_relief_dets.pkl")
+            elif "veg_overlay.run" in code:
+                calls.append("veg")
+                self._make(cache_dir, "1_2_BI18_relief_canopy.npy")
+            elif "O4_Height_Relief" in code:
+                calls.append("relief")
+                seen["files"] = sorted(os.listdir(cache_dir))
+            return 0
+
+        with mock.patch.object(PIPELINE, "bld_disable_cache", True), \
+                mock.patch.object(PIPELINE, "veg_disable_cache", True), \
+                mock.patch.object(PIPELINE, "terrain_materials_heights", relief_on), \
+                mock.patch.object(PIPELINE, "overlays_run_together", return_value=together), \
+                mock.patch.object(PIPELINE, "_overlay_cache_dir", return_value=cache_dir), \
+                mock.patch.object(PIPELINE, "_check_tile_imagery", return_value=True), \
+                mock.patch.object(PIPELINE, "_auto_setup", return_value=True), \
+                mock.patch.object(PIPELINE, "_run_venv", side_effect=_venv), \
+                mock.patch.object(PIPELINE, "_dds_converter", return_value="nvcompress.exe"), \
+                mock.patch.object(PIPELINE, "_dsftool_path", return_value=None), \
+                mock.patch.object(PIPELINE, "_scenery_paths", return_value=""), \
+                mock.patch.object(PIPELINE, "_resolve_remote_host", return_value=""), \
+                mock.patch.object(PIPELINE, "_finish_veg_tile_replacement"):
+            errors = PIPELINE.process_overlays_tile(12, 34, tmpdir)
+        self.assertEqual(errors, {"bld": None, "veg": None})
+        return calls, seen, cache_dir
+
+    def test_relief_stage_reads_the_heights_before_the_caches_go(self):
+        for together in (False, True):
+            calls, seen, cache_dir = self._overlays_with_relief(together)
+            self.assertEqual(calls[-1], "relief", together)
+            self.assertIn("1_2_BI16_relief_dets.pkl", seen["files"])
+            self.assertIn("1_2_BI18_relief_canopy.npy", seen["files"])
+            self.assertFalse(os.path.exists(cache_dir), "relief sidecars or caches left behind")
+
+    def test_relief_stage_off(self):
+        calls, _, cache_dir = self._overlays_with_relief(False, relief_on=False)
+        self.assertNotIn("relief", calls)
+        self.assertFalse(os.path.exists(cache_dir))
+
+    def test_overlays_are_told_whether_to_hand_over_heights(self):
+        with mock.patch.object(PIPELINE, "terrain_materials_heights", True):
+            self.assertTrue(PIPELINE._relief_wanted())
+        with mock.patch.object(PIPELINE, "terrain_materials", False):
+            self.assertFalse(PIPELINE._relief_wanted())
+
 
 if __name__ == "__main__":
     unittest.main()

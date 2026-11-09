@@ -424,7 +424,12 @@ cfg_tile_vars = {
     "terrain_materials_relief": {
         "type": float,
         "default": 0.15,
-        "hint": "Strength of the micro-relief in the terrain material maps (terrain_materials), taken from the fine detail of the orthophoto: 0.15 tilts the surface by about 5 degrees on average, 0 keeps it flat. Changing it remakes the maps on the next Step 3.",
+        "hint": "Strength of the micro-relief in the terrain material maps (terrain_materials), taken from the fine detail of the orthophoto: 0.15 tilts the surface by about 5 degrees on average, 0 keeps it flat. Changing it remakes the maps on the next Step 3 (re-run the building overlay to bring back the relief from real heights, terrain_materials_heights).",
+    },
+    "terrain_materials_heights": {
+        "type": bool,
+        "default": True,
+        "hint": "Relief from real heights in the terrain material maps (terrain_materials): after the building overlay, every detected building (at its HeightNet height) and, where the vegetation overlay ran the canopy-height model (ZL18/19), the tree canopy shade the ground like raised surfaces - lit toward the sun, darker on the far side, with a broad dark band there that lengthens as the sun gets lower, like a long shadow. Runs with the building overlay (a few seconds per texture); Step 3 keeps these maps until the texture changes.",
     },
     # Vegetation overlay (src/scripts/generate_veg_overlay.py)
     "veg_density": {
@@ -1162,6 +1167,7 @@ list_dsf_vars = [
     "terrain_decal",
     "terrain_materials",
     "terrain_materials_relief",
+    "terrain_materials_heights",
 ]
 
 list_other_vars = ["custom_dem", "fill_nodata"]
@@ -1257,7 +1263,10 @@ _segformer_vars = ["segformer_patch_size", "segformer_overlap", "segformer_batch
 # What O4_Overlay_Pipeline.apply_tile_settings() copies from a Tile before each
 # overlay step; the GUI single-tile buttons and batch builds share these lists.
 list_veg_pipeline_vars = list_veg_vars + list_veg_legacy_vars
-list_bld_pipeline_vars = list_bld_vars + _segformer_vars
+# The terrain material settings decide the relief-from-heights stage that
+# runs after the overlays (O4_Height_Relief).
+_relief_vars = ["terrain_materials", "terrain_materials_relief", "terrain_materials_heights"]
+list_bld_pipeline_vars = list_bld_vars + _segformer_vars + _relief_vars
 
 list_tile_vars = (
     list_vector_vars
@@ -1328,7 +1337,7 @@ settings_sections = (
         ("Water", ("water_tech", "ratio_bathy", "ratio_water", "sea_texture_blur")),
         ("Terrain", ("overlay_lod", "normal_map_strength", "terrain_casts_shadows",
                      "use_decal_on_terrain", "terrain_decal", "terrain_materials",
-                     "terrain_materials_relief")),
+                     "terrain_materials_relief", "terrain_materials_heights")),
     )),
     ("Elevation", (
         (None, tuple(list_other_vars)),

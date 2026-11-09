@@ -61,6 +61,7 @@ import O4_Forest_Spacing as FOREST_SPACING
 import O4_Tree_Sizes as TREE_SIZES
 import O4_Forest_Heights as FOREST_HEIGHTS
 import O4_Forest_Tint as FOREST_TINT
+import O4_Height_Relief as HRELIEF
 import O4_Approach_Heights as APPROACH
 import O4_Apt_Pavement as APT
 import O4_Texture_Selection as TEXSEL
@@ -3310,6 +3311,8 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
                         timings['canopy'] += time.perf_counter() - _t
                         if canopy_maps is not None and not disable_cache:
                             np.save(canopy_path, canopy_maps)
+            # Relief from real heights (O4_Height_Relief, after the overlays).
+            HRELIEF.save_canopy_sidecar(cache_dir, fname, canopy_maps)
 
         # Enlarged-image support up to ZL16, unless the texture tree check covers the texture.
         upscale_trees = None

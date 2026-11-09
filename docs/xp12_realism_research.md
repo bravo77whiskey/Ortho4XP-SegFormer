@@ -178,6 +178,24 @@ Two refinements, with limits:
   sizes) and HeightNet building heights. Normals from them give crowns and roof edges shading that follows
   the sim sun. Expect it to matter at low altitude only; mips average it out with distance.
 
+**Outcome (2026-11-09, shipped, `terrain_materials_heights` on by default).**
+
+- **Sign check.** Dome tests in the sim, on 30 Jun at 16:00 and 21 Dec at noon, showed that X-Plane reads
+  R as +east and G as +north. The old luminance relief had its north-south sign inverted; that is fixed
+  (MARK_VERSION 2, which remakes every map on the next Step 3).
+- **Gloss.** Pushing gloss up for clear weather was rejected: it reads as wet, a reflection rather than
+  the "pop" wanted.
+- **The relief that shipped.** It is the A/B "long" variant: fine slopes smoothed over 1.5 m, plus broad
+  slopes smoothed over 10 m at ×1.5 gain. A static map cannot cast shadows. The broad band on the side
+  away from the sun deepens as the sun gets lower, and before sunset it reads like a long shadow. In
+  overcast the sun term is weak, so it should wash out (not checked in the sim).
+- **How it runs.** `O4_Height_Relief` runs after the overlays (O4_Overlay_Pipeline `_relief_step`). It
+  takes every YOLO building at its HeightNet height and the canopy-height model's canopy (ZL18/19), keeps
+  the taller of the two, and rewrites the textures' `_mat.dds` stamped with HEIGHT_RELIEF_VERSION. Step 3
+  keeps those maps until the texture changes. The stage runs whenever the building overlay runs; canopy
+  is included when the vegetation overlay ran in the same call. Cost: about 3–4 s per texture, mostly
+  HeightNet on the detections the overlay did not need heights for.
+
 ## 6. Baked shadows in the ortho
 
 Building and tree shadows in the photo point to the capture-time sun and never move. Literature check
@@ -203,7 +221,7 @@ Daytime only (night items parked 2026-11-09):
 
 1. Forest leaf colours: shipped 2026-11-09 (`veg_forest_tint`, on by default) after the in-sim A/B.
 2. Weather round of the lighting work, with class-driven materials and the weather/snow `.ter` inputs.
-3. Height-derived relief from the canopy/HeightNet rasters, after the one-tile tangent-sign check.
+3. Height-derived relief from the canopy/HeightNet rasters: shipped 2026-11-09 (§5).
 
 Parked: night LIT terrain (§1) and ProcGen v4 LIT windows (§3). The prototype stays in
 `experiments/xp12_realism_20261108/night_lit.py` if night flying ever matters.

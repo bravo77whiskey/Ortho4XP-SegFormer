@@ -77,6 +77,17 @@ class MapTests(unittest.TestCase):
         bumpy = TMAT.material_map(img, relief=0.15)
         self.assertGreater(np.abs(bumpy[..., :2].astype(int) - 128).mean(), 1)
 
+    def test_relief_normals_point_east_and_north_like_x_plane_reads_them(self):
+        # Brightness (height) rising toward the north-east: the slope faces
+        # south-west, so R (east) and G (north) both drop below 128.
+        y, x = np.mgrid[0:128, 0:128].astype(np.float32)
+        ramp = ((x - y) % 32) / 32 * 0.5 + 0.25            # rises east and north (up the image)
+        img = np.repeat(ramp[..., None], 3, -1)
+        m = TMAT.material_map(img, relief=0.15)[40:90, 40:90].astype(int)
+        inner = m[(np.abs(m[..., 0] - 128) > 2)]
+        self.assertLess(np.median(inner[:, 0]), 128)
+        self.assertLess(np.median(inner[:, 1]), 128)
+
     def test_names_and_sizes(self):
         self.assertEqual(TMAT.map_file_name(TEX), "27456_54768_BI16_mat.dds")
         self.assertTrue(TMAT.is_map_name("27456_54768_BI16_mat.dds"))

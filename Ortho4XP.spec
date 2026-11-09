@@ -73,6 +73,7 @@ OVERLAY_MODULES = [
     "O4_Greenhouse_Map",
     "O4_Height_Model",
     "O4_Height_Priors",
+    "O4_Height_Relief",
     "O4_Landcover_Inference",
     "O4_Leaf_Type",
     "O4_Library_Catalog",
