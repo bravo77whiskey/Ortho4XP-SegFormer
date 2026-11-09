@@ -5,6 +5,11 @@ saved situation (Reload Scenery is not trusted to pick up every change).
     python scripts/sim_ab.py install   --tile +22+120      (X-Plane closed)
     python scripts/sim_ab.py grass on|off      --tile +22+120
     python scripts/sim_ab.py mat 2048|1024|off --tile +22+120
+    python scripts/sim_ab.py mat-build --tile +22+120   (after build)
+    python scripts/sim_ab.py mat strong|max|dome --tile +22+120
+    python scripts/sim_ab.py canopy-heights --tile +22+120   (CUDA, X-Plane closed; then mat-build)
+    python scripts/sim_ab.py building-heights --tile +22+120 (CUDA, X-Plane closed; then mat-build)
+    python scripts/sim_ab.py mat relief-fix|canopy|canopy-half|long|longer --tile +22+120
     python scripts/sim_ab.py trees-build --tile +22+120  (after build)
     python scripts/sim_ab.py trees off|on      --tile +22+120
     python scripts/sim_ab.py tint-build [off|on] --tile +22+120   (after build)
@@ -47,6 +52,14 @@ from an O4XP_Forest_Heights library written under --out; install links it
 into Custom Scenery too (uninstall removes it).  A later 'grass' swap
 replaces the trees variant and the other way round.
 
+mat-build adds three test sets of material maps for every land texture:
+'strong' (gloss x3, F0 x2), 'max' (gloss 1, F0 at least 0.04) and 'dome'
+(as-built gloss with a grid of 80 m domes as the relief, R = +east,
+G = +north, to find the sign of X-Plane's terrain tangent frame).  'mat 2048'
+goes back to the maps as built.  'relief-fix' is the as-built relief with its
+north-south sign fixed; after canopy-heights, 'canopy' and 'canopy-half' add
+the slopes of the canopy-height model's surface on ZL18/19 textures.
+
 tint-build regenerates the whole tile's trees with THIS checkout's vegetation
 overlay, twice: 'off' = X-Plane's one leaf colour (veg_forest_tint off), 'on'
 = each forest in the leaf colour nearest the canopy on the ortho, summer
@@ -68,6 +81,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
+
+import numpy as np  # noqa: E402
 
 import O4_Terrain_Materials as TMAT  # noqa: E402
 
@@ -213,6 +228,229 @@ def build_materials(n):
           f"{res.count('FAILED')} failed, of {len(jobs)} ZL17+ textures")
     if "FAILED" in res:
         sys.exit("material map encoding failed")
+
+
+# ── material test maps ───────────────────────────────────────────────────────
+# Each test set points every land .ter at its own map <stem><suffix>.dds:
+#   strong  gloss x3 (capped at 1) and F0 x2: is gloss visible at all in clear weather?
+#   max     gloss 1 and F0 >= 0.04 everywhere: the most X-Plane can show.
+#   dome    the as-built gloss/F0 with the relief replaced by a grid of domes,
+#           encoded as R = +east, G = +north.  Which side of a dome faces the
+#           sun settles the sign of X-Plane's terrain tangent frame (it uses
+#           per-draw uniforms, not UV derivatives) before real heights go in.
+MAT_TESTS = {"strong": "_matS.dds", "max": "_matM.dds", "dome": "_matD.dds", "dome-s": "_matDs.dds",
+             "relief-fix": "_matF.dds", "canopy": "_matC.dds", "canopy-half": "_matH.dds",
+             "long": "_matL.dds", "longer": "_matLL.dds"}
+# long, longer  trees (canopy, ZL18/19) and buildings (building-heights, every ZL):
+#              the 'canopy' slopes plus a broad copy of the height field (smoothed
+#              over LONG_VARIANTS metres, slopes x gain).  The side away from the sun
+#              gets a wide dark band that turns darker as the sun gets lower: the
+#              closest a static map gets to long shadows (it cannot cast one).
+LONG_VARIANTS = {"long": (10.0, 1.5), "longer": (16.0, 2.5)}
+# relief-fix   the as-built luminance relief with its north-south sign fixed (MARK_VERSION 2)
+# canopy       relief-fix plus the true slopes of the canopy-height model's surface
+#              (ZL18/19 textures with canopy-heights run; others = relief-fix)
+# canopy-half  the same with the canopy slopes halved
+CANOPY_SMOOTH_M = 1.5
+# 2026-11-09 in-sim (RCKH, facing west, 30 June 4 pm = sun 283 deg, 36 deg up): 'dome'
+# was lit from the WNW, i.e. R = +east, G = +north read right.  'dome-s' (G = +south)
+# is the deliberately wrong twin for a north-south check.
+DOME_RADIUS_M, DOME_SPACING_M = 80.0, 260.0
+
+
+def _map_metres_per_px(n, tex, size=1024):
+    zl = TMAT._zoomlevel(tex)
+    lat = int(n.tile[:3]) + 0.5
+    # A texture is 16 x 16 web-mercator tiles of its ZL.
+    return 40075016.686 * np.cos(np.radians(lat)) / (2 ** zl) * 16 / size
+
+
+def dome_relief(size, m_per_px, g_south=False):
+    """RG normal bytes of a dome grid: R = +east (columns), G = +north (up the image),
+    or +south (down the image) with ``g_south``."""
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32) * m_per_px
+    cx = (xx % DOME_SPACING_M) - DOME_SPACING_M / 2
+    cy = (yy % DOME_SPACING_M) - DOME_SPACING_M / 2
+    d = np.hypot(cx, cy)
+    inside = d < DOME_RADIUS_M
+    # Spherical cap normal: (x, y, z) / r; north is up the image, so -row.
+    nx = np.where(inside, cx / DOME_RADIUS_M, 0.0)
+    ny = np.where(inside, (cy if g_south else -cy) / DOME_RADIUS_M, 0.0)
+    nx, ny = nx * 0.8, ny * 0.8                     # keep z > 0 at the rim
+    return (np.clip(np.stack([nx, ny], -1) * 127.5 + 127.5, 0, 255) + 0.5).astype(np.uint8)
+
+
+def relief_heights(n, stem, size=1024):
+    """Tree + building height field (m) at ``size`` px: the higher of the canopy model's
+    canopy and the building-heights raster, or None when neither was computed."""
+    import cv2
+    layers = []
+    for sub in ("canopy", "buildings"):
+        p = os.path.join(n.ab, sub, stem + ".npy")
+        if os.path.isfile(p):
+            layers.append(cv2.resize(np.load(p).astype(np.float32), (size, size),
+                                     interpolation=cv2.INTER_AREA))
+    return np.maximum.reduce(layers) if layers else None
+
+
+def canopy_slopes(heights, size, m_per_px, smooth_m=CANOPY_SMOOTH_M):
+    """East and north slopes (dz/dx, dz/dy) of a height map at ``size`` px."""
+    import cv2
+    h = cv2.resize(np.asarray(heights, np.float32), (size, size), interpolation=cv2.INTER_AREA)
+    h = cv2.GaussianBlur(h, (0, 0), max(0.5, smooth_m / m_per_px))
+    gy, gx = np.gradient(h, m_per_px)                 # gy: per metre down the image (south)
+    return gx, -gy
+
+
+def with_slopes(rg, sx, sy):
+    """RG normal bytes with extra surface slopes (dz/dx east, dz/dy north) added."""
+    nx = (rg[..., 0].astype(np.float32) - 127.5) / 127.5
+    ny = (rg[..., 1].astype(np.float32) - 127.5) / 127.5
+    nz = np.sqrt(np.clip(1 - nx * nx - ny * ny, 1e-4, 1))
+    px, py = -nx / nz + sx, -ny / nz + sy             # normal (nx, ny, nz) = slope (-nx/nz, -ny/nz); add
+    nz = 1 / np.sqrt(1 + px * px + py * py)
+    nx, ny = -px * nz, -py * nz
+    return (np.clip(np.stack([nx, ny], -1) * 127.5 + 127.5, 0, 255) + 0.5).astype(np.uint8)
+
+
+def build_material_tests(n):
+    """ter_strong / ter_max / ter_dome sets and their maps, from the as-built .ter set."""
+    ter_src = os.path.join(n.ab, "ter_2048")
+    tex_dir = os.path.join(n.tile_dir, "textures")
+    sets = {m: os.path.join(n.ab, f"ter_{m}") for m in MAT_TESTS}
+    for d in sets.values():
+        os.makedirs(d, exist_ok=True)
+    jobs = []
+    for name in sorted(os.listdir(ter_src)):
+        with open(os.path.join(ter_src, name), newline="") as f:
+            text = f.read()
+        lines, _ = TMAT._split_ter(text)
+        base = TMAT.ter_base_texture(lines)
+        if not (TMAT.is_land_ter(name, lines) and base and base.startswith("../textures/")):
+            continue
+        tex = base[len("../textures/"):]
+        ours = TMAT.ter_lines(tex)[0]
+        stem = TMAT.map_file_name(tex)[:-len("_mat.dds")]
+        for m, suffix in MAT_TESTS.items():
+            t = text.replace(ours, f"TEXTURE_NORMAL 1 ../textures/{stem}{suffix}")
+            if ours not in (l.strip() for l in lines):   # no map as built: add one for the test
+                t = TMAT.add_ter_lines(text, tex).replace(ours, f"TEXTURE_NORMAL 1 ../textures/{stem}{suffix}")
+            with open(os.path.join(sets[m], name), "w", newline="") as f:
+                f.write(t)
+        jobs.append((tex, stem))
+
+    def one(job):
+        tex, stem = job
+        built = TMAT.map_mark(os.path.join(tex_dir, stem + "_mat.dds"))
+        relief = built[1] / 10000 if built else TMAT.RELIEF_DEFAULT
+        rgb = TMAT.load_rgb(os.path.join(tex_dir, tex), 1024)
+        base = TMAT.material_map(rgb, relief)
+        f0, gloss = base[..., 2].astype(np.float32), base[..., 3].astype(np.float32)
+        variants = {
+            "strong": (base[..., :2], np.minimum(f0 * 2, 255), np.minimum(gloss * 3, 255)),
+            "max": (base[..., :2], np.maximum(f0, 0.04 * 255), np.full_like(gloss, 255)),
+            "dome": (dome_relief(1024, _map_metres_per_px(n, tex)), f0, gloss),
+            "dome-s": (dome_relief(1024, _map_metres_per_px(n, tex), g_south=True), f0, gloss),
+            "relief-fix": (base[..., :2], f0, gloss),
+        }
+        canopy = os.path.join(n.ab, "canopy", stem + ".npy")
+        if os.path.isfile(canopy):
+            sx, sy = canopy_slopes(np.load(canopy), 1024, _map_metres_per_px(n, tex))
+            variants["canopy"] = (with_slopes(base[..., :2], sx, sy), f0, gloss)
+            variants["canopy-half"] = (with_slopes(base[..., :2], sx * 0.5, sy * 0.5), f0, gloss)
+        else:
+            variants["canopy"] = variants["canopy-half"] = variants["relief-fix"]
+        heights = relief_heights(n, stem)
+        mpp = _map_metres_per_px(n, tex)
+        if heights is not None:
+            fx, fy = canopy_slopes(heights, 1024, mpp)
+            for m, (smooth_m, gain) in LONG_VARIANTS.items():
+                bx, by = canopy_slopes(heights, 1024, mpp, smooth_m)
+                variants[m] = (with_slopes(base[..., :2], fx + bx * gain, fy + by * gain), f0, gloss)
+        else:
+            for m in LONG_VARIANTS:
+                variants[m] = variants["relief-fix"]
+        ok = True
+        for m, (rg, b, a) in variants.items():
+            out = os.path.join(tex_dir, stem + MAT_TESTS[m])
+            rgba = np.dstack([rg, (b + 0.5).astype(np.uint8), (a + 0.5).astype(np.uint8)])
+            ok &= encode_bc3_cpu(np.ascontiguousarray(rgba), out, relief)
+        return ok
+
+    with ThreadPoolExecutor(6) as ex:
+        res = list(ex.map(one, jobs))
+    print(f"  material test maps: {res.count(True)} textures x {len(MAT_TESTS)} made, "
+          f"{res.count(False)} failed")
+    if not all(res):
+        sys.exit("material test map encoding failed")
+
+
+def cmd_canopy_heights(n, args):
+    """Canopy height (m) of every ZL18/19 texture into _ab/<tile>/canopy/<stem>.npy (CUDA)."""
+    if not load_state(n):
+        sys.exit("build first")
+    if xplane_running():
+        sys.exit("quit X-Plane first (the canopy model needs ~4 GB of GPU memory)")
+    out = os.path.join(n.ab, "canopy")
+    os.makedirs(out, exist_ok=True)
+    code = "\n".join([
+        "import os, re, sys, time",
+        f"sys.path.insert(0, {os.path.join(ROOT, 'src')!r})",
+        "import numpy as np",
+        "from PIL import Image",
+        "import O4_Canopy_Height as C",
+        f"tex, out = {os.path.join(n.tile_dir, 'textures')!r}, {out!r}",
+        f"model = C.CanopyModel.load({CANOPY_MODEL_DIR!r})",
+        "if model is None: sys.exit('canopy model unavailable')",
+        "names = sorted(f for f in os.listdir(tex) if re.match('^[0-9]+_[0-9]+_[A-Za-z]+1[89][.]dds$', f))",
+        "t0 = time.time()",
+        "for i, f in enumerate(names):",
+        "    dst = os.path.join(out, f[:-4] + '.npy')",
+        "    if os.path.isfile(dst): continue",
+        "    rgb = np.asarray(Image.open(os.path.join(tex, f)).convert('RGB'))",
+        "    np.save(dst, model.maps(rgb, int(f[-6:-4]))[0])",
+        "    print(f'  [{i + 1}/{len(names)}] {f}', flush=True)",
+        "print(f'canopy heights: {len(names)} textures in {time.time() - t0:.0f}s')",
+    ]) + "\n"
+    rc = subprocess.call([CUDA_PYTHON, "-c", code], cwd=os.path.join(ROOT, "src"))
+    if rc != 0:
+        sys.exit("canopy heights failed")
+
+
+def cmd_building_heights(n, args):
+    """Building heights (YOLO + HeightNet, live cfg models) into _ab/<tile>/buildings/ (CUDA)."""
+    if not load_state(n):
+        sys.exit("build first")
+    if xplane_running():
+        sys.exit("quit X-Plane first (YOLO + HeightNet need the GPU)")
+    cfg = {}
+    with open(INSTALLED_CFG, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    yolo, height = cfg.get("bld_yolo_checkpoint"), cfg.get("bld_height_checkpoint")
+    if not (yolo and height and os.path.isfile(yolo) and os.path.isfile(height)):
+        sys.exit(f"building models not found in {INSTALLED_CFG}: {yolo!r}, {height!r}")
+    script = os.path.join(ROOT, "experiments", "xp12_realism_20261108", "building_heights.py")
+    rc = subprocess.call([CUDA_PYTHON, script, os.path.join(n.tile_dir, "textures"),
+                          os.path.join(n.ab, "buildings"), yolo, height,
+                          cfg.get("bld_yolo_conf", "0.05"), cfg.get("bld_yolo_iou", "0.5"),
+                          cfg.get("bld_yolo_stride", "512"), "512", "8", "asia"],
+                         cwd=os.path.join(ROOT, "src"))
+    if rc != 0:
+        sys.exit("building heights failed")
+
+
+def cmd_mat_build(n, args):
+    if not load_state(n):
+        sys.exit("build first")
+    t0 = time.time()
+    build_material_tests(n)
+    state = load_state(n)
+    state["mat_tests_built"] = time.strftime("%Y-%m-%d %H:%M")
+    save_state(n, state)
+    print(f"material tests built in {time.time() - t0:.0f}s; swap with: mat {'|'.join(MAT_TESTS)}|2048|off")
 
 
 def build_veg(n, real_veg):
@@ -699,7 +937,8 @@ def cmd_uninstall(n, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["build", "install", "uninstall", "status", "grass", "mat",
+    ap.add_argument("command", choices=["build", "install", "uninstall", "status", "grass", "mat", "mat-build",
+                                        "canopy-heights", "building-heights",
                                         "trees-build", "trees", "tint-build", "tint"])
     ap.add_argument("mode", nargs="?")
     ap.add_argument("--tile", required=True, help="e.g. +22+120")
@@ -708,7 +947,7 @@ def main():
     args = ap.parse_args()
     n = Names(args)
     if args.command in ("grass", "mat", "trees", "tint"):
-        modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off"), "trees": ("off", "on"),
+        modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off") + tuple(MAT_TESTS), "trees": ("off", "on"),
                  "tint": ("off", "on")}[args.command]
         if args.mode not in modes:
             sys.exit(f"{args.command} needs one of: {' '.join(modes)}")
@@ -718,12 +957,16 @@ def main():
             sys.exit("trees-build first")
         if args.command == "tint" and not os.path.isfile(os.path.join(n.ab, "veg_tint_on.dsf")):
             sys.exit("tint-build first")
+        if args.command == "mat" and not os.path.isdir(os.path.join(n.ab, f"ter_{args.mode}")):
+            sys.exit("mat-build first")
         {"grass": set_grass, "mat": set_mat, "trees": set_trees, "tint": set_tint}[args.command](n, args.mode)
         cmd_status(n, args)
         print("now restart X-Plane (or start it) to load this variant")
         return
     {"build": cmd_build, "install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status,
-     "trees-build": cmd_trees_build, "tint-build": cmd_tint_build}[args.command](n, args)
+     "trees-build": cmd_trees_build, "tint-build": cmd_tint_build,
+     "mat-build": cmd_mat_build, "canopy-heights": cmd_canopy_heights,
+     "building-heights": cmd_building_heights}[args.command](n, args)
 
 
 if __name__ == "__main__":
