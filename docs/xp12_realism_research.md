@@ -19,7 +19,7 @@ The daytime order is #2 → #4 → #5; #6 stays research only.
 | # | Lever | Kind | Evidence | Effort | Recommendation |
 |---|---|---|---|---|---|
 | 1 | Night lights baked into ortho terrain (`TEXTURE_LIT`) | scenery | Laminar's urban terrain has it, Ortho4XP `.ter` doesn't; prototype built | small–medium | **Parked** (daytime-only user) |
-| 2 | Forest colour matched to the imagery (own forest library) | scenery | canopy hue 115–160°, chroma 11–22 across the hotspots; XP's one leaf colour (124.5°, 19.4) matches Kaohsiung/Shouguang, not Shenzhen (corrected 2026-11-09) | medium | **Built 2026-11-09** (`veg_forest_tint`), needs in-sim A/B |
+| 2 | Forest colour matched to the imagery (own forest library) | scenery | canopy hue 115–160°, chroma 11–22 across the hotspots; XP's one leaf colour (124.5°, 19.4) matches Kaohsiung/Shouguang, not Shenzhen (corrected 2026-11-09) | medium | **Shipped 2026-11-09** (`veg_forest_tint`, on by default); in-sim A/B on +22+113 and +22+120 kept it, clearest at RCKH |
 | 3 | Night windows on our ProcGen v4 buildings | asset | v4 README: "No night lighting" | medium | **Parked** (daytime-only user) |
 | 4 | Material classes from SegFormer instead of colour rules; weather hooks | scenery | terrain shader reads a weather texture and snow coefficients we never set | medium | After the weather round of the lighting work |
 | 5 | Relief normals from real heights (high-res DEM, canopy/building height rasters) | scenery | the 3" DEM in use is already mostly in the mesh | medium | Only where a ≤10 m DEM or our height rasters exist |
@@ -201,7 +201,7 @@ mismatch becomes a named complaint.
 
 Daytime only (night items parked 2026-11-09):
 
-1. Forest leaf colours (built 2026-11-09, `veg_forest_tint`): A/B on one hotspot with `sim_ab.py`.
+1. Forest leaf colours: shipped 2026-11-09 (`veg_forest_tint`, on by default) after the in-sim A/B.
 2. Weather round of the lighting work, with class-driven materials and the weather/snow `.ter` inputs.
 3. Height-derived relief from the canopy/HeightNet rasters, after the one-tile tangent-sign check.
 
