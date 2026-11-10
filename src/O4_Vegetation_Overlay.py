@@ -259,6 +259,194 @@ def _forest_tint_enabled():
     return _veg_flag("O4_VEG_FOREST_TINT")
 
 
+# Forest edge thickets: X-Plane's forests are tall trees with bare trunks on
+# a 9-20 m grid and a sparse understory that fades out within 2-5 km, so from
+# the oblique views of flight a forest edge shows a row of bare trunks over
+# the photo's canopy. A real edge has a mantle of shrubs and young trees.
+# Every area forest gets one: a band about FOREST_EDGE_WIDTH_M wide inside
+# its open edges (not along texture edges or where another of our forest
+# polygons carries on), its width varying by +-FOREST_EDGE_WIDTH_SPREAD over
+# about FOREST_EDGE_NOISE_M, planted with the edge thicket copy of the
+# polygon's forest (O4_Forest_Heights.mantle_trees: its own species as young
+# trees and shrubs, at MANTLE_SHARE of its height) on top of the
+# forest's own trees, which stay as they are. Bands under FOREST_EDGE_MIN_M2
+# are left out. Bands are simplified by FOREST_EDGE_SIMPLIFY_RATIO of their
+# narrowest width, between FOREST_EDGE_SIMPLIFY_PX and the forest's own
+# simplification (szx_e ZL16, 2026-11-09: 0.6 px -> 1 px kept the band area
+# within 1 % and cut its points from 133k to 84k).
+# The thicket copies plant on a MANTLE_SPACING_M grid; next to a forest whose
+# trees stand far apart (X-Plane's 12 m default at ZL16) that is ten times
+# the forest's plants per hectare, so the band's DSF density thins it to a
+# spacing of FOREST_EDGE_SPACING_RATIO x the forest's own, at most
+# FOREST_EDGE_MAX_SPACING_M (measured 2026-11-09 on szx_e: +65 % plants
+# at full density). Thinning drops random cells, which also breaks the band up.
+FOREST_EDGE_WIDTH_M = 6.0
+FOREST_EDGE_WIDTH_SPREAD = 0.5
+FOREST_EDGE_NOISE_M = 40.0
+FOREST_EDGE_MIN_M2 = 30.0
+FOREST_EDGE_SIMPLIFY_PX = 0.6
+FOREST_EDGE_SIMPLIFY_RATIO = 0.8
+FOREST_EDGE_SPACING_RATIO = 0.5
+FOREST_EDGE_MAX_SPACING_M = 6.0
+FOREST_EDGE_VERSION = 4
+# Inset (opt-in): X-Plane plants trunks up to a forest polygon's edge, so its
+# full-size crowns (a 6-8 m radius on 15-25 m trees) hang out over the road
+# or field beyond the photo's canopy edge, which reads wrong from above.
+# With FOREST_EDGE_INSET_M > 0 the forest's own trees stand that far in from
+# open ground and the thicket (at least as wide) fills the strip, so the 3-d
+# canopy edge sits nearer the photo's and the edge steps down to it from the
+# side. Strips narrower than twice the inset keep their trees.
+FOREST_EDGE_INSET_M = 0.0
+
+
+def _forest_edges_enabled():
+    """O4_VEG_FOREST_EDGES=0: no edge thickets; forest edges are the forest's own trees."""
+    return _veg_flag("O4_VEG_FOREST_EDGES")
+
+
+def _forest_edge_width_m():
+    """Mean thicket width, metres; O4_VEG_FOREST_EDGE_M overrides."""
+    return _env_cells("O4_VEG_FOREST_EDGE_M", FOREST_EDGE_WIDTH_M) or FOREST_EDGE_WIDTH_M
+
+
+def _forest_edge_inset_m():
+    """Tall trees kept this far in from open forest edges, metres (0 = up to the edge);
+    O4_VEG_FOREST_EDGE_INSET_M overrides."""
+    return _env_cells("O4_VEG_FOREST_EDGE_INSET_M", FOREST_EDGE_INSET_M)
+
+
+def _forest_edge_sig():
+    """Polygon cache-key part for the edge thickets."""
+    return (
+        _forest_edges_enabled(), _forest_edge_width_m(), _forest_edge_inset_m(),
+        FOREST_EDGE_WIDTH_SPREAD,
+        FOREST_EDGE_NOISE_M, FOREST_EDGE_MIN_M2, FOREST_EDGE_SIMPLIFY_PX,
+        FOREST_EDGE_SIMPLIFY_RATIO, FOREST_EDGE_SPACING_RATIO, FOREST_EDGE_MAX_SPACING_M,
+        FOREST_EDGE_VERSION, FOREST_HEIGHTS.MANTLE_LEVELS_M, FOREST_HEIGHTS.MANTLE_SHARE,
+        FOREST_HEIGHTS.MANTLE_SPACING_M,
+    )
+
+
+def _edge_density(forest_spacing_m, density_override=None):
+    """DSF density (0-255) of a thicket band next to a forest whose trees stand
+    ``forest_spacing_m`` apart (None: unknown, full density)."""
+    full = 1.0 if density_override is None else float(density_override)
+    if forest_spacing_m:
+        grid = FOREST_HEIGHTS.MANTLE_SPACING_M
+        target = min(FOREST_EDGE_MAX_SPACING_M,
+                     max(grid, FOREST_EDGE_SPACING_RATIO * float(forest_spacing_m)))
+        full *= (grid / target) ** 2
+    return max(1, min(255, int(round(full * 255))))
+
+
+def _edge_width_map(shape, m_per_px, seed):
+    """Thicket width per pixel, metres: the mean width varying smoothly by
+    +-FOREST_EDGE_WIDTH_SPREAD over about FOREST_EDGE_NOISE_M."""
+    h, w = shape
+    cell_px = max(1.0, FOREST_EDGE_NOISE_M / max(m_per_px, 1e-6))
+    gh = max(2, int(math.ceil(h / cell_px)) + 1)
+    gw = max(2, int(math.ceil(w / cell_px)) + 1)
+    grid = np.random.default_rng(seed).random((gh, gw)).astype(np.float32)
+    noise = np.clip(cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC), 0.0, 1.0)
+    spread = FOREST_EDGE_WIDTH_SPREAD
+    return (_forest_edge_width_m() * (1.0 - spread + 2.0 * spread * noise)).astype(np.float32)
+
+
+def _mask_rings(mask, x0, y0, min_px, eps, img_w, img_h, lat_n, lat_s, lon_w, lon_e):
+    """The parts of a crop ``mask`` (crop origin x0, y0 in the texture) at least ``min_px``
+    big, as HoledRings in (lon, lat), simplified by ``eps`` pixels."""
+    cnts, hier = cv2.findContours(mask.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return []
+    holes_of = {}
+    for i, (_n, _p, _c, parent) in enumerate(hier[0]):
+        if parent >= 0:
+            holes_of.setdefault(parent, []).append(i)
+    shift = np.array([[[x0, y0]]], dtype=np.int32)
+
+    def _ll(c):
+        c_s = cv2.approxPolyDP(c, eps, closed=True) if eps > 0 else c
+        if len(c_s) < 3:
+            return None
+        ring = _contour_to_latlon(c_s + shift.astype(c_s.dtype),
+                                  img_w, img_h, lat_n, lat_s, lon_w, lon_e)
+        return ring if len(ring) >= 4 else None
+
+    rings = []
+    for i, c in enumerate(cnts):
+        if hier[0][i][3] >= 0 or cv2.contourArea(c) < min_px:
+            continue
+        ring = _ll(c)
+        if ring is None:
+            continue
+        outer_sign = _signed_area(ring[:-1]) >= 0
+        holes = []
+        for j in holes_of.get(i, ()):
+            if cv2.contourArea(cnts[j]) < 1.0:
+                continue
+            hr = _ll(cnts[j])
+            if hr is None:
+                continue
+            if (_signed_area(hr[:-1]) >= 0) == outer_sign:
+                hr = hr[::-1]
+            holes.append(hr)
+        rings.append(HoledRing(ring, holes) if holes else ring)
+    return rings
+
+
+def _edge_band_rings(cnt, hole_cnts, extent, width_m, m_per_px, img_w, img_h,
+                     lat_n, lat_s, lon_w, lon_e, inset_m=0.0, core_simplify_px=1.0,
+                     core_min_m2=0.0):
+    """The thicket band along the open edges of one forest polygon (outline ``cnt``,
+    kept clearings ``hole_cnts``, pixel contours), as HoledRings in (lon, lat).
+
+    Open is ground that is neither this polygon nor ``extent`` (all planted
+    forest of the texture); beyond the texture edge counts as forest. A pixel
+    of the polygon is in the band within ``width_m`` (per pixel) of open ground.
+
+    Returns (band rings, core rings): with ``inset_m`` the core is the polygon
+    without its outer ``inset_m`` along open ground (pieces under
+    ``core_min_m2`` left out), the band then at least that wide; the core is
+    None without an inset, when nothing borders open ground, or when nothing
+    of the polygon is left (a strip narrower than twice the inset).
+    """
+    x, y, w, h = cv2.boundingRect(cnt)
+    reach = max(float(width_m.max()), inset_m)
+    pad = int(math.ceil(reach / max(m_per_px, 1e-6))) + 2
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(img_w, x + w + pad), min(img_h, y + h + pad)
+    offset = np.array([[[x0, y0]]], dtype=cnt.dtype)
+    poly = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    cv2.drawContours(poly, [cnt - offset], -1, 1, -1)
+    cleared = np.zeros_like(poly)
+    if hole_cnts:
+        cv2.drawContours(cleared, [hc - offset.astype(hc.dtype) for hc in hole_cnts], -1, 1, -1)
+    inside = (poly > 0) & (cleared == 0)
+    open_ground = ~inside & ((cleared > 0) | ~extent[y0:y1, x0:x1])
+    if not open_ground.any():
+        return [], None
+    # Distance to the nearest open pixel (the crop's own edge is not open).
+    dist_m = cv2.distanceTransform((~open_ground).astype(np.uint8), cv2.DIST_L2, 5) * m_per_px
+    width = width_m[y0:y1, x0:x1]
+    if inset_m > 0:
+        width = np.maximum(width, inset_m)
+    band = inside & (dist_m <= width)
+    if not band.any():
+        return [], None
+    geo = (img_w, img_h, lat_n, lat_s, lon_w, lon_e)
+    narrowest_px = max(float(width.min()), 0.0) / max(m_per_px, 1e-6)
+    eps = min(max(FOREST_EDGE_SIMPLIFY_PX, core_simplify_px),
+              max(FOREST_EDGE_SIMPLIFY_PX, FOREST_EDGE_SIMPLIFY_RATIO * narrowest_px))
+    bands = _mask_rings(band, x0, y0, FOREST_EDGE_MIN_M2 / (m_per_px * m_per_px), eps, *geo)
+    core = None
+    if inset_m > 0:
+        core_mask = inside & (dist_m > inset_m)
+        if core_mask.any():
+            core = _mask_rings(core_mask, x0, y0, max(1.0, core_min_m2 / (m_per_px * m_per_px)),
+                               core_simplify_px, *geo) or None
+    return bands, core
+
+
 # Forest stands (O4_Forest_Stands): the canopy is cut into irregular stands
 # about FOREST_STAND_M across and each stand is measured on its own, instead
 # of the 20 m Gaussian zones above, which planted a broad forest whose height
@@ -429,6 +617,8 @@ def _process_tree_mask(mask, **kwargs):
     stands = kwargs.pop('forest_stands', False)
     tints = kwargs.pop('tint_zones', None)
     forest_copies = kwargs.pop('forest_copies', None)
+    if kwargs.get('forest_edges') is not None and kwargs.get('forest_extent') is None:
+        kwargs['forest_extent'] = mask > 0
     if tints is not None and forest_copies is not None:
         tints = np.where(mask > 0, tints, 0).astype(np.uint8)   # zones already merged (O4_Forest_Tint)
     else:
@@ -448,6 +638,8 @@ def _process_tree_mask(mask, **kwargs):
     if levels is not None:
         key += levels
         mask = np.where(levels > 0, mask, 0).astype(np.uint8)   # under the lowest cap: no tree
+        if kwargs.get('forest_extent') is not None:
+            kwargs['forest_extent'] = kwargs['forest_extent'] & (levels > 0)
     if bands is not None:
         key += bands.astype(np.int64) * 65536
     if tints is not None:
@@ -1449,6 +1641,7 @@ def _dds_polygon_cache_key(
         'asset_selection_mode': asset_selection_mode,
         'forest_type_source_path': forest_type_source_path,
         'veg_features': _veg_feature_sig(),
+        'forest_edges': _forest_edge_sig(),
     }
 
 
@@ -2325,7 +2518,8 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                       forest_path_mapper=None,
                       forest_spacing=None, gap_certain=None, canopy_height=None,
                       forest_heights=None, forest_height_map=None, height_cap=None,
-                      texture_density=None):
+                      texture_density=None, forest_edges=None, forest_extent=None,
+                      edge_width=None):
     """Extract polygons from one DDS class mask. Returns list of (path, density, ring).
 
     ``texture_density`` (O4_Veg_Density) replaces the fixed density of forest
@@ -2348,6 +2542,11 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
 
     ``forest_path_mapper.map_path(path, lon, lat, veg_type)`` may swap the
     chosen tree family for a climate-specific X-Plane forest at the polygon.
+
+    ``forest_edges`` (O4_Forest_Heights.ForestHeights) adds an edge thicket
+    band to each area forest along its open edges: ``forest_extent`` is all
+    the texture's planted forest (bool), ``edge_width`` the band width per
+    pixel in metres (_edge_width_map).
     """
     with_holes = _forest_holes_enabled() and veg_cls == SEGFORMER.CLASS_TREE
     hole_min_m2 = _forest_hole_min_m2()
@@ -2412,7 +2611,7 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                     roi = gap_certain[hp['y']:hp['y'] + hp['h'], hp['x']:hp['x'] + hp['w']]
                     certain = (float((roi.astype(bool) & hp['fill'].astype(bool)).sum())
                                >= HOLE_CERTAIN_FRAC * hp['area_px'])
-            hole_cands.append((hr, h_area, h_m2, certain))
+            hole_cands.append((hr, h_area, h_m2, certain, hole))
             if h_m2 >= hole_min_m2:
                 hole_px += h_area   # provisional, for the density below
         if veg_cls == SEGFORMER.CLASS_TREE:
@@ -2478,14 +2677,15 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
             # crown every POINT_TREE_SPACING_M (review set, 2026-10-19: the
             # 2-cell cut-off alone halved the single trees).
             point_max_m2 = max(POINT_TREE_MAX_AREA_M2, point_cells * cell_m2)
-            hole_rings = [
-                hr for hr, _a, h_m2, certain in hole_cands
+            kept_holes = [
+                (hr, hc) for hr, _a, h_m2, certain, hc in hole_cands
                 if (h_m2 >= certain_cells * cell_m2 if certain
                     else unsure_cells > 0 and h_m2 >= unsure_cells * cell_m2)
             ]
         else:
             point_max_m2 = POINT_TREE_MAX_AREA_M2
-            hole_rings = [hr for hr, _a, h_m2, _c in hole_cands if h_m2 >= hole_min_m2]
+            kept_holes = [(hr, hc) for hr, _a, h_m2, _c, hc in hole_cands if h_m2 >= hole_min_m2]
+        hole_rings = [hr for hr, _hc in kept_holes]
         if shrubs and forest_heights is not None:
             # Shrubs on a close grid, cut to the cap; their polygon is as
             # dense as the density setting makes a full forest (below).
@@ -2556,7 +2756,30 @@ def _process_dds_mask(mask, veg_cls, img_w, img_h,
                     _core_width_m(prepared_fill['fill'], m_per_px) > SHRUB_TREELINE_MAX_WIDTH_M):
                 line = 0   # too wide for one row of shrubs a side: fill it
             dsf_den = line + full
-        polys.append((fpath, dsf_den, ring))
+        edge_path, bands, core = None, [], None
+        if (forest_edges is not None and forest_extent is not None and edge_width is not None
+                and veg_cls == SEGFORMER.CLASS_TREE and shape == 'area' and not shrubs
+                and dsf_den < LINE_MODE):
+            edge_path = forest_edges.mantle_path_for(fpath, height_cap)
+            if edge_path:
+                core_min_m2 = (forest_spacing.cell_m2(fpath) if spacing_rules
+                               else FOREST_HOLE_MIN_AREA_M2)
+                bands, core = _edge_band_rings(
+                    cnt, [hc for _hr, hc in kept_holes], forest_extent, edge_width,
+                    m_per_px, img_w, img_h, lat_n, lat_s, lon_w, lon_e,
+                    inset_m=_forest_edge_inset_m(), core_simplify_px=simplify_px,
+                    core_min_m2=core_min_m2)
+        if core:
+            # The forest's own trees stand back from the open edge (inset).
+            polys.extend((fpath, dsf_den, part) for part in core)
+        else:
+            polys.append((fpath, dsf_den, ring))
+        if bands:
+            sp = forest_edges.spacing(fpath)
+            if sp is None and forest_spacing is not None:
+                sp = forest_spacing.spacing(fpath)[0]
+            edge_den = _edge_density(sp, density_override)
+            polys.extend((edge_path, edge_den, band) for band in bands)
     return polys
 
 
@@ -2810,7 +3033,7 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     forest_copies = None
     tropics_evergreen = _tropics_evergreen_enabled() and _tile_reaches_tropics(lat)
     if custom_scenery_dir and (_forest_heights_enabled() or approach_surfaces or tropics_evergreen
-                               or _forest_tint_enabled()):
+                               or _forest_tint_enabled() or _forest_edges_enabled()):
         forest_copies = FOREST_HEIGHTS.ForestHeights(custom_scenery_dir, log=verbose_print)
         if not forest_copies.available:
             forest_copies = None
@@ -3905,6 +4128,12 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
             if img is not None:
                 kwargs['tint_zones'] = FOREST_TINT.tint_zones(img, tree_mask, mpp)
                 kwargs['forest_copies'] = forest_copies
+        if _forest_edges_enabled() and forest_copies is not None:
+            kwargs['forest_edges'] = forest_copies
+            kwargs['forest_extent'] = tree_mask > 0
+            kwargs['edge_width'] = _edge_width_map(
+                tree_mask.shape, mpp,
+                int.from_bytes(hashlib.sha1(f"veg-edge:{fname}".encode("utf-8")).digest()[:8], "big"))
         if simheaven_type_source_path:
             kwargs['simheaven_type_path'] = simheaven_type_source_path
         if simheaven_type_resolver is not None:
@@ -4032,17 +4261,20 @@ def run(tex_dir, lat, lon, out_dsf, cache_dir,
     banded = [p for p in for_paths if p.startswith(FOREST_HEIGHTS.VIRTUAL_PREFIX)]
     if banded and not (forest_copies is not None and forest_copies.ensure(banded)):
         # No pack to plant them from: measured bands fall back to their
-        # full-height originals; approach caps leave those trees out.
-        capped = {p for p in banded if FOREST_HEIGHTS.is_capped(p)}
+        # full-height originals; approach caps and edge thickets leave those trees out.
+        capped = {p for p in banded if FOREST_HEIGHTS.needs_pack(p)}
         n_before = len(polygons)
         polygons = [(FOREST_HEIGHTS.source_path(p), d, r) for p, d, r in polygons if p not in capped]
         if capped:
             print(f"  [ForestHeights] no {FOREST_HEIGHTS.PACK_NAME}: "
-                  f"{n_before - len(polygons)} tree polygon(s) under runway approaches left out",
-                  flush=True)
+                  f"{n_before - len(polygons)} tree polygon(s) under runway approaches "
+                  f"or along forest edges left out", flush=True)
         for_paths = sorted(set(p for p, _, _ in polygons))
     elif banded:
         n_cap = sum(1 for p in banded if (FOREST_HEIGHTS.parse_virtual(p) or ("", "h"))[1] == "c")
+        n_edge = sum(1 for _p, _d, _r in polygons if FOREST_HEIGHTS.is_mantle(_p))
+        if n_edge:
+            print(f"  [ForestHeights] {n_edge} forest edge thicket polygon(s)", flush=True)
         tints = {FOREST_HEIGHTS.tint_of(p) for p in banded} - {None}
         print(f"  [ForestHeights] {len(banded)} forest copies from {FOREST_HEIGHTS.PACK_NAME}"
               f" ({n_cap} for runway approaches"

@@ -330,7 +330,7 @@ def tree_height(path):
     if path in _TREE_H:
         return _TREE_H[path]
     copy = FOREST_HEIGHTS.parse_virtual(path)
-    height = copy[2] if copy and copy[1] == "h" else None
+    height = copy[2] if copy and copy[1] in ("h", FOREST_HEIGHTS.MANTLE_KIND) else None
     cap = copy[2] if copy and copy[1] in "cs" and copy[2] else None
     if height is None:
         source = copy[0] if copy else path

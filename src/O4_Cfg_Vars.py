@@ -775,6 +775,33 @@ cfg_tile_vars = {
                 "the O4XP_Forest_Heights pack (about 14 MB of textures per "
                 "colour used).",
     },
+    "veg_forest_edges": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_edges",
+        "hint": "Plant a thicket of shrubs, saplings and young trees of the "
+                "forest's own species in a band along each forest's open "
+                "edges, under its full-size trees, so the bare trunks of "
+                "X-Plane's trees are hidden when seen from an angle. The "
+                "inside of the forest is unchanged. Uses the "
+                "O4XP_Forest_Heights pack.",
+    },
+    "veg_forest_edge_m": {
+        "type": float,
+        "default": 6.0,
+        "short_name": "veg_edge_m",
+        "hint": "Mean width of the forest edge thicket, metres; it varies by "
+                "half of that either way along the edge.",
+    },
+    "veg_forest_edge_inset_m": {
+        "type": float,
+        "default": 0.0,
+        "short_name": "veg_edge_in",
+        "hint": "Keep the forest's full-size trees this many metres in from "
+                "its open edges (the edge thicket fills the strip), so their "
+                "crowns don't hang out over the road or field beyond the "
+                "canopy in the photo. 0 = trees up to the edge.",
+    },
     "veg_avoid_gfv2": {
         "type": bool,
         "default": False,
@@ -1205,6 +1232,9 @@ list_veg_vars = [
     "veg_approach_heights",
     "veg_tropics_evergreen",
     "veg_forest_tint",
+    "veg_forest_edges",
+    "veg_forest_edge_m",
+    "veg_forest_edge_inset_m",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
     "veg_texture_tree_check",
@@ -1368,7 +1398,8 @@ settings_sections = (
                                      "veg_tree_sizes", "veg_forest_heights",
                                      "veg_forest_stands", "veg_forest_stand_m",
                                      "veg_approach_heights", "veg_tropics_evergreen",
-                                     "veg_forest_tint")),
+                                     "veg_forest_tint", "veg_forest_edges",
+                                     "veg_forest_edge_m", "veg_forest_edge_inset_m")),
         ("Tree types", ("veg_use_leaf_type_maps", "veg_use_xp_forests")),
         ("Other scenery", ("veg_use_simheaven", "veg_avoid_simheaven_buildings",
                            "veg_simheaven_building_buffer_m", "veg_avoid_simheaven_forests",

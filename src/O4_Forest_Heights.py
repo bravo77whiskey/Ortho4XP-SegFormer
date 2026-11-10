@@ -78,6 +78,29 @@ MIN_SPACING_M = 4.0
 # the grid shrinks with them (by the shrubs' mean cut), to SHRUB_MIN_SPACING_M.
 SHRUB_SPACING_M = 3.0
 SHRUB_MIN_SPACING_M = 1.5
+# Edge thicket copies ``m<top>`` ("mantle", the shrub and young-tree belt a
+# real forest edge has): planted only in a band along a forest's open edges
+# (O4_Vegetation_Overlay), under the forest's own trees, so the bare trunks
+# below X-Plane's canopy are hidden from the oblique views of flight. Each
+# is the forest's own species on a MANTLE_SPACING_M grid: one layer of its
+# canopy trees as young trees topping out at ``top`` m (MANTLE_YOUNG_SHARE)
+# mixed with its shrubs, and a second layer of shrubs (its understory, the
+# forest-floor clutter under MANTLE_MIN_SHRUB_M left out, cut to ``top``),
+# visible to MANTLE_LOD_M instead of X-Plane's 2-5 km. ``top`` is
+# MANTLE_SHARE of the forest's canopy height, one of MANTLE_LEVELS_M.
+# Young trees alone read as thin poles (scaled-down tall trees keep their
+# bare trunks); the bushy shrubs are what closes the edge.
+MANTLE_LEVELS_M = (3.0, 4.5, 6.0, 7.5, 9.0)
+MANTLE_SHARE = 0.45
+MANTLE_YOUNG_SHARE = 0.4
+MANTLE_SPACING_M = 4.0
+MANTLE_RANDOM_M = 3.5
+MANTLE_MIN_SHRUB_M = 2.0
+# Understory that is not living cover (stumps, broken trunks, forest-floor
+# stones, branches and ferns) stays out of the thicket.
+MANTLE_SKIP_NOTES = ("ff_", "stump", "broken")
+MANTLE_LOD_M = 6000.0
+MANTLE_KIND = "m"
 # Suffix of an evergreen copy's kind, and the kind of a plain evergreen copy.
 EVERGREEN_SUFFIX = "-ev"
 EVERGREEN_KIND = "ev"
@@ -219,8 +242,10 @@ def _scaled_mesh(block, factor, name=None):
     return out
 
 
-def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None, spacing_min_m=None):
-    """``text`` with every tree scaled by ``factor_for(layer, min h, max h)``.
+def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None, spacing_min_m=None,
+                line_factor=None):
+    """``text`` with every tree scaled by ``factor_for(layer, min h, max h)``,
+    or by ``line_factor(fields of the TREE / TREE2 line)`` when given.
 
     A tree's min/max (and TREE2 nominal) heights and the vertices of its 3-d
     meshes are scaled by the same factor. A mesh that trees with different
@@ -254,7 +279,8 @@ def scale_trees(text, factor_for, mesh_suffix="", spacing_m=None, spacing_min_m=
                 lo_i, hi_i, _nom_i, lay_i = fields
                 try:
                     layer = int(float(parts[lay_i]))
-                    current = float(factor_for(layer, float(parts[lo_i]), float(parts[hi_i])))
+                    current = float(line_factor(parts) if line_factor is not None
+                                    else factor_for(layer, float(parts[lo_i]), float(parts[hi_i])))
                     if layer == 1:
                         canopy.append((abs(float(parts[6])), current))
                 except ValueError:
@@ -347,6 +373,152 @@ def shrub_trees(text, cap_m=None, mesh_suffix=""):
                        spacing_min_m=SHRUB_MIN_SPACING_M)
 
 
+def _mantle_layout(text):
+    """``text`` arranged for an edge thicket copy (MANTLE_KIND).
+
+    Understory trees under MANTLE_MIN_SHRUB_M or named in MANTLE_SKIP_NOTES are
+    dropped; the other understory (the shrubs) is drawn out to MANTLE_LOD_M and
+    also joins every canopy (layer 1) group, at frequencies that make the
+    canopy trees MANTLE_YOUNG_SHARE of it. Groups and meshes left without a
+    tree are dropped.
+    """
+    lines = text.splitlines(keepends=True)
+    n = len(lines)
+    blocks = {}   # first line -> (end, fields, layer, hi)
+    i = 0
+    while i < n:
+        parts = lines[i].split()
+        fields = parts and parts[0] in ("TREE", "TREE2") and _tree_fields(parts)
+        if not fields:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and lines[j].split()[:1] == ["MESH_3D"]:
+            j += 1
+        try:
+            layer, hi = int(float(parts[fields[3]])), float(parts[fields[1]])
+        except ValueError:
+            layer, hi = None, 0.0
+        blocks[i] = (j, fields, layer, hi)
+        i = j
+
+    def is_shrub(start):
+        _end, _fields, layer, hi = blocks[start]
+        notes = lines[start].split()[-1]
+        return (layer is not None and layer != 1 and hi >= MANTLE_MIN_SHRUB_M
+                and not notes.startswith(MANTLE_SKIP_NOTES))
+
+    def shrub_block(start, layer=None, freq_scale=1.0):
+        end, fields, _layer, _hi = blocks[start]
+        parts = lines[start].split()
+        if parts[0] == "TREE2":
+            try:
+                parts[10] = _fmt(max(float(parts[10]), MANTLE_LOD_M))
+            except ValueError:
+                pass
+        if layer is not None:
+            parts[fields[3]] = str(layer)
+        if freq_scale != 1.0:
+            parts[6] = _fmt(abs(float(parts[6])) * freq_scale)
+        return [_rebuild(lines[start], parts)] + lines[start + 1:end]
+
+    shrubs = [b for b in blocks if is_shrub(b)]
+    shrub_freq = sum(abs(float(lines[b].split()[6])) for b in shrubs)
+
+    out = []
+    group_layer, young_freq = None, 0.0
+
+    def close_group():
+        if group_layer == 1 and young_freq > 0 and shrub_freq > 0:
+            scale = (1.0 - MANTLE_YOUNG_SHARE) / MANTLE_YOUNG_SHARE * young_freq / shrub_freq
+            for b in shrubs:
+                out.extend(shrub_block(b, layer=1, freq_scale=scale))
+
+    i = 0
+    while i < n:
+        parts = lines[i].split()
+        head = parts[0] if parts else ""
+        if i in blocks:
+            end, _fields, layer, _hi = blocks[i]
+            if layer == 1:
+                out.extend(lines[i:end])
+                young_freq += abs(float(parts[6]))
+            elif is_shrub(i):
+                out.extend(shrub_block(i))
+            i = end
+            continue
+        if head and not head.startswith("#"):
+            close_group()
+            group_layer, young_freq = None, 0.0
+            if head == "GROUP" and len(parts) > 1:
+                group_layer = int(float(parts[1]))
+        out.append(lines[i])
+        i += 1
+    close_group()
+
+    def _head(ln):
+        return (ln.split()[:1] or [""])[0]
+    keep = [True] * len(out)
+    for k, ln in enumerate(out):
+        if _head(ln) == "GROUP":
+            m = k + 1
+            while m < len(out) and _head(out[m]) not in ("GROUP", "TREE", "TREE2"):
+                m += 1
+            keep[k] = m < len(out) and _head(out[m]) in ("TREE", "TREE2")
+    used = {ln.split()[1] for ln in out if _head(ln) == "MESH_3D" and len(ln.split()) > 1}
+    k = 0
+    while k < len(out):
+        parts = out[k].split()
+        if parts[:1] == ["MESH"] and len(parts) > 1 and parts[1] not in used:
+            m = k + 1
+            while m < len(out) and _head(out[m]) in ("VERTEX", "IDX"):
+                m += 1
+            for q in range(k, m):
+                keep[q] = False
+            k = m
+            continue
+        k += 1
+    return "".join(ln for ln, ok in zip(out, keep) if ok)
+
+
+def mantle_trees(text, top_m, mesh_suffix=""):
+    """Edge thicket copy (MANTLE_KIND): the forest's canopy trees as young trees topping out
+    at ``top_m`` mixed with its shrubs, more shrubs as a second layer, everything cut to
+    ``top_m``, on the MANTLE grid."""
+    text = _mantle_layout(text)
+
+    def line_factor(parts):
+        _lo_i, hi_i, _nom_i, _lay_i = _tree_fields(parts)
+        hi = float(parts[hi_i])
+        return min(1.0, top_m / hi) if hi > 0 else 1.0
+
+    text = scale_trees(text, None, mesh_suffix, line_factor=line_factor)
+    out = []
+    random_line = ["RANDOM", _fmt(MANTLE_RANDOM_M), _fmt(MANTLE_RANDOM_M)]
+    has_random = any(ln.split()[:1] == ["RANDOM"] for ln in text.splitlines())
+    for line in text.splitlines(keepends=True):
+        parts = line.split()
+        if parts[:1] == ["SPACING"]:
+            line = _rebuild(line, ["SPACING", _fmt(MANTLE_SPACING_M), _fmt(MANTLE_SPACING_M)])
+            if not has_random:
+                out.append(line)
+                line = _rebuild(line, random_line)
+        elif parts[:1] == ["RANDOM"]:
+            line = _rebuild(line, random_line)
+        out.append(line)
+    return "".join(out)
+
+
+def mantle_top(canopy_h, cap_m=None):
+    """Top of the edge thicket under a canopy ``canopy_h`` m tall (and ``cap_m``): the
+    MANTLE_LEVELS_M nearest MANTLE_SHARE of it, none above the cap; 0.0 when none fits."""
+    want = MANTLE_SHARE * canopy_h
+    levels = [h for h in MANTLE_LEVELS_M if cap_m is None or h <= cap_m + 1e-6]
+    if not levels:
+        return 0.0
+    return min(levels, key=lambda h: (abs(h - want), h))
+
+
 def evergreen_text(text):
     """A summer .for without its SEASONAL (autumn blend) textures."""
     return "".join(ln for ln in text.splitlines(keepends=True) if not _SEASONAL_RE.match(ln))
@@ -419,7 +591,7 @@ def _seg_join(base, evergreen, tint):
 
 
 def parse_virtual(path):
-    """(source forest path, kind 'h', 'c', 's', 'e' or 't', height) of a copy's path, else None.
+    """(source forest path, kind 'h', 'c', 's', 'm', 'e' or 't', height) of a copy's path, else None.
 
     An evergreen or tinted copy of an h/c/s copy parses as that copy
     (is_evergreen / tint_of tell them apart); a plain evergreen copy is kind
@@ -435,7 +607,7 @@ def parse_virtual(path):
         if evergreen:
             return source, "e", 0.0
         return (source, "t", 0.0) if tint is not None else None
-    if len(base) < 2 or base[0] not in "hcs":
+    if len(base) < 2 or base[0] not in "hcs" + MANTLE_KIND:
         return None
     try:
         height = float(base[1:])
@@ -461,6 +633,19 @@ def is_capped(path):
     (approach caps, cut shrubs): without the pack their trees are left out."""
     parsed = parse_virtual(path)
     return bool(parsed) and (parsed[1] == "c" or (parsed[1] == "s" and parsed[2] > 0))
+
+
+def is_mantle(path):
+    """True for an edge thicket copy's path (MANTLE_KIND)."""
+    parsed = parse_virtual(path)
+    return bool(parsed) and parsed[1] == MANTLE_KIND
+
+
+def needs_pack(path):
+    """True for copies whose trees are left out, not planted as their full-height original,
+    when the pack cannot be written: capped copies and edge thickets (an original
+    would plant a second full forest along the edge)."""
+    return is_capped(path) or is_mantle(path)
 
 
 def evergreen_virtual_path(path):
@@ -550,6 +735,7 @@ class ForestHeights:
             except OSError:
                 self.exports = {}
         self._stats = {}
+        self._spacing = {}
 
     @property
     def available(self):
@@ -585,6 +771,53 @@ class ForestHeights:
         if bucket is None or source_path(path) not in self.exports:
             return path
         return tinted_virtual_path(path, bucket)
+
+    def spacing(self, path):
+        """Tree spacing (SPACING x, metres) of X-Plane's forest at ``path`` or of a
+        copy of one as it is written, or None when unknown."""
+        parsed = parse_virtual(path)
+        g8_path = source_path(path)
+        key = (g8_path,) + (tuple(parsed[1:]) if parsed else ())
+        if key not in self._spacing:
+            result = None
+            seasons = self.exports.get(g8_path) or {}
+            rel = seasons.get("sum") or seasons.get("") or next(iter(seasons.values()), None)
+            if rel:
+                try:
+                    with open(os.path.join(self.xp_dir, rel), "r", encoding="utf-8",
+                              errors="ignore") as f:
+                        text = f.read()
+                except OSError:
+                    text = None
+                if text is not None and parsed:
+                    kind, height = parsed[1], parsed[2]
+                    stock = self.stock_height(g8_path) if kind == "h" else None
+                    text = (None if kind == "h" and not stock
+                            else self._copy_text(text, kind, height, stock, ""))
+                if text is not None:
+                    for line in text.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[0] == "SPACING":
+                            try:
+                                result = float(parts[1])
+                            except ValueError:
+                                pass
+                            break
+            self._spacing[key] = result
+        return self._spacing[key]
+
+    @staticmethod
+    def _copy_text(text, kind, height, stock, suffix):
+        """The trees of a copy of kind ``kind`` made from the forest ``text``."""
+        if kind == "h":
+            return band_trees(text, height, stock, suffix)
+        if kind == "s":
+            return shrub_trees(text, height or None, suffix)
+        if kind == "c":
+            return cap_trees(text, height, suffix)
+        if kind == MANTLE_KIND:
+            return mantle_trees(text, height, suffix)
+        return text
 
     def stock_height(self, g8_path):
         """Canopy mean height of the forest X-Plane exports at ``g8_path`` (summer), or None."""
@@ -626,6 +859,30 @@ class ForestHeights:
         stats = self.stats(shrub_path)
         level = cap_level(cap_m) if cap_m is not None and stats.max > cap_m + 1e-6 else 0.0
         return band_virtual_path(shrub_path, level, "s")
+
+    def mantle_path_for(self, path, cap_m=None):
+        """The edge thicket copy (MANTLE_KIND) for a forest polygon planted with ``path``
+        (one of X-Plane's climate forests or a copy of one) where no tree may be taller
+        than ``cap_m``; keeps its evergreen / leaf colour. None for other forests, shrubs,
+        and where no thicket fits under the cap."""
+        parsed = parse_virtual(path)
+        source, kind, height = parsed if parsed else (str(path), "", 0.0)
+        if kind in ("s", MANTLE_KIND):
+            return None
+        stock = self.stock_height(source)
+        if stock is None:
+            return None
+        canopy = height if kind == "h" else stock
+        if kind == "c":
+            canopy = min(canopy, height)
+            cap_m = height if cap_m is None else min(cap_m, height)
+        top = mantle_top(canopy, cap_m)
+        if not top:
+            return None
+        parts = _split_virtual(path)
+        evergreen, tint = (_seg_parts(parts[0])[1:] if parts else (False, None))
+        seg = _seg_join(f"{MANTLE_KIND}{_fmt(top)}", evergreen, tint)
+        return f"{VIRTUAL_PREFIX}{seg}/{_copy_name(source)}"
 
     def ensure(self, virtual_paths):
         """Write every copy in ``virtual_paths`` that the pack lacks; False on failure."""
@@ -706,12 +963,7 @@ class ForestHeights:
                 suffix = f"_o4{kind}{_fmt(height)}".replace(".", "p")
                 if evergreen:
                     text = evergreen_text(text)
-                if kind == "h":
-                    text = band_trees(text, height, stock, suffix)
-                elif kind == "s":
-                    text = shrub_trees(text, height or None, suffix)
-                elif kind == "c":
-                    text = cap_trees(text, height, suffix)
+                text = self._copy_text(text, kind, height, stock, suffix)
                 if tint is not None:
                     text = TINT.tint_for_text(text, tint, season)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)

@@ -11,7 +11,7 @@
     --obj: 255,140,40; --fac: 235,70,190; --gh: 170,120,255; --tree: 60,210,90; --scenery: 40,215,235;
     --near: 200,200,200; --filtered: 255,70,70; --resorted: 150,120,255; --blocked: 255,230,40;
     --road: 255,120,170; --noasset: 190,90,255; --dedup: 255,150,40; --smaller: 120,255,120; --seam: 80,170,255; --placedc: 255,255,255; --other: 130,130,130;
-    --treept: 150,255,60; --vegroad: 255,40,220; --vegother: 255,110,40; --vegcanopy: 120,220,255;
+    --treept: 150,255,60; --treeedge: 255,196,40; --vegroad: 255,40,220; --vegother: 255,110,40; --vegcanopy: 120,220,255;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -119,6 +119,7 @@
     { id: "gh", label: "Greenhouses", color: "--gh", on: true },
     { id: "tree", label: "Trees", color: "--tree", on: true },
     { id: "treept", label: "Single trees (one per crown)", color: "--treept", on: true },
+    { id: "treeedge", label: "Forest edge thickets", color: "--treeedge", on: true },
     { id: "placedc", label: "Detected box (before asset fit)", color: "--placedc", on: false, outline: true },
     { id: "smaller", label: "Kept with a smaller asset (box)", color: "--smaller", on: true, outline: true },
   ];
@@ -267,7 +268,7 @@
       const rings = b.t === "obj" ? [b.p] : b.r;
       shapes.push({ layer: isGreenhouse(b.a) ? "gh" : b.t, info: b, rings, bb: bbox(rings) });
     }
-    for (const v of d.veg) shapes.push({ layer: v.pt ? "treept" : "tree", info: v, rings: v.r, bb: bbox(v.r) });
+    for (const v of d.veg) shapes.push({ layer: v.pt ? "treept" : /^o4xp\/forests\/m[0-9]/.test(v.a) ? "treeedge" : "tree", info: v, rings: v.r, bb: bbox(v.r) });
     // Canopy SegFormer found that an exclusion layer then removed.
     for (const [cut, layer] of [["road", "vegRoad"], ["other", "vegOther"], ["canopy", "vegCanopy"]])
       for (const r of (d.vegcut && d.vegcut[cut]) || [])
@@ -392,7 +393,7 @@
     if (im && im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, 4096, 4096);
     if (!hideOverlay) {
       const op = +$("opacity").value, fill = $("lyFill").checked;
-      const order = ["scenery", "vegOther", "vegRoad", "tree", "treept", "obj", "fac", "gh", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "seam", "road", "blocked"];
+      const order = ["scenery", "vegOther", "vegRoad", "tree", "treeedge", "treept", "obj", "fac", "gh", "placedc", "smaller", "other", "resorted", "near", "filtered", "noasset", "dedupAsset", "dedup", "seam", "road", "blocked"];
       const defs = Object.fromEntries([...OUT, ...CAND, ...SCEN].map(d => [d.id, d]));
       for (const layer of order) {
         if (!on(layer)) continue;
@@ -422,9 +423,9 @@
     }
     const nGh = data.bld.filter(b => isGreenhouse(b.a)).length;
     const nObj = data.bld.filter(b => b.t === "obj" && !isGreenhouse(b.a)).length, nFac = data.bld.length - nObj - nGh;
-    const nPt = data.veg.reduce((n, v) => n + (v.pt || 0), 0), nPoly = data.veg.filter(v => !v.pt).length;
+    const nPt = data.veg.reduce((n, v) => n + (v.pt || 0), 0), nPoly = data.veg.filter(v => !v.pt).length, nEdge = data.veg.filter(v => !v.pt && /^o4xp\/forests\/m[0-9]/.test(v.a)).length;
     $("status").textContent =
-      `${meta.label}  ·  ZL${meta.zl}  ·  ${meta.file}  ·  objects ${nObj}  facades ${nFac}  greenhouse pieces ${nGh}  tree polys ${nPoly}  single trees ${nPt}` +
+      `${meta.label}  ·  ZL${meta.zl}  ·  ${meta.file}  ·  objects ${nObj}  facades ${nFac}  greenhouse pieces ${nGh}  tree polys ${nPoly - nEdge}  edge thickets ${nEdge}  single trees ${nPt}` +
       `  ·  zoom ${Math.round(view.s * 100)}%${hideOverlay ? "  ·  TEXTURE ONLY" : ""}`;
   }
 
@@ -527,6 +528,7 @@
       ? `<b class="t">Trees removed by the road exclusion</b><br>canopy within a road's clearance (simHeaven network / OSM roads)`
       : `<b class="t">Trees removed by another exclusion</b><br>SegFormer road/building/developed buffer, existing buildings, water, forests or exclusion zones`;
     const tall = i.h != null ? ` · ~${i.h} m tall` : "";
+    if (s.layer === "treeedge") return `<b>forest edge thicket</b> · shrubs, saplings and young trees up to ~${i.h} m, under the forest's own trees<br>${esc(i.a)}`;
     if (s.layer === "treept") return `<b>single trees</b> · ${i.pt} tree${i.pt > 1 ? "s" : ""}, one per crown${tall}<br>${esc(i.a)}`;
     if (s.layer === "obj") return `<b>object</b><br>${esc(i.a)}`;
     if (s.layer === "gh") return `<b>greenhouse</b><br>${esc(i.a)}`;
