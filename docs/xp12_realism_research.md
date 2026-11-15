@@ -19,7 +19,7 @@ The daytime order is #2 → #4 → #5; #6 stays research only.
 | # | Lever | Kind | Evidence | Effort | Recommendation |
 |---|---|---|---|---|---|
 | 1 | Night lights baked into ortho terrain (`TEXTURE_LIT`) | scenery | Laminar's urban terrain has it, Ortho4XP `.ter` doesn't; prototype built | small–medium | **Parked** (daytime-only user) |
-| 2 | Forest colour matched to the imagery (own forest library) | scenery | canopy hue 115–160°, chroma 11–22 across the hotspots; XP's one leaf colour (124.5°, 19.4) matches Kaohsiung/Shouguang, not Shenzhen (corrected 2026-11-09) | medium | **Shipped 2026-11-09** (`veg_forest_tint`, on by default); in-sim A/B on +22+113 and +22+120 kept it, clearest at RCKH |
+| 2 | Forest colour matched to the imagery (own forest library) | scenery | canopy hue 115–160°, chroma 11–22 across the hotspots; XP's one leaf colour (124.5°, 19.4) matches Kaohsiung/Shouguang, not Shenzhen (corrected 2026-11-09) | medium | Shipped 2026-11-09 (`veg_forest_tint`); in-sim A/B on +22+113 and +22+120 kept it. **Retired 2026-11-16**: imagery with off colours gave unnatural trees. Only the summer forests without the autumn blend stay (`veg_summer_leaves`) |
 | 3 | Night windows on our ProcGen v4 buildings | asset | v4 README: "No night lighting" | medium | **Parked** (daytime-only user) |
 | 4 | Material classes from SegFormer instead of colour rules; weather hooks | scenery | terrain shader reads a weather texture and snow coefficients we never set | medium | After the weather round of the lighting work |
 | 5 | Relief normals from real heights (high-res DEM, canopy/building height rasters) | scenery | the 3" DEM in use is already mostly in the mesh | medium | Only where a ≤10 m DEM or our height rasters exist |
@@ -116,7 +116,9 @@ shadows and exposure, which the sim adds itself, so lightness is left alone.
 **Constraint:** OBJ8/.for has no per-instance tint (`u_imm_a_instance_tint` exists in the shader but isn't
 exposed for forests), so the fix is texture variants.
 
-**Built (2026-11-09, uncommitted): `src/O4_Forest_Tint.py`, setting `veg_forest_tint` (default on).**
+**Retired 2026-11-16.** Some textures have unnatural colours, and the trees matched them. `O4_Forest_Tint`, the 16 buckets and the colour zones were removed; the summer files without `SEASONAL` stayed, as `su` copies in X-Plane's own leaf colour (setting `veg_summer_leaves`, the old `veg_forest_tint` key carries over). It also removed ~14 MB of VRAM per colour in view. What follows is how it was built.
+
+**Built (2026-11-09): `src/O4_Forest_Tint.py`, setting `veg_forest_tint` (default on).**
 - All 175 `1200 forests` files use the same two leaf atlases, so a colour costs 4 textures (3-d +
   billboard, summer + spring): ~14 MB of VRAM per colour in use, written once into `O4XP_Forest_Heights/textures_t<k>`.
 - 16 buckets: hue steps −12/0/+12/+24° × chroma ×1.15/1/0.82/0.66 of X-Plane's leaf colour, ~3 ΔE apart
@@ -219,7 +221,7 @@ mismatch becomes a named complaint.
 
 Daytime only (night items parked 2026-11-09):
 
-1. Forest leaf colours: shipped 2026-11-09 (`veg_forest_tint`, on by default) after the in-sim A/B.
+1. Forest leaf colours: shipped 2026-11-09 after the in-sim A/B, retired 2026-11-16 (unnatural colours where the imagery's were off); summer forests without the autumn blend kept.
 2. Weather round of the lighting work, with class-driven materials and the weather/snow `.ter` inputs.
 3. Height-derived relief from the canopy/HeightNet rasters: shipped 2026-11-09 (§5).
 

@@ -11,16 +11,22 @@ and seasons and only make trees shorter:
     height was measured on the ortho (hedges, young stands, gardens);
   * height caps ``c<level>``: every tree taller than one of CAP_LEVELS_M
     scaled down to it, for approach paths (O4_Approach_Heights);
-  * shrubs ``s<level>``: X-Plane's shrubs planted on a SHRUB_SPACING_M grid
-    (its shrublands use 10 m for 2-6 m shrubs, which reads as a few bushes
-    on grass), cut down to the cap level where one applies (``s0``: none),
-    the grid closing up with them down to SHRUB_MIN_SPACING_M;
+  * shrubs ``s<level>`` (tiles built before shrubs followed the tree rules,
+    2026-11-15): X-Plane's shrubs cut down to the cap level like a ``c``
+    copy (``s0``: none), on their own grid. New builds plant uncut shrubs
+    from X-Plane's own forest and cut ones from its ``c`` copy;
   * evergreen ``ev`` (and ``<kind><height>-ev`` for the copies above): the
     summer file alone, without its SEASONAL autumn texture, exported for
     every season. X-Plane runs its seasons by the calendar of the hemisphere,
     so on the equator its temperate-band forests (which it plants on tropical
     highlands such as Eldoret and Addis Ababa) turn brown in October; its own
-    hot-band forests are already exported like this.
+    hot-band forests are already exported like this;
+  * summer leaves ``su`` (and ``<kind><height>-su``): every season as
+    X-Plane has it, but the summer file without its SEASONAL autumn
+    texture. X-Plane's summer forests blend toward autumn as the season goes
+    on (strongly autumnal by mid-July in the sim). These replaced the leaf
+    colour copies ``t<k>`` (2026-11-09, retired 2026-11-16: imagery with off
+    colours gave unnatural trees), whose paths no longer parse.
 
 A tree's 3-d meshes are modelled at its minimum height (in all of X-Plane's
 forests, mesh top / TREE min height is 1.00-1.02) and X-Plane scales them
@@ -58,7 +64,6 @@ import sys
 import time
 from collections import namedtuple
 
-import O4_Forest_Tint as TINT
 
 PACK_NAME = "O4XP_Forest_Heights"
 VIRTUAL_PREFIX = "o4xp/forests/"
@@ -70,14 +75,19 @@ MIN_GAIN_M = 3.0
 # fits. Finer at the bottom, where the shrubs (O4_Tree_Sizes.shrub_path) are.
 CAP_LEVELS_M = (1.0, 2.0, 3.0, 4.5, 6.0, 7.5) + tuple(float(h) for h in range(9, 34, 3))
 SIGNATURE = "forest-heights-v5"
+# Rule revision of one kind of copy. A change remakes only that kind's copies
+# in the pack (a SIGNATURE change remakes all of them, ~20 GB of copies on a
+# well-used install). Kinds not listed are revision 1.
+#   s 2 (2026-11-15): shrubs keep X-Plane's own grid, like the tree copies.
+KIND_REVISIONS = {"s": 2}
+
+
+def version_text():
+    """What the pack's VERSION_FILE holds for copies made by the current rules."""
+    return "\n".join([SIGNATURE] + [f"{k}={v}" for k, v in sorted(KIND_REVISIONS.items())])
+
 # Densest planting grid of a copy, metres: X-Plane's own small shrubs.
 MIN_SPACING_M = 4.0
-# Shrub copies' grid, metres. X-Plane's shrub crowns are 3-4 m across, so at
-# 4 m they stood apart (RCKH, 2026-10-19: "shrubs sparse"); at 3 m they close
-# into cover. Shrubs cut down under an approach cap have smaller crowns, so
-# the grid shrinks with them (by the shrubs' mean cut), to SHRUB_MIN_SPACING_M.
-SHRUB_SPACING_M = 3.0
-SHRUB_MIN_SPACING_M = 1.5
 # Edge thicket copies ``m<top>`` ("mantle", the shrub and young-tree belt a
 # real forest edge has): planted only in a band along a forest's open edges
 # (O4_Vegetation_Overlay), under the forest's own trees, so the bare trunks
@@ -104,6 +114,7 @@ MANTLE_KIND = "m"
 # Suffix of an evergreen copy's kind, and the kind of a plain evergreen copy.
 EVERGREEN_SUFFIX = "-ev"
 EVERGREEN_KIND = "ev"
+SUMMER_KIND = "su"
 _SEASONAL_RE = re.compile(r"^\s*SEASONAL\s")
 # Forests a copy can be made of: X-Plane's climate forests and its single-species trees.
 _SOURCES = ("lib/g8/", "lib/vegetation/trees/")
@@ -365,12 +376,16 @@ def cap_trees(text, cap_m, mesh_suffix=""):
 
 
 def shrub_trees(text, cap_m=None, mesh_suffix=""):
-    """Shrub copy: planted on a SHRUB_SPACING_M grid, shrubs taller than ``cap_m`` cut down to
-    it and the grid closed up by their mean cut (to SHRUB_MIN_SPACING_M)."""
-    factor_for = ((lambda _layer, _lo, hi: min(1.0, cap_m / hi) if hi > 0 else 1.0) if cap_m
-                  else (lambda _layer, _lo, _hi: 1.0))
-    return scale_trees(text, factor_for, mesh_suffix, spacing_m=SHRUB_SPACING_M,
-                       spacing_min_m=SHRUB_MIN_SPACING_M)
+    """Shrub copy (kind ``s``, kept for tiles that plant them): the tree copies' rule,
+    so shrubs taller than ``cap_m`` are cut down to it and the grid closes up by
+    their mean cut, never under MIN_SPACING_M; X-Plane's own grid otherwise.
+
+    Until 2026-11-15 shrubs were planted on a 3 m grid where X-Plane spaces its
+    shrubs 4-6 m (10 m in the hot bands): up to 11x as many plants.
+    """
+    if cap_m:
+        return cap_trees(text, cap_m, mesh_suffix)
+    return scale_trees(text, lambda _layer, _lo, _hi: 1.0, mesh_suffix)
 
 
 def _mantle_layout(text):
@@ -554,59 +569,47 @@ def _split_virtual(path):
     return parts if len(parts) == 2 else None
 
 
-_TINT_TOKEN_RE = re.compile(r"^t(\d+)$")
-
-
 def _seg_parts(seg):
-    """(base, evergreen, tint bucket or None) of a kind segment.
+    """(base, evergreen, summer leaves) of a kind segment.
 
-    ``<kind><height>`` (h/c/s copies, or nothing), then ``-ev`` for an
-    evergreen copy, then ``-t<k>`` for leaf colour bucket k (O4_Forest_Tint);
-    a copy with no height change is ``ev``, ``t<k>`` or ``ev-t<k>``.
+    ``<kind><height>`` (h/c/s/m copies, or nothing), then ``-ev`` for an
+    evergreen copy or ``-su`` for a summer-leaves one; a copy with no height
+    change is ``ev`` or ``su``.
     """
     tokens = seg.split("-")
     base, mods = tokens[0], tokens[1:]
-    evergreen, tint = False, None
-    if base == EVERGREEN_KIND:
-        base, evergreen = "", True
-    elif _TINT_TOKEN_RE.match(base):
+    if base in (EVERGREEN_KIND, SUMMER_KIND):
         mods.insert(0, base)
         base = ""
-    for tok in mods:
-        m = _TINT_TOKEN_RE.match(tok)
-        if tok == EVERGREEN_SUFFIX[1:]:
-            evergreen = True
-        elif m:
-            tint = int(m.group(1))
-    return base, evergreen, tint
+    return base, EVERGREEN_KIND in mods, SUMMER_KIND in mods
 
 
-def _seg_join(base, evergreen, tint):
+def _seg_join(base, evergreen, summer):
     parts = [base] if base else []
     if evergreen:
-        parts.append(EVERGREEN_KIND)
-    if tint is not None:
-        parts.append(f"t{tint}")
+        parts.append(EVERGREEN_KIND)   # the summer file all year: no autumn blend either
+    elif summer:
+        parts.append(SUMMER_KIND)
     return "-".join(parts)
 
 
 def parse_virtual(path):
-    """(source forest path, kind 'h', 'c', 's', 'm', 'e' or 't', height) of a copy's path, else None.
+    """(source forest path, kind 'h', 'c', 's', 'm', 'e' or 'su', height) of a copy's path, else None.
 
-    An evergreen or tinted copy of an h/c/s copy parses as that copy
-    (is_evergreen / tint_of tell them apart); a plain evergreen copy is kind
-    'e', a plain tinted one kind 't', both height 0.
+    An evergreen or summer-leaves copy of an h/c/s/m copy parses as that copy
+    (is_evergreen / is_summer tell them apart); a plain evergreen copy is kind
+    'e', a plain summer-leaves one kind 'su', both height 0.
     """
     parts = _split_virtual(path)
     if not parts:
         return None
     seg, rest = parts
     source = ("lib/vegetation/" if rest.startswith("trees/") else "lib/g8/") + rest
-    base, evergreen, tint = _seg_parts(seg)
+    base, evergreen, summer = _seg_parts(seg)
     if not base:
         if evergreen:
             return source, "e", 0.0
-        return (source, "t", 0.0) if tint is not None else None
+        return (source, SUMMER_KIND, 0.0) if summer else None
     if len(base) < 2 or base[0] not in "hcs" + MANTLE_KIND:
         return None
     try:
@@ -622,10 +625,10 @@ def is_evergreen(path):
     return bool(parts) and _seg_parts(parts[0])[1]
 
 
-def tint_of(path):
-    """Leaf colour bucket of a copy's path (O4_Forest_Tint.BUCKETS index), else None."""
+def is_summer(path):
+    """True for a summer-leaves copy's path."""
     parts = _split_virtual(path)
-    return _seg_parts(parts[0])[2] if parts else None
+    return bool(parts) and _seg_parts(parts[0])[2]
 
 
 def is_capped(path):
@@ -655,19 +658,72 @@ def evergreen_virtual_path(path):
         return path
     parts = _split_virtual(path)
     if parts:
-        base, _ev, tint = _seg_parts(parts[0])
-        return f"{VIRTUAL_PREFIX}{_seg_join(base, True, tint)}/{parts[1]}"
+        base = _seg_parts(parts[0])[0]
+        return f"{VIRTUAL_PREFIX}{_seg_join(base, True, False)}/{parts[1]}"
     return f"{VIRTUAL_PREFIX}{EVERGREEN_KIND}/{_copy_name(path)}"
 
 
-def tinted_virtual_path(path, bucket):
-    """The copy of an X-Plane forest or of one of its copies with leaf colour ``bucket``."""
+def summer_virtual_path(path):
+    """The summer-leaves copy of an X-Plane forest or of one of its copies (an evergreen
+    copy, which has no autumn blend either, unchanged)."""
     path = str(path)
     parts = _split_virtual(path)
     if parts:
-        base, evergreen, _tint = _seg_parts(parts[0])
-        return f"{VIRTUAL_PREFIX}{_seg_join(base, evergreen, bucket)}/{parts[1]}"
-    return f"{VIRTUAL_PREFIX}t{bucket}/{_copy_name(path)}"
+        base, evergreen, _summer = _seg_parts(parts[0])
+        return f"{VIRTUAL_PREFIX}{_seg_join(base, evergreen, True)}/{parts[1]}"
+    return f"{VIRTUAL_PREFIX}{SUMMER_KIND}/{_copy_name(path)}"
+
+
+# Rare copies (merge_rare_copies). X-Plane loads every forest file a scene
+# references with its own copy of the tree meshes (~60k vertices for a
+# climate forest), so each leaf colour x height x thicket level a tile plants
+# costs a few MB of VRAM however few trees it holds (2026-11-15). An edge
+# thicket level under MERGE_SHARE of its forest's thicket plantings moves to
+# the nearest level the forest keeps at most one level lower (never higher:
+# thickets under runway approaches stay under the cap).
+MERGE_SHARE = 0.05
+MERGE_MANTLE_STEP_M = 1.5
+
+
+def _kept(weights, share):
+    """Members of a group with at least ``share`` of its weight (else its heaviest)."""
+    total = sum(weights.values())
+    kept = {k for k, w in weights.items() if w >= share * total}
+    return kept or {max(weights, key=lambda k: (weights[k], str(k)))}
+
+
+def merge_rare_copies(weights, share=MERGE_SHARE, mantle_step_m=MERGE_MANTLE_STEP_M):
+    """{path: replacement path} for the forest copies in ``weights`` ({path: how much
+    it plants, e.g. area x density}) that are rare in their group.
+
+    Thicket copies of one forest (evergreen and summer-leaves copies apart)
+    form a group; a level under ``share`` of the group's weight moves to the
+    nearest kept level at most ``mantle_step_m`` lower. Other paths, and
+    levels with nowhere close to go, are left alone.
+    """
+    groups = {}
+    for path, w in weights.items():
+        parts = _split_virtual(path)
+        if not parts:
+            continue
+        base, ev, summer = _seg_parts(parts[0])
+        if len(base) < 2 or base[0] != MANTLE_KIND:
+            continue
+        try:
+            level = float(base[1:])
+        except ValueError:
+            continue
+        groups.setdefault((ev, summer, parts[1]), {}).setdefault(level, [0.0, path])[0] += w
+    moves = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        kept = _kept({h: m[0] for h, m in members.items()}, share)
+        for h, (_w, path) in members.items():
+            lower = [k for k in kept if h - mantle_step_m - 1e-9 <= k < h]
+            if h not in kept and lower:
+                moves[path] = members[max(lower)][1]
+    return moves
 
 
 def source_path(path):
@@ -765,12 +821,10 @@ class ForestHeights:
         """The evergreen copy of ``path`` where X-Plane changes it with the seasons, else ``path``."""
         return evergreen_virtual_path(path) if self.is_seasonal(path) else path
 
-    def tint_path(self, path, bucket):
-        """``path`` with leaf colour ``bucket`` (O4_Forest_Tint) when it is one of X-Plane's
-        forests or a copy of one, else ``path``."""
-        if bucket is None or source_path(path) not in self.exports:
-            return path
-        return tinted_virtual_path(path, bucket)
+    def summer_path(self, path):
+        """The summer-leaves copy of ``path`` where X-Plane changes it with the seasons
+        (one of its forests or a copy of one), else ``path``."""
+        return summer_virtual_path(path) if self.is_seasonal(path) else path
 
     def spacing(self, path):
         """Tree spacing (SPACING x, metres) of X-Plane's forest at ``path`` or of a
@@ -852,13 +906,16 @@ class ForestHeights:
         return cap_virtual_path(g8_path, level)
 
     def shrub_path_for(self, shrub_path, cap_m=None):
-        """The shrub copy of ``shrub_path`` (an X-Plane shrub forest) under ``cap_m``, or None
-        when X-Plane has no such forest."""
-        if not self.stats(shrub_path):
-            return None
+        """The shrubs of ``shrub_path`` (an X-Plane shrub forest) under ``cap_m``, or None
+        when X-Plane has no such forest or no shrub fits: the forest itself where its
+        tallest shrub fits under the cap, else its cap copy, as for trees (path_for)."""
         stats = self.stats(shrub_path)
-        level = cap_level(cap_m) if cap_m is not None and stats.max > cap_m + 1e-6 else 0.0
-        return band_virtual_path(shrub_path, level, "s")
+        if not stats:
+            return None
+        if cap_m is None or stats.max <= cap_m + 1e-6:
+            return shrub_path
+        level = cap_level(cap_m)
+        return cap_virtual_path(shrub_path, level) if level else None
 
     def mantle_path_for(self, path, cap_m=None):
         """The edge thicket copy (MANTLE_KIND) for a forest polygon planted with ``path``
@@ -880,8 +937,8 @@ class ForestHeights:
         if not top:
             return None
         parts = _split_virtual(path)
-        evergreen, tint = (_seg_parts(parts[0])[1:] if parts else (False, None))
-        seg = _seg_join(f"{MANTLE_KIND}{_fmt(top)}", evergreen, tint)
+        evergreen, summer = (_seg_parts(parts[0])[1:] if parts else (False, False))
+        seg = _seg_join(f"{MANTLE_KIND}{_fmt(top)}", evergreen, summer)
         return f"{VIRTUAL_PREFIX}{seg}/{_copy_name(source)}"
 
     def ensure(self, virtual_paths):
@@ -897,18 +954,20 @@ class ForestHeights:
                 _link_dir(os.path.join(self.pack_dir, "textures"), os.path.join(self.xp_dir, "textures"))
                 lines = self._read_pack_exports()
                 remade = []
-                if lines and self._pack_version() != SIGNATURE:
+                stale = self._stale_lines(lines)
+                if stale:
                     # Copies from an earlier rule: remade under the same paths,
                     # so tiles built with them pick up the new ones.
-                    remade = sorted({ln.split()[-2] for ln in lines} - set(wanted))
-                    for ln in lines:
+                    stale_paths = {ln.split()[-2] for ln in stale}
+                    remade = sorted(stale_paths - set(wanted))
+                    for ln in stale:
                         try:
                             os.remove(os.path.join(self.pack_dir, ln.split()[-1]))
                         except OSError:
                             pass
-                    self.log(f"  [ForestHeights] remaking {len(remade) + len(wanted)} forest "
+                    self.log(f"  [ForestHeights] remaking {len(stale_paths | set(wanted))} forest "
                              f"copies from an earlier {PACK_NAME}")
-                    lines = []
+                    lines = [ln for ln in lines if ln.split()[-2] not in stale_paths]
                 changed = bool(remade)
                 for virtual in wanted + remade:
                     ok, added = self._write_copy(virtual, lines)
@@ -917,9 +976,9 @@ class ForestHeights:
                     changed |= added
                 if changed or not os.path.isfile(os.path.join(self.pack_dir, "library.txt")):
                     self._write_library(lines)
-                if self._pack_version() != SIGNATURE:
+                if self._pack_version() != version_text():
                     with open(os.path.join(self.pack_dir, VERSION_FILE), "w", encoding="utf-8") as f:
-                        f.write(SIGNATURE + "\n")
+                        f.write(version_text() + "\n")
             return True
         except (OSError, TimeoutError) as exc:
             self.log(f"  [ForestHeights] could not write {PACK_NAME} ({exc})")
@@ -933,14 +992,7 @@ class ForestHeights:
             return False, False
         g8_path, kind, height = parsed
         evergreen = is_evergreen(virtual)
-        tint = tint_of(virtual)
-        if tint is not None:
-            if not 0 <= tint < len(TINT.BUCKETS):
-                self.log(f"  [ForestHeights] no leaf colour {tint}: {virtual}")
-                return False, False
-            if tint != TINT.STOCK:
-                TINT.write_textures(os.path.join(self.xp_dir, "textures"),
-                                    os.path.join(self.pack_dir, TINT.texture_dir(tint)), tint)
+        summer = is_summer(virtual)
         seasons = self.exports.get(g8_path)
         stock = self.stock_height(g8_path) if kind == "h" else None
         if not seasons or (kind == "h" and not stock):
@@ -961,11 +1013,9 @@ class ForestHeights:
                           errors="ignore", newline="") as f:
                     text = f.read()
                 suffix = f"_o4{kind}{_fmt(height)}".replace(".", "p")
-                if evergreen:
+                if evergreen or (summer and season == "sum"):
                     text = evergreen_text(text)
                 text = self._copy_text(text, kind, height, stock, suffix)
-                if tint is not None:
-                    text = TINT.tint_for_text(text, tint, season)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 tmp = dst + ".tmp"
                 with open(tmp, "w", encoding="utf-8", newline="") as f:
@@ -984,6 +1034,24 @@ class ForestHeights:
                 return f.read().strip()
         except OSError:
             return None
+
+    def _stale_lines(self, lines):
+        """The export lines of copies made by an earlier rule: all of them after a
+        SIGNATURE change, else those of the kinds whose KIND_REVISIONS moved on."""
+        if not lines:
+            return []
+        rows = (self._pack_version() or "").splitlines()
+        if not rows or rows[0].strip() != SIGNATURE:
+            return list(lines)
+        revs = {}
+        for row in rows[1:]:
+            kind, _eq, rev = row.strip().partition("=")
+            if rev.strip().isdigit():
+                revs[kind.strip()] = int(rev)
+        kinds = {k for k, v in KIND_REVISIONS.items() if revs.get(k, 1) != v}
+        if not kinds:
+            return []
+        return [ln for ln in lines if (parse_virtual(ln.split()[-2]) or ("", ""))[1] in kinds]
 
     def _read_pack_exports(self):
         lib = os.path.join(self.pack_dir, "library.txt")

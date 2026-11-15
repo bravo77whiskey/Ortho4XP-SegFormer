@@ -99,16 +99,18 @@ class MantleCopyTests(unittest.TestCase):
             self.assertEqual(fh.mantle_path_for("lib/g8/broad_tmp_wet.for", 5.0),
                              "o4xp/forests/m4.5/broad_tmp_wet.for")
             self.assertIsNone(fh.mantle_path_for("lib/g8/broad_tmp_wet.for", 2.0))
-            self.assertEqual(fh.mantle_path_for("o4xp/forests/ev-t3/broad_tmp_wet.for"),
-                             "o4xp/forests/m9-ev-t3/broad_tmp_wet.for")
+            self.assertEqual(fh.mantle_path_for("o4xp/forests/ev/broad_tmp_wet.for"),
+                             "o4xp/forests/m9-ev/broad_tmp_wet.for")
+            self.assertEqual(fh.mantle_path_for("o4xp/forests/su/broad_tmp_wet.for"),
+                             "o4xp/forests/m9-su/broad_tmp_wet.for")
             self.assertIsNone(fh.mantle_path_for("o4xp/forests/s0/trees/x/shrubs.for"))
             self.assertIsNone(fh.mantle_path_for("simheaven/forests/x.for"))
             path = "o4xp/forests/m9/broad_tmp_wet.for"
             self.assertEqual(FH.parse_virtual(path), ("lib/g8/broad_tmp_wet.for", "m", 9.0))
             self.assertTrue(FH.is_mantle(path) and FH.needs_pack(path) and not FH.is_capped(path))
-            tinted = fh.tint_path(path, 3)
-            self.assertEqual(tinted, "o4xp/forests/m9-t3/broad_tmp_wet.for")
-            self.assertEqual(FH.evergreen_virtual_path(tinted), "o4xp/forests/m9-ev-t3/broad_tmp_wet.for")
+            summer = fh.summer_path(path)
+            self.assertEqual(summer, "o4xp/forests/m9-su/broad_tmp_wet.for")
+            self.assertEqual(FH.evergreen_virtual_path(summer), "o4xp/forests/m9-ev/broad_tmp_wet.for")
             # The pack writes it like the other copies.
             self.assertTrue(fh.ensure([path]))
             lib = open(os.path.join(fh.pack_dir, "library.txt")).read()

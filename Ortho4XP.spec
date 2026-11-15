@@ -67,7 +67,6 @@ OVERLAY_MODULES = [
     "O4_Forest_Spacing",
     "O4_Forest_Stands",
     "O4_Forest_Heights",
-    "O4_Forest_Tint",
     "O4_GPU_Budget",
     "O4_Grass_Overlay",
     "O4_Greenhouse_Map",

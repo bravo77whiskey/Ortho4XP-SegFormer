@@ -33,7 +33,7 @@ NEW_VARS = (
     "veg_forest_stand_m",
     "veg_approach_heights",
     "veg_tropics_evergreen",
-    "veg_forest_tint",
+    "veg_summer_leaves",
     "veg_upscale_gap_trees",
     "veg_osm_rescue_rangeland",
     "veg_texture_tree_check",

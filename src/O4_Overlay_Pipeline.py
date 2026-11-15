@@ -320,8 +320,9 @@ def _veg_tree_env():
         "O4_VEG_FOREST_STAND_M": repr(max(5.0, float(veg_forest_stand_m))),
         "O4_VEG_APPROACH_HEIGHTS": "1" if veg_approach_heights else "0",
         "O4_VEG_TROPICS_EVERGREEN": "1" if veg_tropics_evergreen else "0",
-        "O4_VEG_FOREST_TINT": "1" if veg_forest_tint else "0",
+        "O4_VEG_SUMMER_LEAVES": "1" if veg_summer_leaves else "0",
         "O4_VEG_FOREST_EDGES": "1" if veg_forest_edges else "0",
+        "O4_VEG_MERGE_RARE_COPIES": "1" if veg_merge_rare_copies else "0",
         "O4_VEG_FOREST_EDGE_M": repr(max(1.0, float(veg_forest_edge_m))),
         "O4_VEG_FOREST_EDGE_INSET_M": repr(max(0.0, float(veg_forest_edge_inset_m))),
         "O4_VEG_UPSCALE_TREES": "1" if veg_upscale_gap_trees else "0",
@@ -366,8 +367,9 @@ veg_forest_stands = True    # those heights measured per irregular stand, not pe
 veg_forest_stand_m = 25.0   # stand width
 veg_approach_heights = True  # trees under runway approaches below the approach surface
 veg_tropics_evergreen = True  # no autumn colours between the tropics
-veg_forest_tint = True  # leaf colour matched to the ortho canopy, no summer autumn blend
+veg_summer_leaves = True  # summer forests without X-Plane's blend toward autumn colours
 veg_forest_edges = True  # shrub and young-tree thicket along forest edges, hides bare trunks
+veg_merge_rare_copies = True  # rare thicket heights join a near one the tile uses (VRAM)
 veg_forest_edge_m = 6.0  # its mean width
 veg_forest_edge_inset_m = 0.0  # full-size trees kept this far in from open edges
 veg_upscale_gap_trees = True   # up to ZL16: add the trees SegFormer finds on the texture enlarged 2x

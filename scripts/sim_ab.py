@@ -12,8 +12,8 @@ saved situation (Reload Scenery is not trusted to pick up every change).
     python scripts/sim_ab.py mat relief-fix|canopy|canopy-half|long|longer --tile +22+120
     python scripts/sim_ab.py trees-build --tile +22+120  (after build)
     python scripts/sim_ab.py trees off|on      --tile +22+120
-    python scripts/sim_ab.py tint-build [off|on] --tile +22+120   (after build)
-    python scripts/sim_ab.py tint off|on       --tile +22+120
+    python scripts/sim_ab.py summer-build [off|on] --tile +22+120   (after build)
+    python scripts/sim_ab.py summer off|on     --tile +22+120
     python scripts/sim_ab.py edges-build [off|on] --tile +22+120  (after build)
     python scripts/sim_ab.py edges off|on      --tile +22+120
     python scripts/sim_ab.py status    --tile +22+120
@@ -62,14 +62,13 @@ goes back to the maps as built.  'relief-fix' is the as-built relief with its
 north-south sign fixed; after canopy-heights, 'canopy' and 'canopy-half' add
 the slopes of the canopy-height model's surface on ZL18/19 textures.
 
-tint-build regenerates the whole tile's trees with THIS checkout's vegetation
-overlay, twice: 'off' = X-Plane's one leaf colour (veg_forest_tint off), 'on'
-= each forest in the leaf colour nearest the canopy on the ortho, summer
-forests without the autumn blend (O4_Forest_Tint).  Everything else is the
-installed settings, so the two differ only in leaf colour.  The tinted
-copies and their atlases go into the same O4XP_Forest_Heights library under
---out.  A tint swap replaces the whole veg DSF (grass inside an old tile's
-veg DSF is not rebuilt).
+summer-build regenerates the whole tile's trees with THIS checkout's vegetation
+overlay, twice: 'off' = X-Plane's own forests, whose summer blends toward
+autumn as the season goes on, 'on' = their summer-leaves copies without that
+blend (veg_summer_leaves).  Everything else is the installed settings.  The
+copies go into the same O4XP_Forest_Heights library under --out.  A summer
+swap replaces the whole veg DSF (grass inside an old tile's veg DSF is not
+rebuilt).
 
 edges-build does the same with the forest edge thickets as the only
 difference: 'off' = veg_forest_edges off, 'on' = shrubs and young trees
@@ -686,7 +685,7 @@ def cmd_trees_build(n, args):
     print(f"trees built in {time.time() - t0:.0f}s; swapped to 'trees off'")
 
 
-TINT_VARIANTS = {"off": {"O4_VEG_FOREST_TINT": "0"}, "on": {"O4_VEG_FOREST_TINT": "1"}}
+SUMMER_VARIANTS = {"off": {"O4_VEG_SUMMER_LEAVES": "0"}, "on": {"O4_VEG_SUMMER_LEAVES": "1"}}
 
 
 def installed_veg_env():
@@ -711,10 +710,10 @@ def installed_veg_env():
     return {k: v for k, v in PIPELINE._veg_tree_env().items() if k.startswith(("O4_VEG_", "O4_CANOPY_"))}
 
 
-def cmd_tint_build(n, args):
-    build_whole_tile_variants(n, args, "tint", TINT_VARIANTS)
-    set_tint(n, "off")
-    print("swapped to 'tint off'")
+def cmd_summer_build(n, args):
+    build_whole_tile_variants(n, args, "summer", SUMMER_VARIANTS)
+    set_summer(n, "off")
+    print("swapped to 'summer off'")
 
 
 EDGE_VARIANTS = {"off": {"O4_VEG_FOREST_EDGES": "0"}, "on": {"O4_VEG_FOREST_EDGES": "1"}}
@@ -768,14 +767,14 @@ def build_whole_tile_variants(n, args, name, variants):
 def set_whole_tile(n, name, mode):
     shutil.copyfile(os.path.join(n.ab, f"veg_{name}_{mode}.dsf"), n.veg_dsf(n.veg_dir))
     state = load_state(n)
-    for k in ("trees", "grass", "tint", "edges"):    # these variants carry the whole tile's trees
+    for k in ("trees", "grass", "summer", "edges"):    # these variants carry the whole tile's trees
         state.pop(k, None)
     state[name] = mode
     save_state(n, state)
 
 
-def set_tint(n, mode):
-    set_whole_tile(n, "tint", mode)
+def set_summer(n, mode):
+    set_whole_tile(n, "summer", mode)
 
 
 def set_edges(n, mode):
@@ -787,7 +786,7 @@ def set_trees(n, mode):
     state = load_state(n)
     state["trees"] = mode
     state["grass"] = "on"                            # the trees variants keep the built grass
-    state.pop("tint", None)
+    state.pop("summer", None)
     state.pop("edges", None)
     save_state(n, state)
 
@@ -798,7 +797,7 @@ def set_grass(n, mode):
     state = load_state(n)
     state["grass"] = mode
     state.pop("trees", None)                         # the grass variants carry the trees as built
-    state.pop("tint", None)
+    state.pop("summer", None)
     state.pop("edges", None)
     save_state(n, state)
 
@@ -827,7 +826,7 @@ def cmd_status(n, args):
     if not s:
         sys.exit("not built")
     print(f"tile {n.tile}: grass {s.get('grass')}, material maps {s.get('mat')}, "
-          f"trees {s.get('trees', 'as built')}, tint {s.get('tint', 'as built')}, "
+          f"trees {s.get('trees', 'as built')}, summer {s.get('summer', 'as built')}, "
           f"edges {s.get('edges', 'as built')}"
           f" ({'installed' if s.get('installed') else 'NOT installed'}); GPU memory used {gpu_memory()}")
 
@@ -973,7 +972,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command", choices=["build", "install", "uninstall", "status", "grass", "mat", "mat-build",
                                         "canopy-heights", "building-heights",
-                                        "trees-build", "trees", "tint-build", "tint",
+                                        "trees-build", "trees", "summer-build", "summer",
                                         "edges-build", "edges"])
     ap.add_argument("mode", nargs="?")
     ap.add_argument("--tile", required=True, help="e.g. +22+120")
@@ -981,28 +980,28 @@ def main():
     ap.add_argument("--custom-scenery", default=DEFAULT_CS)
     args = ap.parse_args()
     n = Names(args)
-    if args.command in ("grass", "mat", "trees", "tint", "edges"):
+    if args.command in ("grass", "mat", "trees", "summer", "edges"):
         modes = {"grass": ("on", "off"), "mat": ("2048", "1024", "off") + tuple(MAT_TESTS), "trees": ("off", "on"),
-                 "tint": ("off", "on"), "edges": ("off", "on")}[args.command]
+                 "summer": ("off", "on"), "edges": ("off", "on")}[args.command]
         if args.mode not in modes:
             sys.exit(f"{args.command} needs one of: {' '.join(modes)}")
         if not load_state(n):
             sys.exit("build first")
         if args.command == "trees" and not os.path.isfile(os.path.join(n.ab, "veg_trees_on.dsf")):
             sys.exit("trees-build first")
-        if args.command == "tint" and not os.path.isfile(os.path.join(n.ab, "veg_tint_on.dsf")):
-            sys.exit("tint-build first")
+        if args.command == "summer" and not os.path.isfile(os.path.join(n.ab, "veg_summer_on.dsf")):
+            sys.exit("summer-build first")
         if args.command == "edges" and not os.path.isfile(os.path.join(n.ab, f"veg_edges_{args.mode}.dsf")):
             sys.exit("edges-build first")
         if args.command == "mat" and not os.path.isdir(os.path.join(n.ab, f"ter_{args.mode}")):
             sys.exit("mat-build first")
-        {"grass": set_grass, "mat": set_mat, "trees": set_trees, "tint": set_tint,
+        {"grass": set_grass, "mat": set_mat, "trees": set_trees, "summer": set_summer,
          "edges": set_edges}[args.command](n, args.mode)
         cmd_status(n, args)
         print("now restart X-Plane (or start it) to load this variant")
         return
     {"build": cmd_build, "install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status,
-     "trees-build": cmd_trees_build, "tint-build": cmd_tint_build, "edges-build": cmd_edges_build,
+     "trees-build": cmd_trees_build, "summer-build": cmd_summer_build, "edges-build": cmd_edges_build,
      "mat-build": cmd_mat_build, "canopy-heights": cmd_canopy_heights,
      "building-heights": cmd_building_heights}[args.command](n, args)
 

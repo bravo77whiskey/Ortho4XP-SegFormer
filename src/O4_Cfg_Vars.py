@@ -762,18 +762,15 @@ cfg_tile_vars = {
                 "temperate-band forests (planted on tropical highlands) turn "
                 "autumn brown in October. Uses the O4XP_Forest_Heights pack.",
     },
-    "veg_forest_tint": {
+    "veg_summer_leaves": {
         "type": bool,
         "default": True,
-        "short_name": "veg_tint",
-        "hint": "Give each forest the leaf colour nearest the canopy on the ortho "
-                "under it: one of 16 recoloured copies of X-Plane's summer and "
-                "spring leaf textures (greener, yellower, more or less "
-                "saturated; lightness unchanged), so the trees blend with the "
-                "photo instead of sitting on it in X-Plane's one green. Summer "
-                "forests also lose X-Plane's blend toward autumn colours. Uses "
-                "the O4XP_Forest_Heights pack (about 14 MB of textures per "
-                "colour used).",
+        "short_name": "veg_summer",
+        "hint": "Keep summer forests green all summer. X-Plane's summer forests "
+                "blend toward their autumn colours as the season goes on "
+                "(strongly autumnal by mid-July); copies of them in X-Plane's "
+                "own leaf colour leave the blend out. Uses the "
+                "O4XP_Forest_Heights pack.",
     },
     "veg_forest_edges": {
         "type": bool,
@@ -785,6 +782,16 @@ cfg_tile_vars = {
                 "X-Plane's trees are hidden when seen from an angle. The "
                 "inside of the forest is unchanged. Uses the "
                 "O4XP_Forest_Heights pack.",
+    },
+    "veg_merge_rare_copies": {
+        "type": bool,
+        "default": True,
+        "short_name": "veg_merge",
+        "hint": "Save video memory: X-Plane loads a full set of 3-d tree "
+                "meshes (a few MB) for every forest height and edge thicket "
+                "height a tile plants, however few trees use it. A thicket "
+                "height that plants under 5 % of its forest's thicket on a "
+                "tile takes the next lower one the tile already uses.",
     },
     "veg_forest_edge_m": {
         "type": float,
@@ -1231,8 +1238,9 @@ list_veg_vars = [
     "veg_forest_stand_m",
     "veg_approach_heights",
     "veg_tropics_evergreen",
-    "veg_forest_tint",
+    "veg_summer_leaves",
     "veg_forest_edges",
+    "veg_merge_rare_copies",
     "veg_forest_edge_m",
     "veg_forest_edge_inset_m",
     "veg_upscale_gap_trees",
@@ -1398,8 +1406,9 @@ settings_sections = (
                                      "veg_tree_sizes", "veg_forest_heights",
                                      "veg_forest_stands", "veg_forest_stand_m",
                                      "veg_approach_heights", "veg_tropics_evergreen",
-                                     "veg_forest_tint", "veg_forest_edges",
-                                     "veg_forest_edge_m", "veg_forest_edge_inset_m")),
+                                     "veg_summer_leaves", "veg_forest_edges",
+                                     "veg_forest_edge_m", "veg_forest_edge_inset_m",
+                                     "veg_merge_rare_copies")),
         ("Tree types", ("veg_use_leaf_type_maps", "veg_use_xp_forests")),
         ("Other scenery", ("veg_use_simheaven", "veg_avoid_simheaven_buildings",
                            "veg_simheaven_building_buffer_m", "veg_avoid_simheaven_forests",

@@ -119,6 +119,9 @@ _KEY_ALIASES = {
     "bld_o4sfr_library_assets": "bld_asset_mode",
     "bld_o4sfr_assets": "bld_asset_mode",
     "bld_assets": "bld_asset_mode",
+    # Leaf colours matched to the ortho were retired on 2026-11-16; what is
+    # left of that setting is the summer forests without an autumn blend.
+    "veg_forest_tint": "veg_summer_leaves",
 }
 # Morphology radii once stored as ZL16 kernel pixels (~2 m/px), now metres.
 _PIXEL_RADIUS_ALIASES = {

@@ -224,19 +224,21 @@ class ForestHeightTests(unittest.TestCase):
         scaled = FOREST_HEIGHTS.scale_canopy(_FOR.replace("0.5 0 0.25", "0.5 0.00000001 0.25"), 0.5)
         self.assertNotRegex(scaled, r"\de-")
 
-    def test_shrub_copies_plant_on_a_close_grid(self):
+    def test_shrub_copies_follow_the_tree_rules(self):
+        # Until 2026-11-15 shrubs were planted on a 3 m grid at full density.
         shrubs = _FOR.replace("SPACING\t12 12", "SPACING\t10 10\nRANDOM\t4 4")
-        dense = FOREST_HEIGHTS.shrub_trees(shrubs, None, "_o4s0")
-        self.assertIn("SPACING\t3\t3", dense)
-        self.assertIn("RANDOM\t1.2\t1.2", dense)
-        self.assertEqual(FOREST_HEIGHTS.max_tree_height(dense), 26.0)      # no cap: heights kept
-        # Cut down, the shrubs' crowns shrink and their grid closes up with them.
+        stock = FOREST_HEIGHTS.shrub_trees(shrubs, None, "_o4s0")
+        self.assertIn("SPACING\t10 10", stock)                             # X-Plane's own grid
+        self.assertIn("RANDOM\t4 4", stock)
+        self.assertEqual(FOREST_HEIGHTS.max_tree_height(stock), 26.0)      # no cap: heights kept
+        # Cut down, the grid closes up like a tree cap copy, never under MIN_SPACING_M.
         capped = FOREST_HEIGHTS.shrub_trees(shrubs, 3.0, "_o4s3")
         self.assertEqual(FOREST_HEIGHTS.max_tree_height(capped), 3.0)
-        self.assertIn("SPACING\t1.5\t1.5", capped)                         # held at the floor
+        self.assertIn(f"SPACING\t{FOREST_HEIGHTS._fmt(FOREST_HEIGHTS.MIN_SPACING_M)}", capped)
+        self.assertEqual(capped, FOREST_HEIGHTS.cap_trees(shrubs, 3.0, "_o4s3"))
         half = FOREST_HEIGHTS.shrub_trees(shrubs, 13.0, "_o4s13")
         grid = float([ln for ln in half.splitlines() if ln.startswith("SPACING")][0].split()[1])
-        self.assertAlmostEqual(grid, 3 * (13 / 20 + 13 / 26) / 2, places=1)
+        self.assertAlmostEqual(grid, 10 * (13 / 20 + 13 / 26) / 2, places=1)
         self.assertEqual(FOREST_HEIGHTS.parse_virtual("o4xp/forests/s0/trees/deciduous/shrubs_small.for"),
                          ("lib/vegetation/trees/deciduous/shrubs_small.for", "s", 0.0))
 
@@ -312,7 +314,54 @@ class ForestHeightTests(unittest.TestCase):
             self.assertIn("o4xp/forests/h9/broad_tmp_wet.for\twin_h9/broad_tmp.for", lib)
             self.assertIn("o4xp/forests/c6/broad_tmp_wet.for", lib)
             self.assertEqual(open(os.path.join(pack, FOREST_HEIGHTS.VERSION_FILE)).read().strip(),
-                             FOREST_HEIGHTS.SIGNATURE)
+                             FOREST_HEIGHTS.version_text())
+
+    def test_a_kind_revision_remakes_only_that_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            xp = os.path.join(tmp, "xp")
+            cs = os.path.join(tmp, "Custom Scenery")
+            os.makedirs(cs)
+            _fake_xp(xp)
+            pack = os.path.join(cs, FOREST_HEIGHTS.PACK_NAME)
+            for sub in ("sum_h9", "sum_s0"):
+                os.makedirs(os.path.join(pack, sub))
+                with open(os.path.join(pack, sub, "broad_tmp.for"), "w") as f:
+                    f.write("SPACING\t3\t3\n")   # a shrub copy on the old 3 m grid
+            with open(os.path.join(pack, "library.txt"), "w") as f:
+                f.write("A\n1200\nLIBRARY\n\n"
+                        "EXPORT_SEASON sum\to4xp/forests/h9/broad_tmp_wet.for\tsum_h9/broad_tmp.for\n"
+                        "EXPORT_SEASON sum\to4xp/forests/s0/broad_tmp_wet.for\tsum_s0/broad_tmp.for\n")
+            with open(os.path.join(pack, FOREST_HEIGHTS.VERSION_FILE), "w") as f:
+                f.write(FOREST_HEIGHTS.SIGNATURE + "\n")   # before KIND_REVISIONS
+            fh = FOREST_HEIGHTS.ForestHeights(cs, log=lambda *a: None, xp_dir=xp)
+            self.assertTrue(fh.ensure(["o4xp/forests/c6/broad_tmp_wet.for"]))
+            kept = open(os.path.join(pack, "sum_h9", "broad_tmp.for")).read()
+            self.assertEqual(kept, "SPACING\t3\t3\n")      # other kinds untouched
+            shrubs = open(os.path.join(pack, "sum_s0", "broad_tmp.for")).read()
+            self.assertIn("SPACING\t12 12", shrubs)           # remade: X-Plane's grid
+            lib = open(os.path.join(pack, "library.txt")).read()
+            for path in ("h9", "s0", "c6"):
+                self.assertIn(f"o4xp/forests/{path}/broad_tmp_wet.for", lib)
+            self.assertEqual(open(os.path.join(pack, FOREST_HEIGHTS.VERSION_FILE)).read().strip(),
+                             FOREST_HEIGHTS.version_text())
+            # Up to date: nothing is remade.
+            with open(os.path.join(pack, "sum_s0", "broad_tmp.for"), "w") as f:
+                f.write("marker")
+            self.assertTrue(fh.ensure(["o4xp/forests/c9/broad_tmp_wet.for"]))
+            self.assertEqual(open(os.path.join(pack, "sum_s0", "broad_tmp.for")).read(), "marker")
+
+    def test_shrubs_that_fit_plant_x_planes_own_forest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            xp = os.path.join(tmp, "xp")
+            cs = os.path.join(tmp, "Custom Scenery")
+            os.makedirs(cs)
+            _fake_xp(xp)
+            fh = FOREST_HEIGHTS.ForestHeights(cs, log=lambda *a: None, xp_dir=xp)
+            src = "lib/g8/broad_tmp_wet.for"          # tallest tree 26 m
+            self.assertEqual(fh.shrub_path_for(src), src)
+            self.assertEqual(fh.shrub_path_for(src, 30.0), src)
+            self.assertEqual(fh.shrub_path_for(src, 6.0), "o4xp/forests/c6/broad_tmp_wet.for")
+            self.assertIsNone(fh.shrub_path_for("lib/g8/none_tmp_wet.for", 6.0))
 
     def test_evergreen_copies_keep_the_summer_forest_all_year(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -468,7 +517,7 @@ class OverlayHookTests(unittest.TestCase):
         polys = self._capped(mask, None, forest_heights=_CapCopies(), forest_height_map=hmap)
         self.assertTrue(polys)
         for path, den, _r in polys:
-            self.assertIn("/s0/", path)
+            self.assertTrue(path.startswith("lib/vegetation/trees/deciduous/shrubs_"), msg=path)
             self.assertLess(den, VEG.LINE_MODE)   # filled shrubs, not a ring
 
     def test_capped_forests_take_the_cap_copy(self):
@@ -487,12 +536,13 @@ class OverlayHookTests(unittest.TestCase):
         mask[20:180, 20:180] = 1
         hmap = np.full(mask.shape, 3.8, np.float32)
         polys = self._capped(mask, None, forest_heights=_CapCopies(), forest_height_map=hmap)
-        self.assertEqual({p for p, _d, _r in polys}, {"o4xp/forests/s0/trees/deciduous/shrubs_medium.for"})
-        # Shrubs plant at the full-forest density, whatever the woodland thinning.
-        self.assertEqual({d for _p, d, _r in polys}, {VEG._BASE_DENSITY['tree'][100]})
+        # X-Plane's own shrubs, no copy, at the density the trees get.
+        self.assertEqual({p for p, _d, _r in polys}, {"lib/vegetation/trees/deciduous/shrubs_medium.for"})
+        shrub_den = {d for _p, d, _r in polys}
         hmap[:] = 8.0                         # a tree band: not shrubs
         polys = self._capped(mask, None, forest_heights=_CapCopies(), forest_height_map=hmap)
         self.assertEqual({p for p, _d, _r in polys}, {"lib/g8/broad_tmp_wet.for"})
+        self.assertEqual(shrub_den, {d for _p, d, _r in polys})
 
     def test_capped_forests_under_the_shrub_limit_become_shrubs(self):
         mask = np.zeros((200, 200), np.uint8)
@@ -500,7 +550,7 @@ class OverlayHookTests(unittest.TestCase):
         polys = self._capped(mask, 6.0)          # shrubs_medium fits even without copies
         self.assertEqual({p for p, _d, _r in polys}, {"lib/vegetation/trees/deciduous/shrubs_medium.for"})
         polys = self._capped(mask, 2.0, forest_heights=_CapCopies())
-        self.assertEqual({p for p, _d, _r in polys}, {"o4xp/forests/s2/trees/deciduous/shrubs_small.for"})
+        self.assertEqual({p for p, _d, _r in polys}, {"o4xp/forests/c2/trees/deciduous/shrubs_small.for"})
         polys = self._capped(mask, 2.0, forest_heights=_CapCopies(), density_override_=0.4)
         self.assertEqual({d for _p, d, _r in polys}, {102})
 
@@ -561,8 +611,9 @@ class _CapCopies:
         return FOREST_HEIGHTS.cap_virtual_path(path, FOREST_HEIGHTS.cap_level(cap_m))
 
     def shrub_path_for(self, path, cap_m=None):
-        level = FOREST_HEIGHTS.cap_level(cap_m) if cap_m is not None else 0.0
-        return FOREST_HEIGHTS.band_virtual_path(path, level, "s")
+        if cap_m is None:
+            return path
+        return FOREST_HEIGHTS.cap_virtual_path(path, FOREST_HEIGHTS.cap_level(cap_m))
 
 
 class CapZoneTests(unittest.TestCase):
