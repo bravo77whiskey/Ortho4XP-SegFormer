@@ -136,6 +136,62 @@ class AirportPriorityTest(unittest.TestCase):
         self.assertEqual(second[0].pack, "Airport_B")
 
 
+class BoundarySanityTest(unittest.TestCase):
+    """A boundary that misses the runways (KMSP's pack draws one round the
+    terminal) gives way to the outline of the pavement and runway strips."""
+
+    def _airport(self, path):
+        return {icao: (pav, bnd, rwy) for icao, pav, bnd, rwy in APT.parse_airports(path)}["TEST"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        # The same field with its boundary moved 3 km north, off the runway.
+        self.off = os.path.join(self.tmp.name, "off.dat")
+        _write(self.off, APT_DAT.replace("111 9.99", "111 10.02").replace("111 10.01", "111 10.04")
+               .replace("113 10.01", "113 10.04"))
+        self.good = os.path.join(self.tmp.name, "good.dat")
+        _write(self.good, APT_DAT)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_good_boundary_is_kept(self):
+        pav, bnd, rwy = self._airport(self.good)
+        self.assertAlmostEqual(APT.boundary_runway_share(bnd, rwy, 10.0), 1.0, places=3)
+        self.assertIs(APT.usable_boundaries("TEST", pav, bnd, rwy, 10.0, log=lambda *_: None), bnd)
+
+    def test_boundary_off_the_runways_becomes_the_outline(self):
+        pav, bnd, rwy = self._airport(self.off)
+        self.assertEqual(APT.boundary_runway_share(bnd, rwy, 10.0), 0.0)
+        msgs = []
+        out = APT.usable_boundaries("TEST", pav, bnd, rwy, 10.0, log=msgs.append)
+        self.assertEqual(len(out), 1)
+        self.assertIn("0% of the runways", msgs[0])
+        outer = np.array(out[0][0])
+        kx = 111320 * math.cos(math.radians(10))
+        # North: the apron (to 10.003); south: the 30 m runway's 140 m strip;
+        # 60 m of strip past each end.
+        self.assertAlmostEqual(outer[:, 1].max(), 10.003, places=6)
+        self.assertAlmostEqual((10.0 - outer[:, 1].min()) * 110574, 140.0, delta=1)
+        self.assertAlmostEqual((20.0 - outer[:, 0].min()) * kx, 60.0, delta=1)
+        self.assertAlmostEqual((outer[:, 0].max() - 20.01) * kx, 60.0, delta=1)
+
+    def test_small_runway_gets_the_narrow_strip(self):
+        path = os.path.join(self.tmp.name, "small.dat")
+        _write(path, open(self.off, encoding="utf-8").read().replace("100 30.00", "100 18.00"))
+        pav, bnd, rwy = self._airport(path)
+        outer = np.array(APT.usable_boundaries("TEST", pav, bnd, rwy, 10.0, log=lambda *_: None)[0][0])
+        self.assertAlmostEqual((10.0 - outer[:, 1].min()) * 110574, 40.0, delta=1)
+
+    def test_loader_applies_it(self):
+        xp = self.tmp.name
+        cs = os.path.join(xp, "Custom Scenery")
+        _write(os.path.join(cs, "Field", "Earth nav data", "apt.dat"), open(self.off, encoding="utf-8").read())
+        _write(os.path.join(cs, "scenery_packs.ini"), "I\n1000 Version\nSCENERY\n\nSCENERY_PACK Custom Scenery/Field/\n")
+        found = APT.airports_near(xp, 10.0, 20.005, 5000.0, log=lambda *_: None)
+        self.assertEqual(APT.boundary_runway_share(found[0].boundaries, found[0].runways, 10.0), 1.0)
+
+
 DSF_TEXT = """POLYGON_DEF lib/airport/pavement/asphalt_2L.pol
 POLYGON_DEF lib/vegetation/forests/broadleaves/warm.for
 POLYGON_DEF local/apron.pol

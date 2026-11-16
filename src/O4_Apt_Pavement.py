@@ -14,7 +14,9 @@ Per airport:
       - row 102 helipads: their rectangle;
       - row 110 pavement (taxiways, aprons, shoulders): its boundary loops,
         Bezier edges sampled; the first loop is the outline, later loops holes;
-  * boundaries: the row 130 airport boundary polygons, same form;
+  * boundaries: the row 130 airport boundary polygons, same form -- or, when
+    they hold under half of the airport's own runways, the convex outline of
+    its pavement and runway strips (usable_boundaries);
   * runways: each row 100 land runway's two thresholds (Runway: position,
     displaced-threshold length and marking code of each end, width);
   * draped pavement polygons (.pol) in the DSFs of the airport's own pack,
@@ -31,7 +33,16 @@ from collections import namedtuple
 
 EARTH_M_PER_DEG_LAT = 110574.0
 BEZIER_STEPS = 8
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
+# A row 130 boundary that holds less than this share of its own runways' area
+# is not the airfield (KMSP's pack draws one round the terminal only); the
+# airport then takes the outline of its pavement and runway strips instead.
+MIN_BOUNDARY_RUNWAY_SHARE = 0.5
+# Runway strip (ICAO Annex 14, graded grass either side of a runway): half
+# width for instrument-size runways (30 m wide or more) and smaller ones, and
+# the length past each end.
+STRIP_HALF_WIDTH_M = (140.0, 40.0)
+STRIP_END_M = 60.0
 # Shoulder codes from before XP12 carry no width: assume the ICAO-typical
 # 7.5 m a side (60 m over all for a 45 m runway).
 LEGACY_SHOULDER_M = 7.5
@@ -202,6 +213,62 @@ def _apt_sources(xplane_dir):
     return sources
 
 
+def _local_polygon(outer, holes, lat0):
+    from shapely.geometry import Polygon
+    kx = _m_per_deg_lon(lat0)
+    return Polygon([(x * kx, y * EARTH_M_PER_DEG_LAT) for x, y in outer],
+                   [[(x * kx, y * EARTH_M_PER_DEG_LAT) for x, y in h] for h in holes]).buffer(0)
+
+
+def boundary_runway_share(boundaries, runways, lat0):
+    """Share of the runways' area (as drawn, without shoulders) inside the
+    boundaries, or None without runways or boundaries."""
+    from shapely.ops import unary_union
+    rects = [_runway_rect(r.width, r.lat1, r.lon1, 0.0, r.lat2, r.lon2, 0.0) for r in runways]
+    rects = [r for r in rects if r]
+    if not rects or not boundaries:
+        return None
+    rw = unary_union([_local_polygon(r, [], lat0) for r in rects])
+    if rw.area <= 0:
+        return None
+    b = unary_union([_local_polygon(o, h, lat0) for o, h in boundaries])
+    return rw.intersection(b).area / rw.area
+
+
+def pavement_outline(pavement, runways, lat0):
+    """Convex outline of an airport's pavement and its runway strips, as a
+    boundary [(outer, [])], or [] without anything to outline."""
+    from shapely.geometry import MultiPoint
+    pts = [p for outer, _ in pavement for p in outer]
+    for r in runways:
+        half = STRIP_HALF_WIDTH_M[0] if r.width >= 30.0 else STRIP_HALF_WIDTH_M[1]
+        strip = _runway_rect(2 * half, r.lat1, r.lon1, STRIP_END_M, r.lat2, r.lon2, STRIP_END_M)
+        if strip:
+            pts.extend(strip)
+    if len(pts) < 3:
+        return []
+    kx = _m_per_deg_lon(lat0)
+    hull = MultiPoint([(x * kx, y * EARTH_M_PER_DEG_LAT) for x, y in pts]).convex_hull
+    if hull.geom_type != "Polygon":
+        return []
+    return [([(x / kx, y / EARTH_M_PER_DEG_LAT) for x, y in list(hull.exterior.coords)[:-1]], [])]
+
+
+def usable_boundaries(icao, pavement, boundaries, runways, lat0, log=print):
+    """The airport's boundaries, or its pavement outline when they miss most
+    of its runways (a boundary drawn round one part of the airport)."""
+    try:
+        share = boundary_runway_share(boundaries, runways, lat0)
+    except Exception:                            # degenerate geometry: keep what apt.dat says
+        return boundaries
+    if share is None or share >= MIN_BOUNDARY_RUNWAY_SHARE:
+        return boundaries
+    outline = pavement_outline(pavement, runways, lat0)
+    log(f"{icao}: apt.dat boundary holds {share:.0%} of the runways; "
+        f"using the pavement and runway-strip outline instead")
+    return outline
+
+
 def _near(rings, lat0, lon0, radius_m):
     kx = _m_per_deg_lon(lat0)
     r2 = radius_m * radius_m
@@ -227,6 +294,7 @@ def airports_near(xplane_dir, lat0, lon0, radius_m, log=print):
                 kx = _m_per_deg_lon(clat)
                 reach = max(math.hypot((p[0] - clon) * kx, (p[1] - clat) * EARTH_M_PER_DEG_LAT) for p in pts)
                 pack_dir = os.path.dirname(os.path.dirname(apt)) if name != "Global Airports" else None
+                bounds = usable_boundaries(icao, pavement, bounds, runways, clat, log=log)
                 out.append(Airport(icao, name, pavement, bounds, clat, clon, reach, pack_dir,
                                    list(runways)))
         except OSError as exc:                   # unreadable disk sectors: skip, don't abort
